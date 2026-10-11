@@ -128,7 +128,7 @@ so `SimTrace` and the controller facade live in
 | `cpu/`, `memory`, `loader` | The interpreter, copy-on-write address spaces, and golden ELF images |
 | `corpus`, `facts`, `markers` | The golden programs, what binutils say about them, and the conditions their sources state |
 | `client/` | The simulated user driving `DebuggerHandle`, and the clients of sessions adopting held children |
-| `oracles`, `semantics`, `hits`, `watches`, `views`, `audit` | Checks of the debugger against ground truth |
+| `oracles`, `semantics`, `hits`, `watches`, `views`, `samples`, `audit` | Checks of the debugger and the profiler against ground truth |
 | `marks`, `report` | Coverage marks; traces, fingerprints, and failures |
 | `conformance/` | Dual-run kernel probes and CPU lockstep against the real machine |
 | `tests` | The gate's seeds, the determinism check, and sabotage tests |
@@ -157,7 +157,7 @@ compares fingerprints (`a_seed_always_names_the_same_run`).
 
 The seed is expanded with SplitMix64 into one xoshiro256** generator per
 stream, salted by the stream's name: `Swarm`, `Schedule`, `Preempt`,
-`Client`, `Fault`, and `Program`. Both generators are written in-tree and
+`Client`, `Fault`, `Program`, `Control`, and `Sample`. Both generators are written in-tree and
 pinned by test vectors, so a seed means the same thing on every toolchain.
 Changing how one concern draws leaves the others' choices unchanged. Draws
 are integers only: `below`, `chance`, `pick`, `weighted`, and `fill`.
@@ -232,6 +232,22 @@ fails the run as a model gap, so the simulator never guesses.
 | K-DR-4 | Writing a debug-register address reserves a slot even while disabled, and can fail with ENOSPC. DR7 writes are transactional: one a slot refuses, as for an address its length misaligns, changes nothing. No slot may watch the top page of user memory. |
 | K-DR-5 | `rep stos` and `rep movs` trap once per iteration that touches the watched range, with `rip` still at the instruction. Stores of the same value trap. `POKEDATA` never traps. |
 | K-MEM-1 | `PEEKDATA` and `POKEDATA` ignore page protections and fail only where nothing is mapped. CPU accesses obey protections and fault with `SEGV_MAPERR` or `SEGV_ACCERR`. |
+| K-PERF-1 | A sample of a thread in user code, for the events the profiler opens, holds in `sample_type`'s order its process and thread, its callchain (`PERF_CONTEXT_USER`, `rip`, then K-PERF-2's walk), the 64-bit register ABI with the registers `PTRACE_GETREGS` reads, and K-PERF-3's stack. |
+| K-PERF-2 | The callchain walks frame pointers from `rbp`: while the 16 bytes at a link lie below the end of user memory in present pages, the upper word is the next return address and the lower the next link. A link a thread inherited is followed into another thread's stack, and a register holding data is read as a link. A walk that fills the chain's 127 addresses is not modeled. |
+| K-PERF-3 | A sample asks for the event's bytes of stack, but none past the end of user memory, and where the record would pass 64 KiB, what still fits, rounded up to a word. The copy runs from `rsp` through present pages and ends where one is not. The model takes the pages the program wrote, or the loader filled, as present. |
+| K-PERF-4 | An execute breakpoint event samples a thread each time it reaches the address, before the instruction runs: an `int3` there traps after the sample, and a thread rewound over the trap is sampled again. |
+
+**Perf samples** are what the profiler's events write (K-PERF-1 to
+K-PERF-4), byte for byte as the recorder decodes them. The kernel samples
+only where asked: a probe arms an execute breakpoint, and the world
+samples a running thread where a clock event's tick would find it
+(section 10). The chain and the stack copy read memory with page faults
+disabled, so they stop at a page that is not present: the model counts
+the pages the program wrote, or the loader filled, as present, which is
+the least of what Linux may copy, and exactly what it copies of a main
+thread's stack. The probes compare samples a breakpoint takes at `leaf` in
+`frames`: their registers and stacks against the thread's own at the trap
+that follows, and their chains, relative to the image, on both threads.
 
 Probes compare only what does not depend on timing. Where a running thread
 stops for an interrupt or the tracer's SIGSTOP depends on timing, so those
@@ -654,6 +670,23 @@ judged once its stop is over or its process is ending.
   elements or entries, each read from where the walk finds it and the same
   in pages of any size; or, for a broken container, the typed problem the
   walk ends in.
+
+**Samples** (`samples.rs`, judged when the profiler samples a thread). In
+three runs of four, a thread still running in user code after a `Run`
+burst is sampled now and then, often, or after every burst, copying 64,
+512, 8,192, or 65,528 bytes of stack. The sample is the record the kernel
+writes (K-PERF-1 to K-PERF-3), read by the recorder's own decoder and
+unwound by its own `unwind_sample` against the variant's debug
+information, so what is judged is what a profile would hold.
+
+- *Sampled stacks:* the frames are the thread's `rip` and then, for each
+  call it has not returned from, innermost first, the byte before its
+  return address. A sample may stop early only by saying why. Where the
+  program overwrote a return address, the frame may show what the slot
+  holds, as the last frame, never as a whole stack. A sample that found
+  every frame must say it is whole when its copy holds the word above the
+  outermost call's return address; short of that, nothing in it tells the
+  thread's first frame from one with a caller.
 
 **Transparency:** the debugger never changes what the program does. What a
 program wrote so far always begins what it writes undisturbed; one that

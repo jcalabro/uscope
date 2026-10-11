@@ -74,6 +74,9 @@ pub struct Sample<'a> {
     pub registers: Words<'a>,
     /// The bytes of stack the kernel copied from the stack pointer up.
     pub stack: &'a [u8],
+    /// The bytes of stack the sample asked for, which the copy may fall
+    /// short of.
+    pub stack_asked: u64,
 }
 
 impl Sample<'_> {
@@ -346,6 +349,7 @@ fn decode_sample(body: &[u8]) -> Result<Sample<'_>, Malformed> {
         chain,
         registers,
         stack,
+        stack_asked: size,
     })
 }
 

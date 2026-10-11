@@ -52,6 +52,7 @@ use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles::{self, HeardTrap};
 use super::report::{Failure, Trace};
+use super::samples::Sampler;
 use super::schedule::{Action, Scheduler, SessionId};
 use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
@@ -142,6 +143,8 @@ pub enum Sabotage {
     /// come to report its first byte as a no-op, so the debugger cannot
     /// tell the thread is about to call.
     HideSteppedCalls,
+    /// Samples copy each return address a call pushed as the next address.
+    SkewSampledReturnAddresses,
 }
 
 impl Default for Settings {
@@ -323,6 +326,8 @@ struct World<'a> {
     watch_counts: BTreeMap<u64, u64>,
     /// The last stop watch accounting judged.
     judged_stop: Option<u64>,
+    /// The profiler's samples of running threads.
+    sampler: Sampler,
     trace: Trace,
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
@@ -342,6 +347,7 @@ impl<'a> World<'a> {
         let mut random = [0; 16];
         choices.fill(Stream::Program, &mut random);
         let scheduler = Scheduler::new(swarm.policy, &mut choices);
+        let sampler = Sampler::new(&mut choices);
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
         kernel.borrow_mut().debug_behavior = swarm.debug;
@@ -415,6 +421,7 @@ impl<'a> World<'a> {
             baselines: BTreeMap::new(),
             watch_counts: BTreeMap::new(),
             judged_stop: None,
+            sampler,
             trace,
             #[cfg(debug_assertions)]
             capture,
@@ -552,7 +559,18 @@ impl<'a> World<'a> {
                     .borrow_mut()
                     .below(Stream::Schedule, self.swarm.burst)
                     + 1;
-                Ok(self.machine.run_thread(tid, budget))
+                let mut line = self.machine.run_thread(tid, budget);
+                let sampled = self.sampler.after_burst(
+                    &mut self.machine.choices.borrow_mut(),
+                    &mut self.machine.kernel.borrow_mut(),
+                    self.variant,
+                    tid,
+                    &mut self.machine.marks.borrow_mut(),
+                )?;
+                if let Some(sampled) = sampled {
+                    line = format!("{line}; {sampled}");
+                }
+                Ok(line)
             }
             Action::Collect(id) => Ok(self.machine.collect(id)),
             Action::Deliver(FIRST) => self.deliver(),

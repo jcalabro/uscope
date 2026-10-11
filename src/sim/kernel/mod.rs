@@ -11,6 +11,7 @@
 //! - [`syscalls`]: the system calls the golden runtime makes.
 
 pub mod debug_regs;
+pub mod perf;
 mod processes;
 pub mod ptrace;
 pub mod shadow;
@@ -571,6 +572,8 @@ pub struct Kernel {
     pub watching: Watching,
     /// How the debug registers answer the tracer.
     pub debug_behavior: DebugBehavior,
+    /// The execute breakpoint a probe armed to sample a process.
+    pub perf: Option<perf::Breakpoint>,
     /// The identifier the next activation takes.
     next_activation: u64,
     /// The start time the next process takes.
@@ -641,6 +644,7 @@ impl Kernel {
             tracking: None,
             watching: Watching::new(),
             debug_behavior: DebugBehavior::Faithful,
+            perf: None,
             next_activation: 1,
             next_start_time: 1,
             #[cfg(test)]
@@ -908,6 +912,7 @@ impl Kernel {
 
     /// Executes one instruction of a running thread.
     fn execute(&mut self, tid: Tid) -> Executed {
+        self.sample_breakpoint(tid);
         let thread = &self.threads[&tid];
         // What a thread does is the debugger's to report only while it
         // traces the thread, in the process it debugs.

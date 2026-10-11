@@ -82,6 +82,16 @@ marks! {
     /// A backtrace ended at a caller read from a return address the program
     /// overwrote.
     CorruptCaller,
+    /// A sample showed every call its thread made.
+    WholeSample,
+    /// A sample showed every call its thread made, past the end of its
+    /// copy of the stack, through the kernel's frame-pointer walk.
+    SplicedSample,
+    /// A sample stopped, saying why, short of its thread's first frame.
+    TruncatedSample,
+    /// A sample ended at a caller read from a return address the program
+    /// overwrote.
+    CorruptSampledCaller,
     /// A backtrace showed functions that left by tail calls, at jumps
     /// their activation took.
     TailCallFrames,

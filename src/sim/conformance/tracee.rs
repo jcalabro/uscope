@@ -12,12 +12,14 @@ use std::sync::Arc;
 
 use nix::errno::Errno;
 use nix::libc;
-use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+use object::{Object as _, ObjectSection as _, ObjectSegment as _, ObjectSymbol as _};
 
 use crate::backend::native_tracee::NativeTracee;
+use crate::backend::perf::decode;
 use crate::backend::sim_edge::signal_view;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{RAX, Registers};
+use crate::sim::kernel::perf::perf_registers;
 use crate::sim::kernel::{Kernel, Options, Tid, WaitStatus};
 
 /// The simulated debugger's process identifier.
@@ -68,6 +70,11 @@ pub(super) trait Tracee {
     /// Lets something other than the tracer hold `count` of `thread`'s
     /// hardware breakpoints, watching `address`.
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64);
+    /// Samples every thread of the process each time it reaches
+    /// `address`, copying `stack_bytes` of stack (K-PERF-4).
+    fn sample_at(&mut self, address: u64, stack_bytes: u32);
+    /// The records the samples wrote since the last call.
+    fn samples(&mut self) -> Vec<u8>;
     /// Takes on `child`, which the process forked, to end it with the
     /// process.
     fn adopt(&mut self, child: Tid);
@@ -168,6 +175,12 @@ impl Tracee for NativeTracee {
     }
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64) {
         Self::hold_debug_slots(self, thread, count, address);
+    }
+    fn sample_at(&mut self, address: u64, stack_bytes: u32) {
+        Self::sample_at(self, address, stack_bytes);
+    }
+    fn samples(&mut self) -> Vec<u8> {
+        Self::samples(self)
     }
     fn adopt(&mut self, child: Tid) {
         Self::adopt(self, child);
@@ -355,6 +368,21 @@ impl Tracee for SimTracee {
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, _address: u64) {
         self.kernel.hold_debug_slots(thread, count);
     }
+    fn sample_at(&mut self, address: u64, stack_bytes: u32) {
+        self.kernel.perf = Some(crate::sim::kernel::perf::Breakpoint {
+            tgid: self.pid,
+            address,
+            stack_bytes,
+            records: Vec::new(),
+        });
+    }
+    fn samples(&mut self) -> Vec<u8> {
+        self.kernel
+            .perf
+            .as_mut()
+            .map(|breakpoint| std::mem::take(&mut breakpoint.records))
+            .unwrap_or_default()
+    }
     fn adopt(&mut self, _child: Tid) {}
     fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
         self.kernel.detach(thread, signal)
@@ -395,11 +423,13 @@ pub(super) struct Landmarks {
     pub(super) syscall: u64,
     /// An address nothing maps.
     pub(super) unmapped: u64,
+    /// The addresses the image's segments span.
+    pub(super) image: std::ops::Range<u64>,
     symbols: BTreeMap<&'static str, u64>,
 }
 
 /// Symbols whose addresses describe others, where a program defines them.
-const SYMBOLS: [&str; 15] = [
+const SYMBOLS: [&str; 17] = [
     "fib",
     "share",
     "tick",
@@ -415,6 +445,8 @@ const SYMBOLS: [&str; 15] = [
     "bump",
     "child",
     "work",
+    "leaf",
+    "rt_yield",
 ];
 
 impl Landmarks {
@@ -441,11 +473,18 @@ impl Landmarks {
             .expect("a syscall instruction")
             .ip()
             + bias;
+        let segments = file
+            .segments()
+            .map(|segment| (segment.address(), segment.address() + segment.size()))
+            .collect::<Vec<_>>();
+        let start = segments.iter().map(|&(start, _)| start).min().unwrap_or(0);
+        let end = segments.iter().map(|&(_, end)| end).max().unwrap_or(0);
         Self {
             bias,
             entry: file.entry() + bias,
             syscall,
             unmapped: 0x1000,
+            image: start + bias..end + bias,
             symbols,
         }
     }
@@ -468,6 +507,25 @@ impl Landmarks {
             .unwrap_or_else(|| "elsewhere".to_owned())
     }
 }
+
+/// A sample as a record carries it.
+struct Decoded {
+    tid: Tid,
+    chain: Vec<u64>,
+    registers: Vec<u64>,
+    /// The bytes of stack it asked for, and those it copied.
+    size: u64,
+    stack: Vec<u8>,
+}
+
+/// The end of user memory.
+const USER_END: u64 = 0x7fff_ffff_f000;
+
+/// The registers of a sample, in its order.
+const PERF_REGISTER_NAMES: [&str; 18] = [
+    "ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "ip", "flags", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15",
+];
 
 /// Records what a script observes.
 pub(super) struct Record<'a> {
@@ -756,6 +814,115 @@ impl Record<'_> {
         self.set_debug(thread, 7, 0);
         self.set_debug(thread, 0, address);
         self.set_debug(thread, 7, control);
+    }
+
+    /// The samples written since the last look, decoded.
+    fn decoded_samples(&mut self) -> Vec<Decoded> {
+        let records = self.tracee.samples();
+        let mut samples = Vec::new();
+        let mut rest = &records[..];
+        while let Some(next) = decode::next(rest) {
+            let (record, length) = next.expect("the kernel writes whole records");
+            if let decode::Record::Sample(sample) = record {
+                samples.push(Decoded {
+                    tid: Tid::try_from(sample.tid).expect("a thread id"),
+                    chain: sample.chain.iter().collect(),
+                    registers: sample.registers.iter().collect(),
+                    size: sample.stack_asked,
+                    stack: sample.stack.to_vec(),
+                });
+            }
+            rest = &rest[length..];
+        }
+        samples
+    }
+
+    /// How a sample's word reads in a record: where it is in the image,
+    /// or near the sampled stack pointer, as `stack`, or as it is.
+    fn word(&self, value: u64, sp: u64) -> String {
+        if self.landmarks.image.contains(&value) {
+            self.place(value)
+        } else if value.wrapping_sub(sp) < 1 << 20 || sp.wrapping_sub(value) < 1 << 16 {
+            "stack".to_owned()
+        } else {
+            format!("{value:#x}")
+        }
+    }
+
+    /// The one sample `thread` wrote reaching the trap it is stopped at:
+    /// whether its registers are the thread's, with `rip` at the trap,
+    /// and its stack the thread's memory from `rsp` (K-PERF-1, K-PERF-3).
+    pub(super) fn sampled_at_stop(&mut self, thread: Tid) {
+        let name = self.name_of(thread);
+        let samples = self.decoded_samples();
+        let [sample] = &samples[..] else {
+            self.note(format!("{name} wrote {} samples", samples.len()));
+            return;
+        };
+        let (mut registers, _) = self.tracee.registers(thread).expect("registers at a trap");
+        registers.rip -= 1;
+        let differ = perf_registers(&registers)
+            .zip(&sample.registers)
+            .zip(PERF_REGISTER_NAMES)
+            .filter(|((held, sampled), _)| held != *sampled)
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
+        self.note(format!(
+            "sample of {}: registers differ in {differ:?}",
+            self.name_of(sample.tid)
+        ));
+        let sp = registers.general[crate::sim::cpu::RSP];
+        let same = sample.stack.chunks(8).enumerate().all(|(index, word)| {
+            let mut held = [0; 8];
+            let address = sp + 8 * index as u64;
+            let value = self.tracee.peek(thread, address).unwrap_or(0);
+            held.copy_from_slice(&value.to_le_bytes());
+            held[..word.len()] == *word
+        });
+        self.note(format!("its stack is the thread's memory: {same}"));
+    }
+
+    /// Every sample written since the last look, sorted: its thread, its
+    /// chain, and how much of the stack it copied (K-PERF-2, K-PERF-3).
+    pub(super) fn samples(&mut self) {
+        let mut lines = Vec::new();
+        for sample in self.decoded_samples() {
+            let sp = sample.registers[7];
+            let chain = sample
+                .chain
+                .iter()
+                .map(|&entry| {
+                    if entry >= (-4095_i64).cast_unsigned() {
+                        format!("context {}", entry.cast_signed())
+                    } else {
+                        self.word(entry, sp)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let copied = sample.stack.len() as u64;
+            // A sample asks for no more than reaches the end of user
+            // memory, which the environment's size moves.
+            let asked = if sample.size == USER_END - sp {
+                "to the end of user memory".to_owned()
+            } else {
+                format!("{} bytes", sample.size)
+            };
+            let copy = if copied == sample.size {
+                "whole".to_owned()
+            } else if (sp + copied).is_multiple_of(4096) {
+                "to a page's end".to_owned()
+            } else {
+                format!("{copied} bytes")
+            };
+            lines.push(format!(
+                "sample of {}: chain {}; rbp {}; asked {asked}, copied {copy}",
+                self.name_of(sample.tid),
+                chain.join(" "),
+                self.word(sample.registers[6], sp),
+            ));
+        }
+        lines.sort();
+        self.lines.extend(lines);
     }
 
     /// Rewinds a thread's `rip` over the trap it executed.

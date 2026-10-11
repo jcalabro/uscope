@@ -24,6 +24,9 @@ pub struct NativeTracee {
     pid: Pid,
     /// Perf breakpoints holding some of a thread's hardware breakpoints.
     held: Vec<std::os::fd::OwnedFd>,
+    /// The events sampling the process at a breakpoint, as the profiler
+    /// opens them.
+    sampling: Option<super::perf::Events>,
     /// Children the process forked, killed with it.
     forked: Vec<Pid>,
     /// Whether the process was left to its parent rather than killed.
@@ -69,6 +72,7 @@ impl NativeTracee {
             ptrace,
             pid,
             held: Vec::new(),
+            sampling: None,
             forked: Vec::new(),
             abandoned: false,
         };
@@ -108,6 +112,7 @@ impl NativeTracee {
             ptrace: super::native::LinuxPtrace::new(),
             pid: Pid::from_raw(i32::try_from(child.id()).expect("a process id fits i32")),
             held: Vec::new(),
+            sampling: None,
             forked: Vec::new(),
             abandoned: false,
         };
@@ -403,6 +408,29 @@ impl NativeTracee {
 
     /// Holds `count` of `thread`'s hardware breakpoints with disabled perf
     /// breakpoints watching `address`, until the tracee is dropped.
+    /// Samples every thread of the process each time it reaches `address`,
+    /// copying `stack_bytes` of stack, through the profiler's events.
+    pub fn sample_at(&mut self, address: u64, stack_bytes: u32) {
+        let options = super::perf::EventOptions {
+            source: super::perf::Source::Breakpoint { address },
+            stack_bytes,
+            ring_pages: 64,
+            switches: false,
+        };
+        let pid = self.pid.as_raw().cast_unsigned();
+        let events = super::perf::Events::attach(pid, &options, 4096).expect("open perf events");
+        self.sampling = Some(events);
+    }
+
+    /// The records the events wrote since the last call.
+    pub fn samples(&mut self) -> Vec<u8> {
+        let mut records = Vec::new();
+        if let Some(events) = &mut self.sampling {
+            events.drain(&mut records);
+        }
+        records
+    }
+
     pub fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64) {
         const PERF_TYPE_BREAKPOINT: u32 = 5;
         const HW_BREAKPOINT_W: u32 = 2;

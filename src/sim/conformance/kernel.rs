@@ -1164,3 +1164,45 @@ fn k_seize_2_a_thread_answers_only_its_own_tracer() {
         record.as_another_tracer(child);
     });
 }
+
+/// K-PERF-1 to K-PERF-4: an execute breakpoint samples each thread that
+/// reaches its address, before the instruction runs, and again each time
+/// it runs it. A sample holds the thread's registers, the kernel's walk of
+/// its frame pointers, and its stack from `rsp` up through the pages
+/// present, here to the end of the main thread's stack.
+#[test]
+fn k_perf_1_a_sample_holds_the_threads_registers_chain_and_stack() {
+    dual_run("frames", &["1"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let leaf = record.landmarks.symbol("leaf");
+        record.tracee.sample_at(leaf, 65528);
+        let original = record.plant(leaf);
+        record.resume(leader, None);
+        let orphan = record.cloned(leader);
+        record.wait(orphan);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.sampled_at_stop(leader);
+        record.restore(leader, leaf, original);
+        record.rewind(leader);
+
+        // The leader runs its round and waits for the orphan.
+        let spin = record.landmarks.symbol("rt_yield");
+        let original = record.plant(spin);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.samples();
+        record.resume(orphan, None);
+        record.wait(orphan);
+        record.samples();
+        record.resume(orphan, None);
+        record.wait(orphan);
+        record.restore(leader, spin, original);
+        record.rewind(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}

@@ -9,7 +9,7 @@
 //! - [`kernel`], [`cpu`], [`memory`], [`loader`]: the simulated machine.
 //! - [`client`]: the simulated user, driving `DebuggerHandle`.
 //! - [`oracles`], `semantics`, and `audit`: checks of the debugger against
-//!   ground truth.
+//!   ground truth, and `samples`, of the profiler's samples.
 //! - [`choices`], [`swarm`], [`schedule`]: where every random choice comes
 //!   from, and how the next action is chosen.
 //! - [`faults`]: what the rest of the machine does to a session.
@@ -35,6 +35,7 @@ pub(crate) mod marks;
 pub(crate) mod memory;
 mod oracles;
 pub(crate) mod report;
+mod samples;
 pub(crate) mod schedule;
 mod semantics;
 pub(crate) mod swarm;

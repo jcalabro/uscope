@@ -307,6 +307,26 @@ impl AddressSpace {
         self.pages.get(&(address / PAGE_SIZE))
     }
 
+    /// How many bytes from `address`, at most `length`, the kernel copies
+    /// with page faults disabled, as perf does: readable bytes in pages
+    /// that are present, which the model takes to be those the program
+    /// wrote or the loader filled (K-PERF-3).
+    #[must_use]
+    pub fn present(&self, address: u64, length: u64) -> u64 {
+        let mut current = address;
+        let end = address.saturating_add(length);
+        while current < end {
+            let readable = self
+                .region(current)
+                .is_some_and(|region| region.protection.read);
+            if !readable || self.page(current).is_none() {
+                break;
+            }
+            current = (current / PAGE_SIZE + 1) * PAGE_SIZE;
+        }
+        current.min(end) - address
+    }
+
     /// Whether the CPU may execute `address`.
     #[must_use]
     pub fn executable(&self, address: u64) -> bool {

@@ -119,6 +119,17 @@ fn skewed_return_addresses_fail_the_backtrace_oracle() {
     );
 }
 
+/// Samples whose stack copies misreport return addresses make the
+/// profiler unwind to callers that are not, which the samples oracle
+/// catches.
+#[test]
+fn skewed_sampled_return_addresses_fail_the_samples_oracle() {
+    assert_eq!(
+        first_failure_with(Sabotage::SkewSampledReturnAddresses),
+        "samples"
+    );
+}
+
 /// A CPU whose single steps run on executes more than a step allows, which
 /// the stepping oracle catches.
 #[test]

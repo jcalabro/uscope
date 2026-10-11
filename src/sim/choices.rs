@@ -26,10 +26,13 @@ pub enum Stream {
     /// makes temporary, and where it advances to. Drawn apart from
     /// [`Stream::Client`], so seeds that never use them choose as before.
     Control,
+    /// Whether and how the profiler samples running threads. Drawn apart
+    /// from the rest, so seeds that never sample choose as before.
+    Sample,
 }
 
 impl Stream {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Swarm,
         Self::Schedule,
         Self::Client,
@@ -37,6 +40,7 @@ impl Stream {
         Self::Preempt,
         Self::Fault,
         Self::Control,
+        Self::Sample,
     ];
 
     const fn name(self) -> &'static str {
@@ -48,6 +52,7 @@ impl Stream {
             Self::Preempt => "preempt",
             Self::Fault => "fault",
             Self::Control => "control",
+            Self::Sample => "sample",
         }
     }
 
