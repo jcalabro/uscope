@@ -751,6 +751,11 @@ impl Sink for Held {
         self.capture.event(&event);
     }
 
+    fn attached_by(&mut self, attachment: &crate::syscall_engines::bpf::Attachment) {
+        self.capture.setting("attach", attachment.name());
+        self.capture.setting("attach reason", &attachment.reason);
+    }
+
     fn attached(&mut self, _process: u32) {
         if let Some(ready) = self.ready.take() {
             let _ = ready.send(());

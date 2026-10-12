@@ -1083,9 +1083,9 @@ security.wrappers.uscope-bpf = {
           <tr><td>Y5.4</td><td>Files, network, processes, in flight; live sessions panel</td><td><span class="st done">done</span></td><td>The record form traces with ptrace, republished every 2 s; the Processes tab lists what each thread is blocked in while it runs. Tested in Rust, Vitest, and Playwright in Chromium and Firefox</td></tr>
         </tbody></table></div>
         <p class="exit">Exit: the web e2e suite drives every tab on a recorded capture in Chromium and Firefox; the probe screenshots read well in both themes.</p></div>
-      <div class="phase"><header><span class="pid">Y6</span><h3>Production</h3><span class="st todo">todo</span></header>
+      <div class="phase"><header><span class="pid">Y6</span><h3>Production</h3><span class="st doing">doing</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>Y6.1</td><td>fentry/fexit attach for short lists; attach choice in accounting</td><td><span class="st todo">todo</span></td><td>Measured in scratch</td></tr>
+          <tr><td>Y6.1</td><td>fentry/fexit attach for short lists; attach choice in accounting</td><td><span class="st done">done</span></td><td>32 fentry/fexit slots share the tracepoints&rsquo; bodies; <code>--attach auto|tracepoint|fentry</code>. The choice and its reason are capture settings, and tracepoints print their cost to everyone else. Held to the tracepoints and to ptrace in the container</td></tr>
           <tr><td>Y6.2</td><td>cgroup and container targets; namespace translation</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>Y6.3</td><td>Budget controller; continuous segments and triggers</td><td><span class="st todo">todo</span></td><td></td></tr>
           <tr><td>Y6.4</td><td>BPF token</td><td><span class="st todo">todo</span></td><td></td></tr>
@@ -1117,6 +1117,8 @@ security.wrappers.uscope-bpf = {
         <tr><td>Y5.2</td><td>&mdash;</td><td>A call site is the innermost frame with a source line, or the innermost frame when none has one</td><td>The kernel&rsquo;s entry, libc&rsquo;s wrapper, and the dynamic loader rarely have lines; the program&rsquo;s own line is what one fixes.</td></tr>
         <tr><td>Y5.3</td><td>&mdash;</td><td>Lanes take calls that overlap the range; every other view takes calls that ended in it</td><td>A blocked call that began before the range and ends after it is exactly what a lane must show.</td></tr>
         <tr><td>Y5.4</td><td>Live traces with either engine</td><td>Live traces from the page use the ptrace engine</td><td>The BPF engine needs the wrapper&rsquo;s privilege, which the web server does not run with; <code>uscope syscalls -o</code> captures from either engine open in the page.</td></tr>
+        <tr><td>Y6.1</td><td>fentry for at most 32 syscalls, named as the calls are</td><td>At most 32 kernel functions, each the entry point the kernel&rsquo;s syscall tables name (<code>fstat</code> enters <code>__x64_sys_newfstat</code>); a compat call has its own</td><td>A call&rsquo;s function is not always named after it, so the names come from the tables, kept in <code>src/syscalls/entries.gen.rs</code> by <code>scripts/syscall-entries.sh</code>. One call can need a function per ABI.</td></tr>
+        <tr><td>Y6.1</td><td>&mdash;</td><td>A list that needs a call BTF does not describe, such as <code>execve</code> here, or <code>-y</code>&rsquo;s every descriptor-changing call, uses the tracepoints and says why</td><td>Attaching to some of a list&rsquo;s calls would drop the rest without a word.</td></tr>
 </tbody></table></div>
     </section>
 
