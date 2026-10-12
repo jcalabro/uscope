@@ -7,6 +7,34 @@ mod generated {
     include!("table.gen.rs");
 }
 
+/// The kernel's entry points, from its x86 syscall tables.
+mod entries {
+    include!("entries.gen.rs");
+}
+
+/// The kernel function `id` enters through, with its ABI's prefix.
+pub(super) fn kernel_function(id: SyscallId) -> Option<String> {
+    let find = |table: &[(u32, &'static str)]| {
+        table
+            .binary_search_by_key(&id.number, |&(number, _)| number)
+            .ok()
+            .map(|index| table[index].1)
+    };
+    match id.abi {
+        // x32's own calls are compat entries, which x86-64 kernels also
+        // name `__x64_`.
+        Abi::X86_64 => find(entries::X86_64).map(|entry| format!("__x64_{entry}")),
+        Abi::X32 => find(entries::X32).map(|entry| format!("__x64_{entry}")),
+        Abi::X86_32 => entries::X86_32
+            .binary_search_by_key(&id.number, |&(number, _, _)| number)
+            .ok()
+            .map(|index| {
+                let (_, entry, compat) = entries::X86_32[index];
+                format!("__ia32_{}", if compat.is_empty() { entry } else { compat })
+            }),
+    }
+}
+
 /// Every call of an ABI, as (number, name), in ascending number order.
 #[must_use]
 pub const fn calls(abi: Abi) -> &'static [(u32, &'static str)] {
@@ -62,6 +90,57 @@ mod tests {
     use super::*;
 
     const GENERATED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/syscalls/table.gen.rs");
+
+    /// Every entry point is of a call the headers number, past those a
+    /// newer kernel adds, and a call's
+    /// function is named as the kernel names it, which is not always the
+    /// call's name.
+    #[test]
+    fn entry_points_are_of_numbered_calls_and_named_as_the_kernel_names_them() {
+        for (abi, numbers) in [
+            (
+                Abi::X86_64,
+                entries::X86_64.iter().map(|&(n, _)| n).collect::<Vec<_>>(),
+            ),
+            (Abi::X32, entries::X32.iter().map(|&(n, _)| n).collect()),
+            (
+                Abi::X86_32,
+                entries::X86_32.iter().map(|&(n, _, _)| n).collect(),
+            ),
+        ] {
+            assert!(numbers.is_sorted(), "{abi:?}");
+            // x32 shares x86-64's numbers below its own calls.
+            let newer = limit(if abi == Abi::X32 { Abi::X86_64 } else { abi });
+            for number in numbers {
+                // A newer kernel's tables go past the headers'.
+                assert!(
+                    SyscallId::new(abi, number).name().is_some() || number >= newer,
+                    "{abi:?} {number} has an entry but no name"
+                );
+            }
+        }
+        let function = |abi, name| SyscallId::named(abi, name).and_then(SyscallId::kernel_function);
+        assert_eq!(
+            function(Abi::X86_64, "fstat").as_deref(),
+            Some("__x64_sys_newfstat")
+        );
+        assert_eq!(
+            function(Abi::X86_64, "umount2").as_deref(),
+            Some("__x64_sys_umount")
+        );
+        assert_eq!(
+            function(Abi::X32, "rt_sigaction").as_deref(),
+            Some("__x64_compat_sys_rt_sigaction")
+        );
+        assert_eq!(
+            function(Abi::X86_32, "fstat").as_deref(),
+            Some("__ia32_compat_sys_newfstat")
+        );
+        assert_eq!(
+            function(Abi::X86_32, "getpid").as_deref(),
+            Some("__ia32_sys_getpid")
+        );
+    }
 
     /// The kernel UAPI headers the flake provides, among the BPF include
     /// directories.

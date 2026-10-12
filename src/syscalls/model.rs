@@ -79,6 +79,14 @@ impl SyscallId {
         )
     }
 
+    /// The kernel function the call enters through, as x86-64 kernels
+    /// name it: `__x64_sys_newfstat` for `fstat`. Its own name is not
+    /// always the call's.
+    #[must_use]
+    pub fn kernel_function(self) -> Option<String> {
+        table::kernel_function(self)
+    }
+
     /// The call named `name` under `abi`.
     #[must_use]
     pub fn named(abi: Abi, name: &str) -> Option<Self> {

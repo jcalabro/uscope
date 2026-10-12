@@ -86,6 +86,7 @@ uscope-probes = { path = "sdk/rust-probes" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.14"
+aya-obj = "0.3"
 cpp_demangle = "0.5"
 crc32fast = "1.5"
 gimli = "0.34"

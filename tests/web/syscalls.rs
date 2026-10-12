@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::support::{Scenario, ScratchDir};
 use crate::profiles::listed;
+use crate::support::{Scenario, ScratchDir};
 use crate::web::{Client, Web};
 
 /// The syscalls fixture's trace in `mode`, by the ptrace engine with
@@ -382,7 +382,10 @@ async fn a_live_trace_shows_what_its_program_is_blocked_in() {
             break call.clone();
         }
     };
-    assert!(blocked["blockedNs"].as_u64() >= Some(1_000_000), "{blocked}");
+    assert!(
+        blocked["blockedNs"].as_u64() >= Some(1_000_000),
+        "{blocked}"
+    );
     let summary = tab
         .ok("syscallSummary", json!({"profile": id, "revision": seen}))
         .await;

@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, RingBuf};
-use aya::programs::{BtfTracePoint, Iter};
+use aya::programs::{BtfTracePoint, FEntry, FExit, Iter};
 use aya::{Btf, Ebpf, EbpfLoader};
+use aya_obj::btf::BtfKind;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::super::perf;
@@ -884,6 +885,7 @@ pub struct BpfOptions {
     /// With stacks, copy each stack's top to unwind by call-frame
     /// information, rather than trust the kernel's walk alone.
     pub stack_copy: bool,
+    pub attach: AttachMode,
 }
 
 impl Default for BpfOptions {
@@ -892,7 +894,105 @@ impl Default for BpfOptions {
             count_only: false,
             ring: DEFAULT_RING,
             stack_copy: false,
+            attach: AttachMode::Auto,
         }
+    }
+}
+
+/// Where the programs attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttachMode {
+    /// The chosen calls' functions when they can, else the tracepoints.
+    #[default]
+    Auto,
+    /// The tracepoints every call on the host passes.
+    Tracepoints,
+    /// The chosen calls' functions, or not at all.
+    Functions,
+}
+
+/// The most kernel functions the programs attach to: their slots.
+const FUNCTION_SLOTS: usize = 32;
+
+/// Where the programs attached, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// The chosen calls' kernel functions; none for the tracepoints.
+    pub functions: Vec<String>,
+    pub reason: String,
+}
+
+impl Attachment {
+    /// The program type, as the kernel names it.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        if self.functions.is_empty() {
+            "tp_btf"
+        } else {
+            "fentry"
+        }
+    }
+}
+
+/// The kernel function a call enters through, when `has` finds it.
+fn function_of(call: SyscallId, has: &impl Fn(&str) -> bool) -> Option<String> {
+    call.kernel_function().filter(|function| has(function))
+}
+
+/// Where the programs attach to see `chosen`, every call when `all`, as
+/// `mode` asks; `has` says which kernel functions BTF describes.
+fn attachment(
+    all: bool,
+    chosen: &[SyscallId],
+    mode: AttachMode,
+    has: &impl Fn(&str) -> bool,
+) -> Result<Attachment, String> {
+    let tracepoints = |reason: String| Attachment {
+        functions: Vec::new(),
+        reason,
+    };
+    if mode == AttachMode::Tracepoints {
+        return Ok(tracepoints("asked for".to_owned()));
+    }
+    let why = if all {
+        "every call is traced".to_owned()
+    } else {
+        let mut functions: Vec<String> = Vec::new();
+        let mut missing = None;
+        for &call in chosen {
+            match function_of(call, has) {
+                Some(function) if !functions.contains(&function) => functions.push(function),
+                Some(_) => {}
+                None => {
+                    missing.get_or_insert(call);
+                }
+            }
+        }
+        match missing {
+            Some(call) => format!(
+                "{} has no kernel function that BTF describes",
+                call.display_name()
+            ),
+            None if functions.len() > FUNCTION_SLOTS => format!(
+                "the calls enter through {} kernel functions, more than {FUNCTION_SLOTS}",
+                functions.len()
+            ),
+            None => {
+                return Ok(Attachment {
+                    reason: format!(
+                        "{} calls enter through {} kernel functions",
+                        chosen.len(),
+                        functions.len()
+                    ),
+                    functions,
+                });
+            }
+        }
+    };
+    if mode == AttachMode::Functions {
+        Err(format!("--attach fentry cannot be used: {why}"))
+    } else {
+        Ok(tracepoints(why))
     }
 }
 
@@ -906,6 +1006,7 @@ struct Loaded {
     targets: HashMap<MapData, u32, u8>,
     /// The call each row of statistics counts.
     rows: Vec<SyscallId>,
+    attachment: Attachment,
 }
 
 impl Loaded {
@@ -919,6 +1020,17 @@ impl Loaded {
             .collect();
         let rows = u32::try_from(chosen.len().max(1)).unwrap_or(u32::MAX);
         let btf = Btf::from_sys_fs().map_err(load_error)?;
+        let calls: Vec<SyscallId> = chosen.iter().map(|&(_, call)| call).collect();
+        let attachment = attachment(all, &calls, engine.attach, &|name| {
+            btf.id_by_type_name_kind(name, BtfKind::Func).is_ok()
+        })
+        .map_err(BpfError::Unavailable)?;
+        record!(
+            "syscalls bpf: attach {} ({}): {:?}",
+            attachment.name(),
+            attachment.reason,
+            attachment.functions
+        );
         let mut ebpf = EbpfLoader::new()
             .btf(Some(&btf))
             .map_max_entries("EVENTS", engine.ring)
@@ -970,21 +1082,7 @@ impl Loaded {
             value.copy_from_slice(raw.as_bytes());
             config.set(0, value, 0).map_err(load_error)?;
         }
-        for (name, tracepoint) in PROGRAMS {
-            let program: &mut BtfTracePoint = ebpf
-                .program_mut(name)
-                .ok_or_else(|| missing(name))?
-                .try_into()
-                .map_err(load_error)?;
-            program.load(tracepoint, &btf).map_err(load_error)?;
-            program.attach().map_err(load_error)?;
-        }
-        let iterator: &mut Iter = ebpf
-            .program_mut("in_flight")
-            .ok_or_else(|| missing("in_flight"))?
-            .try_into()
-            .map_err(load_error)?;
-        iterator.load("task", &btf).map_err(load_error)?;
+        attach(&mut ebpf, &btf, &attachment)?;
         let targets =
             HashMap::try_from(ebpf.take_map("TARGETS").ok_or_else(|| missing("TARGETS"))?)
                 .map_err(load_error)?;
@@ -992,7 +1090,8 @@ impl Loaded {
         Ok(Self {
             ebpf,
             targets,
-            rows: chosen.into_iter().map(|(_, call)| call).collect(),
+            rows: calls,
+            attachment,
         })
     }
 
@@ -1126,6 +1225,48 @@ impl Loaded {
     }
 }
 
+/// Loads and attaches the programs where `attachment` says, and loads
+/// the in-flight iterator, which runs only when asked.
+fn attach(ebpf: &mut Ebpf, btf: &Btf, attachment: &Attachment) -> Result<(), BpfError> {
+    for (name, tracepoint) in PROGRAMS {
+        if !attachment.functions.is_empty() && matches!(name, "sys_enter" | "sys_exit") {
+            continue;
+        }
+        let program: &mut BtfTracePoint = ebpf
+            .program_mut(name)
+            .ok_or_else(|| missing(name))?
+            .try_into()
+            .map_err(load_error)?;
+        program.load(tracepoint, btf).map_err(load_error)?;
+        program.attach().map_err(load_error)?;
+    }
+    for (slot, function) in attachment.functions.iter().enumerate() {
+        let enter = format!("enter_{slot}");
+        let program: &mut FEntry = ebpf
+            .program_mut(&enter)
+            .ok_or_else(|| missing(&enter))?
+            .try_into()
+            .map_err(load_error)?;
+        program.load(function, btf).map_err(load_error)?;
+        program.attach().map_err(load_error)?;
+        let exit = format!("exit_{slot}");
+        let program: &mut FExit = ebpf
+            .program_mut(&exit)
+            .ok_or_else(|| missing(&exit))?
+            .try_into()
+            .map_err(load_error)?;
+        program.load(function, btf).map_err(load_error)?;
+        program.attach().map_err(load_error)?;
+    }
+    let iterator: &mut Iter = ebpf
+        .program_mut("in_flight")
+        .ok_or_else(|| missing("in_flight"))?
+        .try_into()
+        .map_err(load_error)?;
+    iterator.load("task", btf).map_err(load_error)?;
+    Ok(())
+}
+
 fn missing(name: &str) -> BpfError {
     BpfError::Load(format!("the BPF object has no {name}"))
 }
@@ -1195,6 +1336,7 @@ fn run(
 ) -> Result<Finished, BpfError> {
     Probe::read().check()?;
     let mut loaded = Loaded::load(options, engine, !matches!(start, Start::Attach(_)))?;
+    sink.attached_by(&loaded.attachment);
     let mut gate: Option<Gate> = None;
     let mut live = BTreeSet::new();
     let mut mappings = Vec::new();
@@ -1563,6 +1705,47 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short list attaches to its calls' functions, each once; anything
+    /// that cannot falls back to the tracepoints and says why, unless
+    /// functions were insisted on.
+    #[test]
+    fn short_lists_attach_to_their_functions_and_the_rest_say_why_not() {
+        let has = |name: &str| !name.contains("getppid");
+        let named = |abi, name| SyscallId::named(abi, name).expect(name);
+        let open = [
+            named(Abi::X86_64, "openat"),
+            named(Abi::X32, "openat"),
+            named(Abi::X86_32, "openat"),
+        ];
+        let chosen = attachment(false, &open, AttachMode::Auto, &has).expect("an attachment");
+        assert_eq!(
+            chosen.functions,
+            ["__x64_sys_openat", "__ia32_compat_sys_openat"]
+        );
+        assert_eq!(chosen.name(), "fentry");
+
+        let without = [named(Abi::X86_64, "getppid")];
+        let fallen = attachment(false, &without, AttachMode::Auto, &has).expect("tracepoints");
+        assert_eq!(
+            (fallen.name(), fallen.reason.as_str()),
+            (
+                "tp_btf",
+                "getppid has no kernel function that BTF describes"
+            )
+        );
+        assert!(attachment(false, &without, AttachMode::Functions, &has).is_err());
+        let all = attachment(true, &[], AttachMode::Auto, &has).expect("tracepoints");
+        assert_eq!(all.reason, "every call is traced");
+
+        let many: Vec<SyscallId> = (0..=40)
+            .map(|number| SyscallId::new(Abi::X86_64, number))
+            .filter(|call| call.name().is_some())
+            .collect();
+        let wide =
+            attachment(false, &many, AttachMode::Auto, &|_: &str| true).expect("tracepoints");
+        assert_eq!(wide.name(), "tp_btf", "{wide:?}");
+    }
     use crate::syscalls::captures::MOST_BYTES;
 
     /// The object's BTF: each struct's size and its members' names and

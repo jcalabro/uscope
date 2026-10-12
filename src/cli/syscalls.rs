@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value, json};
-use uscope::syscall_engines::bpf::{self, BpfOptions};
+use uscope::syscall_engines::bpf::{self, AttachMode, Attachment, BpfOptions};
 use uscope::syscall_engines::capture::SyscallCapture;
 use uscope::syscall_engines::ptrace;
 use uscope::syscall_engines::stacks::{Frame, SharedStacks};
@@ -447,6 +447,27 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
     })
 }
 
+/// How the BPF engine runs, as the flags ask.
+fn bpf_options(args: &SyscallsArgs, plan: &Plan, ring: Option<u32>) -> BpfOptions {
+    // The kernel counts on its own what -c alone shows, when whether a
+    // call counts depends only on which call it is.
+    let count_only = args.summary_only
+        && plan.filter.status == StatusSet::ALL
+        && plan.filter.paths.is_empty()
+        && plan.filter.fds.is_none()
+        && plan.filter.slower_than.is_none();
+    BpfOptions {
+        count_only,
+        ring: ring.unwrap_or(bpf::DEFAULT_RING),
+        stack_copy: plan.stacks.is_some_and(|stacks| stacks.dwarf),
+        attach: match args.attach {
+            AttachArg::Auto => AttachMode::Auto,
+            AttachArg::Tracepoint => AttachMode::Tracepoints,
+            AttachArg::Fentry => AttachMode::Functions,
+        },
+    }
+}
+
 fn trace(args: &SyscallsArgs) -> Result<i32> {
     let mut plan = plan(args)?;
     let ring = args.ring.as_deref().map(ring_bytes).transpose()?;
@@ -523,18 +544,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             ptrace::trace(target, &options, &stop, &mut printer).map_err(anyhow::Error::from)
         }
         EngineArg::Bpf => {
-            // The kernel counts on its own what -c alone shows, when
-            // whether a call counts depends only on which call it is.
-            let count_only = args.summary_only
-                && plan.filter.status == StatusSet::ALL
-                && plan.filter.paths.is_empty()
-                && plan.filter.fds.is_none()
-                && plan.filter.slower_than.is_none();
-            let engine = BpfOptions {
-                count_only,
-                ring: ring.unwrap_or(bpf::DEFAULT_RING),
-                stack_copy: plan.stacks.is_some_and(|stacks| stacks.dwarf),
-            };
+            let engine = bpf_options(args, &plan, ring);
             bpf::trace(target, &options, engine, &stop, &mut printer).map_err(anyhow::Error::from)
         }
     };
@@ -1835,6 +1845,23 @@ impl Sink for Printer {
 
     fn in_flight_after(&self) -> Option<u64> {
         self.in_flight
+    }
+
+    fn attached_by(&mut self, attachment: &Attachment) {
+        if let Some((_, capture)) = &mut self.capture {
+            capture.setting("attach", attachment.name());
+            capture.setting("attach reason", &attachment.reason);
+        }
+        // What tracing costs everyone else, which only tracepoints charge,
+        // said even beside a file's trace; -qq silences it.
+        if attachment.functions.is_empty() && self.quiet < 2 {
+            self.message(&format!(
+                "tracing through tp_btf ({}), which costs every other process on this host \
+                 about 33 ns a system call; a list of at most 32 calls attaches to their \
+                 functions instead and costs them nothing",
+                attachment.reason
+            ));
+        }
     }
 
     fn attached(&mut self, process: u32) {

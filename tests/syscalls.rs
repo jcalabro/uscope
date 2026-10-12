@@ -936,6 +936,44 @@ mod bpf {
         assert_same(&comparable(&bpf), &comparable(&ptrace), "for signals");
     }
 
+    /// A short list attaches to its calls' kernel functions, which see the
+    /// calls the tracepoints do; only the tracepoints, which every call on
+    /// the host passes, say what they cost.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn functions_see_what_tracepoints_see_and_only_tracepoints_charge_everyone() {
+        let directory = ScratchDir::new("syscalls-attach");
+        let directory = directory.path();
+        let chosen = ["-e", "trace=openat,read,write,close,unlink"];
+        let by = |attach: &str| {
+            let (code, errors, trace) =
+                traced(directory, uscope(&["--attach", attach]), &chosen, "files");
+            assert_eq!(code, Some(3), "{errors}");
+            (errors, trace)
+        };
+        let (fentry_errors, fentry) = by("fentry");
+        let (tracepoint_errors, tracepoint) = by("tracepoint");
+        assert_same(&comparable(&fentry), &comparable(&tracepoint), "by attach");
+        assert!(!fentry_errors.contains("33 ns"), "{fentry_errors}");
+        assert!(
+            tracepoint_errors.contains("tracing through tp_btf (asked for)"),
+            "{tracepoint_errors}"
+        );
+
+        // A call no function describes cannot be had through functions.
+        let (code, errors, _) = traced(
+            directory,
+            uscope(&["--attach", "fentry"]),
+            &["-e", "trace=getpid@32"],
+            "compat",
+        );
+        assert_eq!(code, Some(1), "{errors}");
+        assert!(
+            errors.contains("--attach fentry cannot be used"),
+            "{errors}"
+        );
+    }
+
     /// Children and threads, each followed alike. A process that is not
     /// traced is never sent the SIGCHLD its default ignores, which ptrace
     /// makes the kernel queue, so the comparison leaves it out.

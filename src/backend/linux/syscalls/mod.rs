@@ -20,6 +20,9 @@ pub trait Sink {
     /// A running process is now traced, every thread of it.
     fn attached(&mut self, _process: u32) {}
 
+    /// Where the BPF engine's programs attached, and why.
+    fn attached_by(&mut self, _attachment: &bpf::Attachment) {}
+
     /// The calls threads have been blocked in since before `since`, read
     /// every so often while the trace runs.
     fn in_flight(&mut self, _calls: &[InFlight]) {}

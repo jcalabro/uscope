@@ -653,15 +653,13 @@ static __always_inline void send_files(u32 tid, u32 tgid, struct call_spec *spec
 	}
 }
 
-SEC("tp_btf/sys_enter")
-int sys_enter(u64 *ctx)
+// A call's entry, with the registers it entered with and its number.
+static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 {
 	u64 ids = bpf_get_current_pid_tgid();
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
-	struct pt_regs *regs = (struct pt_regs *)ctx[0];
-	u64 id = ctx[1];
 	struct entry entry = {};
 	entry.abi = abi_of(id, &entry.flags);
 	entry.nr = entry.abi == ABI_X32 ? (id & ~X32_SYSCALL_BIT) : id;
@@ -696,15 +694,14 @@ int sys_enter(u64 *ctx)
 	return 0;
 }
 
-SEC("tp_btf/sys_exit")
-int sys_exit(u64 *ctx)
+// A call's exit, with the program's context for its stack.
+static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 {
 	u64 ids = bpf_get_current_pid_tgid();
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
 	u64 now = bpf_ktime_get_ns();
-	s64 ret = ctx[1];
 	struct config *settings = config();
 	if (!settings)
 		return 0;
@@ -724,7 +721,6 @@ int sys_exit(u64 *ctx)
 		// did, which a launched program's never do but uscope's own.
 		if (settings->flags & CONFIG_SKIP_UNSEEN)
 			return 0;
-		struct pt_regs *regs = (struct pt_regs *)ctx[0];
 		u64 id = BPF_CORE_READ(regs, orig_ax);
 		entry.flags = CALL_ENTRY_UNSEEN;
 		entry.abi = abi_of(id, &entry.flags);
@@ -747,11 +743,50 @@ int sys_exit(u64 *ctx)
 		if (spec->makes)
 			send_files(tid, tgid, spec, &entry, ret);
 		if (settings->flags & CONFIG_STACKS)
-			send_stack(ctx, tid, tgid, (struct pt_regs *)ctx[0], settings->flags);
+			send_stack(ctx, tid, tgid, regs, settings->flags);
 		send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT, ret, now);
 	}
 	return 0;
 }
+
+// Every call, on every thread of the host: the default.
+SEC("tp_btf/sys_enter")
+int sys_enter(u64 *ctx)
+{
+	return on_enter((struct pt_regs *)ctx[0], ctx[1]);
+}
+
+SEC("tp_btf/sys_exit")
+int sys_exit(u64 *ctx)
+{
+	return on_exit(ctx, (struct pt_regs *)ctx[0], ctx[1]);
+}
+
+// Or only the chosen calls' kernel functions, each `__x64_sys_NAME(regs)`
+// or its compat twin, which costs calls not chosen nothing. Userspace
+// binds each slot to one function as it loads it; the call's number is
+// in the registers.
+#define FUNCTION_SLOT(n)                                                           \
+	SEC("fentry")                                                              \
+	int enter_##n(u64 *ctx)                                                    \
+	{                                                                          \
+		struct pt_regs *regs = (struct pt_regs *)ctx[0];                   \
+		return on_enter(regs, BPF_CORE_READ(regs, orig_ax));               \
+	}                                                                          \
+	SEC("fexit")                                                               \
+	int exit_##n(u64 *ctx)                                                     \
+	{                                                                          \
+		return on_exit(ctx, (struct pt_regs *)ctx[0], ctx[1]);             \
+	}
+
+FUNCTION_SLOT(0) FUNCTION_SLOT(1) FUNCTION_SLOT(2) FUNCTION_SLOT(3)
+FUNCTION_SLOT(4) FUNCTION_SLOT(5) FUNCTION_SLOT(6) FUNCTION_SLOT(7)
+FUNCTION_SLOT(8) FUNCTION_SLOT(9) FUNCTION_SLOT(10) FUNCTION_SLOT(11)
+FUNCTION_SLOT(12) FUNCTION_SLOT(13) FUNCTION_SLOT(14) FUNCTION_SLOT(15)
+FUNCTION_SLOT(16) FUNCTION_SLOT(17) FUNCTION_SLOT(18) FUNCTION_SLOT(19)
+FUNCTION_SLOT(20) FUNCTION_SLOT(21) FUNCTION_SLOT(22) FUNCTION_SLOT(23)
+FUNCTION_SLOT(24) FUNCTION_SLOT(25) FUNCTION_SLOT(26) FUNCTION_SLOT(27)
+FUNCTION_SLOT(28) FUNCTION_SLOT(29) FUNCTION_SLOT(30) FUNCTION_SLOT(31)
 
 SEC("tp_btf/sched_process_fork")
 int process_fork(u64 *ctx)
