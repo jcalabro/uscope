@@ -115,7 +115,12 @@ tokio *ARGS:
 # it. It loads debug information afresh, without the image cache, so that the
 # suite also runs against the loader itself. Arguments go to nextest, e.g.
 # `just stress 100 -E 'binary(dap)'`.
-[doc("Runs the test suite COUNT times under CPU load.")]
+#
+# With SOAK_MINUTES set, the tokio soak then runs under the same load for that
+# many minutes, e.g. `SOAK_MINUTES=30 just stress 1`. It attaches to a tokio
+# server under client load, inspecting and re-attaching it over and over, with
+# every invariant checked at every stop. Without it, only the suite runs.
+[doc("Runs the test suite COUNT times under CPU load, then the soak if SOAK_MINUTES is set.")]
 [script]
 stress COUNT="10" *ARGS: build-test-programs
     # Build before the busy loops start so they slow only the tests.
@@ -126,14 +131,9 @@ stress COUNT="10" *ARGS: build-test-programs
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
     ulimit -c 0
     XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
-
-# Attaches uscope to a tokio server under load for MINUTES, inspecting and
-# re-attaching it over and over, with every invariant checked at every stop.
-[script]
-soak MINUTES="10": build-test-programs
-    cargo nextest run --features tools --no-run
-    ulimit -c 0
-    USCOPE_SOAK_SECONDS="$(( $1 * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
+    if (( ${SOAK_MINUTES:-0} > 0 )); then
+        USCOPE_SOAK_SECONDS="$(( SOAK_MINUTES * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
+    fi
 
 # Installs the web page's locked dependencies.
 web-deps:

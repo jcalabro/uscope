@@ -1,8 +1,8 @@
 //! uscope attached to the `server` fixture for minutes while clients load
 //! it: paused and inspected over and over, stopped by a conditional
 //! breakpoint in the handler, and detached and attached again, with every
-//! invariant checked at every stop. It runs only through `just soak`,
-//! which says for how long in `USCOPE_SOAK_SECONDS`.
+//! invariant checked at every stop. It runs only through `just stress` with
+//! `SOAK_MINUTES` set, which says for how long in `USCOPE_SOAK_SECONDS`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -29,7 +29,7 @@ const ROUND_TIMEOUT: Duration = Duration::from_secs(60);
 /// The rounds before the debugger's memory is first sampled, and how much
 /// it may grow after.
 const WARM_UP_ROUNDS: u64 = 20;
-const MEMORY_MARGIN: u64 = 64 << 20;
+const MEMORY_MARGIN: u64 = 16 << 20;
 
 /// Clients sending lines to the server and checking each answer, until
 /// stopped.
@@ -96,16 +96,12 @@ impl Load {
     }
 }
 
-/// The test process's resident memory, almost all of it the debugger's.
-fn resident() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").expect("this process's status");
-    let kilobytes = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))
-        .and_then(|value| value.trim().strip_suffix(" kB"))
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .expect("a resident size");
-    kilobytes * 1024
+/// The live heap of the test process, almost all of it the debugger's.
+///
+/// Resident memory is not used: across rounds it rose and fell while the live
+/// heap stayed flat, so it does not show leaks.
+fn live_heap() -> u64 {
+    u64::try_from(uscope::timings::alloc::totals().live_bytes).expect("a live heap")
 }
 
 async fn attach(server: &ExternalProcess) -> Scenario {
@@ -121,7 +117,7 @@ async fn check(scenario: &Scenario, round: u64) {
 }
 
 #[tokio::test]
-#[ignore = "run through `just soak`"]
+#[ignore = "run through `SOAK_MINUTES=N just stress`"]
 async fn soak() {
     let seconds = std::env::var("USCOPE_SOAK_SECONDS")
         .ok()
@@ -208,12 +204,12 @@ async fn soak() {
             other => panic!("round {round}: {other:?}"),
         }
 
-        let memory = resident();
+        let heap = live_heap();
         match baseline {
-            None if round == WARM_UP_ROUNDS => baseline = Some(memory),
+            None if round == WARM_UP_ROUNDS => baseline = Some(heap),
             Some(baseline) => assert!(
-                memory <= baseline + MEMORY_MARGIN,
-                "round {round}: the debugger grew from {baseline} bytes to {memory}"
+                heap <= baseline + MEMORY_MARGIN,
+                "round {round}: the debugger's live heap grew from {baseline} bytes to {heap}"
             ),
             None => {}
         }

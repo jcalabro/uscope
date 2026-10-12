@@ -343,9 +343,14 @@ just stress 100 -E 'binary(dap) & test(/disconnect/)'
 ```
 
 Soak tests exercise a long-running scenario repeatedly and are ignored by the
-normal suite. Use the named Just recipe and its contained memory/process
-limits. A soak test still needs observable progress and per-operation
-deadlines.
+normal suite. Set `SOAK_MINUTES` to run them after the stress passes:
+
+```sh
+SOAK_MINUTES=30 just stress 1
+```
+
+They keep the stress recipe's contained memory/process limits. A soak test
+still needs observable progress and per-operation deadlines.
 
 ## Fuzzing
 
