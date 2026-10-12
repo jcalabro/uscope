@@ -3,6 +3,19 @@
 Performance changes must use the project's measurements. Do not add one-off
 timing prints.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/timings/mod.rs` | `span!`, `count!`, measurement storage, and report entry points |
+| `src/timings/alloc.rs`, `src/timings/report.rs` | Allocation counting and timing report rendering |
+| `bench/baseline.json` | Expected load-allocation counts for smoke checks |
+| `bench/overhead.json` | Flight-recorder overhead baseline |
+| `bench/reports/` | Checked-in comparison reports used during performance work |
+| `src/bin/uscope-tools.rs`, `src/tools/` | Benchmark and overhead helper commands |
+| `justfile` | `timings`, `bench-*`, and `profile-*` recipes |
+| `dev/profiling.md` | Architecture of uscope's user-facing profiler |
+
 ## Timings
 
 Give a new phase one `span!` and count repeated work with `count!` from

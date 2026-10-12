@@ -4,6 +4,22 @@
 one debugger session over WebSocket. The server is a `DebuggerHandle` client,
 like the CLI and DAP server.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/web/mod.rs`, `src/web/session.rs`, `src/web/connection.rs` | HTTP/WebSocket server and debugger-session ownership |
+| `src/web/protocol.rs` | Rust protocol types and TypeScript generation source |
+| `src/web/assets.rs`, `src/web/auth.rs` | Built-page serving and access control |
+| `src/web/inspect.rs`, `src/web/values.rs`, `src/web/draw.rs`, `src/web/profiles.rs` | Server adapters for major page features |
+| `web/src/store.ts`, `web/src/connection.ts`, `web/src/actions.ts` | Browser state, transport, and user actions |
+| `web/src/router.tsx`, `web/src/tab.ts`, `web/src/ui/` | URL state, per-tab view, and React interface |
+| `web/src/protocol.gen.ts` | Generated TypeScript protocol; do not edit by hand |
+| `web/src/visualize/`, `sdk/web/` | Sandboxed visualizers and their public type contract |
+| `web/test/` | Fast TypeScript, React, replay, and sandbox tests |
+| `web/e2e/`, `tests/web/` | Browser end-to-end tests and Rust server tests |
+| `web/vite.config.ts`, `web/playwright.config.ts` | Browser build and end-to-end configuration |
+
 ## Protocol and state
 
 The server sends tab state and notices. A tab sends requests that include the

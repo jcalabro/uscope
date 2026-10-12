@@ -5,6 +5,21 @@ the public debugger depend on one runtime. Go goroutines and tokio tasks use
 the same public concepts even though their metadata, scheduling, stack shape,
 and saved state differ.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/runtime_model/mod.rs`, `src/runtime_model/records.rs` | Neutral runtime records and discovery interface |
+| `src/runtime_model/go/` | Go runtime layout and goroutine discovery |
+| `src/runtime_model/tokio/` | Tokio runtime, task, and future discovery |
+| `src/runtime_model/futures.rs`, `src/runtime_model/rust/` | Rust future inspection and shared Rust rules |
+| `src/debug_info/coroutines.rs`, `src/debug_info/roles.rs` | Static coroutine and code-role metadata |
+| `src/image/resumes.rs` | Validated resume-point tables |
+| `src/backend/linux/runtimes.rs`, `src/backend/linux/async_frames.rs`, `src/backend/linux/frames.rs` | Stop-scoped runtime snapshots and logical stacks |
+| `tests/go/`, `tests/tokio/` | Runtime integration suites |
+| `tests/fixtures/go/`, `tests/fixtures/rust/tokio/` | Programs that expose scheduler and task states |
+| `views/` | Built-in Go, Rust, and Tokio value views |
+
 ## Boundary
 
 Runtime support has two inputs:

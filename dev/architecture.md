@@ -5,6 +5,19 @@ x86-64, ELF, DWARF, ptrace, and native registers stay at the edges. Clients
 talk to the same model whether they are the terminal, browser, DAP server, or a
 future interface.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/lib.rs` | Public debugger API, session construction, and `DebuggerHandle` |
+| `src/model.rs`, `src/model/` | Platform-neutral public types and module-image model |
+| `src/protocol.rs` | Requests, replies, events, `StopId`, and execution identity |
+| `src/backend/mod.rs` | Backend interface used by the public debugger |
+| `src/backend/linux.rs`, `src/backend/linux/` | Linux controller and target-specific implementation |
+| `src/present/` | Formatting shared by user interfaces |
+| `src/cli/`, `src/dap/`, `src/web/` | Terminal, Debug Adapter Protocol, and web clients |
+| `tests/debugger/`, `tests/dap/`, `tests/web/` | Public-boundary integration tests |
+
 ## Debugger clients
 
 `DebuggerHandle` is the client boundary. A client sends requests through a

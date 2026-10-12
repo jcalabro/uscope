@@ -3,6 +3,22 @@
 Tests protect behavior, invariants, and cleanup. Prefer a small number of
 high-value scenarios over assertions that restate implementation details.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `tests/support/mod.rs` | `Scenario`, fixture lookup, process cleanup, and shared assertions |
+| `tests/support/dap.rs`, `web.rs` | DAP and web test clients |
+| `tests/support/flight_recordings.rs`, `memory_cap.rs` | Failure artifacts and per-process memory limits |
+| `tests/debugger/` | Public debugger workflows |
+| `tests/dap/`, `tests/web/` | Client protocol and server behavior |
+| `tests/go/`, `tests/tokio/` | Runtime-specific integration suites |
+| `tests/fixtures/` | Native source programs, view files, and fixture packages |
+| `tests/golden/` | Deterministic simulator programs and manifests |
+| `scripts/build-test-programs.sh`, `scripts/golden.sh` | Fixture and golden-program builds |
+| `scripts/contained.sh`, `.config/nextest.toml` | Resource containment and nextest process policy |
+| `justfile` | Supported test, stress, simulator, web, and gate commands |
+
 ## Workflow
 
 Write the test before the fix and run it while the bug is present. This proves

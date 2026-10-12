@@ -4,6 +4,22 @@ Debug-information providers translate format- and language-specific data into
 the neutral model used by the debugger. ELF, DWARF, Go tables, native register
 layouts, and ABI rules stay behind this boundary.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/debug_info/mod.rs`, `src/debug_info/dispatch.rs` | Provider interfaces and format dispatch |
+| `src/debug_info/dwarf.rs`, `src/debug_info/dwarf/` | DWARF loading, variables, locations, and type facts |
+| `src/debug_info/elf.rs`, `src/debug_info/separate.rs` | ELF metadata and separate debug-file discovery |
+| `src/debug_info/gopclntab.rs`, `src/debug_info/gopclntab/` | Go table decoding and Go-specific unwind data |
+| `src/debug_info/x86_64.rs` | Architecture-specific register and unwind rules |
+| `src/image/` | Validated immutable table image and checked views |
+| `src/model/image.rs`, `src/model/image/` | Public image model and location types |
+| `src/cache.rs` | Persistent image cache and cache-key construction |
+| `src/unwind/` | Generic caller iteration and sampled-stack unwinding |
+| `src/source_map.rs` | Source path resolution and remapping |
+| `src/image/tests.rs`, `src/cache/tests.rs`, `tests/debugger/debug_files.rs` | Image, cache, and external debug-file coverage |
+
 ## Images and bindings
 
 A load produces one validated image of immutable tables under `src/image`.

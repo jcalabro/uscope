@@ -3,6 +3,21 @@
 The Linux backend controls each tracee independently while the public debugger
 presents one all-stop process.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/backend/linux.rs` | Controller state and the main Linux event loop |
+| `src/backend/linux/native.rs`, `src/backend/linux/native_tracee.rs` | Real kernel operations and native tracee access |
+| `src/backend/linux/lifecycle.rs`, `src/backend/linux/new_task.rs` | Launch, attach, fork, clone, exec, exit, and detach |
+| `src/backend/linux/classify.rs`, `src/backend/linux/internal_stops.rs` | Raw wait-status classification and internal stops |
+| `src/backend/linux/run_control.rs`, `src/backend/linux/stepping.rs`, `src/backend/linux/step_targets.rs` | Resume, pause, and stepping plans |
+| `src/backend/linux/breakpoints.rs`, `src/backend/linux/watchpoints.rs`, `src/backend/linux/writes.rs` | Breakpoint sites, hardware watches, and stopped-state writes |
+| `src/backend/linux/signals.rs`, `src/backend/linux/awaits.rs` | Signal policy and asynchronous wait coordination |
+| `src/backend/linux/recorded.rs`, `src/backend/linux/sim_edge.rs` | Recorded native calls and the simulator boundary |
+| `tests/debugger/`, `tests/watchpoints.rs`, `tests/hit_counts.rs` | End-to-end process-control behavior |
+| `tests/fixtures/c/` | Native programs used to force lifecycle and concurrency states |
+
 ## Thread ownership
 
 The controller runs on the OS thread that created the tracee. Every ptrace call

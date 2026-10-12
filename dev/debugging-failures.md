@@ -4,6 +4,19 @@ Start with the evidence uscope already records. A debugger failure often
 depends on the order of requests, ptrace calls, wait statuses, and events; an
 extra print can change that order.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/flight_recorder.rs` | Recorder format, destinations, retention, and recording macros |
+| `src/backend/linux/recorded.rs` | Native control calls captured by the recorder |
+| `tests/support/flight_recordings.rs` | Test log naming, retention, and failure reporting |
+| `target/flight-recorder/` | Logs from local development runs |
+| `src/sim/report.rs`, `src/sim/audit.rs` | Simulator failure reports, traces, and invariant audits |
+| `tests/support/memory_cap.rs`, `src/test_memory.rs` | Test memory-limit enforcement and diagnostics |
+| `scripts/contained.sh` | CPU and memory containment for expensive runs |
+| `dev/testing.md`, `dev/simulator.md` | Test selection and simulator-specific diagnosis |
+
 ## Reproduce narrowly
 
 Find the smallest command or named test that still fails. Keep the same build

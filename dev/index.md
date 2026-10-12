@@ -18,6 +18,26 @@ will change:
 - [Web UI](web-ui.md)
 - [Documentation](documentation.md)
 
+## Find code by task
+
+| Task | Start here | Read next |
+| --- | --- | --- |
+| Change public debugger state or requests | `src/model.rs`, `src/protocol.rs` | `src/lib.rs`, [architecture](architecture.md) |
+| Launch, attach, stop, resume, or detach | `src/backend/linux.rs`, `src/backend/linux/lifecycle.rs` | [process control](process-control.md) |
+| Change stepping or breakpoints | `src/backend/linux/stepping.rs`, `src/backend/linux/breakpoints.rs` | `tests/debugger/stepping.rs`, `tests/debugger/execution.rs` |
+| Change watchpoints or memory writes | `src/backend/linux/watchpoints.rs`, `src/backend/linux/writes.rs` | `tests/watchpoints.rs`, `tests/debugger/writes.rs` |
+| Load symbols, types, variables, or source lines | `src/debug_info/`, `src/image/` | [debug information](debug-information.md) |
+| Change stack unwinding or frames | `src/unwind/`, `src/backend/linux/frames.rs` | `tests/debugger/unwind.rs`, `tests/frames.rs` |
+| Change expressions or value inspection | `src/eval/`, `src/inspection.rs` | [expressions, inspection, and views](evaluation-and-views.md) |
+| Change views or visualizers | `src/view/`, `views/`, `web/src/visualize/` | `tests/debugger/views.rs`, `web/test/drawing.test.tsx` |
+| Change goroutines, tasks, or async frames | `src/runtime_model/`, `src/backend/linux/runtimes.rs` | [runtime models](runtime-models.md) |
+| Change profiling or capture analysis | `src/profiler/`, `src/capture/`, `src/analysis/` | [profiling](profiling.md) |
+| Change the CLI, DAP server, or web UI | `src/cli/`, `src/dap/`, `src/web/`, `web/src/` | [web UI](web-ui.md) and the client test suites |
+| Add or diagnose an integration test | `tests/support/mod.rs`, `tests/fixtures/` | [testing](testing.md), [diagnosing failures](debugging-failures.md) |
+| Change simulated kernel behavior | `src/sim/`, `src/backend/linux/sim_edge.rs` | [simulator](simulator.md), `plans/simulator.md` |
+| Measure debugger cost | `src/timings/`, `bench/` | [performance](performance.md) |
+| Change public or developer docs | `docs/`, `dev/`, `AGENTS.md` | [documentation](documentation.md) |
+
 ## Development environment
 
 Every project command runs in the pinned Nix environment. Enter it with:

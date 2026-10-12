@@ -15,6 +15,21 @@ The main code is split across three layers:
 The CLI commands `record`, `report`, `convert`, and `symbolize` are adapters
 over those layers. The browser reads the same profile and analysis results.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/profiler/collector.rs`, `src/profiler/record.rs`, `src/profiler/session.rs` | perf collection, record decoding, and session lifecycle |
+| `src/profiler/tasks.rs`, `src/profiler/calls.rs`, `src/profiler/frame_pointers.rs` | Task tracking and stack reconstruction |
+| `src/profiler/annotate.rs`, `src/profiler/symbols.rs`, `src/profiler/zones.rs` | Symbol, source, and instrumentation annotation |
+| `src/profiler/formats/` | Chrome, folded-stack, and pprof output |
+| `src/capture/` | Validated capture file format and table builder |
+| `src/analysis/` | Queries, call trees, diffs, costs, and zones |
+| `src/cli/profile.rs` | `record`, `report`, `convert`, and `symbolize` command adapters |
+| `src/web/profiles.rs`, `web/src/profile/`, `web/src/ui/profile/` | Profile transport, browser model, and profile pages |
+| `sdk/c/uscope_kernel.h`, `sdk/rust-probes/`, `sdk/zig/uscope_kernel.zig` | Target-side profiling and instrumentation interfaces |
+| `tests/profiler.rs`, `src/capture/tests.rs`, `src/analysis/tests.rs` | End-to-end and format/analysis tests |
+
 ## Recording model
 
 The recorder opens perf events for target threads and receives bounded binary

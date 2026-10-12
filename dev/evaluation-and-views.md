@@ -5,6 +5,21 @@ Expressions let a user name and compute with program values. Inspection turns
 a located value into a bounded public tree. Views change that tree's logical
 shape. Keep these layers separate.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/eval/syntax/` | Lexer, parser, syntax tree, and canonical printing |
+| `src/eval/bind.rs`, `src/eval/ir.rs` | Name and type binding into target-neutral IR |
+| `src/eval/interp.rs`, `src/eval/number.rs`, `src/eval/target.rs` | Evaluation, exact numeric rules, and target traits |
+| `src/inspection.rs` | Bounded conversion from located values to public value trees |
+| `src/backend/linux/evaluation.rs`, `src/backend/linux/inspection.rs` | Debugger implementations of evaluation and inspection access |
+| `src/view/syntax.rs`, `src/view/bind.rs`, `src/view/run.rs` | View parsing, binding, and execution |
+| `src/view/scan.rs`, `src/view/kernel.rs`, `src/view/summary.rs` | View discovery, kernel programs, and summaries |
+| `src/view_files.rs`, `views/` | View-file loading and built-in view definitions |
+| `sdk/` | Headers and libraries exposed to instrumented programs and visualizers |
+| `src/eval/tests.rs`, `src/view/tests.rs`, `tests/debugger/expressions.rs`, `tests/debugger/views.rs` | Core and public-path tests |
+
 ## Expression phases
 
 `src/eval` has three main phases:

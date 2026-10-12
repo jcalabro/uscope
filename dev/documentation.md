@@ -4,6 +4,20 @@ Public documentation lives in `docs/` and is published with VitePress.
 Developer documentation lives in `dev/`. Design and implementation records
 stay in `plans/`.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `README.md` | Short human-facing project entrance and public-doc links |
+| `AGENTS.md` | Short agent-facing rules and developer-doc router |
+| `docs/` | Public, end-user documentation published by VitePress |
+| `docs/.vitepress/` | Site navigation, theme, metadata, and build configuration |
+| `dev/` | Detailed developer documentation kept in the repository |
+| `plans/` | Internal design records and implementation history |
+| `docs/package.json`, `docs/pnpm-lock.yaml` | Pinned documentation-site tools |
+| `justfile` | Documentation install, development, and build recipes |
+| `web/test/docs.test.tsx`, `src/eval/tests.rs` | Executable documentation examples and contracts |
+
 ## Audience
 
 Public pages explain how to use uscope. They may explain a design choice when
@@ -18,6 +32,12 @@ Plans record decisions, evidence, and implementation history. They are not a
 promise of current behavior and are not included in the public site.
 
 ## Writing
+
+Every developer guide should place a compact `Code map` after its opening
+paragraph. Name the few files or directories that provide the best entry
+points for that subject, including its main tests. Prefer an exact file when
+one owns the behavior. Use a directory when the reader needs the whole
+subsystem. Keep the map current when ownership moves.
 
 - Open with what the reader can do or what the component does.
 - Use common words and short sentences.

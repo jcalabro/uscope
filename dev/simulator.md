@@ -4,6 +4,22 @@ The deterministic simulator in `src/sim` runs the real controller and
 `DebuggerHandle` against a simulated kernel and CPU. After each action, oracles
 compare debugger state with the world's ground truth.
 
+## Code map
+
+| Path | What lives there |
+| --- | --- |
+| `src/sim/world.rs`, `machine.rs`, `schedule.rs` | Simulated world state, machine execution, and action scheduling |
+| `src/sim/choices.rs`, `swarm.rs`, `corpus.rs` | Seeded choices, configuration variation, and saved inputs |
+| `src/sim/kernel/` | Process, ptrace, signal, debug-register, perf, and syscall models |
+| `src/sim/cpu/` | Simulated x86-64 operations and flags |
+| `src/sim/client/` | Generated client behavior against `DebuggerHandle` |
+| `src/sim/oracles.rs`, `audit.rs`, `marks.rs` | Ground-truth checks, invariants, and coverage marks |
+| `src/sim/conformance/` | Dual-run probes against the real Linux kernel and CPU |
+| `src/backend/linux/sim_edge.rs` | Adapter from the real controller to simulated native operations |
+| `src/bin/uscope-sim.rs`, `src/sim/report.rs` | Sweep/replay command and failure reports |
+| `tests/golden/`, `scripts/golden.sh` | Reproducible native programs and manifest management |
+| `plans/simulator.md` | Numbered model rules and design record |
+
 ## Determinism
 
 One seed names one run for one commit. All choices come from the seed's
