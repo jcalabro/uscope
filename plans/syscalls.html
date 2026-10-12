@@ -1124,6 +1124,7 @@ security.wrappers.uscope-bpf = {
         <tr><td>Y6.2</td><td>&mdash;</td><td><span class="mono">-k</span> and <span class="mono">--no-follow</span> refused with a cgroup</td><td>Stacks need each process&rsquo;s mappings followed from the start, which a cgroup&rsquo;s newcomers do not give. Every member is traced, so there is nothing to narrow.</td></tr>
         <tr><td>Y6.1</td><td>&mdash;</td><td>A call still held when its thread ends, other than exit, exit_group or execve, is reported lost</td><td>When another tracer attaches to a kernel function, the kernel skips the old trampoline&rsquo;s fexit programs for calls in progress and counts nothing. This was the in-flight test&rsquo;s flake.</td></tr>
         <tr><td>Y3.4</td><td>&mdash;</td><td>Losses include the kernel&rsquo;s skipped program runs</td><td>A preempted run makes the next one on its CPU skip. The count covers every process&rsquo;s runs, so it bounds the loss rather than measuring it.</td></tr>
+        <tr><td>Y6.1</td><td>&mdash;</td><td>Without x32 in the kernel, x32 calls are left out of a function list; calls without arguments, such as getpid, have no wrapper in BTF and use tracepoints</td><td>Such a kernel fails an x32 call before any function runs, so only tracepoints could see it. pahole leaves <span class="mono">SYSCALL_DEFINE0</span> wrappers out of BTF.</td></tr>
 </tbody></table></div>
     </section>
 

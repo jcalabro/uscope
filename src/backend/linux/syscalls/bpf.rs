@@ -961,11 +961,13 @@ fn function_of(call: SyscallId, has: &impl Fn(&str) -> bool) -> Option<String> {
 }
 
 /// Where the programs attach to see `chosen`, every call when `all`, as
-/// `mode` asks; `has` says which kernel functions BTF describes.
+/// `mode` asks; `has` says which kernel functions BTF describes. Without
+/// `x32` in the kernel, its calls fail before any function is entered.
 fn attachment(
     all: bool,
     chosen: &[SyscallId],
     mode: AttachMode,
+    x32: bool,
     has: &impl Fn(&str) -> bool,
 ) -> Result<Attachment, String> {
     let tracepoints = |reason: String| Attachment {
@@ -980,7 +982,7 @@ fn attachment(
     } else {
         let mut functions: Vec<String> = Vec::new();
         let mut missing = None;
-        for &call in chosen {
+        for &call in chosen.iter().filter(|call| x32 || call.abi != Abi::X32) {
             match function_of(call, has) {
                 Some(function) if !functions.contains(&function) => functions.push(function),
                 Some(_) => {}
@@ -1017,6 +1019,17 @@ fn attachment(
     }
 }
 
+/// Whether the kernel runs x32 calls, by the dispatcher it then has: a
+/// function since 6.9, a table before.
+fn has_x32() -> bool {
+    std::fs::read_to_string("/proc/kallsyms").is_ok_and(|symbols| {
+        symbols.lines().any(|line| {
+            line.rsplit_once(' ')
+                .is_some_and(|(_, name)| name == "x32_sys_call" || name == "x32_sys_call_table")
+        })
+    })
+}
+
 fn load_error(error: impl std::fmt::Display) -> BpfError {
     BpfError::Load(error.to_string())
 }
@@ -1047,7 +1060,7 @@ impl Loaded {
         let rows = u32::try_from(chosen.len().max(1)).unwrap_or(u32::MAX);
         let btf = Btf::from_sys_fs().map_err(load_error)?;
         let calls: Vec<SyscallId> = chosen.iter().map(|&(_, call)| call).collect();
-        let attachment = attachment(all, &calls, engine.attach, &|name| {
+        let attachment = attachment(all, &calls, engine.attach, has_x32(), &|name| {
             btf.id_by_type_name_kind(name, BtfKind::Func).is_ok()
         })
         .map_err(BpfError::Unavailable)?;
@@ -1872,7 +1885,7 @@ mod tests {
             named(Abi::X32, "openat"),
             named(Abi::X86_32, "openat"),
         ];
-        let chosen = attachment(false, &open, AttachMode::Auto, &has).expect("an attachment");
+        let chosen = attachment(false, &open, AttachMode::Auto, true, &has).expect("an attachment");
         assert_eq!(
             chosen.functions,
             ["__x64_sys_openat", "__ia32_compat_sys_openat"]
@@ -1880,7 +1893,7 @@ mod tests {
         assert_eq!(chosen.name(), "fentry");
 
         let without = [named(Abi::X86_64, "getppid")];
-        let fallen = attachment(false, &without, AttachMode::Auto, &has).expect("tracepoints");
+        let fallen = attachment(false, &without, AttachMode::Auto, true, &has).expect("tracepoints");
         assert_eq!(
             (fallen.name(), fallen.reason.as_str()),
             (
@@ -1888,8 +1901,8 @@ mod tests {
                 "getppid has no kernel function that BTF describes"
             )
         );
-        assert!(attachment(false, &without, AttachMode::Functions, &has).is_err());
-        let all = attachment(true, &[], AttachMode::Auto, &has).expect("tracepoints");
+        assert!(attachment(false, &without, AttachMode::Functions, true, &has).is_err());
+        let all = attachment(true, &[], AttachMode::Auto, true, &has).expect("tracepoints");
         assert_eq!(all.reason, "every call is traced");
 
         let many: Vec<SyscallId> = (0..=40)
@@ -1897,8 +1910,22 @@ mod tests {
             .filter(|call| call.name().is_some())
             .collect();
         let wide =
-            attachment(false, &many, AttachMode::Auto, &|_: &str| true).expect("tracepoints");
+            attachment(false, &many, AttachMode::Auto, true, &|_: &str| true).expect("tracepoints");
         assert_eq!(wide.name(), "tp_btf", "{wide:?}");
+
+        // A kernel without x32 has none of its compat functions, and no x32
+        // call ever reaches one.
+        let no_x32 = |name: &str| !name.starts_with("__x64_compat_");
+        let sigaction = [
+            named(Abi::X86_64, "rt_sigaction"),
+            named(Abi::X32, "rt_sigaction"),
+        ];
+        let chosen = attachment(false, &sigaction, AttachMode::Auto, false, &no_x32)
+            .expect("an attachment");
+        assert_eq!(chosen.functions, ["__x64_sys_rt_sigaction"]);
+        let fallen = attachment(false, &sigaction, AttachMode::Auto, true, &no_x32)
+            .expect("tracepoints");
+        assert_eq!(fallen.name(), "tp_btf");
     }
     use crate::syscalls::captures::MOST_BYTES;
 
