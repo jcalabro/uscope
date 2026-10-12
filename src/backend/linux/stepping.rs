@@ -210,7 +210,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
         }
-        if self.pass_unchosen_call(pid)? {
+        // A call behind a breakpoint is passed once the breakpoint's hit has
+        // been judged, which may end the step before the call.
+        let rip = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
+        if !self.before_breakpoint(pid, rip)? && self.pass_unchosen_call(pid)? {
             return Ok(());
         }
         let mode = self.step_mode(kind);
@@ -1123,6 +1126,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// Whether the thread stopped at `instruction` before an installed
+    /// breakpoint's `int3`, which it has yet to hit.
+    fn before_breakpoint(&self, pid: Pid, instruction: VirtualAddress) -> Result<bool> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let hit = inferior
+            .threads
+            .get(&pid)
+            .is_some_and(|thread| thread.stopped_at_breakpoint == Some(instruction));
+        Ok(!hit
+            && inferior
+                .breakpoints
+                .get(&instruction)
+                .is_some_and(|site| site.installed))
+    }
+
     pub(super) fn step_is_complete(&self, pid: Pid, kind: StepKind) -> Result<bool> {
         if kind == StepKind::Instruction {
             return Ok(true);
@@ -1159,17 +1177,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         let instruction = VirtualAddress::new(registers.rip);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let classified_as_breakpoint = inferior
-            .threads
-            .get(&pid)
-            .is_some_and(|thread| thread.stopped_at_breakpoint == Some(instruction));
-        if !classified_as_breakpoint
-            && inferior
-                .breakpoints
-                .get(&instruction)
-                .is_some_and(|site| site.installed)
-        {
+        if self.before_breakpoint(pid, instruction)? {
             // A trace trap can land immediately before an installed `int3`.
             // Resume once so breakpoint classification and user-over-plan
             // precedence happen through the normal breakpoint path.
