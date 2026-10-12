@@ -181,6 +181,8 @@ pub enum Request {
     SyscallNetwork(SyscallQuery),
     /// The processes the trace saw.
     SyscallProcesses(SyscallQuery),
+    /// What a live trace's threads are blocked in.
+    SyscallInFlight(SyscallInFlightQuery),
 }
 
 /// A stop, which must be current.
@@ -737,6 +739,10 @@ pub struct RecordProfile {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub window: Option<f64>,
+    /// Traces system calls instead of sampling.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub syscalls: Option<RecordSyscalls>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -2341,6 +2347,10 @@ mod tests {
         SyscallNetwork::decl,
         SyscallEndpoint::decl,
         SyscallProcesses::decl,
+        RecordSyscalls::decl,
+        SyscallInFlightQuery::decl,
+        SyscallInFlight::decl,
+        SyscallBlocked::decl,
         SyscallProcess::decl,
         ProfileZoneAt::decl,
         ProfileLabelValue::decl,

@@ -17,6 +17,7 @@ use uscope::profiler::{
     Profile, Query, RecordOptions, SampleSource, Side, Source, Transform, Watch, diff_costs,
     diff_trees, record_watched,
 };
+use uscope::syscalls::InFlight;
 
 use super::protocol::{
     self, ErrorKind, ProfileBaseWeight, ProfileCost, ProfileFunctions, ProfileGranularity,
@@ -30,7 +31,7 @@ use super::session::Failure;
 const MOST_BUCKETS: u32 = 4096;
 
 /// How often a recording publishes its profile so far.
-const LIVE_EVERY: Duration = Duration::from_secs(2);
+pub(super) const LIVE_EVERY: Duration = Duration::from_secs(2);
 
 /// The profiles one server serves.
 pub struct Profiles {
@@ -47,6 +48,9 @@ struct Entry {
     profile: Arc<Profile>,
     /// Its system call trace, read once it is asked for.
     syscalls: std::sync::OnceLock<Arc<super::syscalls::Trace>>,
+    /// The calls a live trace's threads were blocked in, and when it saw
+    /// them, on its clock.
+    in_flight: (Vec<InFlight>, u64),
 }
 
 struct Recorder {
@@ -112,6 +116,7 @@ impl Profiles {
                 ended: None,
             },
             read.profile,
+            (Vec::new(), 0),
         );
         id
     }
@@ -121,7 +126,12 @@ impl Profiles {
         clippy::significant_drop_tightening,
         reason = "the list is sent under the lock, so changes publish in order"
     )]
-    fn publish(&self, info: ProfileInfo, profile: Profile) {
+    pub(super) fn publish(
+        &self,
+        info: ProfileInfo,
+        profile: Profile,
+        in_flight: (Vec<InFlight>, u64),
+    ) {
         let mut entries = self.entries.write().expect("profiles lock");
         let id = info.id.clone();
         entries.insert(
@@ -130,6 +140,7 @@ impl Profiles {
                 info,
                 profile: Arc::new(profile),
                 syscalls: std::sync::OnceLock::new(),
+                in_flight,
             }),
         );
         let profiles = entries.values().map(|entry| entry.info.clone()).collect();
@@ -214,24 +225,20 @@ impl Profiles {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut options = RecordOptions::preset(match spec.preset {
-            RecordPreset::Production => Preset::Production,
-            RecordPreset::Development => Preset::Development,
-            RecordPreset::Maximum => Preset::Maximum,
-        });
-        if let Some(symbol) = spec.function.filter(|symbol| !symbol.trim().is_empty()) {
-            options.source = SampleSource::Function { symbol };
-        }
-        if let Some(seconds) = spec.window {
-            options.window = Some(
-                std::time::Duration::try_from_secs_f64(seconds)
-                    .ok()
-                    .filter(|window| !window.is_zero())
-                    .ok_or_else(|| {
-                        Failure::new(ErrorKind::Invalid, "a window is a number of seconds")
-                    })?,
-            );
-        }
+        let traced = spec
+            .syscalls
+            .as_ref()
+            .map(|syscalls| {
+                if spec.function.is_some() || spec.window.is_some() {
+                    return Err(Failure::new(
+                        ErrorKind::Invalid,
+                        "a system call trace samples no function and keeps no window",
+                    ));
+                }
+                super::live::options(syscalls)
+            })
+            .transpose()?;
+        let options = sampling(&spec)?;
         let count = self.recorded.fetch_add(1, Ordering::Relaxed);
         let id = format!(
             "{:016x}",
@@ -251,11 +258,32 @@ impl Profiles {
         let stop = Arc::new(AtomicBool::new(false));
         let (started, starting) = oneshot::channel::<Result<(), String>>();
         let profiles = Arc::clone(self);
+        let program = std::iter::once(&spec.program)
+            .chain(&spec.arguments)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
         let thread = std::thread::Builder::new()
             .name("uscope-web-record".into())
             .spawn({
                 let (id, stop) = (id.clone(), Arc::clone(&stop));
-                move || profiles.run_recording(&id, &name, command, &options, &stop, started)
+                move || match traced {
+                    Some(traced) => {
+                        let publisher = super::live::Publisher {
+                            profiles: &profiles,
+                            id: &id,
+                            name: &name,
+                            started: Some(started),
+                        };
+                        super::live::record(publisher, command, &program, &traced, &stop);
+                        profiles
+                            .recordings
+                            .lock()
+                            .expect("recordings lock")
+                            .remove(&id);
+                    }
+                    None => profiles.run_recording(&id, &name, command, &options, &stop, started),
+                }
             })
             .map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
         self.recordings
@@ -297,7 +325,7 @@ impl Profiles {
             &mut Watch {
                 every: LIVE_EVERY,
                 publish: &mut |profile| {
-                    self.publish(info(revision, None), profile);
+                    self.publish(info(revision, None), profile, (Vec::new(), 0));
                     revision += 1;
                     if let Some(started) = started.take() {
                         let _ = started.send(Ok(()));
@@ -313,6 +341,7 @@ impl Profiles {
                 self.publish(
                     info(revision, Some(recording.status.to_string())),
                     recording.profile,
+                    (Vec::new(), 0),
                 );
             }
             Err(error) => {
@@ -320,7 +349,11 @@ impl Profiles {
                     let _ = started.send(Err(error.to_string()));
                 } else if let Ok(entry) = self.entry(id) {
                     let profile = Profile::clone(&entry.profile);
-                    self.publish(info(revision, Some(format!("failed: {error}"))), profile);
+                    self.publish(
+                        info(revision, Some(format!("failed: {error}"))),
+                        profile,
+                        (Vec::new(), 0),
+                    );
                 }
             }
         }
@@ -504,6 +537,15 @@ impl Profiles {
                 let entry = self.entry(&query.profile)?;
                 Ok(json(&zone_stats(&entry.profile, &query)))
             }
+            Request::SyscallInFlight(query) => {
+                let entry = self.entry(&query.profile)?;
+                let (calls, at) = &entry.in_flight;
+                Ok(json(&super::syscalls::in_flight(
+                    calls,
+                    *at,
+                    entry.info.recording,
+                )))
+            }
             request => {
                 let id = super::syscalls::profile_of(&request)
                     .expect("only profile requests come here")
@@ -517,6 +559,33 @@ impl Profiles {
             }
         }
     }
+}
+
+/// How a recording the page asked for samples.
+fn sampling(spec: &RecordProfile) -> Result<RecordOptions, Failure> {
+    let mut options = RecordOptions::preset(match spec.preset {
+        RecordPreset::Production => Preset::Production,
+        RecordPreset::Development => Preset::Development,
+        RecordPreset::Maximum => Preset::Maximum,
+    });
+    if let Some(symbol) = spec
+        .function
+        .clone()
+        .filter(|symbol| !symbol.trim().is_empty())
+    {
+        options.source = SampleSource::Function { symbol };
+    }
+    if let Some(seconds) = spec.window {
+        options.window = Some(
+            std::time::Duration::try_from_secs_f64(seconds)
+                .ok()
+                .filter(|window| !window.is_zero())
+                .ok_or_else(|| {
+                    Failure::new(ErrorKind::Invalid, "a window is a number of seconds")
+                })?,
+        );
+    }
+    Ok(options)
 }
 
 /// Whether a request is about a profile.
@@ -543,6 +612,7 @@ pub const fn is_profile_request(request: &Request) -> bool {
             | Request::SyscallFiles(_)
             | Request::SyscallNetwork(_)
             | Request::SyscallProcesses(_)
+            | Request::SyscallInFlight(_)
     )
 }
 

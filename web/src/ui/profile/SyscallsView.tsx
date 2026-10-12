@@ -15,6 +15,7 @@ import type {
   SyscallSite,
   SyscallToken,
 } from "../../protocol";
+import { useModel } from "../../store";
 import { useShownScheme } from "../../theme";
 import { token, useAnswer, useProfile } from "./context";
 
@@ -1020,6 +1021,9 @@ function Network({ query }: { query: SyscallQuery }) {
 
 function Processes({ query }: { query: SyscallQuery }) {
   const processes = useAnswer("syscallProcesses", query);
+  const live = useModel(
+    (model) => model.profiles.find((each) => each.id === query.profile)?.recording ?? false,
+  );
   const all = processes.data?.processes ?? [];
   const depth = new Map<number, number>();
   for (const process of all) {
@@ -1050,6 +1054,33 @@ function Processes({ query }: { query: SyscallQuery }) {
           process.end ?? "",
         ])}
       />
+      {live ? <InFlight query={query} /> : null}
     </div>
+  );
+}
+
+/** What each thread of a live trace is blocked in, as of its last
+ * publication. */
+function InFlight({ query }: { query: SyscallQuery }) {
+  const flight = useAnswer("syscallInFlight", {
+    profile: query.profile,
+    revision: query.revision ?? 0,
+  });
+  const calls = flight.data?.calls ?? [];
+  return (
+    <section className="in-flight" data-testid="syscall-in-flight">
+      <h3>Blocked now</h3>
+      <Rows
+        head={["thread", "call", "for"]}
+        empty="No thread is blocked in a call."
+        rows={calls.map((call) => [
+          call.tid,
+          <span key="call" className="mono">
+            <Tokens tokens={call.tokens} />
+          </span>,
+          formatDuration(call.blockedNs),
+        ])}
+      />
+    </section>
   );
 }

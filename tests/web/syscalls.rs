@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 use crate::support::{Scenario, ScratchDir};
+use crate::profiles::listed;
 use crate::web::{Client, Web};
 
 /// The syscalls fixture's trace in `mode`, by the ptrace engine with
@@ -335,4 +336,66 @@ async fn a_familys_processes_and_threads_are_served_in_order() {
         json!([true, true, true, true]),
         "{waiting}"
     );
+}
+
+/// A trace recorded from the page is published as it grows, says what its
+/// program is blocked in, and ends when stopped.
+#[tokio::test]
+async fn a_live_trace_shows_what_its_program_is_blocked_in() {
+    let web = Web::start("syscalls-live", &[]);
+    let mut tab = web.control("tab").await;
+    let program = Scenario::fixture("syscalls");
+    let refused = tab
+        .request(
+            "recordProfile",
+            json!({"program": program, "syscalls": {"filter": "trace=nosuchcall"}}),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    let started = tab
+        .ok(
+            "recordProfile",
+            json!({"program": program, "arguments": ["pause"], "syscalls": {"stacks": true}}),
+        )
+        .await;
+    let id = started["profile"].as_str().expect("an id").to_owned();
+
+    // Each revision is read until the pause shows in flight.
+    let mut seen = -1;
+    let blocked = loop {
+        let info = listed(&mut tab, &id, "a newer revision", |info| {
+            info["revision"].as_i64() > Some(seen)
+        })
+        .await;
+        assert_eq!(info["recording"], true, "{info}");
+        seen = info["revision"].as_i64().expect("a revision");
+        let flight = tab
+            .ok("syscallInFlight", json!({"profile": id, "revision": seen}))
+            .await;
+        assert_eq!(flight["live"], true);
+        if let Some(call) = flight["calls"]
+            .as_array()
+            .expect("calls")
+            .iter()
+            .find(|call| text(call).starts_with("pause("))
+        {
+            break call.clone();
+        }
+    };
+    assert!(blocked["blockedNs"].as_u64() >= Some(1_000_000), "{blocked}");
+    let summary = tab
+        .ok("syscallSummary", json!({"profile": id, "revision": seen}))
+        .await;
+    assert_eq!(summary["engine"], "ptrace");
+    assert!(summary["calls"].as_u64() > Some(0), "{summary}");
+
+    tab.ok("stopRecording", json!({"profile": id})).await;
+    let ended = listed(&mut tab, &id, "the trace's end", |info| {
+        info["recording"] == false
+    })
+    .await;
+    assert_eq!(ended["ended"], "killed by SIGKILL", "{ended}");
+    let flight = tab.ok("syscallInFlight", json!({"profile": id})).await;
+    assert_eq!(flight, json!({"live": false, "calls": []}));
+    crate::web::wait_gone(blocked["pid"].as_u64().expect("a pid"));
 }

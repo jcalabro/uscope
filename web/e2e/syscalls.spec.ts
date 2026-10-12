@@ -145,3 +145,30 @@ test("a family's processes are listed parents first, each with how it ended", as
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(1)).toContainText("exited with 4");
 });
+
+test("a trace recorded from the page shows what its program is blocked in, until stopped", async ({
+  page,
+  uscope,
+}) => {
+  await join(page, uscope.link);
+  await page.goto(new URL("/pick?tab=profile", uscope.origin).href);
+  await page.getByRole("button", { name: "System calls" }).click();
+  await page.getByLabel("Program").fill(fixture("syscalls"));
+  await page.getByLabel("Arguments").fill("pause");
+  await page.getByRole("button", { name: "Record" }).click();
+  await expect(page).toHaveURL(/\/profile\/[0-9a-f]{16}/);
+  await expect(page.getByTestId("recording")).toContainText("Recording syscalls");
+
+  // The pause shows in flight once the trace publishes it.
+  const view = page.getByTestId("syscalls");
+  await view.getByRole("button", { name: "Processes", exact: true }).click();
+  const blocked = page.getByTestId("syscall-in-flight");
+  await expect(blocked.getByRole("row").filter({ hasText: "pause(" })).toBeVisible({
+    timeout: 10_000,
+  });
+
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.getByTestId("recording")).toContainText("killed by SIGKILL");
+  await expect(blocked).toHaveCount(0);
+  await expect(page.getByTestId("syscall-processes")).toContainText("killed by SIGKILL");
+});

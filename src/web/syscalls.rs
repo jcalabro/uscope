@@ -13,15 +13,17 @@ use uscope::syscalls::filter::{self, Filter};
 use uscope::syscalls::procs::ProcessTree;
 use uscope::syscalls::specs::{self, Class};
 use uscope::syscalls::stats::{self, Folded, SyscallStats, bytes_moved};
-use uscope::syscalls::{Errno, Outcome, ProcessEnd, SyscallEvent, TraceEvent};
+use uscope::syscalls::{
+    Errno, EventFlags, InFlight, Outcome, ProcessEnd, SyscallEvent, TraceEvent,
+};
 
 use super::protocol::{
-    ErrorKind, Request, SyscallArgument, SyscallCall, SyscallCallQuery, SyscallCaller,
-    SyscallCount, SyscallDetail, SyscallDetailQuery, SyscallEndpoint, SyscallFile, SyscallFiles,
-    SyscallGroup, SyscallHeatmap, SyscallHeatmapQuery, SyscallLane, SyscallLanes,
-    SyscallLanesQuery, SyscallLine, SyscallLog, SyscallLogQuery, SyscallNetwork, SyscallProcess,
-    SyscallProcesses, SyscallQuery, SyscallRate, SyscallRateBy, SyscallRateQuery, SyscallRow,
-    SyscallSeries, SyscallSite, SyscallSummary, SyscallSummaryQuery, SyscallToken,
+    ErrorKind, Request, SyscallArgument, SyscallBlocked, SyscallCall, SyscallCallQuery,
+    SyscallCaller, SyscallCount, SyscallDetail, SyscallDetailQuery, SyscallEndpoint, SyscallFile,
+    SyscallFiles, SyscallGroup, SyscallHeatmap, SyscallHeatmapQuery, SyscallInFlight, SyscallLane,
+    SyscallLanes, SyscallLanesQuery, SyscallLine, SyscallLog, SyscallLogQuery, SyscallNetwork,
+    SyscallProcess, SyscallProcesses, SyscallQuery, SyscallRate, SyscallRateBy, SyscallRateQuery,
+    SyscallRow, SyscallSeries, SyscallSite, SyscallSummary, SyscallSummaryQuery, SyscallToken,
 };
 use super::session::Failure;
 use crate::present::syscalls::{self as present, Context, FdStyle, Style, Tokens};
@@ -121,6 +123,7 @@ pub fn profile_of(request: &Request) -> Option<&str> {
         Request::SyscallFiles(query)
         | Request::SyscallNetwork(query)
         | Request::SyscallProcesses(query) => &query.profile,
+        Request::SyscallInFlight(query) => &query.profile,
         _ => return None,
     })
 }
@@ -138,12 +141,62 @@ pub fn answer(profile: &Profile, trace: &Trace, request: Request) -> Result<Valu
         Request::SyscallFiles(query) => Ok(json(&files(trace, &query)?)),
         Request::SyscallNetwork(query) => Ok(json(&network(trace, &query)?)),
         Request::SyscallProcesses(query) => Ok(json(&processes(trace, &query)?)),
-        _ => unreachable!("only syscall requests come here"),
+        _ => unreachable!(
+            "only syscall requests come here, and in-flight ones go to their recording"
+        ),
     }
 }
 
 fn json(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).expect("answers serialize")
+}
+
+/// How a process ended, as strace's last line says it.
+pub fn end_text(end: ProcessEnd) -> String {
+    match end {
+        ProcessEnd::Exited(code) => format!("exited with {code}"),
+        ProcessEnd::Killed { signal, core } => format!(
+            "killed by {}{}",
+            present::signal(signal),
+            if core { " (core dumped)" } else { "" }
+        ),
+    }
+}
+
+/// The calls `blocked` lists, as a recording last saw them at `at`.
+pub fn in_flight(blocked: &[InFlight], at: u64, live: bool) -> SyscallInFlight {
+    let style = style();
+    let calls = blocked
+        .iter()
+        .map(|call| {
+            let event = SyscallEvent {
+                thread: call.thread,
+                process: call.process,
+                call: call.call,
+                args: call.args,
+                captured: Vec::new(),
+                outcome: Outcome::Unfinished,
+                entered: Some(call.entered),
+                exited: None,
+                stack: None,
+                flags: EventFlags::default(),
+            };
+            SyscallBlocked {
+                tid: call.thread,
+                pid: call.process,
+                tokens: tokens(present::entry(
+                    &event,
+                    &style,
+                    Context {
+                        fds: None,
+                        before: true,
+                    },
+                )),
+                blocked_ns: at.saturating_sub(call.entered),
+            }
+        })
+        .collect();
+    SyscallInFlight { live, calls }
 }
 
 /// The calls a query selects.
@@ -1029,14 +1082,7 @@ fn processes(trace: &Trace, query: &SyscallQuery) -> Result<SyscallProcesses, Fa
             errors,
             started: trace.relative(process.started),
             ended: process.ended.map(|(time, _)| trace.relative(time)),
-            end: process.ended.map(|(_, end)| match end {
-                ProcessEnd::Exited(code) => format!("exited with {code}"),
-                ProcessEnd::Killed { signal, core } => format!(
-                    "killed by {}{}",
-                    present::signal(signal),
-                    if core { " (core dumped)" } else { "" }
-                ),
-            }),
+            end: process.ended.map(|(_, end)| end_text(end)),
         });
         let mut children: Vec<u32> = trace
             .processes

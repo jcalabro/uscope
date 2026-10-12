@@ -327,6 +327,19 @@ impl SyscallCapture {
         }
     }
 
+    /// The capture so far, as a profile to show while the trace goes on.
+    #[must_use]
+    pub fn snapshot(&self) -> Profile {
+        Self {
+            builder: self.builder.clone(),
+            stacks: None,
+            first: self.first,
+            last: self.last,
+            blob: Vec::new(),
+        }
+        .finish()
+    }
+
     /// The capture, as a profile to write or show.
     #[must_use]
     pub fn finish(mut self) -> Profile {

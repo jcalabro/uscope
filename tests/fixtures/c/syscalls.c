@@ -140,6 +140,11 @@ int main(int argc, char **argv) {
         block();
         return 0;
     }
+    if (strcmp(mode, "pause") == 0) {
+        // Blocked until killed, for a live trace to show in flight.
+        pause();
+        return 0;
+    }
     if (strcmp(mode, "signal") == 0) {
         signals();
         return 0;

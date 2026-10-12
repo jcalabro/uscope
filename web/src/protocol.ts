@@ -82,6 +82,7 @@ export interface Results {
   syscallFiles: P.SyscallFiles;
   syscallNetwork: P.SyscallNetwork;
   syscallProcesses: P.SyscallProcesses;
+  syscallInFlight: P.SyscallInFlight;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

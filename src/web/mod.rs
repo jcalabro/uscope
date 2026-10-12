@@ -12,6 +12,7 @@ mod describe;
 mod draw;
 mod frame;
 mod inspect;
+mod live;
 mod lowlevel;
 mod picker;
 mod profiles;

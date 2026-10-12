@@ -409,3 +409,50 @@ pub struct SyscallProcess {
     /// How it ended, as strace's last line says it.
     pub end: Option<String>,
 }
+
+/// A system call trace a recording makes instead of samples, with the
+/// ptrace engine, which needs no privilege.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct RecordSyscalls {
+    /// The calls to trace, as `-e` takes them; every call when empty.
+    #[serde(default)]
+    pub filter: String,
+    /// Unwinds each call's stack, as `-k` does.
+    #[serde(default)]
+    pub stacks: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SyscallInFlightQuery {
+    pub profile: String,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[expect(dead_code, reason = "only the tab's cache reads it")]
+    pub revision: u32,
+}
+
+/// The calls a live trace's threads were blocked in when it was last
+/// published.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SyscallInFlight {
+    /// Whether the trace is still recording; an ended one has none.
+    pub live: bool,
+    pub calls: Vec<SyscallBlocked>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SyscallBlocked {
+    pub tid: u32,
+    pub pid: u32,
+    /// The call as strace prints its entry.
+    pub tokens: Vec<SyscallToken>,
+    /// How long it had been blocked.
+    pub blocked_ns: u64,
+}
