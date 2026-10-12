@@ -85,6 +85,18 @@ impl Profile {
             || !capture.syscall_stats.is_empty()
     }
 
+    /// How many system calls the capture holds, as calls or counted.
+    #[must_use]
+    pub fn syscall_count(&self) -> u64 {
+        let capture = &self.capture;
+        capture.syscalls.len() as u64
+            + capture
+                .syscall_stats
+                .iter()
+                .map(|stats| stats.calls.get())
+                .sum::<u64>()
+    }
+
     /// The system call trace the capture holds.
     #[must_use]
     pub fn syscalls(&self) -> RecordedSyscalls {
@@ -287,6 +299,26 @@ impl Profile {
     #[must_use]
     pub fn syscall_stack(&self, row: u32) -> (Vec<String>, StackEnding) {
         self.names(row)
+    }
+
+    /// Where a recorded stack's call came from: its innermost frame with a
+    /// source line, as `recv · db.rs:212`. A C library without debug
+    /// information has none, so this is the program's own code that made
+    /// the call.
+    #[must_use]
+    pub fn syscall_site(&self, row: u32) -> Option<String> {
+        let capture = &self.capture;
+        capture.stack_frames(row).find_map(|frame| {
+            let line = capture
+                .frame_lines(frame)
+                .iter()
+                .find(|line| line.file.get() != NONE)?;
+            let function =
+                capture.string(capture.functions[line.function.get() as usize].name.get());
+            let file = capture.string(line.file.get());
+            let file = file.rsplit('/').next().unwrap_or(file);
+            Some(format!("{function} · {file}:{}", line.number.get()))
+        })
     }
 }
 

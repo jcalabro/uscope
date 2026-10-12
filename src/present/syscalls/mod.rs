@@ -54,7 +54,6 @@ pub enum Kind {
 impl Kind {
     /// The kind's name on the wire.
     #[must_use]
-    #[expect(dead_code, reason = "the web UI's Syscalls tab sends kinds by name")]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Name => "name",

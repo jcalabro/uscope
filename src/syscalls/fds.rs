@@ -220,6 +220,15 @@ impl FdTable {
             .insert(fd, description);
     }
 
+    /// A path a call of `process` named, made absolute against `dirfd`
+    /// (`AT_FDCWD` for the working directory) when the table knows it.
+    #[must_use]
+    pub fn resolve(&self, process: u32, dirfd: i64, path: &str) -> String {
+        self.processes
+            .get(&process)
+            .map_or_else(|| path.to_owned(), |known| resolve(known, dirfd, path))
+    }
+
     /// What a descriptor refers to, when the trace knows.
     #[must_use]
     pub fn describe(&self, process: u32, fd: i64) -> Option<&Description> {

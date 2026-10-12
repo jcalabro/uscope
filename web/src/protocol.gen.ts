@@ -8,9 +8,9 @@ export type Envelope = {
 /**
  * Chosen by the tab; the answer carries it back.
  */
-id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "profileLines", "params": ProfileFunctionQuery } | { "method": "profileCode", "params": ProfileFunctionQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef });
+id: number, } & ({ "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "profileLines", "params": ProfileFunctionQuery } | { "method": "profileCode", "params": ProfileFunctionQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef } | { "method": "syscallSummary", "params": SyscallSummaryQuery } | { "method": "syscallRate", "params": SyscallRateQuery } | { "method": "syscallHeatmap", "params": SyscallHeatmapQuery } | { "method": "syscallDetail", "params": SyscallDetailQuery } | { "method": "syscallLog", "params": SyscallLogQuery } | { "method": "syscallCall", "params": SyscallCallQuery } | { "method": "syscallLanes", "params": SyscallLanesQuery } | { "method": "syscallFiles", "params": SyscallQuery } | { "method": "syscallNetwork", "params": SyscallQuery } | { "method": "syscallProcesses", "params": SyscallQuery });
 
-export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "profileLines", "params": ProfileFunctionQuery } | { "method": "profileCode", "params": ProfileFunctionQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef };
+export type Request = { "method": "setName", "params": SetName } | { "method": "share", "params": Share } | { "method": "completePath", "params": CompletePath } | { "method": "processes" } | { "method": "launch", "params": Launch } | { "method": "attach", "params": Attach } | { "method": "openCore", "params": OpenCore } | { "method": "end" } | { "method": "continue", "params": Continue } | { "method": "pause" } | { "method": "kill" } | { "method": "restart" } | { "method": "step", "params": Step } | { "method": "stepTargets", "params": ThreadAt } | { "method": "jump", "params": Jump } | { "method": "setFocus", "params": SetFocus } | { "method": "backtrace", "params": ThreadAt } | { "method": "sources" } | { "method": "source", "params": SourcePath } | { "method": "addBreakpoint", "params": AddBreakpoint } | { "method": "editBreakpoint", "params": EditBreakpoint } | { "method": "removeBreakpoint", "params": BreakpointRef } | { "method": "input", "params": Input } | { "method": "scopes", "params": FrameAt } | { "method": "children", "params": ChildrenOf } | { "method": "evaluate", "params": Evaluate } | { "method": "setValue", "params": SetValue } | { "method": "complete", "params": Complete } | { "method": "console", "params": ConsoleLine } | { "method": "disassemble", "params": Disassemble } | { "method": "readMemory", "params": ReadMemory } | { "method": "writeMemory", "params": WriteMemory } | { "method": "registers", "params": FrameAt } | { "method": "addWatchpoint", "params": AddWatchpoint } | { "method": "editWatchpoint", "params": EditWatchpoint } | { "method": "removeWatchpoint", "params": WatchpointRef } | { "method": "signals" } | { "method": "setSignal", "params": SignalPolicy } | { "method": "modules" } | { "method": "functions", "params": FunctionQuery } | { "method": "tasks", "params": StopAt } | { "method": "draw", "params": Draw } | { "method": "renderer", "params": RendererRef } | { "method": "renderers" } | { "method": "reloadViews" } | { "method": "profile", "params": ProfileRef } | { "method": "profileTree", "params": ProfileQuery } | { "method": "profileFunctions", "params": ProfileQuery } | { "method": "profileTimeline", "params": ProfileTimelineQuery } | { "method": "profileZones", "params": ProfileZonesQuery } | { "method": "profileZoneStats", "params": ProfileZoneStatsQuery } | { "method": "profileLines", "params": ProfileFunctionQuery } | { "method": "profileCode", "params": ProfileFunctionQuery } | { "method": "recordProfile", "params": RecordProfile } | { "method": "stopRecording", "params": ProfileRef } | { "method": "syscallSummary", "params": SyscallSummaryQuery } | { "method": "syscallRate", "params": SyscallRateQuery } | { "method": "syscallHeatmap", "params": SyscallHeatmapQuery } | { "method": "syscallDetail", "params": SyscallDetailQuery } | { "method": "syscallLog", "params": SyscallLogQuery } | { "method": "syscallCall", "params": SyscallCallQuery } | { "method": "syscallLanes", "params": SyscallLanesQuery } | { "method": "syscallFiles", "params": SyscallQuery } | { "method": "syscallNetwork", "params": SyscallQuery } | { "method": "syscallProcesses", "params": SyscallQuery };
 
 export type SetName = { name: string, };
 
@@ -960,6 +960,10 @@ source: string | null,
  */
 timed: boolean, samples: number, weight: number, 
 /**
+ * System calls its trace holds, which the Syscalls view shows.
+ */
+syscalls: number, 
+/**
  * Nanoseconds from the first sample to the last.
  */
 duration: number, threads: Array<ProfileThread>, 
@@ -1314,6 +1318,343 @@ longest: Array<ProfileZoneAt>,
  * For a label: each value's time and count, most time first.
  */
 values: Array<ProfileLabelValue>, };
+
+export type SyscallQuery = { profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallGroup = "syscall" | "class" | "process" | "thread";
+
+export type SyscallSummaryQuery = { group: SyscallGroup, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallSummary = { 
+/**
+ * Every call the trace holds, and those the query selects.
+ */
+total: number, calls: number, errors: number, 
+/**
+ * Records the engine lost: counts are lower bounds when above zero.
+ */
+lost: number, 
+/**
+ * Whether the kernel counted the calls without reporting them, so
+ * that only the summary has them.
+ */
+counted: boolean, 
+/**
+ * The engine that traced, `bpf` or `ptrace`.
+ */
+engine: string | null, processes: number, rows: Array<SyscallRow>, };
+
+export type SyscallRow = { 
+/**
+ * What the row is of, as a filter or query names it: a call's name,
+ * a class, a pid or a tid.
+ */
+key: string, name: string, calls: number, errors: number, 
+/**
+ * Calls with a duration, which the times cover.
+ */
+timed: number, totalNs: number, p50Ns: number | null, p90Ns: number | null, p99Ns: number | null, maxNs: number, bytes: number, 
+/**
+ * Failures by errno name, most first.
+ */
+errnos: Array<SyscallCount>, };
+
+export type SyscallCount = { name: string, count: number, };
+
+export type SyscallRateBy = "class" | "syscall";
+
+export type SyscallRateQuery = { buckets: number, by: SyscallRateBy, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallRate = { 
+/**
+ * The range's start and each slice's nanoseconds.
+ */
+start: number, width: number, 
+/**
+ * Most calls first; the rest past the first few as `other`.
+ */
+series: Array<SyscallSeries>, errors: Array<number>, };
+
+export type SyscallSeries = { name: string, counts: Array<number>, };
+
+export type SyscallHeatmapQuery = { buckets: number, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallHeatmap = { start: number, width: number, 
+/**
+ * Rows of log2 latency, as a histogram's buckets.
+ */
+rows: number, 
+/**
+ * Each slice's rows of counts, slice after slice.
+ */
+counts: Array<number>, most: number, };
+
+export type SyscallDetailQuery = { 
+/**
+ * The call, by name.
+ */
+call: string, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallDetail = { 
+/**
+ * Log2 histograms of the whole trace's calls and of the query's.
+ */
+whole: Array<number>, selected: Array<number>, errnos: Array<SyscallCount>, 
+/**
+ * What counts as slow: the selection's 90th percentile.
+ */
+slowNs: number | null, 
+/**
+ * Where the slow and failed calls came from, most first.
+ */
+callers: Array<SyscallCaller>, 
+/**
+ * Slow or failed calls without a stack.
+ */
+unplaced: number, };
+
+export type SyscallCaller = { 
+/**
+ * The innermost frame with a source line, or the stack's innermost.
+ */
+site: string, slow: number, failed: number, };
+
+export type SyscallLogQuery = { offset: number, limit: number, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallLog = { 
+/**
+ * Lines the query selects.
+ */
+total: number, lines: Array<SyscallLine>, };
+
+export type SyscallLine = { 
+/**
+ * The event's place in the trace, which `syscallCall` names it by.
+ */
+event: number, 
+/**
+ * Nanoseconds from the profile's start.
+ */
+time: number, tid: number, pid: number, tokens: Array<SyscallToken>, durationNs: number | null, failed: boolean, 
+/**
+ * Whether it is a call, which expands; signals and exits do not.
+ */
+call: boolean, };
+
+export type SyscallToken = { kind: string, text: string, };
+
+export type SyscallCallQuery = { profile: string, revision?: number, event: number, };
+
+export type SyscallCall = { arguments: Array<SyscallArgument>, 
+/**
+ * Hex dumps of the bytes it read or wrote, as `-e read=` prints them.
+ */
+dumps: Array<string>, 
+/**
+ * Its stack's functions, innermost first.
+ */
+stack: Array<string>, 
+/**
+ * Why the stack ends early, when it does.
+ */
+stackEnds: string | null, 
+/**
+ * When it entered and returned, from the profile's start.
+ */
+entered: number | null, exited: number | null, 
+/**
+ * What its result means, as `ENOENT (No such file or directory)`.
+ */
+result: Array<SyscallToken>, };
+
+export type SyscallArgument = { name: string, tokens: Array<SyscallToken>, };
+
+export type SyscallLanesQuery = { buckets: number, profile: string, 
+/**
+ * The revision the tab has seen, which keeps its cached answers
+ * apart; the server answers from the newest.
+ */
+revision?: number, 
+/**
+ * Calls that ended in `[start, end)`, in nanoseconds from the
+ * profile's start, or all.
+ */
+range?: [number, number] | null, 
+/**
+ * strace's selection, as `-e` takes it, expressions apart by spaces:
+ * `trace=%file status=failed`.
+ */
+filter: string, 
+/**
+ * Calls of these threads, by id, or of all.
+ */
+threads?: Array<number> | null, };
+
+export type SyscallLanes = { start: number, width: number, lanes: Array<SyscallLane>, };
+
+export type SyscallLane = { tid: number, pid: number, 
+/**
+ * Its process's program.
+ */
+name: string | null, 
+/**
+ * Each slice's nanoseconds spent in calls, and failed calls.
+ */
+busy: Array<number>, failed: Array<number>, };
+
+export type SyscallFiles = { files: Array<SyscallFile>, };
+
+export type SyscallFile = { path: string, opens: number, failed: number, read: number, written: number, 
+/**
+ * Nanoseconds in `fsync` and `fdatasync`.
+ */
+syncNs: number, 
+/**
+ * Nanoseconds in every call on it.
+ */
+totalNs: number, };
+
+export type SyscallNetwork = { endpoints: Array<SyscallEndpoint>, };
+
+export type SyscallEndpoint = { 
+/**
+ * What `-y` prints of the socket, as `TCP:[10.0.0.1:5000->10.0.0.2:80]`.
+ */
+endpoint: string, connects: number, failed: number, 
+/**
+ * Nanoseconds the connects took.
+ */
+connectNs: number, sent: number, received: number, };
+
+export type SyscallProcesses = { processes: Array<SyscallProcess>, };
+
+export type SyscallProcess = { pid: number, parent: number | null, 
+/**
+ * The programs it ran, in order.
+ */
+images: Array<string>, threads: number, calls: number, errors: number, 
+/**
+ * From the profile's start.
+ */
+started: number, ended: number | null, 
+/**
+ * How it ended, as strace's last line says it.
+ */
+end: string | null, };
 
 export type ProfileZoneAt = { thread: number, 
 /**

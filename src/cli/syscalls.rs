@@ -1737,6 +1737,9 @@ impl Sink for Printer {
                     let mut seeds = Seeds::default();
                     ptrace::seed_descriptors(*process, &mut seeds);
                     for seed in seeds.0 {
+                        if let Some((_, capture)) = &mut self.capture {
+                            capture.event(&seed);
+                        }
                         self.fds.apply(&seed);
                     }
                 }

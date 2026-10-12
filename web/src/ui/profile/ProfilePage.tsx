@@ -16,6 +16,7 @@ import { useConnection, useModel } from "../../store";
 import { ProfileContext, type ProfileFocus, useAnswer, useProfile } from "./context";
 import { FlameView } from "./FlameView";
 import { FunctionsView } from "./FunctionsView";
+import { SyscallsView } from "./SyscallsView";
 import { Timeline } from "./Timeline";
 import { TreeView } from "./TreeView";
 import { ZonesView } from "./ZonesView";
@@ -75,7 +76,7 @@ export function ProfilePage() {
   if (!focus) {
     return <div className="page muted">Reading the profile…</div>;
   }
-  const view = look.view ?? "flame";
+  const view = look.view ?? defaultView(focus.summary);
   return (
     <ProfileContext.Provider value={focus}>
       <div className="profile" data-testid="profile">
@@ -90,7 +91,9 @@ export function ProfilePage() {
           </div>
         )}
         <div className="profile-view">
-          {view === "zones" ? (
+          {view === "syscalls" ? (
+            <SyscallsView />
+          ) : view === "zones" ? (
             <ZonesView />
           ) : view === "functions" ? (
             <FunctionsView />
@@ -111,7 +114,27 @@ const VIEWS: { view: ProfileView; label: string }[] = [
   { view: "tree", label: "Call tree" },
   { view: "functions", label: "Functions" },
   { view: "zones", label: "Zones" },
+  { view: "syscalls", label: "Syscalls" },
 ];
+
+/** A trace with no samples opens on its calls; anything else on its
+ * flame graph. */
+function defaultView(summary: ProfileSummary): ProfileView {
+  return summary.samples === 0 && summary.syscalls > 0 ? "syscalls" : "flame";
+}
+
+/** Whether the head offers a view: sample views when there are samples or
+ * nothing else, zones when there are some, calls when traced. */
+function offers(summary: ProfileSummary, view: ProfileView): boolean {
+  switch (view) {
+    case "zones":
+      return summary.zoneSites.length > 0 || summary.probes.plotted > 0;
+    case "syscalls":
+      return summary.syscalls > 0;
+    default:
+      return summary.samples > 0 || summary.syscalls === 0;
+  }
+}
 
 const GRANULARITIES: { by: ProfileGranularity; label: string }[] = [
   { by: "function", label: "functions" },
@@ -126,6 +149,8 @@ function ProfileHead() {
   const { summary, look, setLook } = useProfile();
   const range = look.range ? parseRange(look.range) : null;
   const snapshots = summary.snapshots > 0;
+  // A trace of system calls alone has no frames to invert, fold, or compare.
+  const sampled = summary.samples > 0 || summary.syscalls === 0;
   const taskName = (id: string) =>
     id === "none"
       ? "no task known"
@@ -139,20 +164,24 @@ function ProfileHead() {
         </span>
         <span className="muted">
           {summary.name} · {summary.timed ? `${formatDuration(summary.duration)} · ` : ""}
-          {summary.samples.toLocaleString("en-US")} samples
+          {summary.samples > 0 || summary.syscalls === 0
+            ? `${summary.samples.toLocaleString("en-US")} samples`
+            : ""}
+          {summary.samples > 0 && summary.syscalls > 0 ? " · " : ""}
+          {summary.syscalls > 0 ? `${summary.syscalls.toLocaleString("en-US")} calls` : ""}
         </span>
       </div>
       <div className="segmented">
-        {VIEWS.filter(
-          ({ view }) =>
-            view !== "zones" || summary.zoneSites.length > 0 || summary.probes.plotted > 0,
-        ).map(({ view, label }) => (
+        {VIEWS.filter(({ view }) => offers(summary, view)).map(({ view, label }) => (
           <button
             key={view}
             type="button"
-            aria-pressed={(look.view ?? "flame") === view}
+            aria-pressed={(look.view ?? defaultView(summary)) === view}
             onClick={() =>
-              setLook((look) => withLook(look, "view", view === "flame" ? undefined : view), true)
+              setLook(
+                (look) => withLook(look, "view", view === defaultView(summary) ? undefined : view),
+                true,
+              )
             }
           >
             {label}
@@ -225,26 +254,34 @@ function ProfileHead() {
             />
           ) : null;
         })}
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={look.invert === "1"}
-            onChange={(event) =>
-              setLook((look) => withLook(look, "invert", event.target.checked ? "1" : undefined))
-            }
-          />
-          Inverted
-        </label>
-        <label className="check" title="Show each async task's frames as a stack of its own">
-          <input
-            type="checkbox"
-            checked={look.native !== "1"}
-            onChange={(event) =>
-              setLook((look) => withLook(look, "native", event.target.checked ? undefined : "1"))
-            }
-          />
-          Async stacks
-        </label>
+        {sampled ? (
+          <>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={look.invert === "1"}
+                onChange={(event) =>
+                  setLook((look) =>
+                    withLook(look, "invert", event.target.checked ? "1" : undefined),
+                  )
+                }
+              />
+              Inverted
+            </label>
+            <label className="check" title="Show each async task's frames as a stack of its own">
+              <input
+                type="checkbox"
+                checked={look.native !== "1"}
+                onChange={(event) =>
+                  setLook((look) =>
+                    withLook(look, "native", event.target.checked ? undefined : "1"),
+                  )
+                }
+              />
+              Async stacks
+            </label>
+          </>
+        ) : null}
         {snapshots ? (
           <>
             <label className="check" title="Root each path at the task it ran or waited in">
@@ -290,22 +327,26 @@ function ProfileHead() {
             ))}
           </select>
         ) : null}
-        <select
-          className="input profile-by"
-          aria-label="Frames by"
-          value={look.by ?? "function"}
-          onChange={(event) => {
-            const by = event.target.value as ProfileGranularity;
-            setLook((look) => withLook(look, "by", by === "function" ? undefined : by));
-          }}
-        >
-          {GRANULARITIES.map(({ by, label }) => (
-            <option key={by} value={by}>
-              by {label}
-            </option>
-          ))}
-        </select>
-        <Compare />
+        {sampled ? (
+          <>
+            <select
+              className="input profile-by"
+              aria-label="Frames by"
+              value={look.by ?? "function"}
+              onChange={(event) => {
+                const by = event.target.value as ProfileGranularity;
+                setLook((look) => withLook(look, "by", by === "function" ? undefined : by));
+              }}
+            >
+              {GRANULARITIES.map(({ by, label }) => (
+                <option key={by} value={by}>
+                  by {label}
+                </option>
+              ))}
+            </select>
+            <Compare />
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -438,6 +479,13 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   const stack = setting("stack bytes");
   const paused = summary.gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
   const span = Math.max(summary.duration, 1);
+  if (summary.samples === 0 && summary.syscalls > 0) {
+    return (
+      <div className="profile-foot" data-testid="accounting">
+        <span>{summary.syscalls.toLocaleString("en-US")} calls traced</span>
+      </div>
+    );
+  }
   const probesLost =
     summary.probes.overwritten +
     summary.probes.noRing +

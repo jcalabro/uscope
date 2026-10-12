@@ -45,6 +45,8 @@ pub struct Profiles {
 struct Entry {
     info: ProfileInfo,
     profile: Arc<Profile>,
+    /// Its system call trace, read once it is asked for.
+    syscalls: std::sync::OnceLock<Arc<super::syscalls::Trace>>,
 }
 
 struct Recorder {
@@ -127,6 +129,7 @@ impl Profiles {
             Arc::new(Entry {
                 info,
                 profile: Arc::new(profile),
+                syscalls: std::sync::OnceLock::new(),
             }),
         );
         let profiles = entries.values().map(|entry| entry.info.clone()).collect();
@@ -501,7 +504,17 @@ impl Profiles {
                 let entry = self.entry(&query.profile)?;
                 Ok(json(&zone_stats(&entry.profile, &query)))
             }
-            _ => unreachable!("only profile requests come here"),
+            request => {
+                let id = super::syscalls::profile_of(&request)
+                    .expect("only profile requests come here")
+                    .to_owned();
+                let entry = self.entry(&id)?;
+                let trace = entry
+                    .syscalls
+                    .get_or_init(|| Arc::new(super::syscalls::Trace::of(&entry.profile)));
+                super::syscalls::answer(&entry.profile, trace, request)
+                    .map(|value| (value, Vec::new()))
+            }
         }
     }
 }
@@ -520,6 +533,16 @@ pub const fn is_profile_request(request: &Request) -> bool {
             | Request::ProfileCode(_)
             | Request::RecordProfile(_)
             | Request::StopRecording(_)
+            | Request::SyscallSummary(_)
+            | Request::SyscallRate(_)
+            | Request::SyscallHeatmap(_)
+            | Request::SyscallDetail(_)
+            | Request::SyscallLog(_)
+            | Request::SyscallCall(_)
+            | Request::SyscallLanes(_)
+            | Request::SyscallFiles(_)
+            | Request::SyscallNetwork(_)
+            | Request::SyscallProcesses(_)
     )
 }
 
@@ -550,6 +573,7 @@ fn summary(entry: &Entry) -> ProfileSummary {
         timed: profile.timed(),
         samples: profile.samples() as u64,
         weight: profile.total_weight(),
+        syscalls: profile.syscall_count(),
         duration: end - start,
         threads: profile
             .threads()
