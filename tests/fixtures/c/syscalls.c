@@ -47,6 +47,12 @@ static void *thread_main(void *argument) {
 }
 
 static void family(void) {
+    // SIGCHLD stays pending: delivered, it lands before or after wait4
+    // returns as the child's exit races it, and two traces would differ.
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &blocked, NULL);
     pid_t child = fork();
     if (child == 0) {
         syscall(SYS_write, 1, "child\n", 6);
