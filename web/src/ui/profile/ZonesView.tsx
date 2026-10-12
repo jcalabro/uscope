@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatRange, parseRange, withLook } from "../../profile/look";
-import { formatDuration, hue } from "../../profile/paint";
+import { formatDuration, formatInstant, formatSpan, hue } from "../../profile/paint";
 import {
   blockAt,
   decodeZones,
   describeFlags,
+  panned,
   plotPath,
   type Track,
+  ticks,
   tracks,
+  zoomed,
 } from "../../profile/zones";
 import type { ProfileMark, ProfilePlot, ProfileZoneSite } from "../../protocol";
-import { isDark, token, useAnswer, useProfile } from "./context";
+import { useShownScheme } from "../../theme";
+import { token, useAnswer, useProfile } from "./context";
 
 /** A depth's row, the gap between tracks, and the names column, in CSS
  * pixels. */
@@ -18,6 +22,9 @@ const ROW = 16;
 const GAP = 6;
 const NAMES = 180;
 const PLOT = 40;
+const RULER = 18;
+/** How far a pointer moves before a press pans rather than clicks. */
+const DRAG = 4;
 
 /** What the pointer is over. */
 interface Tip {
@@ -30,7 +37,8 @@ interface Tip {
  * Each thread's zones and labels over the selected range, a row per
  * depth, with the program's messages and frames as ticks above. Zones
  * under three pixels wide fold into one grey block; a click on a block
- * selects its span, which every view then reads. Beside it, Find Zone
+ * selects its span, which every view then reads. Ctrl and the wheel, or a
+ * pinch, zoom about the pointer, and dragging pans. Beside it, Find Zone
  * measures one site's zones.
  */
 export function ZonesView() {
@@ -48,6 +56,12 @@ function ZoneTracks() {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
   const [tip, setTip] = useState<Tip | null>(null);
+  const scheme = useShownScheme();
+  const [pressed, setPressed] = useState<{
+    x: number;
+    view: [number, number];
+    moved: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const element = box.current;
@@ -86,7 +100,10 @@ function ZoneTracks() {
   );
   const laid = useMemo(() => (blocks ? tracks(blocks, order) : []), [blocks, order]);
   const marks = answer.data?.marks ?? [];
-  const range = answer.data?.range ?? [0, Math.max(summary.duration, 1)];
+  // Drawn over the range asked for, so a zoom moves what is shown at once
+  // and the answer only sharpens it.
+  const total = Math.max(summary.duration, 1);
+  const range: [number, number] = selected ?? [0, total];
   const span = Math.max(range[1] - range[0], 1);
   const height =
     laid.length === 0
@@ -95,6 +112,57 @@ function ZoneTracks() {
   const origin = range[0];
   const name = (thread: number) =>
     summary.threads.find((each) => each.row === thread)?.name ?? `thread ${thread}`;
+  // One pixel's time, which is as finely as a time here needs telling.
+  const pixel = span / Math.max(plot, 1);
+
+  // Views asked for while zooming or panning, applied once a frame.
+  const latest = useRef({ range, total, plot });
+  latest.current = { range, total, plot };
+  const wanted = useRef<[number, number] | null>(null);
+  const frame = useRef(0);
+  const show = (view: [number, number]) => {
+    wanted.current = view;
+    if (frame.current !== 0) {
+      return;
+    }
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const next = wanted.current;
+      // From here the address bar holds it, and the next zoom starts there.
+      wanted.current = null;
+      if (!next) {
+        return;
+      }
+      const whole = next[0] <= 0 && next[1] >= latest.current.total;
+      setLook((look) => withLook(look, "range", whole ? undefined : formatRange(next)));
+    });
+  };
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+
+  useEffect(() => {
+    const element = canvas.current;
+    if (!element) {
+      return;
+    }
+    const wheel = (event: WheelEvent) => {
+      const { range, total, plot } = latest.current;
+      const sideways = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+      if (!event.ctrlKey && !event.metaKey && !sideways) {
+        return;
+      }
+      event.preventDefault();
+      const view = wanted.current ?? range;
+      const per = (view[1] - view[0]) / Math.max(plot, 1);
+      if (sideways) {
+        show(panned(view, event.deltaX * per, total));
+        return;
+      }
+      const at = view[0] + (event.clientX - element.getBoundingClientRect().left) * per;
+      show(zoomed(view, at, Math.exp(event.deltaY * 0.002), total));
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  });
 
   useEffect(() => {
     const element = canvas.current;
@@ -110,7 +178,8 @@ function ZoneTracks() {
     context.clearRect(0, 0, plot, height);
     context.font = "11px var(--mono)";
     context.textBaseline = "middle";
-    const dark = isDark();
+    // Painted in the scheme shown, and again when it changes.
+    const dark = scheme === "dark";
     const ink = token("--ink");
     const folded = token("--line-strong");
     const flagged = token("--changed");
@@ -164,9 +233,10 @@ function ZoneTracks() {
       }
       context.fillStyle =
         mark.kind === "trigger" ? flagged : mark.kind === "frame" ? folded : found;
-      context.fillRect(x(mark.time) - 0.5, y - ROW + 3, 1.5, ROW - 4);
+      const at = Math.min(Math.max(x(mark.time) - 0.5, 0), plot - 1.5);
+      context.fillRect(at, y - ROW + 3, 1.5, ROW - 4);
     }
-  }, [blocks, laid, marks, plot, height, look.zs, origin, span]);
+  }, [blocks, laid, marks, plot, height, look.zs, origin, span, scheme]);
 
   const point = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -201,16 +271,14 @@ function ZoneTracks() {
         <span className="count">
           {summary.zoneSites.reduce((sum, site) => sum + site.count, 0)}
         </span>
-        {selected ? (
-          <span className="muted">
-            {formatDuration(selected[0])} – {formatDuration(selected[1])}
-          </span>
-        ) : null}
+        {selected ? <span className="subject">{formatSpan(selected)}</span> : null}
+        <span className="end">ctrl+wheel zooms · drag pans · click a block to select it</span>
       </div>
       {answer.error ? (
         <div className="empty">{answer.error.message}</div>
       ) : (
         <div className={`pane-body zones-body ${answer.current ? "" : "stale"}`} ref={box}>
+          <Ruler origin={range[0]} span={span} width={plot} />
           <div className="zone-lane">
             <div className="zone-names" style={{ width: NAMES, height }}>
               {laid.map((track, index) => (
@@ -228,21 +296,20 @@ function ZoneTracks() {
               style={{ width: plot, height }}
               role="img"
               aria-label={`Zones over ${formatDuration(span)}`}
-              onPointerMove={(event) => {
-                const at = point(event);
-                const lines =
-                  at.block !== null && blocks
-                    ? blockLines(blocks, at.block, name)
-                    : at.mark
-                      ? [
-                          `${at.mark.kind} ${at.mark.name} at ${formatDuration(at.mark.time)}`,
-                          ...(at.mark.text ? [at.mark.text] : []),
-                        ]
-                      : null;
-                setTip(lines ? { x: at.px + NAMES + 12, y: at.py + 30, lines } : null);
+              className={pressed?.moved ? "panning" : undefined}
+              onPointerDown={(event) => {
+                if (event.button !== 0) {
+                  return;
+                }
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setPressed({ x: event.clientX, view: range, moved: false });
               }}
-              onPointerLeave={() => setTip(null)}
-              onClick={(event) => {
+              onPointerUp={(event) => {
+                const was = pressed;
+                setPressed(null);
+                if (!was || was.moved) {
+                  return;
+                }
                 const at = point(event);
                 if (at.block !== null && blocks) {
                   const start = blocks.start[at.block] ?? 0;
@@ -252,6 +319,32 @@ function ZoneTracks() {
                   }
                 }
               }}
+              onPointerCancel={() => setPressed(null)}
+              onPointerMove={(event) => {
+                if (pressed) {
+                  const by = event.clientX - pressed.x;
+                  if (pressed.moved || Math.abs(by) >= DRAG) {
+                    if (!pressed.moved) {
+                      setPressed({ ...pressed, moved: true });
+                    }
+                    setTip(null);
+                    show(panned(pressed.view, -by * pixel, total));
+                    return;
+                  }
+                }
+                const at = point(event);
+                const lines =
+                  at.block !== null && blocks
+                    ? blockLines(blocks, at.block, name, pixel)
+                    : at.mark
+                      ? [
+                          `${at.mark.kind} ${at.mark.name} at ${formatInstant(at.mark.time, pixel)}`,
+                          ...(at.mark.text ? [at.mark.text] : []),
+                        ]
+                      : null;
+                setTip(lines ? { x: at.px + NAMES + 12, y: at.py + 30, lines } : null);
+              }}
+              onPointerLeave={() => setTip(null)}
             />
           </div>
           {(answer.data?.plots ?? []).map((series) => (
@@ -273,6 +366,31 @@ function ZoneTracks() {
   );
 }
 
+/** Round times across the view, above the tracks. */
+function Ruler({ origin, span, width }: { origin: number; span: number; width: number }) {
+  const { step, times } = ticks([origin, origin + span], width);
+  return (
+    <div className="zone-lane zone-ruler">
+      <div className="zone-names" style={{ width: NAMES, height: RULER }} />
+      <svg width={width} height={RULER} role="img" aria-label="Time">
+        {times.map((time) => {
+          const x = ((time - origin) * width) / span;
+          return (
+            <g key={time}>
+              <line x1={x} x2={x} y1={RULER - 5} y2={RULER} />
+              {x < width - 60 ? (
+                <text x={x + 3} y={RULER - 6}>
+                  {formatInstant(time, step, origin + span)}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 /** One plotted series as a line from its lowest value to its highest. */
 function PlotLane({
   series,
@@ -290,7 +408,11 @@ function PlotLane({
     low = Math.min(low, bin[3] ?? low);
     high = Math.max(high, bin[4] ?? high);
   }
-  const extent = series.bins.length > 0 ? `${formatValue(low)} – ${formatValue(high)}` : "";
+  if (series.held !== null) {
+    low = Math.min(low, series.held);
+    high = Math.max(high, series.held);
+  }
+  const extent = Number.isFinite(low) ? `${formatValue(low)} – ${formatValue(high)}` : "";
   return (
     <div className="zone-lane zone-plot">
       <div className="zone-names" style={{ width: NAMES, height: PLOT }}>
@@ -306,7 +428,19 @@ function PlotLane({
         role="img"
         aria-label={`Plot ${series.name}, ${series.values} values${extent ? ` from ${extent}` : ""}`}
       >
-        <path d={plotPath(series.bins, origin, span, width, PLOT, low, high)} />
+        <path
+          d={plotPath(
+            series.bins,
+            origin,
+            span,
+            width,
+            PLOT,
+            low,
+            high,
+            series.held,
+            series.continues,
+          )}
+        />
       </svg>
     </div>
   );
@@ -327,6 +461,7 @@ function blockLines(
   blocks: ReturnType<typeof decodeZones>,
   at: number,
   name: (thread: number) => string,
+  pixel: number,
 ): string[] {
   const length = (blocks.end[at] ?? 0) - (blocks.start[at] ?? 0);
   const count = blocks.zones[at] ?? 1;
@@ -337,7 +472,7 @@ function blockLines(
       : `${label}: ${formatDuration(length)}`;
   return [
     head,
-    `${name(blocks.thread[at] ?? 0)}, from ${formatDuration(blocks.start[at] ?? 0)}`,
+    `${name(blocks.thread[at] ?? 0)}, from ${formatInstant(blocks.start[at] ?? 0, pixel)}`,
     ...describeFlags(blocks.flags[at] ?? 0),
   ];
 }
@@ -510,7 +645,8 @@ function ZoneStats({ site }: { site: ProfileZoneSite }) {
             </button>{" "}
             {zone.value !== null && zone.value !== undefined ? `${site.name}=${zone.value} ` : ""}
             <span className="dim">
-              {thread(zone.thread)} at {formatDuration(zone.start)}
+              {thread(zone.thread)} at{" "}
+              {formatInstant(zone.start, Math.max(zone.end - zone.start, 1) / 10)}
             </span>
           </li>
         ))}

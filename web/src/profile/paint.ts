@@ -83,6 +83,38 @@ export function formatDuration(nanoseconds: number): string {
   return `${Math.round(nanoseconds)} ns`;
 }
 
+/** A time since the profile began, in the largest unit that keeps it, or
+ * `scale`, above one, with as many decimals as tell apart times
+ * `resolution` nanoseconds apart. */
+export function formatInstant(
+  nanoseconds: number,
+  resolution: number,
+  scale = nanoseconds,
+): string {
+  if (nanoseconds === 0) {
+    return "0 s";
+  }
+  const [size, name] = (
+    [
+      [1e9, "s"],
+      [1e6, "ms"],
+      [1e3, "µs"],
+    ] as const
+  ).find(([size]) => Math.abs(scale) >= size) ?? [1, "ns"];
+  const decimals = Math.min(
+    Math.max(Math.ceil(Math.log10(size / Math.max(resolution, 1)) - 1e-9), 0),
+    9,
+  );
+  return `${(nanoseconds / size).toFixed(decimals)} ${name}`;
+}
+
+/** A time range, each end as fine as a hundredth of its length, and that
+ * length. */
+export function formatSpan([start, end]: readonly [number, number]): string {
+  const resolution = (end - start) / 100;
+  return `${formatInstant(start, resolution)} – ${formatInstant(end, resolution)} (${formatDuration(end - start)})`;
+}
+
 export function formatPercent(part: number, whole: number): string {
   if (whole <= 0) {
     return "0%";

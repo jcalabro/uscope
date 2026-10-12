@@ -478,6 +478,18 @@ kbd {
   text-transform: uppercase;
 }
 
+/* What a heading names, such as a function or a time, reads as written. */
+.pane-head .subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font: 500 10.5px var(--mono);
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .pane-head .count {
   color: var(--ink-3);
   font: 500 10.5px var(--mono);
@@ -2788,6 +2800,24 @@ kbd {
   text-align: right;
 }
 
+.column-head {
+  flex: none;
+  height: 20px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-3);
+  font: 10px var(--mono);
+}
+
+.column-head .percent {
+  flex: none;
+  width: 56px;
+  text-align: right;
+}
+
+.column-head .end {
+  margin-left: auto;
+}
+
 .tree-row .name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2865,6 +2895,33 @@ kbd {
 
 .zone-plot {
   border-top: 1px solid var(--line);
+}
+
+/* The ruler stays in sight while the tracks scroll under it. */
+.zone-ruler {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.zone-ruler svg {
+  display: block;
+  flex: none;
+}
+
+.zone-ruler line {
+  stroke: var(--line-strong);
+}
+
+.zone-ruler text {
+  fill: var(--ink-3);
+  font: 10px var(--mono);
+}
+
+.zones-body canvas.panning {
+  cursor: grabbing;
 }
 
 .zone-plot svg {

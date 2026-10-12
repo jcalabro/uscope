@@ -14,10 +14,7 @@ export function TreeView() {
   const tree = useTree(query);
   return (
     <div className="pane grow">
-      <div className="pane-head">
-        {query.invert ? "Callers" : "Call tree"}
-        <span className="end">total · own</span>
-      </div>
+      <div className="pane-head">{query.invert ? "Callers" : "Call tree"}</div>
       <TreeRows tree={tree} label="Call tree" />
       {tree.tree && look.fn ? <Details tree={tree.tree} name={look.fn} /> : null}
     </div>
@@ -100,72 +97,90 @@ export function TreeRows({ tree: fetched, label }: { tree: Fetched; label: strin
     setOpened({ tree, open: next });
   };
   return (
-    <div
-      ref={body}
-      className={`pane-body ${fetched.current ? "" : "stale"}`}
-      role="tree"
-      aria-label={label}
-    >
-      <div className="tree-rows" style={{ height: virtual.getTotalSize() }}>
-        {tree
-          ? virtual.getVirtualItems().map((item) => {
-              const node = rows[item.index] ?? 0;
-              const name = nameOf(tree, node);
-              const parent = node + 1 < (tree.end[node] ?? 0);
-              return (
-                <div
-                  key={node}
-                  role="treeitem"
-                  aria-level={(tree.depth[node] ?? 0) + 1}
-                  aria-expanded={parent ? open.has(node) : undefined}
-                  aria-selected={look.fn === name}
-                  className={`row tree-row ${look.fn === name ? "selected" : ""}`}
-                  style={{ transform: `translateY(${item.start}px)` }}
-                  onClick={() => setLook((look) => ({ ...look, fn: name }))}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      toggle(node);
-                    }
-                  }}
-                  tabIndex={-1}
-                >
-                  <span className="percent">
-                    {formatPercent(tree.total[node] ?? 0, tree.weight)}
-                  </span>
-                  <span className="percent dim">
-                    {formatPercent(tree.own[node] ?? 0, tree.weight)}
-                  </span>
-                  {tree.baseTotal ? (
-                    <Change
-                      points={shareChange(
-                        tree.total[node] ?? 0,
-                        tree.weight,
-                        tree.baseTotal[node] ?? 0,
-                        tree.baseWeight ?? 0,
-                      )}
-                    />
-                  ) : null}
-                  <span style={{ width: (tree.depth[node] ?? 0) * 12, flex: "none" }} />
-                  <button
-                    type="button"
-                    className="twist"
-                    aria-label={open.has(node) ? "Close" : "Open"}
-                    style={{ visibility: parent ? "visible" : "hidden" }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggle(node);
+    <>
+      <ColumnHead columns={tree?.baseTotal ? ["total", "own", "change"] : ["total", "own"]} />
+      <div
+        ref={body}
+        className={`pane-body ${fetched.current ? "" : "stale"}`}
+        role="tree"
+        aria-label={label}
+      >
+        <div className="tree-rows" style={{ height: virtual.getTotalSize() }}>
+          {tree
+            ? virtual.getVirtualItems().map((item) => {
+                const node = rows[item.index] ?? 0;
+                const name = nameOf(tree, node);
+                const parent = node + 1 < (tree.end[node] ?? 0);
+                return (
+                  <div
+                    key={node}
+                    role="treeitem"
+                    aria-level={(tree.depth[node] ?? 0) + 1}
+                    aria-expanded={parent ? open.has(node) : undefined}
+                    aria-selected={look.fn === name}
+                    className={`row tree-row ${look.fn === name ? "selected" : ""}`}
+                    style={{ transform: `translateY(${item.start}px)` }}
+                    onClick={() => setLook((look) => ({ ...look, fn: name }))}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        toggle(node);
+                      }
                     }}
+                    tabIndex={-1}
                   >
-                    {open.has(node) ? "▾" : "▸"}
-                  </button>
-                  <span className="name" title={name}>
-                    {name}
-                  </span>
-                </div>
-              );
-            })
-          : null}
+                    <span className="percent">
+                      {formatPercent(tree.total[node] ?? 0, tree.weight)}
+                    </span>
+                    <span className="percent dim">
+                      {formatPercent(tree.own[node] ?? 0, tree.weight)}
+                    </span>
+                    {tree.baseTotal ? (
+                      <Change
+                        points={shareChange(
+                          tree.total[node] ?? 0,
+                          tree.weight,
+                          tree.baseTotal[node] ?? 0,
+                          tree.baseWeight ?? 0,
+                        )}
+                      />
+                    ) : null}
+                    <span style={{ width: (tree.depth[node] ?? 0) * 12, flex: "none" }} />
+                    <button
+                      type="button"
+                      className="twist"
+                      aria-label={open.has(node) ? "Close" : "Open"}
+                      style={{ visibility: parent ? "visible" : "hidden" }}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggle(node);
+                      }}
+                    >
+                      {open.has(node) ? "▾" : "▸"}
+                    </button>
+                    <span className="name" title={name}>
+                      {name}
+                    </span>
+                  </div>
+                );
+              })
+            : null}
+        </div>
       </div>
+    </>
+  );
+}
+
+/** What each column of the rows below holds, over them. */
+export function ColumnHead({ columns, end }: { columns: string[]; end?: string }) {
+  return (
+    <div className="row column-head" aria-hidden="true">
+      {columns.map((column) => (
+        <span key={column} className={`percent ${column === "change" ? "change" : ""}`}>
+          {column}
+        </span>
+      ))}
+      <span className="name">function</span>
+      {end ? <span className="end">{end}</span> : null}
     </div>
   );
 }

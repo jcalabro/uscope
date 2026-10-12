@@ -10,7 +10,7 @@ import {
   untransformed,
   withLook,
 } from "../../profile/look";
-import { formatDuration, formatPercent, formatWeight } from "../../profile/paint";
+import { formatDuration, formatPercent, formatSpan, formatWeight } from "../../profile/paint";
 import type { ProfileGranularity, ProfileInfo, ProfileSummary } from "../../protocol";
 import { useConnection, useModel } from "../../store";
 import { ProfileContext, type ProfileFocus, useAnswer, useProfile } from "./context";
@@ -182,7 +182,7 @@ function ProfileHead() {
       <div className="profile-query">
         {range ? (
           <Chip
-            label={`${formatDuration(range[0])} – ${formatDuration(range[1])}`}
+            label={formatSpan(range)}
             title="Samples in this time range"
             remove={() => setLook((look) => withLook(look, "range", undefined))}
           />
@@ -323,9 +323,7 @@ function Compare() {
       look.bp && look.bp !== profile
         ? (others.find((each) => each.id === look.bp)?.name ?? look.bp)
         : "this profile";
-    const during = baseRange
-      ? ` ${formatDuration(baseRange[0])} – ${formatDuration(baseRange[1])}`
-      : "";
+    const during = baseRange ? ` ${formatSpan(baseRange)}` : "";
     return (
       <Chip
         label={`diff with ${of}${during}`}

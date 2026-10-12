@@ -10,9 +10,17 @@ import {
   untransformed,
   validateProfileLook,
 } from "../src/profile/look";
-import { diffFill, formatWeight } from "../src/profile/paint";
+import { diffFill, formatInstant, formatSpan, formatWeight } from "../src/profile/paint";
 import { type CallTree, decodeTree, findPath, hit, layout, pathOf } from "../src/profile/tree";
-import { blockAt, decodeZones, plotPath, tracks } from "../src/profile/zones";
+import {
+  blockAt,
+  decodeZones,
+  panned,
+  plotPath,
+  ticks,
+  tracks,
+  zoomed,
+} from "../src/profile/zones";
 import type { ProfileKey, ProfileTree, ServerMessage } from "../src/protocol";
 import { binaries, transcript } from "./transcripts";
 
@@ -297,7 +305,7 @@ describe("a zones answer", () => {
     ).toThrow();
   });
 
-  it("a plot's bin strokes from its first value through its extremes to its last", () => {
+  it("a plot's bin strokes from its first value through its extremes to its last, which holds until the next", () => {
     // Two bins over 100 ns, 100 px wide and 24 tall, of values 0 to 10.
     const path = plotPath(
       [
@@ -312,11 +320,18 @@ describe("a zones answer", () => {
       10,
     );
     expect(path).toBe(
-      "M10.0 12.0L10.0 22.0L10.0 2.0L10.0 22.0L60.0 2.0L60.0 2.0L60.0 2.0L60.0 2.0",
+      "M10.0 12.0L10.0 22.0L10.0 2.0L10.0 22.0L60.0 22.0L60.0 2.0L60.0 2.0L60.0 2.0L60.0 2.0",
     );
     expect(plotPath([[0, 3, 3, 3, 3]], 0, 1, 10, 20, 3, 3)).toBe(
       "M0.0 10.0L0.0 10.0L0.0 10.0L0.0 10.0",
     );
+    // What held before the range starts the line at its left edge, and a
+    // value after the range holds the last to its right.
+    expect(plotPath([[40, 10, 10, 10, 10]], 0, 100, 100, 24, 0, 10, 0, true)).toBe(
+      "M0.0 22.0L40.0 22.0L40.0 2.0L40.0 2.0L40.0 2.0L40.0 2.0L100.0 2.0",
+    );
+    expect(plotPath([], 0, 100, 100, 24, 0, 10, 5, true)).toBe("M0.0 12.0L100.0 12.0");
+    expect(plotPath([], 0, 100, 100, 24, 0, 10, 5, false)).toBe("M0.0 12.0L100.0 12.0");
   });
 });
 
@@ -329,5 +344,46 @@ describe("a weight", () => {
     expect(formatWeight(3, "goroutine")).toBe("3 goroutines");
     expect(formatWeight(1, "goroutine")).toBe("1 goroutine");
     expect(formatWeight(1200, "samples")).toBe("1,200 samples");
+  });
+});
+
+describe("a time in the profile", () => {
+  it("reads as finely as what it is shown beside", () => {
+    // A zone of a few milliseconds four seconds in still tells its start.
+    expect(formatInstant(4_385_412_363, 30_000)).toBe("4.38541 s");
+    expect(formatInstant(84_360_994, 50_000_000)).toBe("84 ms");
+    expect(formatInstant(5_082_923_590, 50_000_000)).toBe("5.08 s");
+    expect(formatInstant(0, 1000)).toBe("0 s");
+    expect(formatInstant(1500, 1)).toBe("1.500 µs");
+    // A ruler's ticks share the unit of its last.
+    expect(formatInstant(500_000_000, 500_000_000, 5_680_000_000)).toBe("0.5 s");
+    expect(formatSpan([4_385_412_363, 4_388_392_651])).toBe("4.38541 s – 4.38839 s (2.98 ms)");
+    expect(formatSpan([84_360_994, 5_082_923_590])).toBe("84 ms – 5.08 s (5.00 s)");
+  });
+});
+
+describe("a zones view's time", () => {
+  it("zooms about the pointer, and never past the profile or below a microsecond", () => {
+    // Zooming in twice at a quarter of the way keeps that time where it was.
+    expect(zoomed([0, 1000_000], 250_000, 0.5, 1000_000)).toEqual([125_000, 625_000]);
+    // Out from near an end slides inside the profile rather than past it.
+    expect(zoomed([0, 600_000], 100_000, 2, 1000_000)).toEqual([0, 1000_000]);
+    expect(zoomed([800_000, 1000_000], 900_000, 1.5, 1000_000)).toEqual([700_000, 1000_000]);
+    expect(zoomed([500_000, 500_400], 500_200, 0.5, 1000_000)).toEqual([499_700, 500_700]);
+  });
+
+  it("pans by a time, stopping at either end", () => {
+    expect(panned([100, 300], 50, 1000)).toEqual([150, 350]);
+    expect(panned([100, 300], -500, 1000)).toEqual([0, 200]);
+    expect(panned([100, 300], 5000, 1000)).toEqual([800, 1000]);
+  });
+
+  it("ticks at round times about a hundred pixels apart", () => {
+    expect(ticks([0, 1000_000_000], 1000)).toEqual({
+      step: 100_000_000,
+      times: [0, 1e8, 2e8, 3e8, 4e8, 5e8, 6e8, 7e8, 8e8, 9e8, 1e9],
+    });
+    expect(ticks([4_385_412_363, 4_388_392_651], 600).step).toBe(500_000);
+    expect(ticks([4_385_412_363, 4_388_392_651], 600).times[0]).toBe(4_385_500_000);
   });
 });

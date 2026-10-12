@@ -19,7 +19,8 @@ import {
   type Rect,
 } from "../../profile/tree";
 import type { TransformOp } from "../../protocol";
-import { isDark, token, useAnswer, useProfile } from "./context";
+import { useShownScheme } from "../../theme";
+import { token, useAnswer, useProfile } from "./context";
 
 /** One row of the flame graph, in CSS pixels. */
 const ROW = 18;
@@ -129,6 +130,7 @@ function FlameGraph({
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
+  const scheme = useShownScheme();
   const [hovered, setHovered] = useState<{ rect: Rect; left: number; top: number } | null>(null);
 
   useEffect(() => {
@@ -160,7 +162,8 @@ function FlameGraph({
     element.height = Math.round(height * ratio);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
-    const dark = isDark();
+    // Painted in the scheme shown, and again when it changes.
+    const dark = scheme === "dark";
     const ink = token("--ink");
     const surface = token("--surface");
     context.font = `11px ${token("--mono")}`;
@@ -187,7 +190,7 @@ function FlameGraph({
       }
     }
     context.globalAlpha = 1;
-  }, [rects, tree, width, height, matched]);
+  }, [rects, tree, width, height, matched, scheme]);
 
   const at = (event: React.MouseEvent) => {
     const bounds = event.currentTarget.getBoundingClientRect();

@@ -215,6 +215,44 @@ test("a program's zones show in tracks, and Find Zone measures one and filters b
   await stats.getByRole("listitem").first().getByRole("button").click();
   await expect(page).toHaveURL(/range=\d+-\d+/);
 
+  // Ctrl and the wheel zoom about the pointer, dragging pans, and the
+  // ruler names the times in view.
+  const tracks = page.getByRole("img", { name: /^Zones over/ });
+  const range = () => {
+    const [start = 0, end = 0] = (new URL(page.url()).searchParams.get("range") ?? "")
+      .split("-")
+      .map(Number);
+    return { start, end };
+  };
+  const selected = range();
+  const bounds = (await tracks.boundingBox()) ?? { x: 0, y: 0, width: 0, height: 0 };
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 4);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 400);
+  await page.keyboard.up("Control");
+  await expect
+    .poll(() => range().end - range().start)
+    .toBeGreaterThan(selected.end - selected.start);
+  await expect(
+    page.getByTestId("zones").getByRole("img", { name: "Time", exact: true }),
+  ).toContainText(/\d s|ms|µs/);
+  const zoomed = range();
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 80, bounds.y + 4, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(() => range().start).toBeLessThan(zoomed.start);
+  expect(range().end - range().start).toBe(zoomed.end - zoomed.start);
+
+  // Another theme repaints the tracks in its colors.
+  await page.emulateMedia({ colorScheme: "light" });
+  const painted = () => tracks.evaluate((canvas) => (canvas as HTMLCanvasElement).toDataURL());
+  const before = await painted();
+  const theme = page.getByRole("button", { name: /^Theme:/ });
+  await theme.click();
+  await theme.click();
+  await expect.poll(painted).not.toBe(before);
+  await stats.getByRole("listitem").first().getByRole("button").click();
+
   // A label's values are filters of every view: in that span, the round
   // around it.
   await find.getByRole("button", { name: "round", exact: true }).click();

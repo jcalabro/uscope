@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { formatRange, parseRange, withLook } from "../../profile/look";
 import { formatDuration } from "../../profile/paint";
 import type { ProfileLane, ProfileSummary, ProfileThread } from "../../protocol";
+import { useShownScheme } from "../../theme";
 import { type ProfileFocus, token, useAnswer, useProfile } from "./context";
 
 /** One lane, in CSS pixels. */
@@ -70,6 +71,7 @@ export function Timeline() {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
+  const scheme = useShownScheme();
   const [dragging, setDragging] = useState<{ from: number; to: number } | null>(null);
 
   useEffect(() => {
@@ -108,6 +110,8 @@ export function Timeline() {
     const ratio = window.devicePixelRatio || 1;
     element.width = Math.round(plot * ratio);
     element.height = Math.round(height * ratio);
+    // Its colors are the scheme's, so a change of scheme paints it again.
+    element.dataset.scheme = scheme;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, plot, height);
     const answered = new Map(
@@ -165,6 +169,11 @@ export function Timeline() {
       context.fillRect(0, 0, from, height);
       context.fillRect(to, 0, plot - to, height);
       context.globalAlpha = 1;
+      // A range too short to see between its shades still shows where it is.
+      const wide = Math.max(to - from, 3);
+      context.fillStyle = token("--accent");
+      context.fillRect((from + to) / 2 - wide / 2, 0, wide, 2);
+      context.fillRect((from + to) / 2 - wide / 2, height - 2, wide, 2);
     }
   }, [
     answer.data,
@@ -178,6 +187,7 @@ export function Timeline() {
     range,
     dragging,
     summary.gaps,
+    scheme,
   ]);
 
   const time = (event: React.PointerEvent) => {

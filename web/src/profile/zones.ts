@@ -118,8 +118,11 @@ export function describeFlags(flags: number): string[] {
 
 /** An SVG path of a plot's bins, `width` by `height`, from `origin` over
  * `span` nanoseconds and from `low` to `high`: each bin a stroke from its
- * first value through its lowest and highest to its last, joined to the
- * next. */
+ * first value through its lowest and highest to its last, which holds
+ * until the next bin's first. A value `held` from before the range holds
+ * from its left edge, and when a value `continues` past the range, the
+ * last holds to its right edge, as `held` does across a range it alone
+ * covers. */
 export function plotPath(
   bins: number[][],
   origin: number,
@@ -128,6 +131,8 @@ export function plotPath(
   height: number,
   low: number,
   high: number,
+  held: number | null = null,
+  continues = false,
 ): string {
   const x = (time: number) => (((time - origin) * width) / Math.max(span, 1)).toFixed(1);
   const y = (value: number) =>
@@ -136,11 +141,65 @@ export function plotPath(
       : height - 2 - ((value - low) * (height - 4)) / (high - low)
     ).toFixed(1);
   const points: string[] = [];
+  let holding = held;
+  if (holding !== null) {
+    points.push(`${x(origin)} ${y(holding)}`);
+  }
   for (const [time = 0, first = 0, last = 0, least = 0, most = 0] of bins) {
     const at = x(time);
+    if (holding !== null) {
+      points.push(`${at} ${y(holding)}`);
+    }
+    holding = last;
     for (const value of [first, least, most, last]) {
       points.push(`${at} ${y(value)}`);
     }
   }
+  if (holding !== null && (continues || bins.length === 0)) {
+    points.push(`${x(origin + span)} ${y(holding)}`);
+  }
   return points.length > 0 ? `M${points.join("L")}` : "";
+}
+
+/** `view` zoomed by `factor` about the time `at`, which stays where it is
+ * unless that would show past either end of a profile `total` long; never
+ * shorter than `least` nanoseconds. */
+export function zoomed(
+  [start, end]: readonly [number, number],
+  at: number,
+  factor: number,
+  total: number,
+  least = 1000,
+): [number, number] {
+  const span = Math.min(Math.max((end - start) * factor, least), total);
+  const from = at - (at - start) * (span / Math.max(end - start, 1));
+  const kept = Math.min(Math.max(from, 0), total - span);
+  return [Math.round(kept), Math.round(kept + span)];
+}
+
+/** `view` moved later by `by` nanoseconds, stopping at either end of a
+ * profile `total` long. */
+export function panned(
+  [start, end]: readonly [number, number],
+  by: number,
+  total: number,
+): [number, number] {
+  const moved = Math.min(Math.max(start + by, 0), total - (end - start));
+  return [Math.round(moved), Math.round(moved + end - start)];
+}
+
+/** Round times across `view`, drawn `width` pixels wide, about a hundred
+ * pixels apart: a step of 1, 2, or 5 times a power of ten. */
+export function ticks(
+  [start, end]: readonly [number, number],
+  width: number,
+): { step: number; times: number[] } {
+  const raw = ((end - start) * 100) / Math.max(width, 1);
+  const power = 10 ** Math.floor(Math.log10(Math.max(raw, 1)));
+  const step = power * ([1, 2, 5, 10].find((each) => each * power >= raw) ?? 10);
+  const times: number[] = [];
+  for (let time = Math.ceil(start / step) * step; time <= end; time += step) {
+    times.push(time);
+  }
+  return { step, times };
 }

@@ -1,10 +1,10 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { withLook } from "../../profile/look";
 import { formatPercent, formatWeight, shareChange } from "../../profile/paint";
 import type { ProfileQuery } from "../../protocol";
 import { useAnswer, useProfile } from "./context";
-import { Change, TreeRows, useTree } from "./TreeView";
+import { Change, ColumnHead, TreeRows, useTree } from "./TreeView";
 
 const ROW = 20;
 
@@ -49,6 +49,7 @@ export function FunctionsView() {
             ))}
           </div>
         </div>
+        <ColumnHead columns={base ? ["own", "total", "change"] : ["own", "total"]} end="module" />
         {answer.error ? (
           <div className="empty">{answer.error.message}</div>
         ) : (
@@ -148,12 +149,19 @@ function SourceLines({ name }: { name: string }) {
     "profileLines",
     useMemo(() => ({ ...query, function: name }), [query, name]),
   );
+  const body = useRef<HTMLDivElement>(null);
+  useHottestInView(body, name, answer.data !== undefined);
   if (answer.error) {
     return <div className="empty">{answer.error.message}</div>;
   }
   const weight = answer.data?.weight ?? 0;
+  const most = Math.max(
+    0,
+    ...(answer.data?.files ?? []).flatMap((file) => file.lines.map(([, , total]) => total)),
+  );
   return (
     <div
+      ref={body}
       className={`pane-body annotated ${answer.current ? "" : "stale"}`}
       data-testid="source-lines"
     >
@@ -167,7 +175,10 @@ function SourceLines({ name }: { name: string }) {
                 const line = file.first + at;
                 const cost = costs.get(line);
                 return (
-                  <div key={line} className={`row annotated-row ${cost ? "hot" : ""}`}>
+                  <div
+                    key={line}
+                    className={`row annotated-row ${cost ? "hot" : ""} ${hottest(cost?.[1], most)}`}
+                  >
                     <span className="percent">
                       {cost ? formatPercent(cost[0] ?? 0, weight) : ""}
                     </span>
@@ -196,6 +207,8 @@ function Code({ name }: { name: string }) {
     "profileCode",
     useMemo(() => ({ ...query, function: name }), [query, name]),
   );
+  const body = useRef<HTMLDivElement>(null);
+  useHottestInView(body, name, answer.data !== undefined);
   if (answer.error) {
     return <div className="empty">{answer.error.message}</div>;
   }
@@ -204,8 +217,16 @@ function Code({ name }: { name: string }) {
     return <div className="empty">{code.unavailable}</div>;
   }
   const weight = code?.weight ?? 0;
+  const most = Math.max(
+    0,
+    ...(code?.blocks ?? []).flatMap((block) => block.instructions.map((each) => each.total)),
+  );
   return (
-    <div className={`pane-body annotated ${answer.current ? "" : "stale"}`} data-testid="code">
+    <div
+      ref={body}
+      className={`pane-body annotated ${answer.current ? "" : "stale"}`}
+      data-testid="code"
+    >
       {(code?.blocks ?? []).map((block) => (
         <div key={block.symbol} className="annotated-file">
           <div className="annotated-head mono">
@@ -214,7 +235,7 @@ function Code({ name }: { name: string }) {
           {block.instructions.map((instruction) => (
             <div
               key={instruction.address}
-              className={`row annotated-row ${instruction.total > 0 ? "hot" : ""}`}
+              className={`row annotated-row ${instruction.total > 0 ? "hot" : ""} ${hottest(instruction.total, most)}`}
             >
               <span className="percent">
                 {instruction.own > 0 ? formatPercent(instruction.own, weight) : ""}
@@ -223,7 +244,12 @@ function Code({ name }: { name: string }) {
                 {instruction.total > 0 ? formatPercent(instruction.total, weight) : ""}
               </span>
               <span className="line-number">{instruction.address.toString(16)}</span>
-              <code>{instruction.text}</code>
+              <code>
+                {instruction.text}
+                {instruction.target ? (
+                  <span className="asm-target">&lt;{instruction.target}&gt;</span>
+                ) : null}
+              </code>
             </div>
           ))}
           {block.stopped ? <div className="empty">{block.stopped}</div> : null}
@@ -238,6 +264,22 @@ function Code({ name }: { name: string }) {
   );
 }
 
+/** The class of the row that weighs `total` when it weighs the most. */
+function hottest(total: number | undefined, most: number): string {
+  return most > 0 && total === most ? "hottest" : "";
+}
+
+/** Brings the hottest row into view once each function's rows arrive. */
+function useHottestInView(body: RefObject<HTMLDivElement | null>, name: string, ready: boolean) {
+  const shown = useRef<string | null>(null);
+  useEffect(() => {
+    if (ready && shown.current !== name) {
+      shown.current = name;
+      body.current?.querySelector(".hottest")?.scrollIntoView({ block: "center" });
+    }
+  });
+}
+
 /** A function's callers, inverted from it, and its callees, from it. */
 function Sandwich({ query, name }: { query: ProfileQuery; name: string }) {
   const focused = useMemo(
@@ -249,11 +291,15 @@ function Sandwich({ query, name }: { query: ProfileQuery; name: string }) {
   return (
     <div className="profile-sandwich" data-testid="sandwich">
       <div className="pane grow">
-        <div className="pane-head">Callers of {name}</div>
+        <div className="pane-head">
+          Callers of <span className="subject">{name}</span>
+        </div>
         <TreeRows tree={callers} label="Callers" />
       </div>
       <div className="pane grow">
-        <div className="pane-head">Callees of {name}</div>
+        <div className="pane-head">
+          Callees of <span className="subject">{name}</span>
+        </div>
         <TreeRows tree={callees} label="Callees" />
       </div>
     </div>

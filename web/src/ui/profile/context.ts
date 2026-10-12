@@ -44,8 +44,3 @@ export function useAnswer<M extends Method>(
 export function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
-
-/** Whether the page is dark now. */
-export function isDark(): boolean {
-  return getComputedStyle(document.documentElement).colorScheme.includes("dark");
-}
