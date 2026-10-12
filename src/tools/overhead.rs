@@ -150,7 +150,7 @@ struct Measured {
 }
 
 /// Where the program runs, and where uscope does.
-struct Placement {
+pub(super) struct Placement {
     program: CpuSet,
     uscope: CpuSet,
 }
@@ -163,7 +163,7 @@ impl Placement {
     /// One CPU of each of the first cores for the program, and one of each
     /// of the other cores that share its last-level cache for uscope, or of
     /// every other core if none do, so that no two share a core.
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         let mut cores = Vec::new();
         for cpu in 0..CpuSet::count() {
             let siblings =
@@ -214,8 +214,17 @@ impl Placement {
         Ok(sched_setaffinity(Pid::from_raw(0), &self.program)?)
     }
 
+    /// The program's CPUs, as `taskset --cpu-list` reads them.
+    pub(super) fn program_list(&self) -> String {
+        (0..CpuSet::count())
+            .filter(|&cpu| self.program.is_set(cpu).unwrap_or(false))
+            .map(|cpu| cpu.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// Moves the calling thread to uscope's CPUs.
-    fn uscope(&self) -> Result<()> {
+    pub(super) fn uscope(&self) -> Result<()> {
         Ok(sched_setaffinity(Pid::from_raw(0), &self.uscope)?)
     }
 }
@@ -493,7 +502,7 @@ pub fn summarize(runs: &[Run]) -> Vec<Summary> {
     summaries
 }
 
-fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
+pub(super) fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
     let mut values: Vec<f64> = values.collect();
     values.sort_unstable_by(f64::total_cmp);
     values.get(values.len() / 2).copied()

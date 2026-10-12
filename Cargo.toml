@@ -91,7 +91,7 @@ crc32fast = "1.5"
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "gas", "instr_info", "intel", "std"] }
 lzma-rs = "0.3"
-nix = { version = "0.31", features = ["feature", "fs", "personality", "poll", "ptrace", "process", "resource", "sched", "signal", "term", "time", "uio"] }
+nix = { version = "0.31", features = ["feature", "fs", "personality", "poll", "ptrace", "process", "pthread", "resource", "sched", "signal", "term", "time", "uio"] }
 object = { version = "0.39", features = ["read"] }
 perf-event = "0.4"
 ureq = { version = "3", default-features = false, features = ["rustls"] }

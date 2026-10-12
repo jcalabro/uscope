@@ -870,16 +870,73 @@ pub fn trace(
     Ok(finished)
 }
 
-/// The first wait after a status, and the longest while nothing happens.
-/// The tracer polls rather than blocks: a blocked wait outlives the last
-/// tracee's detach, which wakes no waiter.
-const SHORTEST_POLL: Duration = Duration::from_micros(20);
-const LONGEST_POLL: Duration = Duration::from_millis(5);
+/// How often the tracer looks up from waiting: to notice a request to
+/// stop, and to report calls in flight while its tracees make none.
+const TICK: Duration = Duration::from_millis(100);
+
+/// Interrupts the tracer thread's wait each tick with a signal whose
+/// handler does nothing, so that the wait blocks, which answers a stop as
+/// soon as it happens, yet never outlasts a tick. It never calls ptrace.
+struct Ticker {
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+const extern "C" fn woken(_: libc::c_int) {}
+
+impl Ticker {
+    #[allow(
+        unsafe_code,
+        reason = "installing a signal handler is unsafe; this one does nothing"
+    )]
+    fn start() -> Result<Self, TraceError> {
+        use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal as Native};
+        // Without SA_RESTART, the signal ends a blocked waitpid with EINTR.
+        let action = SigAction::new(
+            SigHandler::Handler(woken),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        // SAFETY: the handler does nothing, so it is async-signal-safe, and
+        // nothing else in this process handles SIGURG.
+        unsafe { nix::sys::signal::sigaction(Native::SIGURG, &action) }
+            .map_err(TraceError::System)?;
+        let tracer = nix::sys::pthread::pthread_self();
+        let done = Arc::new(AtomicBool::new(false));
+        let ended = Arc::clone(&done);
+        let thread = std::thread::Builder::new()
+            .name("uscope-ticker".into())
+            .spawn(move || {
+                loop {
+                    std::thread::park_timeout(TICK);
+                    if ended.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = nix::sys::pthread::pthread_kill(tracer, Native::SIGURG);
+                }
+            })
+            .map_err(|_| TraceError::System(Errno::EAGAIN))?;
+        Ok(Self {
+            done,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
 
 fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Finished, TraceError> {
     let mut stopping = false;
     let mut reported = monotonic();
-    let mut poll = SHORTEST_POLL;
+    let _ticker = Ticker::start()?;
     loop {
         if monotonic() - reported > 100_000_000 {
             tracer.report_in_flight();
@@ -906,22 +963,15 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
                 }
             }
         }
-        match wait_for(Pid::from_raw(-1), libc::__WALL | libc::WNOHANG) {
+        match wait_for(Pid::from_raw(-1), libc::__WALL) {
             Ok(Some(event)) => {
-                poll = SHORTEST_POLL;
                 tracer.handle(event)?;
                 if tracer.detaching && tracer.threads.is_empty() {
                     break;
                 }
             }
-            Ok(None) => {
-                if tracer.detaching && tracer.threads.is_empty() {
-                    break;
-                }
-                std::thread::sleep(poll);
-                poll = (poll * 2).min(LONGEST_POLL);
-            }
-            Err(Errno::EINTR) => {}
+            // A tick.
+            Ok(None) | Err(Errno::EINTR) => {}
             Err(Errno::ECHILD) => break,
             Err(error) => return Err(TraceError::System(error)),
         }

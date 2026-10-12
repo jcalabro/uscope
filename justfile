@@ -215,6 +215,16 @@ profile-overhead *ARGS: build-test-programs
     cargo build --quiet --release --features tools --bin uscope-tools
     ./scripts/contained.sh ./target/release/uscope-tools overhead "$@"
 
+# Times a getppid loop bare, under each syscall-tracing engine, and untraced
+# beside a BPF trace of another program, and prints what each adds a call.
+# The BPF setups start uscope through LAUNCHER. Compare with the recorded
+# baseline with `--compare bench/syscalls-overhead.json`, record one with
+# `--out`.
+syscall-overhead LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
+    cargo build --quiet --release --bin uscope
+    cargo build --quiet --release --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/release/uscope-tools syscall-overhead --launcher "$1" "${@:2}"
+
 # The seconds-long benchmark `just all` runs: it fails when loading the
 # small programs allocates more than bench/baseline.json records. Record a
 # deliberate change with `just bench-smoke --record bench/baseline.json`.
