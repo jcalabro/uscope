@@ -960,6 +960,10 @@ mod bpf {
         let mut threads: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut thread = String::new();
         for line in trace.lines() {
+            // Losses are left out, as `normalized` says why.
+            if prefix.replace(line, "").starts_with("--- lost ") {
+                continue;
+            }
             // A stack's frames follow their call's line, unprefixed.
             if !line.starts_with(" > ") {
                 thread = prefix
@@ -1520,6 +1524,91 @@ mod bpf {
         // The window holds the write before the failed close.
         assert_eq!(calls("write").as_deref(), Some("1"), "{table}");
         assert!(calls("close").is_some(), "{table}");
+    }
+
+    /// A continuous recording cuts its calls with its samples: each
+    /// segment holds the calls of its own span.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn a_continuous_recording_cuts_its_calls_into_segments() {
+        let directory = ScratchDir::new("syscalls-record-continuous");
+        let segments = directory.path().join("segments");
+        std::fs::create_dir(&segments).expect("make the directory");
+        let mut recording = Command::new(launcher())
+            .env_clear()
+            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .args([
+                "record",
+                "--syscalls",
+                "read",
+                "--continuous",
+                "segments",
+                "--segment",
+                "0.2",
+                "--",
+            ])
+            .arg(fixture())
+            .arg("block")
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run uscope record");
+        let mut stdout = BufReader::new(recording.stdout.take().expect("stdout"));
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).expect("ready");
+        let written = || {
+            std::fs::read_dir(&segments).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "usprof"))
+                    .count()
+            })
+        };
+        let mut input = recording.stdin.take().expect("stdin");
+        for _ in 0..3 {
+            input.write_all(b"x").expect("a byte");
+            input.flush().expect("sent");
+            // Polls for a file the recording writes and says nothing of.
+            let (before, end) = (written(), Instant::now() + DEADLINE);
+            while written() <= before {
+                assert!(Instant::now() < end, "no segment after {before}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        drop(input);
+        assert!(recording.wait().expect("wait").success());
+
+        // Each segment's reads of a byte, and what it lost.
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&segments)
+            .expect("the segments")
+            .flatten()
+        {
+            let profile = uscope::profiler::Profile::read(&entry.path())
+                .expect("a segment reads")
+                .profile;
+            let syscalls = profile.syscalls();
+            let byte = syscalls
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(&event.event, uscope::syscalls::TraceEvent::Call(call)
+                        if call.call.name() == Some("read")
+                            && call.outcome == uscope::syscalls::Outcome::Returned(1)
+                            && call.args[0] == 0)
+                })
+                .count();
+            found.push((byte, syscalls.lost));
+        }
+        // A read whose return went unseen, as when another tracer attached
+        // to its function while it was blocked, is counted lost.
+        let read: usize = found.iter().map(|&(byte, _)| byte).sum();
+        let lost: u64 = found.iter().map(|&(_, lost)| lost).sum();
+        let holding = found.iter().filter(|&&(byte, _)| byte > 0).count();
+        assert!(read <= 3 && read as u64 + lost >= 3, "{found:?}");
+        assert!(holding >= 2 || lost > 0, "{found:?}");
     }
 
     /// Attaching needs no consent, since the process never stops: it runs

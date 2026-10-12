@@ -765,6 +765,11 @@ static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 		lost();
 		return 0;
 	}
+	// The thread's last call never had its return seen: a function's exit
+	// programs are skipped for calls in progress when another tracer
+	// attaches to it.
+	if (held->entered)
+		lost();
 	*held = entry;
 	if (!sent(settings, entry.flags))
 		return 0;

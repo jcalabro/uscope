@@ -1330,7 +1330,8 @@ impl Printer {
     /// strace's leader: the pid, the time, and the call's number.
     fn leader(&mut self, thread: u32, process: u32, time: u64, number: Option<u32>) -> Tokens {
         let mut out = Tokens::default();
-        if self.per_process.is_none() && self.threads.len() > 1 {
+        // A loss is no thread's, and names none.
+        if self.per_process.is_none() && self.threads.len() > 1 && thread != 0 {
             let name = self
                 .comm
                 .then(|| self.names.get(&process).map(|name| format!("<{name}>")))

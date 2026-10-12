@@ -129,11 +129,7 @@ pub struct RecordArgs {
     /// Trace these system calls too, with their stacks, as `uscope syscalls
     /// -e trace=SET` names them: `all`, or names and classes such as
     /// `%file,%net,connect`. Needs the BPF engine's privileges.
-    #[arg(
-        long,
-        value_name = "SET",
-        conflicts_with_all = ["pid", "window", "continuous"]
-    )]
+    #[arg(long, value_name = "SET", conflicts_with = "pid")]
     syscalls: Option<String>,
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
