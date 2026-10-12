@@ -777,7 +777,7 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         "  break        b           Set a breakpoint",
         "  finish       fin, f      Run until the selected frame returns",
         "  continue     c           Continue execution",
-        "  delete       del, d      Delete breakpoints, and watchpoints wID",
+        "  delete       del, d      Delete breakpoints, watchpoints wID, and catchpoints cID",
         "  clear        cls         Clear and redraw the terminal",
         "  help         h, ?        Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",

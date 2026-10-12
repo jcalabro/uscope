@@ -22,6 +22,10 @@ pub struct Weights {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is one independent choice of the run's shape"
+)]
 pub struct Swarm {
     pub program: usize,
     pub variant: usize,
@@ -59,6 +63,8 @@ pub struct Swarm {
     /// Whether the session holds the children the program forks, for
     /// sessions of their own.
     pub follow: bool,
+    /// Whether the client stops at system calls.
+    pub catching: bool,
 }
 
 impl Swarm {
@@ -119,6 +125,7 @@ impl Swarm {
             watching: pick(&[0, 1]) == 1,
             attach: (pick(&[0, 0, 1]) == 1).then(|| choices.below(Stream::Swarm, 1000)),
             follow: forks && choices.below(Stream::Swarm, 2) == 1,
+            catching: choices.below(Stream::Swarm, 3) == 0,
         }
     }
 }
@@ -128,7 +135,8 @@ impl fmt::Display for Swarm {
         write!(
             formatter,
             "{} preempt={} fault={} burst={} queue={} events={} entry={} requests={} \
-             launches={} early-breakpoints={} debug={:?} watching={} attach={} follow={}",
+             launches={} early-breakpoints={} debug={:?} watching={} attach={} follow={} \
+             catching={}",
             self.policy,
             self.preempt,
             self.fault
@@ -145,6 +153,7 @@ impl fmt::Display for Swarm {
             self.attach
                 .map_or_else(|| "none".to_owned(), |after| format!("after({after})")),
             self.follow,
+            self.catching,
         )
     }
 }

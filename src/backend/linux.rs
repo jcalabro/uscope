@@ -344,9 +344,15 @@ struct TraceThread {
     /// The watchpoints whose hits this thread stops for since its last
     /// public stop, with each hit's number.
     watch_hits: BTreeMap<WatchpointId, u64>,
-    /// The system call the thread entered at its last entry stop, which
-    /// its exit stop reports, with what was read at the entry.
+    /// The system call the thread stopped at the entry of, with what was
+    /// read there, while its exit stop is still to come.
     syscall: Option<catchpoints::Entered>,
+    /// Whether the thread's step makes a system call, which stops at its
+    /// entry and exit for the catchpoints.
+    stepping_call: bool,
+    /// Whether the thread is at an event stop inside a system call, which
+    /// returns when it next runs.
+    inside_call: bool,
     /// The thread's name as of its start or the last published stop.
     name: Option<Arc<str>>,
 }
@@ -366,6 +372,8 @@ impl TraceThread {
             armed: None,
             watch_hits: BTreeMap::new(),
             syscall: None,
+            stepping_call: false,
+            inside_call: false,
             name: None,
         }
     }
@@ -1037,7 +1045,11 @@ impl Inferior {
     }
 
     /// Ends `pid`'s step over the front repair group's breakpoint at `address`.
-    fn finish_current_repair(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+    pub(super) fn finish_current_repair(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+    ) -> Result<()> {
         let thread = self.thread_mut(pid)?;
         thread.stopped_at_breakpoint = None;
         thread.trapped_at = None;

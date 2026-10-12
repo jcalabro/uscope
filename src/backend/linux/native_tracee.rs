@@ -14,6 +14,7 @@ use super::sim_edge::{SETTABLE_FLAGS, apply_user_registers, user_registers};
 use crate::Error;
 use crate::protocol::LaunchOptions;
 use crate::sim::cpu::Registers;
+use crate::sim::kernel::ptrace::CallInfo;
 use crate::sim::kernel::{Tid, WaitStatus};
 
 /// A real traced process, for tests that compare the simulation with
@@ -161,7 +162,8 @@ impl NativeTracee {
                 WaitStatus::GroupStop(pid.as_raw(), signal.number())
             }
             WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
-            other => panic!("unexpected status {other:?}"),
+            WaitEvent::PtraceSyscall(pid) => WaitStatus::Syscall(pid.as_raw()),
+            other @ WaitEvent::Continued(_) => panic!("unexpected status {other:?}"),
         }
     }
 
@@ -315,6 +317,34 @@ impl NativeTracee {
         self.ptrace
             .set_options(Pid::from_raw(thread), exit_kill)
             .map_err(errno_of)
+    }
+
+    /// `PTRACE_SYSCALL`, with `signal`.
+    pub fn resume_to_call(
+        &self,
+        thread: Tid,
+        signal: Option<i32>,
+    ) -> std::result::Result<(), Errno> {
+        let signal = signal.map(|number| Signal::new(number).expect("a real signal"));
+        self.ptrace
+            .continue_to_syscall(Pid::from_raw(thread), signal)
+            .map_err(errno_of)
+    }
+
+    /// `PTRACE_GET_SYSCALL_INFO`, with only what each kind of stop reports.
+    pub fn call_info(&self, thread: Tid) -> std::result::Result<CallInfo, Errno> {
+        let info = self.ptrace.syscall_info(Pid::from_raw(thread))?;
+        let entry = info.op == super::syscalls::info::OP_ENTRY;
+        Ok(CallInfo {
+            op: info.op,
+            number: if entry { info.number } else { 0 },
+            args: if entry { info.args } else { [0; 6] },
+            value: if info.op == super::syscalls::info::OP_EXIT {
+                info.value
+            } else {
+                0
+            },
+        })
     }
 
     pub fn resume(

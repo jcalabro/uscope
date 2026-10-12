@@ -128,7 +128,8 @@ so `SimTrace` and the controller facade live in
 | `cpu/`, `memory`, `loader` | The interpreter, copy-on-write address spaces, and golden ELF images |
 | `corpus`, `facts`, `markers` | The golden programs, what binutils say about them, and the conditions their sources state |
 | `client/` | The simulated user driving `DebuggerHandle`, and the clients of sessions adopting held children |
-| `oracles`, `semantics`, `hits`, `watches`, `views`, `samples`, `audit` | Checks of the debugger and the profiler against ground truth |
+| `oracles`, `semantics`, `hits`, `watches`, `catches`, `views`, `samples`, `audit` | Checks of the debugger and the profiler against ground truth |
+| `tracing` | A model of the BPF engine's tracepoint stream, read by the real decoder and folder |
 | `marks`, `report` | Coverage marks; traces, fingerprints, and failures |
 | `conformance/` | Dual-run kernel probes and CPU lockstep against the real machine |
 | `tests` | The gate's seeds, the determinism check, and sabotage tests |
@@ -157,7 +158,7 @@ compares fingerprints (`a_seed_always_names_the_same_run`).
 
 The seed is expanded with SplitMix64 into one xoshiro256** generator per
 stream, salted by the stream's name: `Swarm`, `Schedule`, `Preempt`,
-`Client`, `Fault`, `Program`, `Control`, and `Sample`. Both generators are written in-tree and
+`Client`, `Fault`, `Program`, `Control`, `Sample`, and `Trace`. Both generators are written in-tree and
 pinned by test vectors, so a seed means the same thing on every toolchain.
 Changing how one concern draws leaves the others' choices unchanged. Draws
 are integers only: `below`, `chance`, `pick`, `weighted`, and `fill`.
@@ -180,7 +181,11 @@ quiet. A configuration names:
 - a planned fault, in half of seeds (section 9);
 - debug-register behavior: faithful (half), discarding as gVisor does (one
   in eight), or contended, with two to four slots of every new thread held
-  by another user (section 5).
+  by another user (section 5);
+- whether the client stops at system calls (a third of seeds): it adds and
+  removes catchpoints, stopped and running, on up to two of the runtime's
+  calls or on every call, at either end, with no condition, `$arg0 == 1`,
+  or `$ret == 0`, which a call's entry cannot judge and so stops.
 
 Every failure report prints the configuration.
 
@@ -208,6 +213,12 @@ fails the run as a model gap, so the simulator never guesses.
 | K-WAIT-2 | Which ready status a wait returns is unspecified, so the scheduler chooses. One exception: a group leader's exit is reported after every other thread's. |
 | K-WAIT-3 | A tracer that exits releases every thread it still traces. A running or exiting one runs on untraced, one at its exit event finishes exiting, and a traced leader that exited alone joins its process's end as if never traced. |
 | K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte, outside any system call (`orig_rax` is -1). A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT` at the call's exit, with `orig_rax` naming the call. |
+| K-SYS-1 | `PTRACE_SYSCALL` resumes as `PTRACE_CONT` does, and the thread stops at its next `syscall` before the call runs: `SIGTRAP \| 0x80` with `si_code` `0x85` from itself, `rip` after the instruction, `rax` `-ENOSYS`, `orig_rax` naming the call, event message 1, and `PTRACE_GET_SYSCALL_INFO` op 1 with the call and its six arguments. |
+| K-SYS-2 | Resumed from an entry with `PTRACE_SYSCALL`, the thread makes the call and stops at its exit, with event message 2, the result in `rax`, and op 2 with it as the value. Resumed with `PTRACE_CONT`, it makes the call and runs on. |
+| K-SYS-3 | An event stop inside a call falls between its entry and its exit: a thread resumed from it with `PTRACE_SYSCALL` stops at the call's exit as it returns. `exit` and `exit_group` stop at their exit events and never return. A new thread does not stop at syscalls until its tracer resumes it so, and never at the exit of the `clone` that made it. |
+| K-SYS-4 | A single step from an entry makes the call and reports `TRAP_BRKPT` after it, with its result, as K-TRAP-1's step across `syscall` does. At any stop but a system-call-stop, `PTRACE_GET_SYSCALL_INFO` reports op 0. |
+| K-SYS-5 | SIGKILL, sent by the tracer or passed as the thread resumes from an entry, takes the thread to its exit event without making the call: `rax` stays `-ENOSYS`. Passing any other signal at a system-call-stop is not modeled. |
+| K-SYS-6 | A thread detached at a call's entry makes the call, and one detached at its exit returns from it; either runs on untraced. Passing a signal as it detaches there is not modeled. |
 | K-SIG-1 | The tracer's `tgkill(SIGSTOP)` produces a signal-delivery stop with `si_code` `SI_TKILL` and the tracer's process as sender, whether the thread was running or stopped when it was sent. |
 | K-SEIZE-1 | A seized thread runs on until an interrupt stops it. The threads and processes it creates are traced with its options, and each first stops in a `PTRACE_EVENT_STOP` of its own rather than for SIGSTOP. |
 | K-SEIZE-2 | A thread has one tracer. Another tracer's requests on it fail with ESRCH, though it is in a ptrace-stop, and its seize with EPERM. |
@@ -610,6 +621,32 @@ constants, so none may fail to evaluate. A watch the debugger said it
 disabled counts and reports nothing; the client enables one again only at a
 stop, whose bytes are then its baseline, as a new watch's are.
 
+**Catch accounting** (`catches.rs`): no traced thread of the debugged
+process, once its tracer has resumed it, makes a call a catchpoint stops,
+at that end of it, without a system-call-stop the debugger can report it
+at: neither a call it continues to, nor one a step makes, the user's step
+or one over a breakpoint's trap. The kernel judges each catchpoint's
+condition from the call's registers. A catchpoint counts from the reply
+that made it until the client asks to remove it.
+
+**Catch stops** (`catches.rs`): while a stop is published, each thread it
+reports at a call is in the kernel's system-call-stop at that end of it.
+The stop names the call `orig_rax` names, the six argument registers, at
+an exit the result `rax` holds, and the memory its pointers read as the
+process's memory holds it. It lists every catchpoint that stops the call,
+of those the client knew of when the reason first appeared, and only ones
+that stop it; a reason a later stop, such as a jump's, publishes again
+answers to the catchpoints of its first appearance.
+
+**Tracing** (`tracing.rs`): each call the kernel serves is written as the
+BPF stream program writes it into a ring of 1, 4, 64, or 65,536 records,
+which a consumer drains every 1, 3, 16, or 1,000 records, and counted per
+call and CPU as the count program counts it; a full ring loses the record
+and counts it lost. The real decoder reads every record back as the call it
+was made of, and when the run ends, every call served is in the trace or
+counted lost, and the real folder's statistics count every call, each
+failure, and each errno. The model's shape comes from the `Trace` stream.
+
 **Semantic** (`semantics.rs`, judged by the world after each poll, against
 shadow state and facts). At each new stop the client reads the selected
 frame's variables and the backtrace of every stopped thread. Nothing is
@@ -623,7 +660,8 @@ judged once its stop is over or its process is ending.
 - *Stepping:* a step whose result is `Step { kind }` left its thread where
   the kind says:
   - an instruction step completed one instruction, or, begun inside a
-    system call, finished the call (K-TRAP-1);
+    system call, at an event or at the call's entry, finished the call
+    (K-TRAP-1, K-SYS-4);
   - stepping over a call returned to its return address in the same frame;
     over anything else, one instruction;
   - stepping out of a physical frame returned to its return address, or,

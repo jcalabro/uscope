@@ -1,21 +1,34 @@
 //! System-call catchpoints: stopping at a call's entry and exit with its
 //! arguments, result, and path; conditions that read them; every call of
-//! threads that call at once counted; and catching from a running program.
+//! threads that call at once counted; steps that make a caught call; and
+//! catching from a running program.
 
 mod support;
 
 use std::sync::Arc;
 
+use object::{Object as _, ObjectSymbol as _};
 use support::Scenario;
 use uscope::syscalls::{Abi, SyscallId};
 use uscope::{
-    CatchPhase, Catchpoint, Condition, ConditionOwner, DebuggerEvent, ExitStatus, LaunchOptions,
-    ScalarValue, StopReason, SyscallStop, VariableState, VariableValue,
+    BreakpointSpec, CatchPhase, Catchpoint, Condition, ConditionOwner, DebuggerEvent, ExitStatus,
+    LaunchOptions, ScalarValue, StepKind, StopReason, SyscallStop, VariableState, VariableValue,
+    VirtualAddress,
 };
 
 /// The program across a compiler and position-independence pair: the
 /// calls go through libc's wrappers either way.
 const FIXTURES: [&str; 2] = ["catch-gcc-o0", "catch-clang-o2-nopie"];
+
+/// The address a fixture's symbol names in its file.
+fn symbol(fixture: &str, name: &str) -> u64 {
+    let bytes = std::fs::read(Scenario::fixture(fixture)).expect("read the fixture");
+    let file = object::File::parse(&*bytes).expect("parse the fixture");
+    file.symbols()
+        .find(|symbol| symbol.name() == Ok(name))
+        .unwrap_or_else(|| panic!("{fixture} defines no {name}"))
+        .address()
+}
 
 fn call(name: &str) -> SyscallId {
     SyscallId::named(Abi::X86_64, name).expect("a call x86-64 names")
@@ -204,4 +217,101 @@ async fn a_catchpoint_added_while_the_program_runs_stops_its_next_call() {
         (call("getppid"), [getppid.id].as_slice())
     );
     scenario.shutdown().await;
+}
+
+/// Instruction steps until one stops for something else, which is returned.
+async fn step_until_not_a_step(scenario: &mut Scenario) -> StopReason {
+    for _ in 0..10_000 {
+        match scenario.step_to_stop(StepKind::Instruction).await {
+            StopReason::Step { .. } => {}
+            reason => return reason,
+        }
+    }
+    panic!("ten thousand steps stopped for nothing else");
+}
+
+/// An instruction step that makes a call stops at its catchpoints as
+/// continuing does: a step from a caught entry stops at the exit, and a
+/// step onto `syscall` stops at the entry. A call none of them catches
+/// leaves the step where a step across `syscall` would.
+#[tokio::test]
+async fn steps_that_make_a_caught_call_stop_at_its_entry_and_exit() {
+    let mut scenario = Scenario::launch(FIXTURES[0]);
+    catch(&scenario, &["write"], CatchPhase::Both, None).await;
+    let entry = scenario.run_to_stop().await;
+    assert_eq!((caught(&entry).args[0], caught(&entry).returned), (2, None));
+    let exit = scenario.step_to_stop(StepKind::Instruction).await;
+    assert_eq!(
+        (caught(&exit).args[0], caught(&exit).returned),
+        (2, Some(10))
+    );
+    let next = step_until_not_a_step(&mut scenario).await;
+    assert_eq!((caught(&next).args[0], caught(&next).returned), (1, None));
+    scenario.shutdown().await;
+
+    // The stderr write's exit and the stdout write's entry stop nothing.
+    let mut scenario = Scenario::launch(FIXTURES[0]);
+    catch(&scenario, &["write"], CatchPhase::Entry, Some("$arg0 == 2")).await;
+    catch(&scenario, &["write"], CatchPhase::Exit, Some("$arg0 == 1")).await;
+    let entry = scenario.run_to_stop().await;
+    assert_eq!(caught(&entry).args[0], 2);
+    let stepped = scenario.step_to_stop(StepKind::Instruction).await;
+    assert!(matches!(stepped, StopReason::Step { .. }), "{stepped:?}");
+    assert!(holds(&scenario, "$rax == 10").await, "the call returned");
+    let next = step_until_not_a_step(&mut scenario).await;
+    assert_eq!(
+        (caught(&next).args[0], caught(&next).returned),
+        (1, Some(10))
+    );
+    scenario.shutdown().await;
+}
+
+/// A breakpoint planted on a `syscall` instruction does not hide the call
+/// from a catchpoint: stepping over its trap stops at the call's entry,
+/// and the call's exit stops next.
+#[tokio::test]
+async fn a_call_under_a_breakpoint_stops_at_its_catchpoint() {
+    for fixture in FIXTURES {
+        let mut scenario = Scenario::launch(fixture);
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Function("main".into()))
+            .await;
+        let options = LaunchOptions {
+            arguments: vec!["raw".into()],
+            ..LaunchOptions::default()
+        };
+        let stop = scenario.run_with_to_stop(options).await;
+        assert!(matches!(stop, StopReason::Breakpoint { .. }), "{stop:?}");
+        let modules = scenario
+            .operation("modules", scenario.handle().loaded_modules())
+            .await;
+        let bias = modules
+            .modules
+            .iter()
+            .find(|record| record.path.ends_with(fixture))
+            .expect("the program is loaded")
+            .module
+            .load_bias;
+        let address = VirtualAddress::new(bias + symbol(fixture, "raw_syscall"));
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(address))
+            .await;
+        catch(&scenario, &["getppid"], CatchPhase::Both, None).await;
+        let stop = scenario.resume_to_stop().await;
+        assert_eq!(support::breakpoint_address(&stop), address, "{fixture}");
+        let entry = scenario.resume_to_stop().await;
+        assert_eq!(
+            (caught(&entry).call, caught(&entry).returned),
+            (call("getppid"), None),
+            "{fixture}"
+        );
+        let after = address.get() + 2;
+        assert!(
+            holds(&scenario, &format!("$rip == {after}")).await,
+            "the raw call stops, {fixture}"
+        );
+        let exit = scenario.resume_to_stop().await;
+        assert!(caught(&exit).returned.is_some(), "{fixture}");
+        scenario.shutdown().await;
+    }
 }

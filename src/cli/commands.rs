@@ -107,12 +107,21 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     /// Returns the inclusive range of argument counts the usage accepts. A
-    /// final `[words...]` takes the rest of the line, and every word of a
-    /// bracketed group such as `[hits hit-condition]` is optional.
+    /// final `[words...]` takes the rest of the line, every word of a
+    /// bracketed group such as `[hits hit-condition]` is optional, and a
+    /// usage of alternatives such as `a [x] | a y z` accepts any of them.
     fn arity(&self) -> (usize, usize) {
+        self.usage
+            .split(" | ")
+            .map(Self::form_arity)
+            .reduce(|(low, high), (minimum, maximum)| (low.min(minimum), high.max(maximum)))
+            .unwrap_or((0, 0))
+    }
+
+    fn form_arity(form: &str) -> (usize, usize) {
         let mut grouped = false;
         let mut range = (0, 0);
-        for word in self.usage.split_whitespace().skip(1) {
+        for word in form.split_whitespace().skip(1) {
             let optional = grouped || word.starts_with('[');
             grouped = optional && !word.ends_with(']');
             let (minimum, maximum) = range;

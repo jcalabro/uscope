@@ -333,6 +333,7 @@ fn wait_event(status: WaitStatus) -> WaitEvent {
         WaitStatus::GroupStop(_, number) => {
             WaitEvent::PtraceEvent(pid, signal(number), libc::PTRACE_EVENT_STOP)
         }
+        WaitStatus::Syscall(_) => WaitEvent::PtraceSyscall(pid),
     }
 }
 
@@ -349,7 +350,8 @@ fn wait_status(event: &WaitEvent) -> String {
             WaitStatus::GroupStop(pid.as_raw(), signal.number())
         }
         WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
-        WaitEvent::PtraceSyscall(pid) | WaitEvent::Continued(pid) => {
+        WaitEvent::PtraceSyscall(pid) => WaitStatus::Syscall(pid.as_raw()),
+        WaitEvent::Continued(pid) => {
             return format!("{event:?} for {pid}");
         }
     };
@@ -599,19 +601,24 @@ impl LinuxTraceOps for SimTrace {
             .map_err(system)
     }
 
-    fn continue_to_syscall(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
-        let mut kernel = self.kernel_mut();
-        kernel.gap("PTRACE_SYSCALL is not modeled");
-        Err(system(Errno::EIO))
+    fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        self.kernel_mut()
+            .resume_to_call(tid(pid), signal.map(Signal::number))
+            .map_err(system)
     }
 
     fn syscall_info(
         &self,
-        _pid: Pid,
+        pid: Pid,
     ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno> {
-        self.kernel_mut()
-            .gap("PTRACE_GET_SYSCALL_INFO is not modeled");
-        Err(Errno::EIO)
+        let info = self.kernel().call_info(tid(pid))?;
+        Ok(super::syscalls::info::SyscallInfo {
+            op: info.op,
+            arch: super::syscalls::info::AUDIT_ARCH_X86_64,
+            number: info.number,
+            args: info.args,
+            value: info.value,
+        })
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {

@@ -9,10 +9,11 @@ use nix::unistd::Pid;
 
 use std::collections::BTreeMap;
 
+use super::classify::is_superseded;
 use super::memory::read_logical_memory;
 use super::native::LinuxTraceOps;
 use super::syscalls::info::{self, OP_ENTRY, OP_EXIT};
-use super::{BreakpointSite, Controller, NativeThreadState};
+use super::{BreakpointSite, ClassifiedStop, Controller, ExpectedStop, NativeThreadState};
 use crate::protocol::{ConditionOwner, DebuggerEvent, StopReason, SyscallStop};
 use crate::syscalls::captures::{self, Limits};
 use crate::syscalls::specs::{self, Arg};
@@ -56,40 +57,60 @@ impl<P: LinuxTraceOps> Controller<P> {
         });
     }
 
+    /// Whether a stopped thread's next instruction step makes a system
+    /// call: it is inside one, stopped at its entry or at an event, or
+    /// about to execute `syscall`.
+    pub(super) fn steps_into_call(&self, pid: Pid) -> Result<bool> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let thread = inferior.thread(pid)?;
+        if thread.syscall.is_some() || thread.inside_call {
+            return Ok(true);
+        }
+        let pc = self.ptrace.registers(pid)?.rip;
+        let read = read_logical_memory(
+            &self.ptrace,
+            pid,
+            &inferior.breakpoints,
+            VirtualAddress::new(pc),
+            SYSCALL.len(),
+        )?;
+        Ok(read.bytes == SYSCALL)
+    }
+
     /// A thread stopped at a system call's entry or exit. It stops every
     /// thread when a catchpoint catches the call and its condition holds,
-    /// or resumes as it would have.
+    /// or resumes as it would have. A step that made the call ends at its
+    /// exit, where a single step across `syscall` would have.
     pub(super) fn handle_syscall_stop(&mut self, pid: Pid) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.thread_mut(pid)?.state = NativeThreadState::Stopped;
-        let info = match self.ptrace.syscall_info(pid) {
-            Ok(info) => info,
-            // SIGKILL took it out of its stop; its exit follows.
-            Err(nix::errno::Errno::ESRCH) => {
-                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-                inferior.thread_mut(pid)?.state = NativeThreadState::Running;
-                return Ok(());
-            }
-            Err(error) => {
+        let thread = inferior.thread_mut(pid)?;
+        thread.state = NativeThreadState::Stopped;
+        let in_step = std::mem::take(&mut thread.stepping_call);
+        let info = self.ptrace.syscall_info(pid);
+        let (info, exit) = match info {
+            Ok(info) if info.op == OP_ENTRY => (info, false),
+            Ok(info) if info.op == OP_EXIT => (info, true),
+            other => {
+                // SIGKILL or a group exit took the thread out of its stop
+                // since it was reported: it is gone, or at its exit event,
+                // which follows.
+                let metadata = match other {
+                    Err(nix::errno::Errno::ESRCH) => Err(nix::errno::Errno::ESRCH),
+                    _ => self.ptrace.signal_metadata(pid),
+                };
+                if is_superseded(&metadata) {
+                    return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
+                }
+                let description = match other {
+                    Ok(info) => format!("a system-call stop of unknown kind {}", info.op),
+                    Err(error) => {
+                        format!("a system-call stop whose call could not be read: {error}")
+                    }
+                };
                 return self.begin_visible_stop(
                     pid,
                     StopReason::Unclassifiable {
-                        description: format!(
-                            "a system-call stop whose call could not be read: {error}"
-                        )
-                        .into(),
-                    },
-                );
-            }
-        };
-        let exit = match info.op {
-            OP_ENTRY => false,
-            OP_EXIT => true,
-            op => {
-                return self.begin_visible_stop(
-                    pid,
-                    StopReason::Unclassifiable {
-                        description: format!("a system-call stop of unknown kind {op}").into(),
+                        description: description.into(),
                     },
                 );
             }
@@ -103,7 +124,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|catchpoint| catchpoint.id)
             .collect();
         if caught.is_empty() {
-            return self.restart_after_internal(pid);
+            return self.resume_uncaught(pid, in_step, exit);
         }
         let returned = exit.then_some(info.value);
         let mut captured = entered.captured;
@@ -145,9 +166,42 @@ impl<P: LinuxTraceOps> Controller<P> {
             stopping.push(id);
         }
         if stopping.is_empty() {
-            return self.restart_after_internal(pid);
+            return self.resume_uncaught(pid, in_step, exit);
+        }
+        // A step over a breakpoint's trap that made the call is past the
+        // trap, which the stop puts back.
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let thread = inferior.thread_mut(pid)?;
+        if let ExpectedStop::BreakpointRepair { address } = thread.expected {
+            thread.expected = ExpectedStop::None;
+            inferior.finish_current_repair(pid, address)?;
+            self.note_step_progress(pid);
         }
         self.begin_visible_stop(pid, stop(stopping.into()))
+    }
+
+    /// Goes on from a call no catchpoint stopped at. A step over a
+    /// breakpoint's trap that made the call is done at its entry, being
+    /// past the trap, and the user's step at its exit, where a single step
+    /// across `syscall` ends; anything else resumes as it would have.
+    fn resume_uncaught(&mut self, pid: Pid, stepping: bool, exit: bool) -> Result<()> {
+        let repairing = matches!(
+            self.inferior
+                .as_ref()
+                .ok_or(Error::NotRunning)?
+                .thread(pid)?
+                .expected,
+            ExpectedStop::BreakpointRepair { .. }
+        );
+        if stepping && (exit || repairing) {
+            return self.handle_classified_stop(
+                pid,
+                ClassifiedStop::Trace {
+                    watch: std::collections::BTreeSet::new(),
+                },
+            );
+        }
+        self.restart_after_internal(pid)
     }
 
     /// The call a thread stopped in, its arguments, and what was read at
@@ -218,6 +272,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         )
     }
 }
+
+/// The `syscall` instruction.
+const SYSCALL: [u8; 2] = [0x0f, 0x05];
 
 /// A thread's call as its entry stop saw it.
 #[derive(Debug, Clone)]

@@ -230,6 +230,22 @@ marks! {
     ViewPaged,
     /// A cyclic list was refused as the cycle it is.
     ViewCycleRefused,
+    /// The debugger made a catchpoint.
+    CatchAdded,
+    /// The debugger removed a catchpoint.
+    CatchRemoved,
+    /// The client added or removed a catchpoint while the program ran.
+    CatchEditWhileRunning,
+    /// Catch accounting judged a stop at a system call's entry.
+    CatchEntryStop,
+    /// Catch accounting judged a stop at a system call's exit.
+    CatchExitStop,
+    /// A step ended at a catchpoint.
+    CatchStepStop,
+    /// The decoder read a call from the model of the tracepoint stream.
+    TraceDecoded,
+    /// The model of the tracepoint stream lost a call to a full ring.
+    TraceLost,
 }
 
 /// How many times a run reached each mark.

@@ -297,6 +297,55 @@ const fn abi_of(code: u8) -> Option<Abi> {
     }
 }
 
+/// A call's slot, as the programs key it: its ABI above ten bits of
+/// number.
+#[must_use]
+pub const fn errno_slot(call: SyscallId) -> u32 {
+    let abi = match call.abi {
+        Abi::X86_64 => 0,
+        Abi::X86_32 => 1,
+        Abi::X32 => 2,
+    };
+    abi << 10 | call.number
+}
+
+/// The record the stream program writes for a call it read nothing of.
+///
+/// The call returned `returned`, or ended its process first, and was made
+/// at the first time and returned at the second. A model of the stream
+/// feeds such records to the decoder.
+#[must_use]
+pub fn encode_call(
+    thread: u32,
+    process: u32,
+    call: SyscallId,
+    args: [u64; 6],
+    returned: Option<i64>,
+    (entered, exited): (u64, u64),
+) -> Vec<u8> {
+    let record = RawCallRecord {
+        header: RawRecord {
+            kind: RECORD_CALL,
+            size: u32::try_from(size_of::<RawCallRecord>()).unwrap_or(u32::MAX),
+            tid: thread,
+            tgid: process,
+        },
+        entered,
+        exited,
+        ret: returned.unwrap_or(0),
+        args,
+        nr: call.number,
+        abi: u8::try_from(errno_slot(call) >> 10).unwrap_or(u8::MAX),
+        flags: if returned.is_some() {
+            0
+        } else {
+            CALL_PROCESS_EXITED
+        },
+        captures: 0,
+    };
+    record.as_bytes().to_vec()
+}
+
 /// The call a CALLS slot holds: its ABI above ten bits of number.
 fn call_of(slot: u32) -> Option<SyscallId> {
     let abi = abi_of(u8::try_from(slot >> 10).ok()?)?;

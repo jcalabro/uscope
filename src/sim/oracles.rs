@@ -118,7 +118,7 @@ pub fn site_ownership(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
 /// Whether `tgid` is ending as a whole: killed, by the debugger or from
 /// outside, or exiting its group. Its threads then leave their stops
 /// whatever the debugger publishes, until it hears of the exit.
-fn ending(kernel: &Kernel, tgid: Tid) -> bool {
+pub(super) fn ending(kernel: &Kernel, tgid: Tid) -> bool {
     kernel
         .processes
         .get(&tgid)

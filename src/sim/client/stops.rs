@@ -134,6 +134,9 @@ impl Client {
                 Ok(reason),
                 Caller::Trusted | Caller::Outermost(UnwindTermination::NoUnwindInfo { .. }),
             ) => {
+                if matches!(reason, StopReason::Syscall(_)) {
+                    self.mark(Mark::CatchStepStop);
+                }
                 self.note(format!("stepped: {reason:?}"));
             }
             (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),

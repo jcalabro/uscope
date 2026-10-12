@@ -649,6 +649,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         deliver_signal: bool,
         expected: ExpectedStop,
     ) -> Result<()> {
+        // A step that makes a system call, the user's or one over a
+        // breakpoint's trap, stops at its entry and exit, which the
+        // catchpoints judge.
+        let stepping_call = matches!(resume, Resume::Step)
+            && matches!(
+                expected,
+                ExpectedStop::UserStep { .. } | ExpectedStop::BreakpointRepair { .. }
+            )
+            && !self.catchpoints.is_empty()
+            && self.steps_into_call(pid)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let holds = inferior.holds_signals(&expected);
         let thread = inferior.thread_mut(pid)?;
@@ -666,10 +676,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .map(|held| held.signal)
                 .filter(|signal| self.signals.get(*signal).pass);
         }
+        let stepping_call = stepping_call && signal.is_none();
+        let to_call =
+            stepping_call || matches!(resume, Resume::Continue) && !self.catchpoints.is_empty();
+        thread.stepping_call = stepping_call;
+        thread.inside_call = false;
+        // Only a resume to the next system-call-stop reaches a call's exit.
+        if !to_call {
+            thread.syscall = None;
+        }
         let result = match resume {
-            Resume::Continue if !self.catchpoints.is_empty() => {
-                self.ptrace.continue_to_syscall(pid, signal)
-            }
+            _ if to_call => self.ptrace.continue_to_syscall(pid, signal),
             Resume::Continue => self.ptrace.continue_execution(pid, signal),
             Resume::Step => self.ptrace.step(pid, signal),
         };

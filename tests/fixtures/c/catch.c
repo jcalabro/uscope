@@ -1,8 +1,9 @@
 // System calls for the debugger's catchpoints. With no argument: an openat
 // that fails, then a write to stderr and one to stdout. With `threads`:
-// four threads that each call getppid a thousand times at once. Built with
-// SPIN, it calls getppid forever, so a catchpoint can be added while it
-// runs.
+// four threads that each call getppid a thousand times at once. With `raw`:
+// one getppid made by a `syscall` instruction labeled raw_syscall, where a
+// breakpoint can go. Built with SPIN, it calls getppid forever, so a
+// catchpoint can be added while it runs.
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <pthread.h>
@@ -12,6 +13,15 @@
 
 #ifndef SPIN
 enum { THREADS = 4, CALLS = 1000 };
+
+static long raw_getppid(void) {
+    long result;
+    __asm__ volatile(".globl raw_syscall\nraw_syscall:\n\tsyscall"
+                     : "=a"(result)
+                     : "a"((long)SYS_getppid)
+                     : "rcx", "r11", "memory");
+    return result;
+}
 
 static pthread_barrier_t start;
 
@@ -34,6 +44,10 @@ int main(int argc, char **argv) {
         syscall(SYS_getppid);
     }
 #else
+    if (argc > 1 && strcmp(argv[1], "raw") == 0) {
+        long raw = raw_getppid();
+        return raw == getppid() ? 0 : 3;
+    }
     if (argc > 1 && strcmp(argv[1], "threads") == 0) {
         pthread_t threads[THREADS];
         pthread_barrier_init(&start, NULL, THREADS);
