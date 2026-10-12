@@ -282,12 +282,38 @@ pub struct Context<'a> {
     pub before: bool,
 }
 
+/// The call a catchpoint stopped at, as strace prints it: its arguments,
+/// with the path it names, and at its exit what it returned.
+#[must_use]
+pub fn caught(stop: &uscope::SyscallStop) -> String {
+    let event = SyscallEvent {
+        thread: 0,
+        process: 0,
+        call: stop.call,
+        args: stop.args,
+        captured: stop.captured.to_vec(),
+        outcome: stop
+            .returned
+            .map_or(Outcome::Unfinished, Outcome::of_return),
+        entered: None,
+        exited: None,
+        stack: None,
+        flags: uscope::syscalls::EventFlags::default(),
+    };
+    let style = Style::default();
+    let context = Context {
+        fds: None,
+        before: true,
+    };
+    if stop.returned.is_some() {
+        call(&event, &style, context).text()
+    } else {
+        entry(&event, &style, context).text()
+    }
+}
+
 /// Formats `name(arguments) = result`, without a prefix or duration.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the REPL prints catchpoint stops with it")
-)]
 pub fn call(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Tokens {
     let mut out = entry(event, style, context);
     let spec = (!style.raw).then(|| specs::spec(event.call)).flatten();

@@ -123,6 +123,21 @@ pub(super) struct Frame<'a, P: InspectionOps> {
     /// Units of work every machine running at the frame has done; the
     /// views presenting values one inside another each have a machine.
     charges: Cell<u32>,
+    /// The system call the frame's thread stopped at, which `$arg0` to
+    /// `$arg5`, `$ret`, and `$path` read in any of its frames.
+    pub(super) call: Option<crate::eval::target::CallValues>,
+}
+
+/// What a catchpoint's stop tells the evaluator of its call.
+pub(super) fn call_values(reason: &crate::StopReason) -> Option<crate::eval::target::CallValues> {
+    let crate::StopReason::Syscall(stop) = reason else {
+        return None;
+    };
+    Some(crate::eval::target::CallValues {
+        args: stop.args,
+        returned: stop.returned,
+        path: stop.path.as_ref().map(|path| path.as_bytes().to_vec()),
+    })
 }
 
 impl<P: InspectionOps> Controller<P> {
@@ -666,6 +681,10 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
             }
             _ => planned,
         }
+    }
+
+    fn call_values(&self) -> Option<&crate::eval::target::CallValues> {
+        self.call.as_ref()
     }
 
     fn register(&self, name: &str) -> Option<Register> {
@@ -1583,7 +1602,9 @@ impl<P: InspectionOps> Controller<P> {
             StackFrameId::INNERMOST,
             Some(&presentation),
         )?;
-        let scope = self.frame_for(inferior, StopId::new(0), &root, &resolved);
+        let mut scope = self.frame_for(inferior, StopId::new(0), &root, &resolved);
+        // The thread's recorded reason is not yet this hit's.
+        scope.call = call_values(reason);
         let program = if condition {
             crate::eval::bind::bind_condition(expression, &scope)
         } else {
@@ -1689,6 +1710,11 @@ impl<P: InspectionOps> Controller<P> {
             code: self.frame_scope(resolved),
             registers: OnceCell::new(),
             charges: Cell::new(0),
+            call: root
+                .thread()
+                .and_then(|pid| inferior.threads.get(&pid))
+                .and_then(|thread| thread.reason.as_ref())
+                .and_then(call_values),
         }
     }
 }

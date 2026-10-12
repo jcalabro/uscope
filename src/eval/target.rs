@@ -112,6 +112,18 @@ pub struct Register {
 }
 
 /// Bind-time view of one frame: what names mean there, and what types are.
+/// What a system call's stop knows of the call, which `$arg0` to `$arg5`,
+/// `$ret`, and `$path` read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallValues {
+    /// The arguments, as the call's registers held them.
+    pub args: [u64; 6],
+    /// What the call returned, once it has.
+    pub returned: Option<i64>,
+    /// The path the call names, when it names one and it could be read.
+    pub path: Option<Vec<u8>>,
+}
+
 pub trait Scope: TypeSource {
     /// A data object the scope can name.
     type Object: Clone + fmt::Debug;
@@ -131,6 +143,11 @@ pub trait Scope: TypeSource {
 
     /// The register a name, without its `$`, means.
     fn register(&self, name: &str) -> Option<Register>;
+
+    /// The call that stopped the thread, where a system call did.
+    fn call_values(&self) -> Option<&CallValues> {
+        None
+    }
 
     /// Whether a view presents values of `ty` with a length, as one
     /// presents a Go map, which is a pointer.

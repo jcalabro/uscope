@@ -585,11 +585,89 @@ numeric_id!(
     "Identifies one watchpoint within a debug session."
 );
 
-/// The breakpoint or watchpoint whose condition an event concerns.
+numeric_id!(
+    CatchpointId,
+    "Identifies one catchpoint within a debug session."
+);
+
+/// The breakpoint, watchpoint, or catchpoint whose condition an event
+/// concerns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionOwner {
     Breakpoint(BreakpointId),
     Watchpoint(WatchpointId),
+    Catchpoint(CatchpointId),
+}
+
+/// Where in a system call a catchpoint stops a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatchPhase {
+    /// As the call begins, before the kernel runs it.
+    Entry,
+    /// As the call returns, with its result.
+    Exit,
+    /// At both, as gdb's `catch syscall` does.
+    #[default]
+    Both,
+}
+
+impl CatchPhase {
+    /// Whether the phase stops at a call's entry, or at its exit when
+    /// `exit` is true.
+    #[must_use]
+    pub const fn stops(self, exit: bool) -> bool {
+        match self {
+            Self::Entry => !exit,
+            Self::Exit => exit,
+            Self::Both => true,
+        }
+    }
+}
+
+/// Stops threads at system calls. Every thread of the process runs with
+/// a stop at each of its calls while any catchpoint exists, which costs
+/// microseconds a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Catchpoint {
+    pub id: CatchpointId,
+    /// The calls it stops at, in every ABI that names them; every call when
+    /// empty.
+    pub calls: Arc<[crate::syscalls::SyscallId]>,
+    pub phase: CatchPhase,
+    /// A condition the stopped thread's innermost frame must meet, where
+    /// `$arg0` to `$arg5`, `$ret`, and `$path` read the call.
+    pub condition: Option<crate::Condition>,
+    /// How many calls it caught, including those its condition did not
+    /// stop at.
+    pub hit_count: u64,
+}
+
+impl Catchpoint {
+    /// Whether it catches `call` at its entry, or at its exit when `exit`
+    /// is true.
+    #[must_use]
+    pub fn catches(&self, call: crate::syscalls::SyscallId, exit: bool) -> bool {
+        self.phase.stops(exit) && (self.calls.is_empty() || self.calls.contains(&call))
+    }
+}
+
+/// The system call a thread stopped at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyscallStop {
+    pub call: crate::syscalls::SyscallId,
+    /// The arguments, as the call's registers held them.
+    pub args: [u64; 6],
+    /// What the call returned, at its exit; none at its entry.
+    pub returned: Option<i64>,
+    /// The path the call names, when it names one uscope could read.
+    pub path: Option<Arc<str>>,
+    /// The memory behind its pointer arguments, read as the syscall
+    /// tracer reads it: what it reads at its entry, and at its exit also
+    /// what it wrote. A pointer the thread's entry stop went unseen for is
+    /// not read.
+    pub captured: Arc<[crate::syscalls::Capture]>,
+    /// Every catchpoint that stopped here, in identifier order.
+    pub catchpoints: Arc<[CatchpointId]>,
 }
 
 /// The memory accesses that trigger a watchpoint.
@@ -1461,6 +1539,9 @@ pub enum StopReason {
         /// The breakpoint instruction.
         address: VirtualAddress,
     },
+    /// A thread entered or returned from a system call a catchpoint
+    /// catches.
+    Syscall(Box<SyscallStop>),
     /// The process replaced its executable image.
     Exec {
         /// Whether the new image is this debugger's executable, which is
@@ -1567,6 +1648,8 @@ pub struct StateSnapshot {
     pub breakpoints: Arc<[Breakpoint]>,
     /// The watchpoints armed in the current process.
     pub watchpoints: Arc<[Watchpoint]>,
+    /// The system-call catchpoints, which outlive any process.
+    pub catchpoints: Arc<[Catchpoint]>,
 }
 
 /// A state or lifecycle event emitted by the debugger.
@@ -1674,6 +1757,8 @@ pub enum DebuggerEvent {
     BreakpointsChanged { revision: u64 },
     /// The set of armed watchpoints changed.
     WatchpointsChanged { revision: u64 },
+    /// The set of catchpoints changed.
+    CatchpointsChanged { revision: u64 },
     /// Scoped watchpoints were removed because their storage's lifetime
     /// ended. A following `WatchpointsChanged` publishes the new set.
     WatchpointsInvalidated {
@@ -1703,6 +1788,7 @@ impl DebuggerEvent {
             | Self::ConditionFailed { revision, .. }
             | Self::BreakpointsChanged { revision }
             | Self::WatchpointsChanged { revision }
+            | Self::CatchpointsChanged { revision }
             | Self::WatchpointsInvalidated { revision, .. } => *revision,
         }
     }
@@ -1779,6 +1865,16 @@ pub enum Request {
     },
     RemoveAllWatchpoints {
         reply: Reply<Arc<[Watchpoint]>>,
+    },
+    AddCatchpoint {
+        calls: Arc<[crate::syscalls::SyscallId]>,
+        phase: CatchPhase,
+        condition: Option<crate::Condition>,
+        reply: Reply<Catchpoint>,
+    },
+    RemoveCatchpoint {
+        id: CatchpointId,
+        reply: Reply<Catchpoint>,
     },
     Launch {
         options: Box<LaunchOptions>,
@@ -2144,6 +2240,10 @@ impl Request {
             Self::RemoveAllBreakpoints { .. } => "remove all breakpoints".to_owned(),
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
+            Self::AddCatchpoint { calls, phase, .. } => {
+                format!("add catchpoint {phase:?} {} calls", calls.len())
+            }
+            Self::RemoveCatchpoint { id, .. } => format!("remove catchpoint {id:?}"),
             Self::ReadMemory { .. } => "read memory".to_owned(),
             Self::LoadedModule { .. } => "loaded module".to_owned(),
             Self::LoadedModules { .. } => "loaded modules".to_owned(),

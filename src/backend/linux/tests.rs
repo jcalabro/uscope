@@ -1236,6 +1236,16 @@ impl LinuxTraceOps for FakeTrace {
         self.record(format!("step {pid}"));
         Ok(())
     }
+    fn continue_to_syscall(&self, pid: Pid, _signal: Option<Signal>) -> Result<()> {
+        self.record(format!("continue_to_syscall {pid}"));
+        Ok(())
+    }
+    fn syscall_info(
+        &self,
+        _pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno> {
+        Err(Errno::EIO)
+    }
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
         self.record(format!("set_registers {pid} rip={:#x}", registers.rip));
         Ok(())

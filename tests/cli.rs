@@ -5453,3 +5453,36 @@ fn record_writes_a_profile_that_report_summarizes() {
         );
     }
 }
+
+#[test]
+fn catch_syscall_stops_where_strace_would_print_and_reads_the_call() {
+    let stdout = batch(
+        &["build/test-programs/catch-gcc-o0"],
+        &[
+            "catch syscall write if $arg0 == 1",
+            "run",
+            "print $arg0",
+            "continue",
+            "print $ret",
+            "info catchpoints",
+            "delete c1",
+            "info catch",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "catchpoint c1: write at entry and exit, if $arg0 == 1",
+            r#"stopped at catchpoint c1 as the call began: write(1, "to stdout\n", 10)"#,
+            "(integer) $arg0 = 1",
+            r#"stopped at catchpoint c1 as the call returned: write(1, "to stdout\n", 10) = 10"#,
+            "(integer) $ret = 10",
+            // Both writes count, at their entries and exits.
+            "c1: write at entry and exit, if $arg0 == 1, 4 hits",
+            "deleted catchpoint c1",
+            "no catchpoints",
+            "inferior exited with status 0",
+        ],
+    );
+}

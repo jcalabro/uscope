@@ -599,6 +599,21 @@ impl LinuxTraceOps for SimTrace {
             .map_err(system)
     }
 
+    fn continue_to_syscall(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
+        let mut kernel = self.kernel_mut();
+        kernel.gap("PTRACE_SYSCALL is not modeled");
+        Err(system(Errno::EIO))
+    }
+
+    fn syscall_info(
+        &self,
+        _pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno> {
+        self.kernel_mut()
+            .gap("PTRACE_GET_SYSCALL_INFO is not modeled");
+        Err(Errno::EIO)
+    }
+
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
         let mut kernel = self.kernel_mut();
         let mut current = kernel.get_registers(tid(pid)).map_err(system)?;

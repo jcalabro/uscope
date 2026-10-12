@@ -29,6 +29,7 @@ use nix::unistd::Pid;
 
 use super::super::native::{ptrace_with_signal, wait_for};
 use super::super::signals::{Signal, WaitEvent};
+use super::info::{OP_ENTRY, OP_EXIT, OP_SECCOMP, SyscallInfo, call_id, syscall_info};
 use super::launch::{self, Gate, GateOptions};
 use super::{Sink, seccomp};
 use crate::syscalls::captures::{self, Limits, Memory};
@@ -73,54 +74,6 @@ pub enum TraceError {
 pub struct Finished {
     /// How the first target ended, when it did while traced.
     pub end: Option<ProcessEnd>,
-}
-
-const OP_ENTRY: u8 = 1;
-const OP_EXIT: u8 = 2;
-const OP_SECCOMP: u8 = 3;
-const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
-
-/// What `PTRACE_GET_SYSCALL_INFO` says about a stopped thread.
-#[derive(Debug, Clone, Copy)]
-struct SyscallInfo {
-    op: u8,
-    arch: u32,
-    /// For an entry or seccomp stop.
-    number: u64,
-    args: [u64; 6],
-    /// For an exit stop.
-    value: i64,
-}
-
-#[allow(
-    unsafe_code,
-    reason = "reading the info as bytes avoids the libc struct's union"
-)]
-fn syscall_info(pid: Pid) -> Result<SyscallInfo, Errno> {
-    let mut buffer = [0_u8; 88];
-    // SAFETY: the kernel writes at most `buffer.len()` bytes, the size the
-    // request passes, into the buffer, which outlives the call.
-    let written = unsafe {
-        libc::ptrace(
-            libc::PTRACE_GET_SYSCALL_INFO,
-            pid.as_raw(),
-            std::ptr::without_provenance_mut::<libc::c_void>(buffer.len()),
-            buffer.as_mut_ptr().cast::<libc::c_void>(),
-        )
-    };
-    Errno::result(written)?;
-    let word = |at: usize| u64::from_le_bytes(buffer[at..at + 8].try_into().unwrap_or_default());
-    let mut args = [0; 6];
-    for (index, arg) in args.iter_mut().enumerate() {
-        *arg = word(32 + index * 8);
-    }
-    Ok(SyscallInfo {
-        op: buffer[0],
-        arch: u32::from_le_bytes(buffer[4..8].try_into().unwrap_or_default()),
-        number: word(24),
-        args,
-        value: word(24).cast_signed(),
-    })
 }
 
 #[allow(
@@ -291,20 +244,6 @@ struct Tracer<'a> {
     end: Option<ProcessEnd>,
     detaching: bool,
     sink: &'a mut dyn Sink,
-}
-
-const fn call_id(info: &SyscallInfo) -> SyscallId {
-    #[expect(clippy::cast_possible_truncation, reason = "call numbers are small")]
-    let number = info.number as u32;
-    if info.arch == AUDIT_ARCH_X86_64 {
-        if number & X32_SYSCALL_BIT != 0 {
-            SyscallId::new(Abi::X32, number & !X32_SYSCALL_BIT)
-        } else {
-            SyscallId::new(Abi::X86_64, number)
-        }
-    } else {
-        SyscallId::new(Abi::X86_32, number)
-    }
 }
 
 impl Tracer<'_> {

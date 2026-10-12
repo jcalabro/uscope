@@ -1685,6 +1685,7 @@ fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
             let owner = match owner {
                 uscope::ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
                 uscope::ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
+                uscope::ConditionOwner::Catchpoint(id) => format!("catchpoint {id}"),
             };
             outlet.publish(
                 Stream::Log,

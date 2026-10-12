@@ -1,0 +1,56 @@
+// System calls for the debugger's catchpoints. With no argument: an openat
+// that fails, then a write to stderr and one to stdout. With `threads`:
+// four threads that each call getppid a thousand times at once. Built with
+// SPIN, it calls getppid forever, so a catchpoint can be added while it
+// runs.
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <pthread.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef SPIN
+enum { THREADS = 4, CALLS = 1000 };
+
+static pthread_barrier_t start;
+
+static void *calls(void *unused) {
+    (void)unused;
+    // Every thread calls at once.
+    pthread_barrier_wait(&start);
+    for (int call = 0; call < CALLS; call++) {
+        syscall(SYS_getppid);
+    }
+    return NULL;
+}
+#endif
+
+int main(int argc, char **argv) {
+#ifdef SPIN
+    (void)argc;
+    (void)argv;
+    for (;;) {
+        syscall(SYS_getppid);
+    }
+#else
+    if (argc > 1 && strcmp(argv[1], "threads") == 0) {
+        pthread_t threads[THREADS];
+        pthread_barrier_init(&start, NULL, THREADS);
+        for (int thread = 0; thread < THREADS; thread++) {
+            pthread_create(&threads[thread], NULL, calls, NULL);
+        }
+        for (int thread = 0; thread < THREADS; thread++) {
+            pthread_join(threads[thread], NULL);
+        }
+        return 0;
+    }
+    if (openat(AT_FDCWD, "/nonexistent/uscope-catch", O_RDONLY) != -1) {
+        return 1;
+    }
+    if (write(2, "to stderr\n", 10) != 10 || write(1, "to stdout\n", 10) != 10) {
+        return 2;
+    }
+    return 0;
+#endif
+}

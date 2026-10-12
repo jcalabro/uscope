@@ -907,6 +907,9 @@ impl Controller<CoreTarget> {
                 | Request::SetWatchpointHitCondition { reply, .. }
                 | Request::SetWatchpointCondition { reply, .. } => reject(reply),
                 Request::RemoveAllWatchpoints { reply } => reject(reply),
+                Request::AddCatchpoint { reply, .. } | Request::RemoveCatchpoint { reply, .. } => {
+                    reject(reply);
+                }
                 Request::Launch { reply, .. }
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }

@@ -320,7 +320,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.finish_barrier_if_ready();
         }
 
-        self.ptrace.continue_execution(pid, None)?;
+        if self.catchpoints.is_empty() {
+            self.ptrace.continue_execution(pid, None)?;
+        } else {
+            self.ptrace.continue_to_syscall(pid, None)?;
+        }
         thread.state = NativeThreadState::Running;
         self.bump_revision();
         if let Some(reply) = self.launch_reply.take() {

@@ -100,6 +100,29 @@ $task                  => error unsupported at `$task`
 $future                => error unknown-name at `$future`
 ```
 
+Where a system call stopped the thread, as at a `catch syscall` stop, `$arg0`
+to `$arg5` are its arguments as its registers held them, `$ret` is what it
+returned, a negative errno when it failed, and `$path` is the path it names.
+Each is an exact integer, or text for `$path`. Before the call returns,
+`$ret` is refused, and so is `$path` for a call that names no path. A stop of
+any other kind has none of them.
+
+```uscope-example
+world: syscall
+$ret == -2             => true : bool
+$arg0                  => 18446744073709551516 : integer
+(int)$arg0             => -100 : int
+$arg1                  => 2147287040 : integer
+$path == "/etc/hosts"  => true : bool
+$arg6                  => error unknown-name at `$arg6`
+```
+
+```uscope-example
+world: scalars
+$ret                   => error unsupported at `$ret`
+$arg0                  => error unsupported at `$arg0`
+```
+
 ## Literals
 
 Integers are decimal, or `0x`, `0o`, or `0b` prefixed, and may contain `_`.

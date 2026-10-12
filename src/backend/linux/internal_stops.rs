@@ -120,6 +120,17 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::SetExceptionStops { stops, reply } => {
                 let _ = reply.send(self.set_exception_stops(stops));
             }
+            Edit::AddCatchpoint {
+                calls,
+                phase,
+                condition,
+                reply,
+            } => {
+                let _ = reply.send(Ok(self.add_catchpoint(calls, phase, condition)));
+            }
+            Edit::RemoveCatchpoint { id, reply } => {
+                let _ = reply.send(self.remove_catchpoint(id));
+            }
             Edit::RefreshModules => {
                 // A failed refresh leaves the previous modules; the next stop
                 // refreshes them again.
@@ -381,6 +392,9 @@ impl Edit {
                 let _ = reply.send(Err(error));
             }
             Self::SetExceptionStops { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::AddCatchpoint { reply, .. } | Self::RemoveCatchpoint { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::RefreshModules | Self::FollowStacks => {}

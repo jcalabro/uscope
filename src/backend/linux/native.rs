@@ -130,6 +130,14 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
     fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+    /// Resumes a stopped thread until its next system call's entry or
+    /// exit, as `PTRACE_SYSCALL` does.
+    fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+    /// What a thread stopped at a system call reports of it.
+    fn syscall_info(
+        &self,
+        pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno>;
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()>;
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
@@ -535,6 +543,22 @@ impl LinuxTraceOps for LinuxPtrace {
             .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
+    }
+
+    fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        self.assert_owner_thread();
+        ptrace_with_signal(libc::PTRACE_SYSCALL, pid, signal)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
+        self.wake_waiter();
+        Ok(())
+    }
+
+    fn syscall_info(
+        &self,
+        pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno> {
+        self.assert_owner_thread();
+        super::syscalls::info::syscall_info(pid)
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {

@@ -287,7 +287,8 @@ probe-cost COUNT="100000000": build-test-programs
 
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
-# dap-request, views, image, perf-records, capture, or profile-import.
+# dap-request, views, image, perf-records, capture, profile-import,
+# syscall-record, or syscall-filter.
 # Arguments go to libFuzzer.
 # iced-x86 builds its formatter tables once and never frees them, which
 # LeakSanitizer would report as a failure when the disassembly target exits.

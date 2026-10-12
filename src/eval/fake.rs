@@ -124,6 +124,8 @@ pub struct World {
     /// The id of the task the stopped thread runs, when the program has
     /// tasks.
     pub task: Option<u64>,
+    /// The system call that stopped the thread, when one did.
+    pub call: Option<super::target::CallValues>,
     /// Generic functions, by the address their code begins at, with their
     /// type arguments by their parameters' names.
     functions: BTreeMap<u64, Vec<(Arc<str>, TypeReference)>>,
@@ -1180,6 +1182,10 @@ impl Scope for World {
         }
     }
 
+    fn call_values(&self) -> Option<&super::target::CallValues> {
+        self.call.as_ref()
+    }
+
     fn register(&self, name: &str) -> Option<Register> {
         let name = match name {
             "pc" => "rip",
@@ -1592,7 +1598,21 @@ pub fn world(name: &str) -> World {
     match name {
         "scalars" => scalars(),
         "memory" => memory(),
+        "syscall" => syscall(),
         other => panic!("no world named {other}"),
+    }
+}
+
+/// A thread stopped as `openat(AT_FDCWD, "/etc/hosts", O_RDONLY)` returned
+/// `-ENOENT`.
+pub fn syscall() -> World {
+    World {
+        call: Some(super::target::CallValues {
+            args: [(-100_i64).cast_unsigned(), 0x7ffd_0000, 0, 0, 0, 0],
+            returned: Some(-2),
+            path: Some(b"/etc/hosts".to_vec()),
+        }),
+        ..World::new()
     }
 }
 

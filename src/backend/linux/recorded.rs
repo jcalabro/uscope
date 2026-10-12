@@ -280,6 +280,21 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         )
     }
 
+    fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        issued(format_args!("PTRACE_SYSCALL {pid} {signal:?}"), &(), || {
+            self.0.continue_to_syscall(pid, signal)
+        })
+    }
+
+    fn syscall_info(
+        &self,
+        pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, nix::errno::Errno> {
+        let info = self.0.syscall_info(pid);
+        record!("PTRACE_GET_SYSCALL_INFO {pid} -> {info:?}");
+        info
+    }
+
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
         issued(
             format_args!("PTRACE_SETREGS {pid} rip={:#x}", registers.rip),

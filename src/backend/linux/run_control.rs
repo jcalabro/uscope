@@ -667,6 +667,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .filter(|signal| self.signals.get(*signal).pass);
         }
         let result = match resume {
+            Resume::Continue if !self.catchpoints.is_empty() => {
+                self.ptrace.continue_to_syscall(pid, signal)
+            }
             Resume::Continue => self.ptrace.continue_execution(pid, signal),
             Resume::Step => self.ptrace.step(pid, signal),
         };

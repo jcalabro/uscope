@@ -170,6 +170,40 @@ impl<'a, S: Scope> Binder<'a, S> {
         ExpressionError::new(kind, span, message)
     }
 
+    /// `$arg0` to `$arg5`, `$ret`, or `$path`: what the call that stopped
+    /// the thread passed, returned, or named.
+    fn call_value(&mut self, name: &str, span: Span) -> BindResult<S> {
+        let unsupported = |message: &str| Self::error(span, ErrorKind::Unsupported, message);
+        let call = self
+            .scope
+            .call_values()
+            .ok_or_else(|| unsupported("only a system call's stop has its arguments and result"))?;
+        let (constant, ty) = match name {
+            "ret" => {
+                let returned = call
+                    .returned
+                    .ok_or_else(|| unsupported("the call has not returned"))?;
+                (Integer::Exact(Exact::from(i128::from(returned))), Ty::Exact)
+            }
+            "path" => {
+                let path = call
+                    .path
+                    .clone()
+                    .ok_or_else(|| unsupported("the call names no path uscope could read"))?;
+                return self.node(Op::Constant(Constant::Text(path)), Ty::Text, span);
+            }
+            _ => {
+                let index = name
+                    .strip_prefix("arg")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .filter(|&index| index < 6)
+                    .ok_or_else(|| unsupported("a call has six arguments"))?;
+                (Integer::Exact(Exact::from(call.args[index])), Ty::Exact)
+            }
+        };
+        self.node(Op::Constant(Constant::Integer(constant)), ty, span)
+    }
+
     fn refused(span: Span, refusal: Refusal) -> ExpressionError {
         ExpressionError::new(refusal.kind, span, refusal.message)
     }
@@ -253,6 +287,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     )),
                 }
             }
+            NodeKind::Register(name) if call_value(&name) => self.call_value(&name, span),
             NodeKind::Register(name) => {
                 let register = self.scope.register(&name).ok_or_else(|| {
                     Self::error(
@@ -2434,4 +2469,12 @@ impl<'a, S: Scope> Binder<'a, S> {
             )),
         }
     }
+}
+
+/// Whether `$name` reads the call that stopped the thread.
+fn call_value(name: &str) -> bool {
+    matches!(
+        name,
+        "arg0" | "arg1" | "arg2" | "arg3" | "arg4" | "arg5" | "ret" | "path"
+    )
 }
