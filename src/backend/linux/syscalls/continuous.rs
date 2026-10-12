@@ -74,6 +74,11 @@ impl Continuous {
         }
     }
 
+    /// Records `key` in every file written from now on.
+    pub fn setting(&mut self, key: &str, value: &str) {
+        self.options.settings.push((key.to_owned(), value.to_owned()));
+    }
+
     /// Whether the segment has run its span by `now`.
     #[must_use]
     pub const fn segment_due(&self, now: u64) -> bool {
@@ -251,6 +256,8 @@ mod tests {
         trace.counted(&kernel);
         assert!(!trace.segment_due(second - 1) && trace.segment_due(second));
         trace.end_segment(second).expect("a segment");
+        // What the trace learns as it runs is recorded in the files after.
+        trace.setting("budget 1", "cut at 16");
 
         // Three seconds on, the window holds only the last two.
         trace.event(&fast(3 * second)).expect("added");
@@ -277,6 +284,7 @@ mod tests {
         assert_eq!(segments.setting("engine"), Some("bpf"));
         let window = Profile::read(&saved.path).expect("the window").profile;
         assert_eq!(window.setting("trigger"), Some("fsync took 1000000000 ns"));
+        assert_eq!(window.setting("budget 1"), Some("cut at 16"));
         assert_eq!(window.syscalls().events.len(), 2);
         std::fs::remove_dir_all(&directory).expect("clean up");
     }

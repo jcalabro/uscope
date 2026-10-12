@@ -653,9 +653,7 @@ fn trace_cgroup(
             None
         }
     };
-    if let Some((_, capture)) = &mut printer.capture {
-        capture.setting("cgroup", &cgroup.path.to_string_lossy());
-    }
+    printer.setting("cgroup", &cgroup.path.to_string_lossy());
     printer.cgroup = Some(cgroup.path.clone());
     Ok(bpf::trace_cgroup(
         cgroup, namespace, options, engine, stop, printer,
@@ -1244,6 +1242,17 @@ impl Printer {
             frame_limit: args.stack_trace_frame_limit,
             capture: capture.map(|path| (path.clone(), SyscallCapture::new(None))),
         })
+    }
+
+    /// Records how the trace was made in its capture and in a continuous
+    /// trace's files.
+    fn setting(&mut self, key: &str, value: &str) {
+        if let Some((_, capture)) = &mut self.capture {
+            capture.setting(key, value);
+        }
+        if let Some(continuous) = &mut self.continuous {
+            continuous.setting(key, value);
+        }
     }
 
     /// A line of uscope's own, as strace's `strace: ...` lines.
@@ -2097,10 +2106,8 @@ impl Sink for Printer {
     }
 
     fn budget(&mut self, _time: u64, note: &str) {
-        if let Some((_, capture)) = &mut self.capture {
-            self.budget_notes += 1;
-            capture.setting(&format!("budget {}", self.budget_notes), note);
-        }
+        self.budget_notes += 1;
+        self.setting(&format!("budget {}", self.budget_notes), note);
         // What the trace leaves out from here, said even beside a file's
         // trace; -qq silences it.
         if self.quiet < 2 {
@@ -2109,10 +2116,8 @@ impl Sink for Printer {
     }
 
     fn attached_by(&mut self, attachment: &Attachment) {
-        if let Some((_, capture)) = &mut self.capture {
-            capture.setting("attach", attachment.name());
-            capture.setting("attach reason", &attachment.reason);
-        }
+        self.setting("attach", attachment.name());
+        self.setting("attach reason", &attachment.reason);
         // What tracing costs everyone else, which only tracepoints charge,
         // said even beside a file's trace; -qq silences it.
         if attachment.functions.is_empty() && self.quiet < 2 {
