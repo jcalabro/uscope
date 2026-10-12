@@ -347,7 +347,7 @@ expression runs, as is an index of an array the program bounds at run
 time: a C variable-length array, a Fortran array's descriptor, or an Ada
 array of an unconstrained type. A C flexible array member's length is
 not described, so its index is not checked. A value a view presents as another value
-(`docs/views.md`), as Rust's `Arc` and C++'s `std::unique_ptr` present
+([Views](views.md)), as Rust's `Arc` and C++'s `std::unique_ptr` present
 what they point to, dereferences to that value: `*arc` is what the `Arc`
 shares, and `*p` on one the view presents as empty, such as a null
 `unique_ptr`, is an error.
@@ -428,7 +428,7 @@ ptr[0:1]               => error type at `ptr`
 ## Maps
 
 `m[key]` is the value a map holds for a key, when a view presents `m` as a
-map (`docs/views.md`): Go's maps, and the maps of the C++, Rust, and Zig
+map ([Views](views.md)): Go's maps, and the maps of the C++, Rust, and Zig
 standard libraries. A key is a number, truth value, pointer, or string, or
 text the program holds, and finds the entry whose key `==` would call equal
 to it, so numbers compare exactly and `m[2.0]` finds the key `2`. A key of a
