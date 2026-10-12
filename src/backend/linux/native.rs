@@ -978,7 +978,7 @@ pub(super) fn wait_for(
     unsafe_code,
     reason = "nix's ptrace wrappers cannot deliver real-time signals"
 )]
-fn ptrace_with_signal(
+pub(super) fn ptrace_with_signal(
     request: libc::c_uint,
     pid: Pid,
     signal: Option<Signal>,

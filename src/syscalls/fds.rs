@@ -30,6 +30,8 @@ pub enum Kind {
     File,
     Socket(Socket),
     Pipe,
+    /// A character or block device, which `-yy` numbers.
+    Device(super::model::Device),
     Other,
 }
 
@@ -76,14 +78,84 @@ impl Socket {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Process {
     fds: BTreeMap<i64, Description>,
+    /// Descriptors the engine read just before the call that made them,
+    /// whose reading the call's own arguments must not replace, with what
+    /// each replaced.
+    fresh: BTreeMap<i64, (Description, Option<Description>)>,
     /// A gap may have hidden calls that changed the table.
     stale: bool,
+    /// Whether every descriptor was read from the system, or inherited
+    /// from a process whose were.
+    read: bool,
 }
 
 /// Every traced process's descriptors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FdTable {
     processes: BTreeMap<u32, Process>,
+}
+
+/// The calls the table follows, which an engine stops at whenever `-y`
+/// needs the table, whether or not the selection shows them.
+pub const FOLLOWED: &[&str] = &[
+    "open",
+    "creat",
+    "openat",
+    "openat2",
+    "open_by_handle_at",
+    "open_tree",
+    "fspick",
+    "fsopen",
+    "fsmount",
+    "close",
+    "close_range",
+    "dup",
+    "dup2",
+    "dup3",
+    "fcntl",
+    "socket",
+    "connect",
+    "bind",
+    "accept",
+    "accept4",
+    "pipe",
+    "pipe2",
+    "socketpair",
+    "eventfd",
+    "eventfd2",
+    "epoll_create",
+    "epoll_create1",
+    "timerfd_create",
+    "signalfd",
+    "signalfd4",
+    "inotify_init",
+    "inotify_init1",
+    "memfd_create",
+    "pidfd_open",
+    "io_uring_setup",
+    "userfaultfd",
+    "perf_event_open",
+    "fanotify_init",
+    "landlock_create_ruleset",
+    "memfd_secret",
+    "pidfd_getfd",
+    "chdir",
+    "fchdir",
+    "execve",
+    "execveat",
+];
+
+/// [`FOLLOWED`] under every ABI that has them.
+#[must_use]
+pub fn followed() -> std::collections::BTreeSet<super::model::SyscallId> {
+    super::model::Abi::ALL
+        .iter()
+        .flat_map(|&abi| {
+            FOLLOWED
+                .iter()
+                .filter_map(move |name| super::model::SyscallId::named(abi, name))
+        })
+        .collect()
 }
 
 const O_CLOEXEC: u64 = 0o2_000_000;
@@ -102,7 +174,8 @@ impl FdTable {
             process,
             Process {
                 fds: fds.into_iter().collect(),
-                stale: false,
+                read: true,
+                ..Process::default()
             },
         );
     }
@@ -123,6 +196,27 @@ impl FdTable {
         self.processes.get(&process)?.fds.get(&fd)
     }
 
+    /// Whether the table holds every descriptor of a process, so that one
+    /// it lacks is not open: true once the process was read from the
+    /// system or inherited such a table, until a gap.
+    #[must_use]
+    pub fn knows(&self, process: u32) -> bool {
+        self.processes
+            .get(&process)
+            .is_some_and(|process| process.read && !process.stale)
+    }
+
+    /// What a descriptor referred to before the call about to be applied,
+    /// which the engine already read the descriptors it made for.
+    #[must_use]
+    pub fn describe_before(&self, process: u32, fd: i64) -> Option<&Description> {
+        let process = self.processes.get(&process)?;
+        match process.fresh.get(&fd) {
+            Some((_, replaced)) => replaced.as_ref(),
+            None => process.fds.get(&fd),
+        }
+    }
+
     /// Processes whose tables a gap made stale, to read again.
     pub fn stale(&self) -> impl Iterator<Item = u32> + '_ {
         self.processes
@@ -139,14 +233,34 @@ impl FdTable {
             .flat_map(|process| {
                 process
                     .fds
-                    .iter()
+                    .range(0..)
                     .map(|(&fd, description)| (fd, description))
             })
     }
 
     pub fn apply(&mut self, event: &TraceEvent) {
         match event {
-            TraceEvent::Call(call) => self.call(call),
+            TraceEvent::Call(call) => {
+                let fresh = self
+                    .processes
+                    .get_mut(&call.process)
+                    .map(|process| std::mem::take(&mut process.fresh))
+                    .unwrap_or_default();
+                self.call(call);
+                if let Some(process) = self.processes.get_mut(&call.process) {
+                    for (fd, (read, _)) in fresh {
+                        // A socket's call knows its family and endpoints,
+                        // which its link does not.
+                        if process
+                            .fds
+                            .get(&fd)
+                            .is_some_and(|made| !matches!(made.kind, Kind::Socket(_)))
+                        {
+                            process.fds.insert(fd, read);
+                        }
+                    }
+                }
+            }
             TraceEvent::Spawn {
                 parent,
                 child,
@@ -167,6 +281,59 @@ impl FdTable {
             TraceEvent::Lost { .. } => {
                 for process in self.processes.values_mut() {
                     process.stale = true;
+                }
+            }
+            TraceEvent::Descriptor {
+                process,
+                fd,
+                text,
+                cloexec,
+                device,
+                made,
+                ..
+            } => {
+                let (fd, cloexec) = (*fd, *cloexec);
+                let table = self.processes.entry(*process).or_default();
+                // A socket's link names only its inode; what the trace saw
+                // of its endpoints says more.
+                let known_socket = matches!(
+                    table.fds.get(&fd),
+                    Some(Description {
+                        kind: Kind::Socket(_),
+                        ..
+                    })
+                );
+                if known_socket && text.starts_with("socket:") {
+                    if let Some(description) = table.fds.get_mut(&fd) {
+                        description.cloexec = cloexec;
+                    }
+                    return;
+                }
+                let kind = device.map_or_else(
+                    || {
+                        if text.starts_with("pipe:") {
+                            Kind::Pipe
+                        } else if text.starts_with("socket:") {
+                            Kind::Socket(Socket::default())
+                        } else if text.starts_with('/') {
+                            Kind::File
+                        } else {
+                            Kind::Other
+                        }
+                    },
+                    Kind::Device,
+                );
+                let description = Description {
+                    text: text.clone(),
+                    kind,
+                    cloexec,
+                };
+                let replaced = table.fds.insert(fd, description.clone());
+                if *made {
+                    table.fresh.insert(fd, (description, replaced));
+                } else {
+                    // The engine reads a process's descriptors together.
+                    table.read = true;
                 }
             }
             TraceEvent::Spawn { .. } | TraceEvent::Signal { .. } => {}
@@ -408,14 +575,18 @@ impl FdTable {
                     .fds
                     .insert(result, anonymous("anon_inode:[io_uring]", false));
             }
+            // What these made, the engine reads from the system when it can;
+            // otherwise it is unknown, never mistaken for closed.
             "userfaultfd"
             | "perf_event_open"
             | "fanotify_init"
-            | "bpf"
             | "landlock_create_ruleset"
             | "memfd_secret"
             | "pidfd_getfd" => {
-                process.fds.remove(&result);
+                process
+                    .fds
+                    .entry(result)
+                    .or_insert_with(|| anonymous("?", false));
             }
             _ => {}
         }
@@ -513,6 +684,33 @@ mod tests {
             vec![],
         ));
         assert_eq!(text(&table, 9), None);
+
+        // What the engine read from /proc just before the call says more
+        // than the call's relative path.
+        table.apply(&TraceEvent::Descriptor {
+            process: 7,
+            fd: 4,
+            time: 4,
+            text: "/home/user/notes".into(),
+            cloexec: false,
+            device: None,
+            made: true,
+        });
+        assert_eq!(table.describe_before(7, 4), None, "made by the next call");
+        table.apply(&call(
+            "openat",
+            &[u64::MAX - 99, 0, 0],
+            4,
+            vec![(1, b"notes\0")],
+        ));
+        assert_eq!(text(&table, 4).as_deref(), Some("/home/user/notes"));
+        table.apply(&call(
+            "openat",
+            &[u64::MAX - 99, 0, 0],
+            5,
+            vec![(1, b"notes\0")],
+        ));
+        assert_eq!(text(&table, 5).as_deref(), Some("notes"), "only once");
     }
 
     #[test]

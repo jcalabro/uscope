@@ -100,6 +100,7 @@ pub mod sim_edge;
 mod stack_watches;
 mod step_targets;
 mod stepping;
+pub mod syscalls;
 mod tls;
 mod vdso;
 mod visualizers;

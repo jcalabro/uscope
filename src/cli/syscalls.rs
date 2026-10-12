@@ -1,0 +1,1273 @@
+//! `uscope syscalls`: strace's flags over uscope's engines
+//! (`plans/syscalls.html`).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{self, LineWriter, Write};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::{Context as _, Result, bail};
+use serde_json::{Map, Value, json};
+use uscope::syscall_engines::ptrace::{self, Finished, Target, TraceOptions};
+use uscope::syscall_engines::{Sink, monotonic};
+use uscope::syscalls::captures::Limits;
+use uscope::syscalls::fds::FdTable;
+use uscope::syscalls::filter::{self, Filter};
+use uscope::syscalls::stats::{SyscallStats, bytes_moved};
+use uscope::syscalls::{Abi, InFlight, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent};
+
+use super::Renderers;
+use super::terminal::{ColorChoice, Renderer, Role};
+use crate::present::syscalls::summary::{self, Column};
+use crate::present::syscalls::{
+    self as present, Constants, Context, FdStyle, Hex, Kind, Style, Tokens,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum EngineArg {
+    /// eBPF in the kernel: no stops, needs `CAP_BPF` and `CAP_PERFMON`.
+    Bpf,
+    /// ptrace with a seccomp filter: exact, unprivileged, slower.
+    Ptrace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Ndjson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConstantsArg {
+    Raw,
+    Abbrev,
+    Verbose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AttachArg {
+    Auto,
+    Tracepoint,
+    Fentry,
+}
+
+/// The flags follow strace's; see `uscope syscalls --help`.
+#[derive(Debug, clap::Args)]
+#[command(about = "Trace the system calls a program makes, as strace does")]
+#[expect(clippy::struct_excessive_bools, reason = "one per flag")]
+pub struct SyscallsArgs {
+    /// A selection: trace=, status=, signal=, read=, write=, trace-fds=,
+    /// raw=, verbose=, or abbrev=. A bare set means trace=.
+    #[arg(short = 'e', value_name = "EXPR")]
+    expressions: Vec<String>,
+    /// Trace the running process PID; repeat it, or separate pids with
+    /// commas.
+    #[arg(short = 'p', long = "attach-pid", value_name = "PID")]
+    pids: Vec<String>,
+    /// Trace children too (the default); twice, with -o, writes each
+    /// process to FILE.PID.
+    #[arg(short = 'f', action = clap::ArgAction::Count)]
+    follow: u8,
+    /// Trace only the targets, not the processes they create.
+    #[arg(long, conflicts_with = "follow")]
+    no_follow: bool,
+    /// Stop tracing a process when it calls SYSCALL; only execve.
+    #[arg(short = 'b', value_name = "SYSCALL")]
+    detach_on: Option<String>,
+    /// Count calls, errors, and time, and print a table at the end
+    /// instead of the calls.
+    #[arg(short = 'c', conflicts_with = "summary_too")]
+    summary_only: bool,
+    /// Print the calls and the table.
+    #[arg(short = 'C')]
+    summary_too: bool,
+    /// Time calls by wall clock, from entry to exit. uscope always does.
+    #[arg(short = 'w')]
+    wall_clock: bool,
+    /// Sort the table by a column: time, calls, errors, name, p99, or
+    /// nothing.
+    #[arg(short = 'S', value_name = "SORTBY", default_value = "time")]
+    sort: String,
+    /// The table's columns, separated by commas: time-percent, total-time,
+    /// min-time, max-time, avg-time, calls, errors, name, p50, p90, p99,
+    /// bytes, errnos.
+    #[arg(short = 'U', value_name = "COLUMNS")]
+    columns: Option<String>,
+    /// Print what descriptors refer to; twice adds sockets' endpoints.
+    #[arg(short = 'y', action = clap::ArgAction::Count)]
+    decode_fds: u8,
+    /// Bytes of each string shown.
+    #[arg(short = 's', value_name = "SIZE", default_value_t = 32)]
+    string_limit: usize,
+    /// Print non-ASCII strings in hex; twice, every string.
+    #[arg(short = 'x', action = clap::ArgAction::Count)]
+    hex: u8,
+    /// How constants print.
+    #[arg(short = 'X', value_enum, value_name = "FORMAT")]
+    constants: Option<ConstantsArg>,
+    /// Print whole structures and environments.
+    #[arg(short = 'v')]
+    verbose: bool,
+    /// Align results at COLUMN, as strace does.
+    #[arg(short = 'a', value_name = "COLUMN", default_value_t = 40)]
+    column: usize,
+    /// Print each call's number.
+    #[arg(short = 'n')]
+    numbers: bool,
+    /// Name each argument as the kernel does.
+    #[arg(short = 'N')]
+    arg_names: bool,
+    /// Print each process's command name beside its pid.
+    #[arg(short = 'Y')]
+    comm: bool,
+    /// Print the time of day; twice, with microseconds; three times, as
+    /// seconds since the epoch.
+    #[arg(short = 't', action = clap::ArgAction::Count)]
+    timestamps: u8,
+    /// Print the time since the previous line.
+    #[arg(short = 'r')]
+    relative: bool,
+    /// Print the time each call took.
+    #[arg(short = 'T')]
+    durations: bool,
+    /// Print the stack of each call.
+    #[arg(short = 'k', action = clap::ArgAction::Count)]
+    stacks: u8,
+    /// Write the trace to FILE; `-` is standard output.
+    #[arg(short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+    /// Append to -o's file.
+    #[arg(short = 'A', requires = "output")]
+    append: bool,
+    /// When to color the trace.
+    #[arg(long, value_enum)]
+    color: Option<ColorChoice>,
+    /// Suppress messages about attaching; twice, about exits too.
+    #[arg(short = 'q', action = clap::ArgAction::Count)]
+    quiet: u8,
+    /// Show only calls that succeeded.
+    #[arg(short = 'z', conflicts_with = "failed_only")]
+    successful_only: bool,
+    /// Show only calls that failed.
+    #[arg(short = 'Z')]
+    failed_only: bool,
+    /// Show only calls that name PATH, by argument or descriptor.
+    #[arg(short = 'P', value_name = "PATH")]
+    paths: Vec<String>,
+    /// Show only calls on these descriptors, separated by commas.
+    #[arg(long, value_name = "FDS")]
+    trace_fds: Option<String>,
+    /// Show only calls that took at least this long: 10ms, 2us, 1s.
+    #[arg(long, value_name = "DURATION")]
+    slower_than: Option<String>,
+    /// Show one call in N, as 1/N; the table still counts every call.
+    #[arg(long, value_name = "1/N")]
+    sample: Option<String>,
+    /// How the trace is written.
+    #[arg(long, value_enum, default_value = "text")]
+    format: OutputFormat,
+    /// Report calls blocked longer than this, while they are: 1s, 500ms,
+    /// or off.
+    #[arg(long, value_name = "DURATION", default_value = "1s")]
+    in_flight: String,
+    /// Which engine sees the calls. There is never a fallback.
+    #[arg(long, value_enum, default_value = "bpf")]
+    engine: EngineArg,
+    /// Allow the ptrace engine to attach, which stops the process at every
+    /// system call it makes.
+    #[arg(long)]
+    stop_every_call: bool,
+    /// Where the BPF engine attaches.
+    #[arg(long, value_enum, default_value = "auto")]
+    attach: AttachArg,
+    /// The BPF engine's ring buffer: bytes, with K or M.
+    #[arg(long, value_name = "SIZE")]
+    ring: Option<String>,
+    /// Hold the BPF engine's cost to PERCENT of one CPU by sampling.
+    #[arg(long, value_name = "PERCENT")]
+    budget: Option<f64>,
+    /// Trace every process of a cgroup.
+    #[arg(long, value_name = "PATH")]
+    cgroup: Option<PathBuf>,
+    /// Trace every process of a container, by its id.
+    #[arg(long, value_name = "ID")]
+    container: Option<String>,
+    /// Stop tracing after this long: 30s, 5m.
+    #[arg(long, value_name = "DURATION")]
+    duration: Option<String>,
+    /// The program to trace and its arguments.
+    #[arg(last = true, value_name = "PROGRAM")]
+    command: Vec<OsString>,
+}
+
+/// Runs `uscope syscalls`, exiting as the traced program did.
+pub fn run(args: &SyscallsArgs) -> std::process::ExitCode {
+    match trace(args) {
+        Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(error) => {
+            eprintln!("uscope: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Nanoseconds in a duration such as `10ms`, `2us`, `1.5s`, or `5m`.
+fn nanoseconds(text: &str) -> Result<u64> {
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let scale = match unit {
+        "" | "s" => 1e9,
+        "ms" => 1e6,
+        "us" | "µs" => 1e3,
+        "ns" => 1.0,
+        "m" => 60e9,
+        "h" => 3600e9,
+        _ => bail!("{text} is not a duration, such as 10ms, 2us, or 1s"),
+    };
+    let number: f64 = number
+        .parse()
+        .with_context(|| format!("{text} is not a duration, such as 10ms, 2us, or 1s"))?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "checked to be finite and non-negative"
+    )]
+    if number.is_finite() && number >= 0.0 {
+        Ok((number * scale) as u64)
+    } else {
+        bail!("{text} is not a duration")
+    }
+}
+
+fn pids(texts: &[String]) -> Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for text in texts {
+        for part in text.split([',', ' ']).filter(|part| !part.is_empty()) {
+            let pid: u32 = part
+                .parse()
+                .with_context(|| format!("{part} is not a process id"))?;
+            if pid == 0 {
+                bail!("0 is not a process id");
+            }
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    Ok(pids)
+}
+
+/// Everything the flags decide, checked.
+struct Plan {
+    filter: Filter,
+    target: Option<Target>,
+    attached: Vec<u32>,
+    follow: bool,
+    sample: u64,
+    in_flight: Option<u64>,
+    columns: Vec<Column>,
+    sort: Option<Column>,
+}
+
+fn plan(args: &SyscallsArgs) -> Result<Plan> {
+    let mut expressions = args.expressions.clone();
+    if args.successful_only {
+        expressions.push("status=successful".to_owned());
+    }
+    if args.failed_only {
+        expressions.push("status=failed".to_owned());
+    }
+    if let Some(fds) = &args.trace_fds {
+        expressions.push(format!("trace-fds={fds}"));
+    }
+    let mut filter = Filter::parse(&expressions, &present::signal_named)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    filter.paths.clone_from(&args.paths);
+    filter.slower_than = args.slower_than.as_deref().map(nanoseconds).transpose()?;
+    let sample = match &args.sample {
+        None => 1,
+        Some(text) => text
+            .strip_prefix("1/")
+            .and_then(|n| n.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .with_context(|| format!("--sample takes 1/N, not {text}"))?,
+    };
+    let in_flight = match args.in_flight.as_str() {
+        "off" | "0" => None,
+        text => Some(nanoseconds(text).context("--in-flight")?),
+    };
+    let columns = match &args.columns {
+        Some(text) => summary::columns(text).map_err(anyhow::Error::msg)?,
+        None => Column::DEFAULT.to_vec(),
+    };
+    let sort = summary::sort_key(&args.sort).map_err(anyhow::Error::msg)?;
+    if let Some(call) = &args.detach_on
+        && call != "execve"
+    {
+        bail!("-b takes only execve, not {call}");
+    }
+    let attached = pids(&args.pids)?;
+    if args.engine == EngineArg::Ptrace {
+        for (given, flag) in [
+            (args.cgroup.is_some(), "--cgroup"),
+            (args.container.is_some(), "--container"),
+            (args.ring.is_some(), "--ring"),
+            (args.budget.is_some(), "--budget"),
+            (args.attach != AttachArg::Auto, "--attach"),
+        ] {
+            if given {
+                bail!("{flag} needs the BPF engine; the ptrace engine has no such choice");
+            }
+        }
+    }
+    let launching = !args.command.is_empty();
+    if launching && !attached.is_empty() {
+        bail!("give either a program after -- or -p PID, not both");
+    }
+    if !launching && attached.is_empty() && args.cgroup.is_none() && args.container.is_none() {
+        bail!(
+            "nothing to trace: give a program after --, or -p PID; uscope never traces the whole host"
+        );
+    }
+    if args.detach_on.is_some() && launching && args.engine == EngineArg::Ptrace {
+        bail!(
+            "-b execve cannot detach a launched program from the ptrace engine: its seccomp filter \
+             would then fail the traced calls with ENOSYS"
+        );
+    }
+    if args.engine == EngineArg::Ptrace && !attached.is_empty() && !args.stop_every_call {
+        bail!(
+            "attaching the ptrace engine stops the process at every system call it makes, \
+             a few microseconds each, because a running process cannot be given a filter. \
+             Pass --stop-every-call to accept that, or use --engine bpf"
+        );
+    }
+    if args.stacks > 0 {
+        bail!("-k is not supported yet");
+    }
+    let target = if launching {
+        let mut command = Command::new(&args.command[0]);
+        command.args(&args.command[1..]);
+        Some(Target::Launch(command))
+    } else if !attached.is_empty() {
+        Some(Target::Attach(attached.clone()))
+    } else {
+        None
+    };
+    Ok(Plan {
+        filter,
+        target,
+        attached,
+        follow: !args.no_follow,
+        sample,
+        in_flight,
+        columns,
+        sort,
+    })
+}
+
+fn trace(args: &SyscallsArgs) -> Result<i32> {
+    let mut plan = plan(args)?;
+    if args.engine == EngineArg::Bpf {
+        bail!(
+            "the BPF engine is not available in this build; trace with --engine ptrace, which \
+             needs no privilege"
+        );
+    }
+    let Some(target) = plan.target.take() else {
+        bail!("--cgroup and --container need the BPF engine");
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    super::profile::handle_signals(Some(stop.clone()), Arc::new(AtomicBool::new(false)))?;
+    if let Some(text) = &args.duration {
+        let after = Duration::from_nanos(nanoseconds(text).context("--duration")?);
+        let stop = stop.clone();
+        std::thread::Builder::new()
+            .name("uscope-syscalls-timer".into())
+            .spawn(move || {
+                std::thread::sleep(after);
+                stop.store(true, Ordering::Relaxed);
+            })
+            .context("starting the --duration timer")?;
+    }
+    // The descriptor table must see every call that changes it, shown or
+    // not, for what -y, -P, and ndjson's paths say to be true.
+    let mut calls = plan.filter.calls.clone();
+    if args.decode_fds > 0 || !args.paths.is_empty() || args.format == OutputFormat::Ndjson {
+        for id in uscope::syscalls::fds::followed() {
+            calls.insert(id);
+        }
+    }
+    let options = TraceOptions {
+        calls,
+        limits: Limits {
+            string: args.string_limit.max(1),
+            ..Limits::default()
+        },
+        verbose: args.verbose,
+        follow: plan.follow,
+    };
+    let mut printer = Printer::new(args, &plan)?;
+    for &pid in &plan.attached {
+        printer.processes.insert(pid);
+    }
+    let finished = ptrace::trace(target, &options, &stop, &mut printer);
+    for &pid in &plan.attached {
+        if printer.quiet == 0 && printer.processes.contains(&pid) && !printer.ended.contains(&pid) {
+            printer.message(&format!("Process {pid} detached"));
+        }
+    }
+    printer.finish()?;
+    let Finished { end } = finished?;
+    // An attached process's end is its own business, as under strace.
+    if !plan.attached.is_empty() {
+        return Ok(0);
+    }
+    Ok(match end {
+        Some(ProcessEnd::Exited(code)) => code & 0xff,
+        Some(ProcessEnd::Killed { signal, .. }) => 128 + signal,
+        None => 0,
+    })
+}
+
+/// Where one process's lines go.
+type Output = Box<dyn Write + Send>;
+
+/// The sink that prints: what strace's output loop does.
+#[expect(clippy::struct_excessive_bools, reason = "one per output flag")]
+struct Printer {
+    filter: Filter,
+    format: OutputFormat,
+    style: Style,
+    /// The renderer that colors text; none for files.
+    renderer: Option<Renderer>,
+    output: Output,
+    /// With -ff: FILE, each process writing FILE.PID.
+    per_process: Option<(PathBuf, BTreeMap<u32, Output>)>,
+    /// Prefixes `PID ` rather than `[pid PID] `, as strace does in files.
+    bare_pid: bool,
+    show_calls: bool,
+    summarize: bool,
+    stats: BTreeMap<SyscallId, SyscallStats>,
+    fds: FdTable,
+    timestamps: u8,
+    relative: bool,
+    durations: bool,
+    numbers: bool,
+    column: usize,
+    comm: bool,
+    quiet: u8,
+    follow: bool,
+    sample: u64,
+    sampled: u64,
+    in_flight: Option<u64>,
+    columns: Vec<Column>,
+    sort: Option<Column>,
+    /// `CLOCK_REALTIME` minus `CLOCK_MONOTONIC`, and the local zone's
+    /// offset, in nanoseconds.
+    realtime: i128,
+    zone: i64,
+    previous: Option<u64>,
+    threads: BTreeSet<u32>,
+    processes: BTreeSet<u32>,
+    ended: BTreeSet<u32>,
+    names: BTreeMap<u32, String>,
+    /// In-flight calls already reported, by thread and entry time.
+    reported: BTreeSet<(u32, u64)>,
+    /// Each thread's last ABI, where it is not x86-64's.
+    personalities: BTreeMap<u32, Abi>,
+    error: Option<io::Error>,
+}
+
+/// The local zone's offset from UTC now, in seconds.
+#[allow(
+    unsafe_code,
+    reason = "libc's localtime_r is the only way to read the zone"
+)]
+fn zone_offset(seconds: i64) -> i64 {
+    let time: nix::libc::time_t = seconds;
+    // SAFETY: zeroes are a valid `tm`, which is plain data.
+    let mut local: nix::libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers name live locals of the right types, and
+    // localtime_r writes only through the second.
+    let converted = unsafe { nix::libc::localtime_r(&raw const time, &raw mut local) };
+    if converted.is_null() {
+        0
+    } else {
+        local.tm_gmtoff
+    }
+}
+
+impl Printer {
+    fn new(args: &SyscallsArgs, plan: &Plan) -> Result<Self> {
+        let open = |path: &std::path::Path| -> Result<File> {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(args.append)
+                .truncate(!args.append)
+                .open(path)
+                .with_context(|| format!("opening {}", path.display()))
+        };
+        let to_file = args.output.as_ref().filter(|path| path.as_os_str() != "-");
+        let color = args.color.unwrap_or_default();
+        let (output, renderer, per_process): (Output, Option<Renderer>, _) =
+            match (&args.output, to_file) {
+                (_, Some(path)) if args.follow >= 2 => (
+                    Box::new(io::sink()),
+                    None,
+                    Some((path.clone(), BTreeMap::new())),
+                ),
+                (_, Some(path)) => (Box::new(io::BufWriter::new(open(path)?)), None, None),
+                (Some(_), None) => (
+                    Box::new(LineWriter::new(io::stdout())),
+                    Some(Renderers::detect(color, false).stdout),
+                    None,
+                ),
+                (None, None) => (
+                    Box::new(LineWriter::new(io::stderr())),
+                    Some(Renderers::detect(color, false).stderr),
+                    None,
+                ),
+            };
+        let realtime =
+            nix::time::clock_gettime(nix::time::ClockId::CLOCK_REALTIME).map_or(0, |time| {
+                i128::from(time.tv_sec()) * 1_000_000_000 + i128::from(time.tv_nsec())
+            }) - i128::from(monotonic());
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "seconds since the epoch fit"
+        )]
+        let zone = zone_offset((realtime / 1_000_000_000) as i64);
+        Ok(Self {
+            filter: plan.filter.clone(),
+            format: args.format,
+            style: Style {
+                string_limit: args.string_limit,
+                hex: match args.hex {
+                    0 => Hex::Never,
+                    1 => Hex::NonAscii,
+                    _ => Hex::All,
+                },
+                constants: match args.constants {
+                    None | Some(ConstantsArg::Abbrev) => Constants::Abbrev,
+                    Some(ConstantsArg::Raw) => Constants::Raw,
+                    Some(ConstantsArg::Verbose) => Constants::Verbose,
+                },
+                verbose: args.verbose,
+                fds: match args.decode_fds {
+                    0 => FdStyle::Number,
+                    1 => FdStyle::Paths,
+                    _ => FdStyle::All,
+                },
+                arg_names: args.arg_names,
+                raw: false,
+            },
+            renderer,
+            output,
+            bare_pid: to_file.is_some() && plan.follow,
+            per_process,
+            show_calls: !args.summary_only,
+            summarize: args.summary_only || args.summary_too,
+            stats: BTreeMap::new(),
+            fds: FdTable::default(),
+            timestamps: args.timestamps,
+            relative: args.relative,
+            durations: args.durations,
+            numbers: args.numbers,
+            column: args.column,
+            comm: args.comm,
+            // As under strace, a trace written to a file says nothing
+            // more on standard error.
+            quiet: if to_file.is_some() {
+                args.quiet.max(1)
+            } else {
+                args.quiet
+            },
+            follow: plan.follow,
+            sample: plan.sample,
+            sampled: 0,
+            in_flight: plan.in_flight,
+            columns: plan.columns.clone(),
+            sort: plan.sort,
+            realtime,
+            zone,
+            previous: None,
+            threads: BTreeSet::new(),
+            processes: BTreeSet::new(),
+            ended: BTreeSet::new(),
+            names: BTreeMap::new(),
+            reported: BTreeSet::new(),
+            personalities: BTreeMap::new(),
+            error: None,
+        })
+    }
+
+    /// A line of uscope's own, as strace's `strace: ...` lines.
+    fn message(&mut self, text: &str) {
+        if self.format == OutputFormat::Ndjson {
+            return;
+        }
+        let line = format!("uscope: {text}\n");
+        if let Err(error) = io::stderr().write_all(line.as_bytes()) {
+            self.error.get_or_insert(error);
+        }
+    }
+
+    fn write(&mut self, process: u32, line: &str) {
+        let output = match &mut self.per_process {
+            Some((path, outputs)) => match outputs.entry(process) {
+                std::collections::btree_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let mut name = path.clone().into_os_string();
+                    name.push(format!(".{process}"));
+                    match File::create(&name) {
+                        Ok(file) => Some(entry.insert(Box::new(io::BufWriter::new(file)))),
+                        Err(error) => {
+                            self.error.get_or_insert(error);
+                            return;
+                        }
+                    }
+                }
+            },
+            None => Some(&mut self.output),
+        };
+        if let Some(output) = output
+            && let Err(error) = output
+                .write_all(line.as_bytes())
+                .and_then(|()| output.write_all(b"\n"))
+        {
+            self.error.get_or_insert(error);
+        }
+    }
+
+    fn paint(&self, tokens: &Tokens) -> String {
+        let Some(renderer) = self.renderer else {
+            return tokens.text();
+        };
+        tokens
+            .0
+            .iter()
+            .map(|token| {
+                let role = match token.kind {
+                    Kind::Name | Kind::Pid => Some(Role::Name),
+                    Kind::Number => Some(Role::Number),
+                    Kind::String => Some(Role::String),
+                    Kind::Constant => Some(Role::Type),
+                    Kind::Fd | Kind::Path | Kind::Address => Some(Role::Metadata),
+                    Kind::Error => Some(Role::Error),
+                    Kind::Comment | Kind::Time => Some(Role::Muted),
+                    Kind::Missing => Some(Role::Warning),
+                    Kind::Punctuation | Kind::Text => None,
+                };
+                role.map_or_else(
+                    || token.text.clone(),
+                    |role| renderer.paint(role, &token.text).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// strace's leader: the pid, the time, and the call's number.
+    fn leader(&mut self, thread: u32, process: u32, time: u64, number: Option<u32>) -> Tokens {
+        let mut out = Tokens::default();
+        if self.per_process.is_none() && self.threads.len() > 1 {
+            let name = self
+                .comm
+                .then(|| self.names.get(&process).map(|name| format!("<{name}>")))
+                .flatten()
+                .unwrap_or_default();
+            if self.bare_pid {
+                out.push(Kind::Pid, format!("{thread:<5}{name}"));
+                out.push(Kind::Punctuation, " ");
+            } else {
+                out.push(Kind::Punctuation, "[pid ");
+                out.push(Kind::Pid, format!("{thread:>5}{name}"));
+                out.push(Kind::Punctuation, "] ");
+            }
+        }
+        if self.relative {
+            let since = self
+                .previous
+                .map_or(0, |previous| time.saturating_sub(previous));
+            out.push(
+                Kind::Time,
+                format!(
+                    "{:>6}.{:06} ",
+                    since / 1_000_000_000,
+                    since % 1_000_000_000 / 1_000
+                ),
+            );
+        }
+        self.previous = Some(time);
+        if self.timestamps > 0 {
+            let wall = self.realtime + i128::from(time);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the epoch's seconds and a fraction"
+            )]
+            let (seconds, micros) = (
+                (wall / 1_000_000_000) as i64,
+                (wall % 1_000_000_000 / 1_000) as u32,
+            );
+            let text = if self.timestamps >= 3 {
+                format!("{seconds}.{micros:06}")
+            } else {
+                let local = (seconds + self.zone).rem_euclid(86_400);
+                let clock = format!(
+                    "{:02}:{:02}:{:02}",
+                    local / 3600,
+                    local / 60 % 60,
+                    local % 60
+                );
+                if self.timestamps == 2 {
+                    format!("{clock}.{micros:06}")
+                } else {
+                    clock
+                }
+            };
+            out.push(Kind::Time, text);
+            out.push(Kind::Punctuation, " ");
+        }
+        if self.numbers
+            && let Some(number) = number
+        {
+            out.push(Kind::Punctuation, format!("[{number:>4}] "));
+        }
+        out
+    }
+
+    fn call(&mut self, event: &SyscallEvent) {
+        if !self.follow && !self.processes.is_empty() && !self.processes.contains(&event.process) {
+            return;
+        }
+        let paths = filter::paths(event);
+        let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let fds = &self.fds;
+        let shows = self.filter.shows(event, &path_refs, &|fd| {
+            fds.describe(event.process, fd)
+                .map(|description| description.text.to_string())
+        });
+        if shows && self.summarize {
+            self.stats.entry(event.call).or_default().add(
+                event.outcome,
+                event.duration(),
+                bytes_moved(event),
+            );
+        }
+        let mut style = self.style.clone();
+        style.raw = self.filter.raw.contains(event.call);
+        style.verbose = style.verbose || !self.filter.verbose.contains(event.call);
+        // strace prints what descriptors named before the call, and what
+        // the result names after it.
+        let entry = (shows && self.show_calls).then(|| {
+            (
+                present::entry(
+                    event,
+                    &style,
+                    Context {
+                        fds: Some(&self.fds),
+                        before: true,
+                    },
+                ),
+                present::argument_values(
+                    event,
+                    &style,
+                    Context {
+                        fds: Some(&self.fds),
+                        before: true,
+                    },
+                ),
+            )
+        });
+        self.fds.apply(&TraceEvent::Call(event.clone()));
+        let Some((entry, arguments)) = entry else {
+            return;
+        };
+        self.sampled += 1;
+        if !(self.sampled - 1).is_multiple_of(self.sample) {
+            return;
+        }
+        let returned = present::returned(
+            event,
+            &style,
+            Context {
+                fds: Some(&self.fds),
+                before: false,
+            },
+        );
+        self.personality(event);
+        match self.format {
+            OutputFormat::Text => {
+                let mut line = self.leader(
+                    event.thread,
+                    event.process,
+                    event.time(),
+                    Some(event.call.number),
+                );
+                line.0.extend(entry.0);
+                let width = line.text().len();
+                // strace pads so that ` = ` begins at the column.
+                if width + 1 < self.column {
+                    line.push(Kind::Punctuation, " ".repeat(self.column - 1 - width));
+                }
+                line.0.extend(returned.0);
+                if self.durations
+                    && let Some(duration) = event.duration()
+                {
+                    line.push(Kind::Time, format!(" <{}>", present::seconds(duration)));
+                }
+                let text = self.paint(&line);
+                self.write(event.process, &text);
+            }
+            OutputFormat::Ndjson => {
+                let text = format!("{}{}", entry.text(), returned.text());
+                let object = self.record(event, arguments, paths, text);
+                self.json(event.process, object);
+            }
+        }
+    }
+
+    /// strace's note that a thread changed its ABI.
+    fn personality(&mut self, event: &SyscallEvent) {
+        let personality = self
+            .personalities
+            .get(&event.thread)
+            .copied()
+            .unwrap_or(Abi::X86_64);
+        if personality == event.call.abi {
+            return;
+        }
+        if event.call.abi == Abi::X86_64 {
+            self.personalities.remove(&event.thread);
+        } else {
+            self.personalities.insert(event.thread, event.call.abi);
+        }
+        if self.format == OutputFormat::Text && self.quiet == 0 {
+            let mode = match event.call.abi {
+                Abi::X86_64 => "64 bit",
+                Abi::X86_32 => "32 bit",
+                Abi::X32 => "x32",
+            };
+            let note = format!("[ Process PID={} runs in {mode} mode. ]", event.thread);
+            self.write(event.process, &note);
+        }
+    }
+
+    /// A call's ndjson record.
+    fn record(
+        &self,
+        event: &SyscallEvent,
+        arguments: Vec<(String, Tokens)>,
+        paths: Vec<String>,
+        text: String,
+    ) -> Map<String, Value> {
+        {
+            {
+                let mut object = self.base("call", event.time(), Some(event.thread), event.process);
+                object.insert("name".into(), event.call.display_name().into());
+                if event.call.abi != Abi::X86_64 {
+                    object.insert("abi".into(), event.call.abi.suffix().into());
+                }
+                object.insert("number".into(), event.call.number.into());
+                let args: Map<String, Value> = arguments
+                    .into_iter()
+                    .map(|(name, tokens)| (name, tokens.text().into()))
+                    .collect();
+                object.insert("args".into(), args.into());
+                match event.outcome {
+                    Outcome::Returned(value) => {
+                        object.insert("return".into(), value.into());
+                    }
+                    Outcome::Failed(errno) => {
+                        object.insert("return".into(), (-i64::from(errno.0)).into());
+                        object.insert("errno".into(), present::errno(errno).0.into());
+                    }
+                    Outcome::Unfinished => {
+                        object.insert("unfinished".into(), true.into());
+                    }
+                    Outcome::ProcessExited => {
+                        object.insert("process_exited".into(), true.into());
+                    }
+                    Outcome::Unavailable => {
+                        object.insert("unavailable".into(), true.into());
+                    }
+                }
+                if let Some(duration) = event.duration() {
+                    object.insert("duration_ns".into(), duration.into());
+                }
+                let path = paths.into_iter().next().or_else(|| {
+                    filter::descriptors(event)
+                        .find_map(|fd| self.fds.describe(event.process, fd))
+                        .map(|description| description.text.to_string())
+                });
+                if let Some(path) = path {
+                    object.insert("path".into(), path.into());
+                }
+                object.insert("text".into(), text.into());
+                object
+            }
+        }
+    }
+
+    fn base(&self, kind: &str, time: u64, thread: Option<u32>, process: u32) -> Map<String, Value> {
+        let mut object = Map::new();
+        object.insert("type".into(), kind.into());
+        let wall = self.realtime + i128::from(time);
+        object.insert("time_ns".into(), json!(i64::try_from(wall).unwrap_or(0)));
+        object.insert("pid".into(), process.into());
+        if let Some(thread) = thread {
+            object.insert("tid".into(), thread.into());
+        }
+        object
+    }
+
+    fn json(&mut self, process: u32, object: Map<String, Value>) {
+        let line = Value::Object(object).to_string();
+        self.write(process, &line);
+    }
+
+    /// Prints a signal, exit, or loss line.
+    fn other(&mut self, event: &TraceEvent) {
+        let (thread, process) = match *event {
+            TraceEvent::Signal {
+                thread,
+                process,
+                signal,
+                ..
+            } => {
+                if !self.filter.signals.contains(&signal) {
+                    return;
+                }
+                (thread, process)
+            }
+            TraceEvent::Exit { process, .. } => {
+                if self.quiet >= 2 {
+                    return;
+                }
+                (process, process)
+            }
+            TraceEvent::Lost { .. } => (0, 0),
+            _ => return,
+        };
+        if !self.follow && !self.processes.contains(&process) && process != 0 {
+            return;
+        }
+        if !self.show_calls && !matches!(event, TraceEvent::Lost { .. }) {
+            return;
+        }
+        match self.format {
+            OutputFormat::Text => {
+                let Some(tokens) = present::other(event) else {
+                    return;
+                };
+                let mut line = self.leader(thread, process, event.time(), None);
+                line.0.extend(tokens.0);
+                let text = self.paint(&line);
+                self.write(process, &text);
+            }
+            OutputFormat::Ndjson => {
+                let object = match *event {
+                    TraceEvent::Signal {
+                        thread,
+                        process,
+                        time,
+                        signal,
+                        code,
+                        sender,
+                        ..
+                    } => {
+                        let mut object = self.base("signal", time, Some(thread), process);
+                        object.insert("signal".into(), present::signal(signal).into());
+                        if let Some(code) = code {
+                            object.insert("code".into(), code.into());
+                        }
+                        if let Some(sender) = sender {
+                            object.insert("sender".into(), sender.into());
+                        }
+                        object
+                    }
+                    TraceEvent::Exit { process, time, end } => {
+                        let mut object = self.base("exit", time, None, process);
+                        match end {
+                            ProcessEnd::Exited(code) => {
+                                object.insert("code".into(), code.into());
+                            }
+                            ProcessEnd::Killed { signal, core } => {
+                                object.insert("signal".into(), present::signal(signal).into());
+                                object.insert("core".into(), core.into());
+                            }
+                        }
+                        object
+                    }
+                    TraceEvent::Lost { time, count } => {
+                        let mut object = self.base("lost", time, None, 0);
+                        object.remove("pid");
+                        object.insert("count".into(), count.into());
+                        object
+                    }
+                    _ => return,
+                };
+                self.json(process, object);
+            }
+        }
+    }
+
+    /// Prints the table and flushes every output.
+    fn finish(&mut self) -> Result<()> {
+        if self.summarize {
+            let errno = |number: u16| present::errno(uscope::syscalls::Errno(number)).0;
+            match self.format {
+                OutputFormat::Text => {
+                    let lines = summary::table(&self.stats, &self.columns, self.sort, &errno);
+                    let mut out = self.output_for_summary();
+                    for line in lines {
+                        writeln!(out, "{line}")?;
+                    }
+                }
+                OutputFormat::Ndjson => {
+                    let rows: Vec<Value> = self
+                        .stats
+                        .iter()
+                        .map(|(id, stats)| {
+                            let errnos: Map<String, Value> = stats
+                                .errors_by_errno
+                                .iter()
+                                .map(|(&number, &count)| (errno(number), count.into()))
+                                .collect();
+                            json!({
+                                "name": id.display_name(),
+                                "calls": stats.calls,
+                                "errors": stats.errors,
+                                "total_ns": stats.total_ns,
+                                "min_ns": stats.min_ns,
+                                "max_ns": stats.max_ns,
+                                "p50_ns": stats.quantile_ns(0.5),
+                                "p90_ns": stats.quantile_ns(0.9),
+                                "p99_ns": stats.quantile_ns(0.99),
+                                "bytes": stats.bytes,
+                                "errnos": errnos,
+                            })
+                        })
+                        .collect();
+                    let line = json!({ "type": "summary", "calls": rows }).to_string();
+                    writeln!(self.output_for_summary(), "{line}")?;
+                }
+            }
+        }
+        self.output.flush()?;
+        if let Some((_, outputs)) = &mut self.per_process {
+            for output in outputs.values_mut() {
+                output.flush()?;
+            }
+        }
+        match self.error.take() {
+            Some(error) if error.kind() != io::ErrorKind::BrokenPipe => {
+                Err(error).context("writing the trace")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// strace writes -c's table where the trace goes, or to stderr with -ff.
+    fn output_for_summary(&mut self) -> Box<dyn Write + '_> {
+        if self.per_process.is_some() {
+            Box::new(io::stderr())
+        } else {
+            Box::new(&mut self.output)
+        }
+    }
+
+    fn note_thread(&mut self, thread: u32, process: u32) {
+        self.threads.insert(thread);
+        if self.comm
+            && !self.names.contains_key(&process)
+            && let Ok(name) = std::fs::read_to_string(format!("/proc/{process}/comm"))
+        {
+            self.names.insert(process, name.trim_end().to_owned());
+        }
+    }
+}
+
+impl Sink for Printer {
+    fn event(&mut self, event: TraceEvent) {
+        match &event {
+            TraceEvent::Call(call) => {
+                if self.processes.is_empty() {
+                    self.processes.insert(call.process);
+                }
+                self.note_thread(call.thread, call.process);
+                self.call(call);
+                return;
+            }
+            TraceEvent::Spawn {
+                child,
+                parent,
+                parent_thread,
+                thread,
+                ..
+            } => {
+                self.threads.insert(*parent_thread);
+                self.threads.insert(*child);
+                if !*thread && let Some(name) = self.names.get(parent).cloned() {
+                    self.names.insert(*child, name);
+                }
+                // strace calls every thread a process.
+                if self.follow && self.quiet == 0 {
+                    self.message(&format!("Process {child} attached"));
+                }
+            }
+            TraceEvent::Exec { process, path, .. } => {
+                if self.processes.is_empty() {
+                    self.processes.insert(*process);
+                }
+                let name: String = path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(15)
+                    .collect();
+                self.names.insert(*process, name);
+                if self.fds.of(*process).next().is_none() {
+                    let mut seeds = Seeds::default();
+                    ptrace::seed_descriptors(*process, &mut seeds);
+                    for seed in seeds.0 {
+                        self.fds.apply(&seed);
+                    }
+                }
+            }
+            TraceEvent::Exit { process, .. } => {
+                self.ended.insert(*process);
+            }
+            TraceEvent::Signal {
+                thread, process, ..
+            } => self.note_thread(*thread, *process),
+            TraceEvent::Lost { .. } | TraceEvent::Descriptor { .. } => {}
+        }
+        self.other(&event);
+        self.fds.apply(&event);
+    }
+
+    fn in_flight(&mut self, calls: &[InFlight]) {
+        let Some(after) = self.in_flight else {
+            return;
+        };
+        let now = monotonic();
+        for call in calls {
+            if !self.reported.insert((call.thread, call.entered)) {
+                continue;
+            }
+            let event = SyscallEvent {
+                thread: call.thread,
+                process: call.process,
+                call: call.call,
+                args: call.args,
+                captured: Vec::new(),
+                outcome: Outcome::Unfinished,
+                entered: Some(call.entered),
+                exited: None,
+                stack: None,
+                flags: uscope::syscalls::EventFlags::default(),
+            };
+            if !self.filter.calls.contains(call.call) || !self.show_calls {
+                continue;
+            }
+            let blocked = now.saturating_sub(call.entered).max(after);
+            match self.format {
+                OutputFormat::Text => {
+                    let mut line = self.leader(
+                        call.thread,
+                        call.process,
+                        call.entered,
+                        Some(call.call.number),
+                    );
+                    let entry = present::entry(
+                        &event,
+                        &self.style,
+                        Context {
+                            fds: Some(&self.fds),
+                            before: false,
+                        },
+                    );
+                    line.0.extend(entry.0);
+                    line.push(
+                        Kind::Comment,
+                        format!(" … in flight {}", present::duration(blocked)),
+                    );
+                    let text = self.paint(&line);
+                    self.write(call.process, &text);
+                }
+                OutputFormat::Ndjson => {
+                    let mut object =
+                        self.base("in_flight", call.entered, Some(call.thread), call.process);
+                    object.insert("name".into(), call.call.display_name().into());
+                    object.insert("blocked_ns".into(), blocked.into());
+                    let entry = present::entry(
+                        &event,
+                        &self.style,
+                        Context {
+                            fds: Some(&self.fds),
+                            before: false,
+                        },
+                    );
+                    object.insert("text".into(), entry.text().into());
+                    self.json(call.process, object);
+                }
+            }
+        }
+        // Forget calls that have returned.
+        let live: BTreeSet<(u32, u64)> = calls
+            .iter()
+            .map(|call| (call.thread, call.entered))
+            .collect();
+        self.reported.retain(|key| live.contains(key));
+    }
+
+    fn in_flight_after(&self) -> Option<u64> {
+        self.in_flight
+    }
+
+    fn attached(&mut self, process: u32) {
+        if self.quiet == 0 {
+            self.message(&format!("Process {process} attached"));
+        }
+        ptrace::seed_descriptors(process, self);
+    }
+}
+
+/// Collects the descriptors a process holds as it begins.
+#[derive(Default)]
+struct Seeds(Vec<TraceEvent>);
+
+impl Sink for Seeds {
+    fn event(&mut self, event: TraceEvent) {
+        self.0.push(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_and_pids_parse_as_strace_writes_them() {
+        assert_eq!(nanoseconds("10ms").ok(), Some(10_000_000));
+        assert_eq!(nanoseconds("2us").ok(), Some(2_000));
+        assert_eq!(nanoseconds("1.5").ok(), Some(1_500_000_000));
+        assert!(nanoseconds("soon").is_err());
+        assert_eq!(
+            pids(&["1,2".to_owned(), "3 2".to_owned()]).ok(),
+            Some(vec![1, 2, 3])
+        );
+        assert!(pids(&["0".to_owned()]).is_err());
+    }
+}

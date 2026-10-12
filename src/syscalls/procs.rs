@@ -104,7 +104,10 @@ impl ProcessTree {
                     entry.ended = Some((time, end));
                 }
             }
-            TraceEvent::Call(_) | TraceEvent::Signal { .. } | TraceEvent::Lost { .. } => {}
+            TraceEvent::Call(_)
+            | TraceEvent::Signal { .. }
+            | TraceEvent::Lost { .. }
+            | TraceEvent::Descriptor { .. } => {}
         }
     }
 

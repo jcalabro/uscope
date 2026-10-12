@@ -209,12 +209,15 @@ fn element(text: &str) -> Result<BTreeSet<SyscallId>, FilterError> {
                         None => return error(format!("unknown class %{name}")),
                     },
                 };
-                calls(&|id, name| {
-                    specs::spec(id)
-                        .or_else(|| specs::spec_named(name))
-                        .is_some_and(|spec| {
-                            classes.iter().any(|&class| spec.classes.contains(class))
-                        })
+                // strace's `%%statfs` takes ustat too, which no class does.
+                let ustat = name == "%statfs";
+                calls(&|id, call| {
+                    (ustat && call == "ustat")
+                        || specs::spec(id)
+                            .or_else(|| specs::spec_named(call))
+                            .is_some_and(|spec| {
+                                classes.iter().any(|&class| spec.classes.contains(class))
+                            })
                 })
             } else {
                 calls(&|_, name| name == body)
@@ -455,6 +458,24 @@ pub fn descriptors(event: &SyscallEvent) -> impl Iterator<Item = i64> + '_ {
         .and_then(|_| event.outcome.raw())
         .filter(|&fd| fd >= 0);
     arguments.chain(result)
+}
+
+/// The paths a call names by argument, as captured.
+#[must_use]
+pub fn paths(event: &SyscallEvent) -> Vec<String> {
+    let Some(spec) = specs::spec(event.call) else {
+        return Vec::new();
+    };
+    spec.args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| matches!(arg, specs::Arg::Path))
+        .filter_map(|(index, _)| {
+            let capture = event.capture(u8::try_from(index).ok()?)?;
+            let bytes = capture.bytes.split(|&b| b == 0).next().unwrap_or_default();
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        })
+        .collect()
 }
 
 /// A descriptor argument as the kernel reads it: an `int`.

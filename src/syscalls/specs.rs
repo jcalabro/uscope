@@ -147,6 +147,10 @@ pub enum Struct {
     FdSet,
     Dirents,
     Tms,
+    /// `struct rseq`, as long as the call's length says.
+    Rseq,
+    /// The status `wait4` writes.
+    WaitStatus,
 }
 
 impl Struct {
@@ -157,6 +161,7 @@ impl Struct {
             Self::Dirents => 0,
             Self::Timezone
             | Self::Int
+            | Self::WaitStatus
             | Self::Fds2
             | Self::Pollfd
             | Self::Sigset
@@ -170,7 +175,12 @@ impl Struct {
             | Self::Iovec
             | Self::Utimbuf => 16,
             Self::OpenHow | Self::Sigaltstack => 24,
-            Self::Timespec2 | Self::Timeval2 | Self::Itimerspec | Self::Sigaction | Self::Tms => 32,
+            Self::Timespec2
+            | Self::Timeval2
+            | Self::Itimerspec
+            | Self::Sigaction
+            | Self::Tms
+            | Self::Rseq => 32,
             Self::Msghdr => 56,
             Self::Mmsghdr => 64,
             Self::CloneArgs => 88,
@@ -213,6 +223,8 @@ impl Struct {
             "siginfo" => Self::Siginfo,
             "clone_args" => Self::CloneArgs,
             "open_how" => Self::OpenHow,
+            "rseq" => Self::Rseq,
+            "wstatus" => Self::WaitStatus,
             "sigaltstack" => Self::Sigaltstack,
             "sched_param" => Self::SchedParam,
             "utimbuf" => Self::Utimbuf,
@@ -367,7 +379,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("stat", "path >stat -> i", "stat"),
     ("fstat", "fd >stat -> i", "fstat"),
     ("lstat", "path >stat -> i", "lstat"),
-    ("poll", "<>pollfd:a1 u i -> i", ""),
+    ("poll", "<>pollfd:a1 u i -> i", "desc"),
     ("lseek", "fd l E:whence -> i", ""),
     ("mmap", "p u F:mmap_prot F:mmap_flags fd x -> x", "memory"),
     ("mprotect", "p z F:mmap_prot -> i", "memory"),
@@ -387,7 +399,11 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("writev", "fd <iovec:a2 z -> i", ""),
     ("access", "path F:access -> i", ""),
     ("pipe", ">fds2 -> i", ""),
-    ("select", "i <>fd_set <>fd_set <>fd_set <>timeval -> i", ""),
+    (
+        "select",
+        "i <>fd_set <>fd_set <>fd_set <>timeval -> i",
+        "desc",
+    ),
     ("sched_yield", " -> i", ""),
     ("mremap", "p z z F:mremap p -> x", "memory"),
     ("msync", "p z F:msync -> i", "memory"),
@@ -399,12 +415,12 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("dup", "fd -> fd", ""),
     ("dup2", "fd fd -> fd", ""),
     ("pause", " -> i", "signal"),
-    ("nanosleep", "<timespec >timespec -> i", "clock"),
+    ("nanosleep", "<timespec >timespec -> i", ""),
     ("getitimer", "i >itimerval -> i", ""),
     ("alarm", "u -> u", ""),
     ("setitimer", "i <itimerval >itimerval -> i", ""),
     ("getpid", " -> pid", "pure"),
-    ("sendfile", "fd fd <>u64 z -> i", "net"),
+    ("sendfile", "fd fd <>u64 z -> i", "net desc"),
     ("socket", "E:af F:sock_type E:ipproto -> fd", "net"),
     ("connect", "fd <sockaddr:a2 u -> i", "net"),
     ("accept", "fd >sockaddr:*a2 <>int -> fd", "net"),
@@ -429,7 +445,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("vfork", " -> pid", "process"),
     ("execve", "path strv strv -> i", "process"),
     ("exit", "i -> none", "process"),
-    ("wait4", "pid >int F:wait >rusage -> pid", "process"),
+    ("wait4", "pid >wstatus F:wait >rusage -> pid", "process"),
     ("kill", "pid sig -> i", "signal process"),
     ("uname", ">utsname -> i", ""),
     ("semget", "i i x -> i", "ipc"),
@@ -447,7 +463,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("truncate", "path l -> i", ""),
     ("ftruncate", "fd l -> i", ""),
     ("getdents", "fd >dirents:ret u -> i", ""),
-    ("getcwd", ">buf:ret z -> i", ""),
+    ("getcwd", ">buf:ret z -> i", "file"),
     ("chdir", "path -> i", ""),
     ("fchdir", "fd -> i", ""),
     ("rename", "path path -> i", ""),
@@ -469,7 +485,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("getrusage", "E:rusage >rusage -> i", ""),
     ("sysinfo", ">sysinfo -> i", ""),
     ("times", ">tms -> i", ""),
-    ("ptrace", "E:ptrace pid x x -> i", "process"),
+    ("ptrace", "E:ptrace pid x x -> i", ""),
     ("getuid", " -> u", "creds pure"),
     ("syslog", "i >buf:ret i -> i", ""),
     ("getgid", " -> u", "creds pure"),
@@ -533,7 +549,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("modify_ldt", "i p u -> i", ""),
     ("pivot_root", "path path -> i", ""),
     ("_sysctl", "p -> i", ""),
-    ("prctl", "E:prctl x x x x -> i", ""),
+    ("prctl", "E:prctl x x x x -> i", "creds"),
     ("arch_prctl", "E:arch_prctl x -> i", ""),
     ("adjtimex", "p -> i", "clock"),
     ("setrlimit", "E:rlimit <rlimit -> i", ""),
@@ -557,8 +573,8 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("query_module", "str i p u p -> i", ""),
     ("quotactl", "x path i p -> i", ""),
     ("nfsservctl", "i p p -> i", ""),
-    ("getpmsg", "x x x x x -> i", ""),
-    ("putpmsg", "x x x x x -> i", ""),
+    ("getpmsg", "x x x x x -> i", "net"),
+    ("putpmsg", "x x x x x -> i", "net"),
     ("afs_syscall", "x x x x x -> i", ""),
     ("tuxcall", "x x x -> i", ""),
     ("security", "x x x -> i", ""),
@@ -582,8 +598,8 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("sched_setaffinity", "pid u p -> i", ""),
     ("sched_getaffinity", "pid u p -> i", ""),
     ("set_thread_area", "p -> i", ""),
-    ("io_setup", "u p -> i", ""),
-    ("io_destroy", "x -> i", ""),
+    ("io_setup", "u p -> i", "memory"),
+    ("io_destroy", "x -> i", "memory"),
     ("io_getevents", "x l l p <timespec -> i", ""),
     ("io_submit", "x l p -> i", ""),
     ("io_cancel", "x p p -> i", ""),
@@ -617,7 +633,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     (
         "clock_nanosleep",
         "E:clock F:timer <timespec >timespec -> i",
-        "clock",
+        "",
     ),
     ("exit_group", "i -> none", "process"),
     ("epoll_wait", "fd >epoll_event:ret i i -> i", ""),
@@ -665,9 +681,9 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     (
         "pselect6",
         "i <>fd_set <>fd_set <>fd_set <>timespec p -> i",
-        "",
+        "desc",
     ),
-    ("ppoll", "<>pollfd:a1 u <timespec <sigset z -> i", ""),
+    ("ppoll", "<>pollfd:a1 u <timespec <sigset z -> i", "desc"),
     ("unshare", "F:clone -> i", ""),
     ("set_robust_list", "p z -> i", ""),
     ("get_robust_list", "pid p p -> i", ""),
@@ -690,11 +706,11 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("timerfd_gettime", "fd >itimerspec -> i", ""),
     ("accept4", "fd >sockaddr:*a2 <>int F:sock_type -> fd", "net"),
     ("signalfd4", "fd <sigset z F:open -> fd", "signal"),
-    ("eventfd2", "u F:open -> fd", ""),
+    ("eventfd2", "u F:efd -> fd", ""),
     ("epoll_create1", "F:open -> fd", ""),
-    ("dup3", "fd fd F:open -> fd", ""),
-    ("pipe2", ">fds2 F:open -> i", ""),
-    ("inotify_init1", "F:open -> fd", ""),
+    ("dup3", "fd fd F:oflags -> fd", ""),
+    ("pipe2", ">fds2 F:oflags -> i", ""),
+    ("inotify_init1", "F:in_init -> fd", ""),
     ("preadv", "fd >iovec:a2 z z z -> i", ""),
     ("pwritev", "fd <iovec:a2 z z z -> i", ""),
     (
@@ -725,7 +741,7 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("getrandom", ">buf:ret z F:getrandom -> i", ""),
     ("memfd_create", "str F:memfd -> fd", ""),
     ("kexec_file_load", "fd fd z str x -> i", ""),
-    ("bpf", "E:bpf p u p u -> i", ""),
+    ("bpf", "E:bpf p u p u -> i", "desc"),
     ("execveat", "dfd path strv strv F:at -> i", "process"),
     ("userfaultfd", "F:open -> fd", ""),
     ("membarrier", "i x i -> i", ""),
@@ -736,9 +752,9 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("pkey_mprotect", "p z F:mmap_prot i -> i", "memory"),
     ("pkey_alloc", "x x -> i", ""),
     ("pkey_free", "i -> i", ""),
-    ("statx", "dfd path F:at x >statx -> i", ""),
+    ("statx", "dfd path F:at x >statx -> i", "fstat"),
     ("io_pgetevents", "x l l p <timespec p -> i", ""),
-    ("rseq", "p u x x -> i", ""),
+    ("rseq", "<rseq:a1 u F:rseq x -> i", ""),
     ("uretprobe", " -> i", ""),
     ("uprobe", " -> i", ""),
     (
@@ -747,21 +763,21 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
         "signal process",
     ),
     ("io_uring_setup", "u p -> fd", ""),
-    ("io_uring_enter", "fd u u x p z -> i", ""),
-    ("io_uring_register", "fd u p u -> i", ""),
+    ("io_uring_enter", "fd u u x p z -> i", "signal"),
+    ("io_uring_register", "fd u p u -> i", "memory"),
     ("open_tree", "dfd path x -> fd", ""),
     ("move_mount", "dfd path dfd path x -> i", ""),
     ("fsopen", "str x -> fd", ""),
-    ("fsconfig", "fd u str p i -> i", ""),
+    ("fsconfig", "fd u str p i -> i", "file"),
     ("fsmount", "fd x x -> fd", ""),
     ("fspick", "dfd path x -> fd", ""),
-    ("pidfd_open", "pid x -> fd", "process"),
+    ("pidfd_open", "pid x -> fd", ""),
     ("clone3", "<clone_args z -> pid", "process"),
-    ("close_range", "fd fd F:close_range -> i", ""),
+    ("close_range", "fd fd F:close_range -> i", "-desc"),
     ("openat2", "dfd path <open_how z -> fd", ""),
     ("pidfd_getfd", "fd i x -> fd", ""),
     ("faccessat2", "dfd path F:access F:at -> i", ""),
-    ("process_madvise", "fd p z E:madvise x -> i", "memory"),
+    ("process_madvise", "fd p z E:madvise x -> i", ""),
     (
         "epoll_pwait2",
         "fd >epoll_event:ret i <timespec <sigset u -> i",
@@ -772,8 +788,8 @@ const SIGNATURES: &[(&str, &str, &str)] = &[
     ("landlock_create_ruleset", "p z x -> fd", ""),
     ("landlock_add_rule", "fd i p x -> i", ""),
     ("landlock_restrict_self", "fd x -> i", ""),
-    ("memfd_secret", "x -> fd", "memory"),
-    ("process_mrelease", "fd x -> i", "memory"),
+    ("memfd_secret", "x -> fd", ""),
+    ("process_mrelease", "fd x -> i", ""),
     ("futex_waitv", "p u x <timespec E:clock -> i", ""),
     ("set_mempolicy_home_node", "p z x x -> i", "memory"),
     ("cachestat", "fd p p x -> i", ""),
@@ -931,7 +947,14 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
         other => return Err(ParseError(format!("unknown result {other:?}"))),
     };
     let mut set = Classes::default();
+    // `-desc` keeps a call that takes a descriptor out of %desc, as
+    // strace's tables do for a few.
+    let mut not_desc = false;
     for name in classes.split_whitespace() {
+        if name == "-desc" {
+            not_desc = true;
+            continue;
+        }
         set.insert(
             Class::named(name).ok_or_else(|| ParseError(format!("unknown class {name:?}")))?,
         );
@@ -939,7 +962,22 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
     if args.iter().any(|arg| matches!(arg, Arg::Path)) {
         set.insert(Class::File);
     }
-    if ret == Ret::Fd || args.iter().any(|arg| matches!(arg, Arg::Fd)) {
+    // strace's %desc: calls that take or make descriptors, a directory's
+    // included, except the network's, which are %net alone.
+    let makes = |arg: &Arg| {
+        matches!(
+            arg,
+            Arg::Mem {
+                kind: MemKind::Struct(Struct::Fds2),
+                ..
+            }
+        )
+    };
+    let takes = |arg: &Arg| matches!(arg, Arg::Fd | Arg::DirFd);
+    if !not_desc
+        && !set.contains(Class::Net)
+        && (ret == Ret::Fd || args.iter().any(|arg| takes(arg) || makes(arg)))
+    {
         set.insert(Class::Desc);
     }
     Ok(Spec {

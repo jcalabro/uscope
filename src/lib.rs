@@ -40,6 +40,8 @@ mod runtime_model;
 pub mod sim;
 mod source_map;
 pub mod syscalls;
+/// The engines that trace system calls into [`syscalls`]' events.
+pub use backend::syscall_engines;
 #[cfg(test)]
 mod test_memory;
 pub mod timings;

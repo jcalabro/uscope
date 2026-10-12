@@ -40,6 +40,8 @@ pub struct SyscallStats {
     /// Calls with a duration, which `total_ns` and the histogram cover.
     pub timed: u64,
     pub total_ns: u64,
+    /// The shortest timed call, or 0 before any.
+    pub min_ns: u64,
     pub max_ns: u64,
     pub log2_ns: Vec<u64>,
     /// Bytes read or written, for calls that move them.
@@ -55,6 +57,11 @@ impl SyscallStats {
             *self.errors_by_errno.entry(errno).or_default() += 1;
         }
         if let Some(duration) = duration {
+            self.min_ns = if self.timed == 0 {
+                duration
+            } else {
+                self.min_ns.min(duration)
+            };
             self.timed += 1;
             self.total_ns = self.total_ns.saturating_add(duration);
             self.max_ns = self.max_ns.max(duration);
@@ -72,6 +79,13 @@ impl SyscallStats {
         self.errors += other.errors;
         for (&errno, &count) in &other.errors_by_errno {
             *self.errors_by_errno.entry(errno).or_default() += count;
+        }
+        if other.timed > 0 {
+            self.min_ns = if self.timed == 0 {
+                other.min_ns
+            } else {
+                self.min_ns.min(other.min_ns)
+            };
         }
         self.timed += other.timed;
         self.total_ns = self.total_ns.saturating_add(other.total_ns);

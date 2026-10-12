@@ -34,7 +34,15 @@ fn event(name: &str, args: &[u64], result: i64, captured: &[(u8, &[u8])]) -> Sys
 }
 
 fn line(event: &SyscallEvent, style: &Style) -> String {
-    call(event, style, Context { fds: None }).text()
+    call(
+        event,
+        style,
+        Context {
+            fds: None,
+            before: false,
+        },
+    )
+    .text()
 }
 
 const AT_FDCWD: u64 = (-100_i64).cast_unsigned();
@@ -182,12 +190,28 @@ fn styles_change_descriptors_constants_and_names() {
         ..Style::default()
     };
     assert_eq!(
-        call(&read, &paths, Context { fds: Some(&table) }).text(),
+        call(
+            &read,
+            &paths,
+            Context {
+                fds: Some(&table),
+                before: false
+            }
+        )
+        .text(),
         r#"read(3</etc/hostname>, "host\n", 64) = 5"#
     );
     let unknown = event("read", &[4, 0x5000, 64], 5, &[(1, b"host\n")]);
     assert_eq!(
-        call(&unknown, &paths, Context { fds: Some(&table) }).text(),
+        call(
+            &unknown,
+            &paths,
+            Context {
+                fds: Some(&table),
+                before: false
+            }
+        )
+        .text(),
         r#"read(4<?>, "host\n", 64) = 5"#
     );
     let open = event(
@@ -202,7 +226,7 @@ fn styles_change_descriptors_constants_and_names() {
     };
     assert_eq!(
         line(&open, &raw),
-        r#"openat(0xffffffffffffff9c, "/etc/hostname", 0x80000) = 3"#
+        r#"openat(-100, "/etc/hostname", 0x80000) = 3"#
     );
     let verbose = Style {
         constants: Constants::Verbose,
@@ -210,7 +234,7 @@ fn styles_change_descriptors_constants_and_names() {
     };
     assert_eq!(
         line(&open, &verbose),
-        r#"openat(AT_FDCWD, "/etc/hostname", 0x80000 /* O_RDONLY|O_CLOEXEC */) = 3"#
+        r#"openat(-100 /* AT_FDCWD */, "/etc/hostname", 0x80000 /* O_RDONLY|O_CLOEXEC */) = 3"#
     );
     let named = Style {
         arg_names: true,
@@ -282,7 +306,7 @@ proptest::proptest! {
             Style { verbose: true, hex: Hex::NonAscii, fds: FdStyle::All, arg_names: true, ..Style::default() },
             Style { constants: Constants::Verbose, string_limit: 0, ..Style::default() },
         ] {
-            let text = super::call(&event, &style, Context { fds: Some(&FdTable::default()) }).text();
+            let text = super::call(&event, &style, Context { fds: Some(&FdTable::default()), before: false }).text();
             proptest::prop_assert!(text.contains('('));
         }
     }

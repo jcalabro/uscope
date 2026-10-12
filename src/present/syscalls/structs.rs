@@ -13,6 +13,10 @@ use super::{Kind, Style, Tokens, sets};
 struct Bytes<'a>(&'a [u8]);
 
 impl Bytes<'_> {
+    fn u8(&self, at: usize) -> Option<u8> {
+        self.0.get(at).copied()
+    }
+
     fn u16(&self, at: usize) -> Option<u16> {
         Some(u16::from_le_bytes(self.0.get(at..at + 2)?.try_into().ok()?))
     }
@@ -81,6 +85,10 @@ pub fn si_code(signal: i32, code: i32) -> String {
             "FPE_FLTRES",
             "FPE_FLTINV",
             "FPE_FLTSUB",
+        ],
+        libc::SIGSYS => &["SYS_SECCOMP", "SYS_USER_DISPATCH"],
+        libc::SIGPOLL => &[
+            "POLL_IN", "POLL_OUT", "POLL_MSG", "POLL_ERR", "POLL_PRI", "POLL_HUP",
         ],
         _ => &[],
     };
@@ -164,6 +172,7 @@ pub(super) struct Decode<'a, 'b> {
     pub index: usize,
     pub spec: &'b Spec,
     pub style: &'b Style,
+    pub context: super::Context<'b>,
 }
 
 impl Decode<'_, '_> {
@@ -182,6 +191,36 @@ impl Decode<'_, '_> {
 
     fn constant(&mut self, text: impl Into<String>) {
         self.out.push(Kind::Constant, text.into());
+    }
+
+    /// A value with a name, as `-X` asks: the name, the number, or both.
+    fn named_value(&mut self, number: String, name: String) {
+        match self.style.constants {
+            super::Constants::Abbrev => self.constant(name),
+            super::Constants::Raw => self.number(number),
+            super::Constants::Verbose => {
+                self.number(number);
+                self.out.push(Kind::Comment, format!(" /* {name} */"));
+            }
+        }
+    }
+
+    /// A resource limit: infinity, or kibibytes when it is a whole number
+    /// of them, as strace names them.
+    fn limit(&mut self, value: u64) {
+        if value == u64::MAX {
+            self.named_value(value.to_string(), "RLIM64_INFINITY".to_owned());
+        } else if value > 1024 && value.is_multiple_of(1024) {
+            self.named_value(value.to_string(), format!("{}*1024", value / 1024));
+        } else {
+            self.number(value);
+        }
+    }
+
+    /// A file mode: its type and permissions.
+    fn mode(&mut self, mode: u32) {
+        let octal = format!("{mode:#o}").replacen("0o", "0", 1);
+        self.named_value(octal, file_mode(mode));
     }
 
     fn address(&mut self, value: u64) {
@@ -249,22 +288,75 @@ impl Decode<'_, '_> {
             return None;
         }
         match structure {
+            Struct::Rseq => {
+                // Each field prints when the registered length covers it.
+                let length = b.0.len();
+                self.punct("{");
+                self.field("cpu_id_start");
+                self.number(b.u32(0)?);
+                self.punct(", ");
+                self.field("cpu_id");
+                match b.i32(4)? {
+                    -1 => self.named_value("-1".to_owned(), "RSEQ_CPU_ID_UNINITIALIZED".to_owned()),
+                    -2 => self.named_value(
+                        "-2".to_owned(),
+                        "RSEQ_CPU_ID_REGISTRATION_FAILED".to_owned(),
+                    ),
+                    cpu => self.number(cpu),
+                }
+                self.punct(", ");
+                self.field("rseq_cs");
+                match b.u64(8)? {
+                    0 => self.constant("NULL".to_owned()),
+                    address => self.number(format!("{address:#x}")),
+                }
+                self.punct(", ");
+                self.field("flags");
+                self.number(b.u32(16)?);
+                for (at, name) in [(20, "node_id"), (24, "mm_cid")] {
+                    if length >= at + 4 {
+                        self.punct(", ");
+                        self.field(name);
+                        self.number(b.u32(at)?);
+                    }
+                }
+                if length >= 32 {
+                    self.punct(", ");
+                    self.field("slice_ctrl");
+                    self.punct("{");
+                    self.field("request");
+                    self.number(b.u8(28)?);
+                    self.punct(", ");
+                    self.field("granted");
+                    self.number(b.u8(29)?);
+                    self.punct(", ");
+                    self.field("__reserved");
+                    self.number(b.u16(30)?);
+                    self.punct("}");
+                }
+                if length >= 33 {
+                    self.punct(", ");
+                    self.field("__reserved");
+                    self.number(b.u8(32)?);
+                }
+                if length > 33 {
+                    self.more();
+                }
+                self.punct("}");
+            }
             Struct::Stat => {
                 self.punct("{");
                 if self.style.verbose {
                     self.field("st_dev");
-                    self.number(format!(
-                        "makedev({:#x}, {:#x})",
-                        b.u64(0)? >> 8 & 0xfff,
-                        b.u64(0)? & 0xff
-                    ));
+                    self.number(makedev(b.u64(0)?));
                     self.punct(", ");
                     self.field("st_ino");
                     self.number(b.u64(8)?);
                     self.punct(", ");
                 }
                 self.field("st_mode");
-                self.constant(file_mode(b.u32(24)?));
+                let mode = b.u32(24)?;
+                self.mode(mode);
                 self.punct(", ");
                 if self.style.verbose {
                     self.field("st_nlink");
@@ -283,8 +375,15 @@ impl Decode<'_, '_> {
                     self.number(b.i64(64)?);
                     self.punct(", ");
                 }
-                self.field("st_size");
-                self.number(b.i64(48)?);
+                // A device has numbers where a file has a size.
+                let kind = b.u32(24)? & 0o170_000;
+                if kind == 0o020_000 || kind == 0o060_000 {
+                    self.field("st_rdev");
+                    self.number(makedev(b.u64(40)?));
+                } else {
+                    self.field("st_size");
+                    self.number(b.i64(48)?);
+                }
                 if !self.style.verbose {
                     self.more();
                 }
@@ -299,7 +398,7 @@ impl Decode<'_, '_> {
                 self.number(b.u64(8)?);
                 self.punct(", ");
                 self.field("stx_mode");
-                self.constant(file_mode(u32::from(b.u16(28)?)));
+                self.mode(u32::from(b.u16(28)?));
                 self.punct(", ");
                 self.field("stx_size");
                 self.number(b.u64(40)?);
@@ -351,19 +450,12 @@ impl Decode<'_, '_> {
                 self.punct("}");
             }
             Struct::Rlimit => {
-                let limit = |value: u64| {
-                    if value == u64::MAX {
-                        "RLIM64_INFINITY".to_owned()
-                    } else {
-                        value.to_string()
-                    }
-                };
                 self.punct("{");
                 self.field("rlim_cur");
-                self.constant(limit(b.u64(0)?));
+                self.limit(b.u64(0)?);
                 self.punct(", ");
                 self.field("rlim_max");
-                self.constant(limit(b.u64(8)?));
+                self.limit(b.u64(8)?);
                 self.punct("}");
             }
             Struct::Rusage => {
@@ -494,6 +586,11 @@ impl Decode<'_, '_> {
                 let address = SocketAddress::parse(&b.0[..b.0.len().min(length)])?;
                 self.constant(address.to_string());
             }
+            Struct::WaitStatus => {
+                self.punct("[");
+                self.constant(wait_status(b.i32(0)?));
+                self.punct("]");
+            }
             Struct::Int => {
                 self.punct("[");
                 self.number(b.i32(0)?);
@@ -505,34 +602,19 @@ impl Decode<'_, '_> {
                 self.punct("]");
             }
             Struct::Fds2 => {
+                let process = self.event.process;
+                // The call made these descriptors.
+                let made = super::Context {
+                    before: false,
+                    ..self.context
+                };
                 self.punct("[");
-                self.out.push(Kind::Fd, b.i32(0)?.to_string());
+                super::descriptor(self.out, process, b.i32(0)?.into(), self.style, made);
                 self.punct(", ");
-                self.out.push(Kind::Fd, b.i32(4)?.to_string());
+                super::descriptor(self.out, process, b.i32(4)?.into(), self.style, made);
                 self.punct("]");
             }
-            Struct::Siginfo => {
-                let signo = b.i32(0)?;
-                let code = b.i32(8)?;
-                self.punct("{");
-                self.field("si_signo");
-                self.constant(super::signal(signo));
-                self.punct(", ");
-                self.field("si_code");
-                self.constant(si_code(signo, code));
-                if signo == libc::SIGCHLD {
-                    self.punct(", ");
-                    self.field("si_pid");
-                    self.number(b.i32(16)?);
-                    self.punct(", ");
-                    self.field("si_uid");
-                    self.number(b.u32(20)?);
-                    self.punct(", ");
-                    self.field("si_status");
-                    self.number(b.i32(24)?);
-                }
-                self.punct("}");
-            }
+            Struct::Siginfo => siginfo(self.out, b.0)?,
             Struct::CloneArgs => {
                 self.punct("{");
                 self.field("flags");
@@ -769,3 +851,144 @@ const MSG_FLAGS_FIELD: &[(u64, &str)] = &[
     (0x80, "MSG_EOR"),
     (0x2000, "MSG_ERRQUEUE"),
 ];
+
+/// A device number as strace prints it, with glibc's split of the bits.
+fn makedev(device: u64) -> String {
+    let major = ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff);
+    let minor = (device & 0xff) | ((device >> 12) & !0xff);
+    format!("makedev({major:#x}, {minor:#x})")
+}
+
+/// A wait status as strace prints it: `{WIFEXITED(s) && WEXITSTATUS(s) == 4}`.
+fn wait_status(status: i32) -> String {
+    let low = status & 0x7f;
+    let mut text = if low == 0 {
+        format!(
+            "{{WIFEXITED(s) && WEXITSTATUS(s) == {}",
+            (status >> 8) & 0xff
+        )
+    } else if low == 0x7f {
+        format!(
+            "{{WIFSTOPPED(s) && WSTOPSIG(s) == {}",
+            super::signal((status >> 8) & 0xff)
+        )
+    } else if status == 0xffff {
+        "{WIFCONTINUED(s)".to_owned()
+    } else {
+        let mut text = format!("{{WIFSIGNALED(s) && WTERMSIG(s) == {}", super::signal(low));
+        if status & 0x80 != 0 {
+            text.push_str(" && WCOREDUMP(s)");
+        }
+        text
+    };
+    text.push('}');
+    // A ptrace event sits above the stop signal.
+    let event = (status >> 16) & 0xff;
+    if event != 0 {
+        let name = match event {
+            1 => "PTRACE_EVENT_FORK".to_owned(),
+            2 => "PTRACE_EVENT_VFORK".to_owned(),
+            3 => "PTRACE_EVENT_CLONE".to_owned(),
+            4 => "PTRACE_EVENT_EXEC".to_owned(),
+            5 => "PTRACE_EVENT_VFORK_DONE".to_owned(),
+            6 => "PTRACE_EVENT_EXIT".to_owned(),
+            7 => "PTRACE_EVENT_SECCOMP".to_owned(),
+            128 => "PTRACE_EVENT_STOP".to_owned(),
+            other => other.to_string(),
+        };
+        text = format!("{text} | {name} << 16");
+    }
+    text
+}
+
+/// A `siginfo_t`, with the fields its signal and code fill, as strace's
+/// `printsiginfo` prints it.
+pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
+    let b = Bytes(bytes);
+    let signo = b.i32(0)?;
+    let errno = b.i32(4)?;
+    let code = b.i32(8)?;
+    let field = |out: &mut Tokens, name: &str, kind: Kind, value: String| {
+        out.push(Kind::Punctuation, ", ");
+        out.push(Kind::Text, name);
+        out.push(Kind::Punctuation, "=");
+        out.push(kind, value);
+    };
+    let address = |value: u64| {
+        if value == 0 {
+            (Kind::Constant, "NULL".to_owned())
+        } else {
+            (Kind::Address, format!("{value:#x}"))
+        }
+    };
+    out.push(Kind::Punctuation, "{");
+    out.push(Kind::Text, "si_signo");
+    out.push(Kind::Punctuation, "=");
+    out.push(Kind::Constant, super::signal(signo));
+    field(out, "si_code", Kind::Constant, si_code(signo, code));
+    if errno != 0 {
+        let (name, _) = super::errno(uscope::syscalls::Errno(
+            u16::try_from(errno.unsigned_abs()).unwrap_or(0),
+        ));
+        field(out, "si_errno", Kind::Error, name);
+    }
+    if code <= 0 {
+        // Sent by a process: its pid and uid, and a queued value.
+        if code == -2 {
+            field(
+                out,
+                "si_timerid",
+                Kind::Number,
+                format!("{:#x}", b.i32(16)?),
+            );
+            field(out, "si_overrun", Kind::Number, b.i32(20)?.to_string());
+        } else {
+            field(out, "si_pid", Kind::Pid, b.i32(16)?.to_string());
+            field(out, "si_uid", Kind::Number, b.u32(20)?.to_string());
+        }
+        if matches!(code, -3..=-1) {
+            field(out, "si_int", Kind::Number, b.i32(24)?.to_string());
+            let (kind, text) = address(b.u64(24)?);
+            field(out, "si_ptr", kind, text);
+        }
+    } else {
+        match signo {
+            libc::SIGCHLD => {
+                field(out, "si_pid", Kind::Pid, b.i32(16)?.to_string());
+                field(out, "si_uid", Kind::Number, b.u32(20)?.to_string());
+                let status = b.i32(24)?;
+                let status = if code == 1 {
+                    (Kind::Number, status.to_string())
+                } else {
+                    (Kind::Constant, super::signal(status))
+                };
+                field(out, "si_status", status.0, status.1);
+                field(out, "si_utime", Kind::Number, b.i64(32)?.to_string());
+                field(out, "si_stime", Kind::Number, b.i64(40)?.to_string());
+            }
+            libc::SIGILL | libc::SIGFPE | libc::SIGSEGV | libc::SIGBUS | libc::SIGTRAP => {
+                let (kind, text) = address(b.u64(16)?);
+                field(out, "si_addr", kind, text);
+            }
+            libc::SIGPOLL => {
+                field(out, "si_band", Kind::Number, b.i64(16)?.to_string());
+                field(out, "si_fd", Kind::Number, b.i32(24)?.to_string());
+            }
+            libc::SIGSYS => {
+                let (kind, text) = address(b.u64(16)?);
+                field(out, "si_call_addr", kind, text);
+                field(out, "si_syscall", Kind::Number, b.i32(24)?.to_string());
+                let arch = b.u32(28)?;
+                let arch = match arch {
+                    0xc000_003e => "AUDIT_ARCH_X86_64".to_owned(),
+                    0x4000_0003 => "AUDIT_ARCH_I386".to_owned(),
+                    other => format!("{other:#x}"),
+                };
+                field(out, "si_arch", Kind::Constant, arch);
+            }
+            _ => {}
+        }
+    }
+    out.push(Kind::Punctuation, "}");
+    Some(())
+}

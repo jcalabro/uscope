@@ -21,6 +21,7 @@ pub use linux::perf;
 pub use linux::resume_address;
 #[cfg(any(test, feature = "sim"))]
 pub use linux::sim_edge;
+pub use linux::syscalls as syscall_engines;
 
 /// Identifies a file independently of the path used to open it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

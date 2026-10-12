@@ -275,6 +275,8 @@ pub enum TraceEvent {
         code: Option<i32>,
         /// The sending process, for signals one sent.
         sender: Option<u32>,
+        /// The whole `siginfo_t`, when the engine read it.
+        info: Option<Arc<[u8]>>,
     },
     /// A thread created a process or a thread.
     Spawn {
@@ -305,6 +307,30 @@ pub enum TraceEvent {
         time: u64,
         count: u64,
     },
+    /// What a descriptor refers to, as the engine read it from the system
+    /// (`/proc/PID/fd/N`): when tracing began, or right after a call made
+    /// the descriptor.
+    Descriptor {
+        process: u32,
+        /// The descriptor, or `AT_FDCWD` (-100) for the working directory.
+        fd: i64,
+        time: u64,
+        text: Arc<str>,
+        cloexec: bool,
+        /// The device it is, when it is a character or block device.
+        device: Option<Device>,
+        /// Whether the call reported next made it, rather than the
+        /// descriptor being there when tracing began.
+        made: bool,
+    },
+}
+
+/// A character or block device's numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Device {
+    pub block: bool,
+    pub major: u32,
+    pub minor: u32,
 }
 
 impl TraceEvent {
@@ -316,7 +342,8 @@ impl TraceEvent {
             | Self::Spawn { time, .. }
             | Self::Exec { time, .. }
             | Self::Exit { time, .. }
-            | Self::Lost { time, .. } => *time,
+            | Self::Lost { time, .. }
+            | Self::Descriptor { time, .. } => *time,
         }
     }
 }

@@ -498,7 +498,10 @@ fn numbered(path: &std::path::Path, number: u32) -> PathBuf {
 
 /// Keeps Ctrl-C from ending uscope, setting `stop` if there is one, and
 /// sets `trigger` at each SIGUSR2.
-fn handle_signals(stop: Option<Arc<AtomicBool>>, trigger: Arc<AtomicBool>) -> Result<()> {
+pub(super) fn handle_signals(
+    stop: Option<Arc<AtomicBool>>,
+    trigger: Arc<AtomicBool>,
+) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let (installed, ready) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

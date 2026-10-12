@@ -81,6 +81,17 @@ const OPEN: &[(u64, &str)] = &[
     (0o20_000_000, "__O_TMPFILE"),
 ];
 
+const EFD: &[(u64, &str)] = &[
+    (1, "EFD_SEMAPHORE"),
+    (c(libc::O_NONBLOCK), "EFD_NONBLOCK"),
+    (c(libc::O_CLOEXEC), "EFD_CLOEXEC"),
+];
+
+const IN_INIT: &[(u64, &str)] = &[
+    (c(libc::O_NONBLOCK), "IN_NONBLOCK"),
+    (c(libc::O_CLOEXEC), "IN_CLOEXEC"),
+];
+
 const MMAP_PROT: &[(u64, &str)] = &[
     (c(libc::PROT_READ), "PROT_READ"),
     (c(libc::PROT_WRITE), "PROT_WRITE"),
@@ -612,6 +623,8 @@ const GETRANDOM: &[(u64, &str)] = &[
     (4, "GRND_INSECURE"),
 ];
 
+const RSEQ: &[(u64, &str)] = &[(1, "RSEQ_FLAG_UNREGISTER")];
+
 const MEMFD: &[(u64, &str)] = &[
     (1, "MFD_CLOEXEC"),
     (2, "MFD_ALLOW_SEALING"),
@@ -666,7 +679,11 @@ const CLOSE_RANGE: &[(u64, &str)] = &[(2, "CLOSE_RANGE_UNSHARE"), (4, "CLOSE_RAN
 #[must_use]
 pub fn set(name: &str) -> Option<Set> {
     Some(match name {
-        "open" => flags(OPEN),
+        // `oflags` are open's without an access mode, as pipe2 and dup3
+        // take them.
+        "open" | "oflags" => flags(OPEN),
+        "efd" => flags(EFD),
+        "in_init" => flags(IN_INIT),
         "mmap_prot" => flags(MMAP_PROT),
         "mmap_flags" => flags(MMAP_FLAGS),
         "whence" => values(WHENCE),
@@ -709,6 +726,7 @@ pub fn set(name: &str) -> Option<Set> {
         "fallocate" => flags(FALLOCATE),
         "rename" => flags(RENAME),
         "getrandom" => flags(GETRANDOM),
+        "rseq" => flags(RSEQ),
         "memfd" => flags(MEMFD),
         "bpf" => values(BPF),
         "close_range" => flags(CLOSE_RANGE),

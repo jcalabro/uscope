@@ -10,6 +10,7 @@
 
 mod argnames;
 pub mod blobs;
+pub mod captures;
 pub mod fds;
 pub mod filter;
 pub mod model;
@@ -21,7 +22,7 @@ pub mod table;
 
 pub use filter::{CallSet, Filter, FilterError, StatusSet};
 pub use model::{
-    Abi, Capture, CaptureState, Errno, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt,
+    Abi, Capture, CaptureState, Device, Errno, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt,
     SyscallEvent, SyscallId, TraceEvent,
 };
 pub use stats::SyscallStats;

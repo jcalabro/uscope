@@ -3,14 +3,10 @@
 //! bytes its engine captured become tokens, which the CLI colors and the
 //! web turns into spans.
 
-#![allow(
-    dead_code,
-    reason = "the CLI and web use the rest; removed when they land"
-)]
-
 mod names;
 pub mod sets;
 mod structs;
+pub mod summary;
 #[cfg(test)]
 mod tests;
 
@@ -18,7 +14,7 @@ use std::fmt::Write as _;
 
 use nix::libc;
 use uscope::syscalls::blobs;
-use uscope::syscalls::fds::FdTable;
+use uscope::syscalls::fds::{FdTable, Kind as FdKind};
 use uscope::syscalls::filter::fd_value;
 use uscope::syscalls::specs::{self, Arg, Count, Direction, MemKind, Ret, Spec};
 use uscope::syscalls::{
@@ -57,6 +53,7 @@ pub enum Kind {
 impl Kind {
     /// The kind's name on the wire.
     #[must_use]
+    #[expect(dead_code, reason = "the web UI's Syscalls tab sends kinds by name")]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Name => "name",
@@ -215,6 +212,10 @@ pub const fn restarts(Errno(number): Errno) -> bool {
 
 /// The error number an errno name names.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "catchpoint conditions compare $errno with names")
+)]
 pub fn errno_named(name: &str) -> Option<Errno> {
     names::ERRNOS
         .iter()
@@ -259,11 +260,74 @@ pub fn signal_named(name: &str) -> Option<i32> {
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub fds: Option<&'a FdTable>,
+    /// Descriptors as they were before the call: true for its arguments,
+    /// false for what it returned.
+    pub before: bool,
 }
 
 /// Formats `name(arguments) = result`, without a prefix or duration.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the REPL prints catchpoint stops with it")
+)]
 pub fn call(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Tokens {
+    let mut out = entry(event, style, context);
+    let spec = (!style.raw).then(|| specs::spec(event.call)).flatten();
+    result(&mut out, event, spec, style, context);
+    out
+}
+
+/// Formats ` = result`: what follows [`entry`], read against the
+/// descriptors as the call left them.
+#[must_use]
+pub fn returned(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Tokens {
+    let mut out = Tokens::default();
+    let spec = (!style.raw).then(|| specs::spec(event.call)).flatten();
+    result(&mut out, event, spec, style, context);
+    out
+}
+
+/// Each argument a call shows, with the kernel's name for it, apart: what
+/// scripts read.
+#[must_use]
+pub fn argument_values(
+    event: &SyscallEvent,
+    style: &Style,
+    context: Context<'_>,
+) -> Vec<(String, Tokens)> {
+    let Some(spec) = (!style.raw).then(|| specs::spec(event.call)).flatten() else {
+        return event
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, &word)| {
+                let mut out = Tokens::default();
+                hex(&mut out, word);
+                (format!("arg{index}"), out)
+            })
+            .collect();
+    };
+    let names = event.call.name().and_then(specs::arg_names);
+    let shown = shown_arguments(event, spec);
+    spec.args
+        .iter()
+        .enumerate()
+        .take(shown)
+        .map(|(index, arg)| {
+            let mut out = Tokens::default();
+            argument(&mut out, event, index, *arg, spec, style, context);
+            let name = names
+                .and_then(|names| names.get(index))
+                .map_or_else(|| format!("arg{index}"), |&name| name.to_owned());
+            (name, out)
+        })
+        .collect()
+}
+
+/// Formats `name(arguments)`: a call as its entry shows it.
+#[must_use]
+pub fn entry(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Tokens {
     let mut out = Tokens::default();
     let name = event.call.display_name();
     out.push(Kind::Name, name.as_ref());
@@ -282,7 +346,6 @@ pub fn call(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Tokens
         }
     }
     out.punct(")");
-    result(&mut out, event, spec, style, context);
     out
 }
 
@@ -408,17 +471,54 @@ fn octal(out: &mut Tokens, value: u64) {
 }
 
 /// A descriptor, with what it refers to under `-y`.
-fn descriptor(out: &mut Tokens, process: u32, fd: i64, style: &Style, context: Context<'_>) {
+pub(super) fn descriptor(
+    out: &mut Tokens,
+    process: u32,
+    fd: i64,
+    style: &Style,
+    context: Context<'_>,
+) {
     out.push(Kind::Fd, fd.to_string());
     if style.fds == FdStyle::Number || fd < 0 {
         return;
     }
+    let described = context.fds.and_then(|table| {
+        if context.before {
+            table.describe_before(process, fd)
+        } else {
+            table.describe(process, fd)
+        }
+    });
+    if described.is_none() && closed(process, context) {
+        return;
+    }
     out.punct("<");
-    match context.fds.and_then(|table| table.describe(process, fd)) {
-        Some(description) => out.push(Kind::Path, description.text.as_ref()),
+    match described {
+        Some(description) => {
+            out.push(Kind::Path, description.text.as_ref());
+            if let (FdStyle::All, FdKind::Device(device)) = (style.fds, &description.kind) {
+                out.punct("<");
+                out.push(
+                    Kind::Path,
+                    format!(
+                        "{} {}:{}",
+                        if device.block { "block" } else { "char" },
+                        device.major,
+                        device.minor
+                    ),
+                );
+                out.punct(">");
+            }
+        }
         None => out.push(Kind::Missing, "?"),
     }
     out.punct(">");
+}
+
+/// Whether a descriptor the table lacks is known not to be open, which
+/// strace prints as a bare number.
+fn closed(process: u32, context: Context<'_>) -> bool {
+    context.fds.is_some_and(|table| table.knows(process))
 }
 
 fn argument(
@@ -431,12 +531,7 @@ fn argument(
     context: Context<'_>,
 ) {
     let word = event.args[index];
-    if style.constants == Constants::Raw
-        && !matches!(arg, Arg::Path | Arg::Str | Arg::StrArray | Arg::Mem { .. })
-    {
-        hex(out, word);
-        return;
-    }
+    // -X raw changes only names: numbers, sizes, and NULL print as ever.
     match arg {
         Arg::Int | Arg::Pid | Arg::Uid | Arg::Gid => out.number(int(word)),
         Arg::Long => out.number(long(word)),
@@ -448,7 +543,24 @@ fn argument(
         Arg::Fd => descriptor(out, event.process, fd_value(word), style, context),
         Arg::DirFd => {
             if int(word) == libc::AT_FDCWD {
-                out.push(Kind::Constant, "AT_FDCWD");
+                match style.constants {
+                    Constants::Abbrev => out.push(Kind::Constant, "AT_FDCWD"),
+                    Constants::Raw => out.number(libc::AT_FDCWD),
+                    Constants::Verbose => {
+                        out.number(libc::AT_FDCWD);
+                        out.push(Kind::Comment, " /* AT_FDCWD */");
+                    }
+                }
+                // strace names the working directory under -y.
+                if style.fds != FdStyle::Number
+                    && let Some(cwd) = context
+                        .fds
+                        .and_then(|table| table.describe(event.process, i64::from(libc::AT_FDCWD)))
+                {
+                    out.punct("<");
+                    out.push(Kind::Path, cwd.text.as_ref());
+                    out.punct(">");
+                }
             } else {
                 descriptor(out, event.process, fd_value(word), style, context);
             }
@@ -469,7 +581,9 @@ fn argument(
             direction,
             kind,
             count,
-        } => memory(out, event, index, direction, kind, count, spec, style),
+        } => memory(
+            out, event, index, direction, kind, count, spec, style, context,
+        ),
     }
 }
 
@@ -768,6 +882,7 @@ fn memory(
     count: Count,
     spec: &Spec,
     style: &Style,
+    context: Context<'_>,
 ) {
     let word = event.args[index];
     #[expect(clippy::cast_possible_truncation, reason = "six arguments")]
@@ -800,6 +915,16 @@ fn memory(
             let shown = &capture.bytes[..capture.bytes.len().min(length)];
             let truncated =
                 matches!(capture.state, CaptureState::Truncated { .. }) || shown.len() < length;
+            // Random bytes are not text; strace prints them in hex.
+            let random = Style {
+                hex: Hex::All,
+                ..style.clone()
+            };
+            let style = if event.call.name() == Some("getrandom") {
+                &random
+            } else {
+                style
+            };
             quote(out, shown, Some(style.string_limit), truncated, style);
         }
         MemKind::Struct(structure) if event.call.abi != Abi::X86_64 => {
@@ -822,6 +947,7 @@ fn memory(
                 index,
                 spec,
                 style,
+                context,
             };
             decoded.structure(
                 structure,
@@ -913,6 +1039,17 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
     match *event {
         TraceEvent::Signal {
             signal: number,
+            ref info,
+            ..
+        } if info.as_deref().is_some_and(|info| info.len() >= 48) => {
+            out.punct("--- ");
+            out.push(Kind::Constant, signal(number));
+            out.punct(" ");
+            structs::siginfo(&mut out, info.as_deref().unwrap_or_default())?;
+            out.punct(" ---");
+        }
+        TraceEvent::Signal {
+            signal: number,
             code,
             sender,
             ..
@@ -957,7 +1094,10 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
             out.push(Kind::Missing, format!("lost {count} events"));
             out.punct(" ---");
         }
-        TraceEvent::Call(_) | TraceEvent::Spawn { .. } | TraceEvent::Exec { .. } => return None,
+        TraceEvent::Call(_)
+        | TraceEvent::Spawn { .. }
+        | TraceEvent::Exec { .. }
+        | TraceEvent::Descriptor { .. } => return None,
     }
     Some(out)
 }
