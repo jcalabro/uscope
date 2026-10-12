@@ -1340,11 +1340,19 @@ fn a_program_killed_by_a_signal_keeps_its_profile() {
 /// names it, with the labels it gave itself.
 #[test]
 fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
-    // The program waits until two snapshots have seen every receiver.
+    // The program waits until two snapshots have seen every receiver, one
+    // of them after a snapshot found the spinner with its labels.
+    let mut labeled = None;
     let recording = snapshot_until(
         Command::new(Scenario::fixture("profile-go-waits")),
         false,
-        |profile| receiving(profile).len() >= 2,
+        |profile| {
+            let found = receiving(profile).len();
+            if labeled.is_none() && spins_labeled(profile) {
+                labeled = Some(found);
+            }
+            labeled.is_some_and(|seen| found >= 2.max(seen + 1))
+        },
     );
     let profile = &recording;
     let (taken, paused, failed) = profile.task_snapshots();
@@ -1441,7 +1449,11 @@ fn live_task_snapshots_find_goroutines_waiting_without_a_pause() {
 /// Records `command` with a task snapshot every 50 ms, `live` or stopping
 /// it, holding it until a profile so far is `ready`, then writing a line
 /// to release it.
-fn snapshot_until(mut command: Command, live: bool, ready: impl Fn(&Profile) -> bool) -> Profile {
+fn snapshot_until(
+    mut command: Command,
+    live: bool,
+    mut ready: impl FnMut(&Profile) -> bool,
+) -> Profile {
     let (reader, mut writer) = std::io::pipe().expect("pipe");
     command
         .stdin(reader)
@@ -1476,6 +1488,15 @@ fn snapshot_until(mut command: Command, live: bool, ready: impl Fn(&Profile) -> 
 
 /// The times of the snapshots that found three distinct goroutines waiting
 /// to receive in `main.receive`.
+/// Whether a task snapshot has found the waits fixture's spinner once it
+/// labeled itself.
+fn spins_labeled(profile: &Profile) -> bool {
+    profile
+        .tasks()
+        .iter()
+        .any(|task| task.labels == [("phase".to_owned(), "spin".to_owned())])
+}
+
 fn receiving(profile: &Profile) -> Vec<i64> {
     let mut found: std::collections::BTreeMap<i64, std::collections::BTreeSet<u64>> =
         std::collections::BTreeMap::new();

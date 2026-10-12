@@ -372,7 +372,8 @@ async fn a_profile_is_served_as_trees_functions_and_a_timeline() {
 }
 
 /// A profile of the waits fixture with task snapshots, once two of them
-/// have found its three receivers waiting.
+/// have found its three receivers waiting, one after a snapshot found the
+/// spinner with its labels.
 fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
     let (reader, mut writer) = std::io::pipe().expect("pipe");
     let mut command = Command::new(Scenario::fixture("profile-go-waits"));
@@ -381,7 +382,7 @@ fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
         task_snapshots: Some(Duration::from_millis(50)),
         ..RecordOptions::default()
     };
-    let (stop, mut released) = (AtomicBool::new(false), false);
+    let (stop, mut released, mut labeled) = (AtomicBool::new(false), false, None);
     let recording = record_watched(
         command,
         &options,
@@ -393,7 +394,16 @@ fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
                     .iter()
                     .filter(|wait| wait.state == "chan receive")
                     .count();
-                if !released && found >= 6 {
+                let spins = || {
+                    profile
+                        .tasks()
+                        .iter()
+                        .any(|task| task.labels == [("phase".to_owned(), "spin".to_owned())])
+                };
+                if labeled.is_none() && spins() {
+                    labeled = Some(found);
+                }
+                if !released && labeled.is_some_and(|seen| found >= 6.max(seen + 3)) {
                     writer.write_all(b"x").expect("release the program");
                     released = true;
                 }
