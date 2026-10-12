@@ -9,8 +9,9 @@ uscope reads TOML settings from up to three files:
 The local file is intended for settings that should not be committed. Add it
 to the project's `.gitignore`.
 
-The project root is the nearest parent containing `.uscope`, then the nearest
-parent containing `.git`, then the current directory.
+The project root is the nearest parent containing `.uscope` or `.git`, or else
+the current directory. A repository inside another project, such as a git
+worktree, is a project of its own.
 
 ## Inspect configuration
 

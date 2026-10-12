@@ -2473,6 +2473,44 @@ fn view_files_loaded_together_stack_as_on_the_command_line() {
     assert_eq!(listings[0], listings[1], "{output}");
 }
 
+/// The project root is the nearest directory with `.uscope/` or `.git`, so
+/// a repository inside another project, as a git worktree often is, is a
+/// project of its own and never reads the outer one's settings or state.
+#[test]
+fn a_repository_inside_a_project_is_its_own_project() {
+    let directory = support::ScratchDir::new("cli-project-root");
+    let outer = directory.path().join("outer");
+    let inner = outer.join("worktrees/inner");
+    let subdirectory = inner.join("src");
+    fs::create_dir_all(outer.join(".uscope/state")).expect("make the outer project");
+    fs::create_dir_all(&subdirectory).expect("make the inner repository");
+    // A worktree's `.git` is a file.
+    fs::write(inner.join(".git"), "gitdir: elsewhere\n").expect("mark the repository");
+    let root = |start: &std::path::Path| {
+        let output = uscope_command()
+            .current_dir(start)
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .args(["config", "path"])
+            .output()
+            .expect("run uscope");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        root(&subdirectory),
+        format!("project root: {}", inner.display())
+    );
+    // From the outer project's own directories, it is still the root.
+    assert_eq!(
+        root(&outer.join("worktrees")),
+        format!("project root: {}", outer.display())
+    );
+}
+
 #[test]
 fn view_files_come_from_the_session_the_project_and_the_user() {
     let directory = support::ScratchDir::new("cli-view-files");
@@ -5079,6 +5117,10 @@ fn jump_moves_the_thread_to_resume_elsewhere_in_its_function() {
 #[test]
 fn step_goes_into_one_call_of_the_line() {
     let line = |marker: &str| support::source_line("tests/fixtures/c/step-targets.c", marker);
+    let next = format!(
+        "stopped after source step in main at tests/fixtures/c/step-targets.c:{}",
+        line("targets: recursive")
+    );
     let (output, errors) = piped(
         &["build/test-programs/step-targets-gcc-o0"],
         &[
@@ -5110,7 +5152,7 @@ fn step_goes_into_one_call_of_the_line() {
             "  (indirect)",
             "  strlen",
             // Stepping into code without source goes on to the next line.
-            "stopped after source step in main at tests/fixtures/c/step-targets.c:29",
+            &next,
         ],
     );
     assert_in_order(
