@@ -27,6 +27,11 @@ pub struct SyscallQuery {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
+    /// Calls whose duration falls in this log2 bucket, as a heat map's
+    /// row names it, or all.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub latency: Option<u32>,
 }
 
 /// What the summary's rows are of.
@@ -39,6 +44,10 @@ pub enum SyscallGroup {
     Class,
     Process,
     Thread,
+    /// The file, socket, or pipe a call names, by path or descriptor.
+    Path,
+    /// The innermost frame with a source line.
+    Site,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,7 +85,7 @@ pub struct SyscallSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SyscallRow {
     /// What the row is of, as a filter or query names it: a call's name,
-    /// a class, a pid or a tid.
+    /// a class, a pid, a tid, a path, or a site.
     pub key: String,
     pub name: String,
     pub calls: u64,
@@ -274,6 +283,22 @@ pub struct SyscallCall {
     pub exited: Option<i64>,
     /// What its result means, as `ENOENT (No such file or directory)`.
     pub result: Vec<SyscallToken>,
+    /// Where in the source it was made, when its stack says.
+    pub site: Option<SyscallSite>,
+}
+
+/// A call's source line, with the lines around it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SyscallSite {
+    pub function: String,
+    pub path: String,
+    pub line: u32,
+    /// The text from line `first`, or why it could not be read.
+    pub first: u32,
+    pub text: Option<Vec<String>>,
+    pub unread: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -313,6 +338,8 @@ pub struct SyscallLane {
     /// Each slice's nanoseconds spent in calls, and failed calls.
     pub busy: Vec<u64>,
     pub failed: Vec<u32>,
+    /// Slices one call spans from end to end: the thread was blocked.
+    pub blocked: Vec<bool>,
 }
 
 /// What the trace did with each file.

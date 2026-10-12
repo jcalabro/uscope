@@ -3498,3 +3498,33 @@ kbd {
 .syscalls-body {
   grid-template-columns: minmax(0, 1fr);
 }
+
+.latency-map canvas.clickable {
+  cursor: pointer;
+}
+
+.call-site {
+  margin: 6px 0 0;
+}
+
+.call-site figcaption {
+  color: var(--ink-2);
+}
+
+.call-site .source-lines {
+  margin: 4px 0 0;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.call-site .line-number {
+  display: inline-block;
+  width: 4ch;
+  margin-right: 1ch;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+.call-site .made {
+  background: var(--select-bg);
+}

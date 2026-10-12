@@ -21,7 +21,7 @@ use super::protocol::{
     SyscallGroup, SyscallHeatmap, SyscallHeatmapQuery, SyscallLane, SyscallLanes,
     SyscallLanesQuery, SyscallLine, SyscallLog, SyscallLogQuery, SyscallNetwork, SyscallProcess,
     SyscallProcesses, SyscallQuery, SyscallRate, SyscallRateBy, SyscallRateQuery, SyscallRow,
-    SyscallSeries, SyscallSummary, SyscallSummaryQuery, SyscallToken,
+    SyscallSeries, SyscallSite, SyscallSummary, SyscallSummaryQuery, SyscallToken,
 };
 use super::session::Failure;
 use crate::present::syscalls::{self as present, Context, FdStyle, Style, Tokens};
@@ -34,6 +34,9 @@ const MOST_BUCKETS: u32 = 4096;
 
 /// The most lines a page of the log holds.
 const MOST_LINES: u32 = 2000;
+
+/// Lines shown on each side of a call's source line.
+const SITE_MARGIN: u64 = 3;
 
 /// The most series a rate chart stacks; the rest are `other`.
 const MOST_SERIES: usize = 8;
@@ -125,7 +128,7 @@ pub fn profile_of(request: &Request) -> Option<&str> {
 /// Answers a syscall request about `profile`, whose trace is `trace`.
 pub fn answer(profile: &Profile, trace: &Trace, request: Request) -> Result<Value, Failure> {
     match request {
-        Request::SyscallSummary(query) => Ok(json(&summary(trace, &query)?)),
+        Request::SyscallSummary(query) => Ok(json(&summary(profile, trace, &query)?)),
         Request::SyscallRate(query) => Ok(json(&rate(trace, &query)?)),
         Request::SyscallHeatmap(query) => Ok(json(&heatmap(trace, &query)?)),
         Request::SyscallDetail(query) => Ok(json(&detail(profile, trace, &query)?)),
@@ -150,6 +153,11 @@ struct Selection {
     from: i64,
     to: i64,
     threads: Option<BTreeSet<u32>>,
+    /// Calls whose duration falls in this log2 bucket.
+    latency: Option<usize>,
+    /// Whether a call that overlaps the range is in it, as lanes draw
+    /// it, rather than only one that ended there.
+    overlapping: bool,
 }
 
 impl Selection {
@@ -171,6 +179,10 @@ impl Selection {
                 .threads
                 .as_ref()
                 .map(|threads| threads.iter().copied().collect()),
+            latency: query
+                .latency
+                .map(|bucket| usize::try_from(bucket).unwrap_or(usize::MAX)),
+            overlapping: false,
         })
     }
 
@@ -179,11 +191,20 @@ impl Selection {
     }
 
     fn shows(&self, call: &SyscallEvent, fds: &FdTable) -> bool {
-        if !self.holds(call.time())
+        let inside = if self.overlapping {
+            let entered = call.entered.unwrap_or_else(|| call.time()).cast_signed();
+            entered < self.to && self.from <= call.time().cast_signed()
+        } else {
+            self.holds(call.time())
+        };
+        if !inside
             || self
                 .threads
                 .as_ref()
                 .is_some_and(|threads| !threads.contains(&call.thread))
+            || self
+                .latency
+                .is_some_and(|band| call.duration().map(stats::bucket) != Some(band))
         {
             return false;
         }
@@ -253,6 +274,51 @@ fn calls(
     });
 }
 
+/// Where stack `row` was made, as a caller's row names it; read once.
+fn site<'a>(profile: &Profile, sites: &'a mut HashMap<u32, String>, row: u32) -> &'a String {
+    sites.entry(row).or_insert_with(|| {
+        profile.syscall_site(row).unwrap_or_else(|| {
+            profile
+                .syscall_stack(row)
+                .0
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "?".to_owned())
+        })
+    })
+}
+
+/// The path a call names, made absolute against the directory it names
+/// it from, as the descriptor it makes will be known.
+fn named_path(call: &SyscallEvent, fds: &FdTable) -> Option<String> {
+    let path = filter::paths(call).into_iter().next()?;
+    let dirfd = specs::spec(call.call)
+        .and_then(|spec| {
+            spec.args
+                .iter()
+                .position(|arg| matches!(arg, specs::Arg::DirFd))
+        })
+        .map_or(AT_FDCWD, |index| filter::fd_value(call.args[index]));
+    Some(fds.resolve(call.process, dirfd, &path))
+}
+
+/// What a call works on: the path it names, or what its first descriptor
+/// refers to.
+fn target(call: &SyscallEvent, fds: &FdTable) -> Option<String> {
+    named_path(call, fds).or_else(|| {
+        let spec = specs::spec(call.call)?;
+        let index = spec
+            .args
+            .iter()
+            .position(|arg| matches!(arg, specs::Arg::Fd))?;
+        let fd = filter::fd_value(call.args[index]);
+        Some(fds.describe(call.process, fd).map_or_else(
+            || fd.to_string(),
+            |description| description.text.to_string(),
+        ))
+    })
+}
+
 /// The class a call is shown under.
 fn class(call: &SyscallEvent) -> &'static str {
     specs::spec(call.call)
@@ -297,10 +363,26 @@ fn row(key: String, name: String, stats: &SyscallStats) -> SyscallRow {
     }
 }
 
-fn summary(trace: &Trace, query: &SyscallSummaryQuery) -> Result<SyscallSummary, Failure> {
+fn summary(
+    profile: &Profile,
+    trace: &Trace,
+    query: &SyscallSummaryQuery,
+) -> Result<SyscallSummary, Failure> {
     let selection = Selection::new(trace, &query.query)?;
-    let group = |call: &SyscallEvent| -> (String, String) {
+    let mut sites: HashMap<u32, String> = HashMap::new();
+    let mut group = |index: usize, call: &SyscallEvent, fds: &FdTable| -> (String, String) {
         match query.group {
+            SyscallGroup::Path => {
+                let path = target(call, fds).unwrap_or_else(|| "none".to_owned());
+                (path.clone(), path)
+            }
+            SyscallGroup::Site => {
+                let site = trace.events[index].stack.map_or_else(
+                    || "no stack".to_owned(),
+                    |stack| site(profile, &mut sites, stack).clone(),
+                );
+                (site.clone(), site)
+            }
             SyscallGroup::Syscall => {
                 let name = call.call.display_name().into_owned();
                 (name.clone(), name)
@@ -325,9 +407,9 @@ fn summary(trace: &Trace, query: &SyscallSummaryQuery) -> Result<SyscallSummary,
             .1
             .merge(stats);
     };
-    calls(trace, &selection, |_, call, _| {
+    calls(trace, &selection, |index, call, fds| {
         processes.insert(call.process);
-        let (key, name) = group(call);
+        let (key, name) = group(index, call, fds);
         let mut one = SyscallStats::default();
         one.add(call.outcome, call.duration(), bytes_moved(call));
         add(key, name, &one);
@@ -342,7 +424,10 @@ fn summary(trace: &Trace, query: &SyscallSummaryQuery) -> Result<SyscallSummary,
         processes.insert(pid);
         let name = id.display_name().into_owned();
         let (key, name) = match query.group {
-            SyscallGroup::Syscall | SyscallGroup::Thread => (name.clone(), name),
+            SyscallGroup::Syscall
+            | SyscallGroup::Thread
+            | SyscallGroup::Path
+            | SyscallGroup::Site => (name.clone(), name),
             SyscallGroup::Class => {
                 let class = specs::spec(id)
                     .and_then(|spec| {
@@ -517,16 +602,7 @@ fn detail(
             unplaced += 1;
             continue;
         };
-        let site = sites.entry(stack).or_insert_with(|| {
-            profile.syscall_site(stack).unwrap_or_else(|| {
-                profile
-                    .syscall_stack(stack)
-                    .0
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| "?".to_owned())
-            })
-        });
+        let site = site(profile, &mut sites, stack);
         let counts = callers.entry(site.clone()).or_default();
         counts.0 += u64::from(slow);
         counts.1 += u64::from(failed);
@@ -708,19 +784,50 @@ fn call(
         entered: target.entered.map(|time| trace.relative(time)),
         exited: target.exited.map(|time| trace.relative(time)),
         result: tokens(result),
+        site: event
+            .stack
+            .and_then(|row| profile.syscall_place(row))
+            .map(|place| {
+                let line = u64::from(place.line);
+                let first = line.saturating_sub(SITE_MARGIN).max(1);
+                let (text, unread) =
+                    match super::profiles::source_lines(place.file, first, line + SITE_MARGIN) {
+                        Ok(text) => (Some(text), None),
+                        Err(why) => (None, Some(why)),
+                    };
+                SyscallSite {
+                    function: place.function.to_owned(),
+                    path: place.file.to_owned(),
+                    line: place.line,
+                    first: u32::try_from(first).unwrap_or(u32::MAX),
+                    text,
+                    unread,
+                }
+            }),
     })
 }
 
 fn lanes(trace: &Trace, query: &SyscallLanesQuery) -> Result<SyscallLanes, Failure> {
-    let selection = Selection::new(trace, &query.query)?;
+    let selection = Selection {
+        overlapping: true,
+        ..Selection::new(trace, &query.query)?
+    };
     let slices = Slices::new(selection.span(trace), query.buckets);
-    let mut lanes: BTreeMap<(u32, u32), (Vec<u64>, Vec<u32>)> = BTreeMap::new();
+    let mut lanes: BTreeMap<(u32, u32), Lane> = BTreeMap::new();
     calls(trace, &selection, |_, call, _| {
-        let (busy, failed) = lanes
+        let Lane {
+            busy,
+            failed,
+            blocked,
+        } = lanes
             .entry((call.process, call.thread))
-            .or_insert_with(|| (vec![0; slices.count], vec![0; slices.count]));
+            .or_insert_with(|| Lane {
+                busy: vec![0; slices.count],
+                failed: vec![0; slices.count],
+                blocked: vec![false; slices.count],
+            });
         if let (Some(entered), Some(exited)) = (call.entered, call.exited) {
-            spread(&slices, entered, exited, busy);
+            spread(&slices, entered, exited, busy, blocked);
         }
         if matches!(call.outcome, Outcome::Failed(_))
             && let Some(slice) = slices.of(call.time())
@@ -733,27 +840,37 @@ fn lanes(trace: &Trace, query: &SyscallLanesQuery) -> Result<SyscallLanes, Failu
         width: slices.width,
         lanes: lanes
             .into_iter()
-            .map(|((pid, tid), (busy, failed))| SyscallLane {
+            .map(|((pid, tid), lane)| SyscallLane {
                 tid,
                 pid,
                 name: trace.program(pid),
-                busy,
-                failed,
+                busy: lane.busy,
+                failed: lane.failed,
+                blocked: lane.blocked,
             })
             .collect(),
     })
 }
 
-/// Adds the nanoseconds of `[from, to)` to each slice they overlap.
-fn spread(slices: &Slices, from: u64, to: u64, busy: &mut [u64]) {
+/// One thread's slices.
+struct Lane {
+    busy: Vec<u64>,
+    failed: Vec<u32>,
+    blocked: Vec<bool>,
+}
+
+/// Adds the nanoseconds of `[from, to)` to each slice they overlap, and
+/// marks those it covers whole.
+fn spread(slices: &Slices, from: u64, to: u64, busy: &mut [u64], blocked: &mut [bool]) {
     let (from, to) = (from.cast_signed(), to.cast_signed());
-    for (slice, total) in (0_i64..).zip(busy.iter_mut()) {
+    for ((slice, total), whole) in (0_i64..).zip(busy.iter_mut()).zip(blocked.iter_mut()) {
         let start = slices.start + slices.width * slice;
         let end = start + slices.width;
         let overlap = to.min(end) - from.max(start);
         if overlap > 0 {
             *total += overlap.unsigned_abs();
         }
+        *whole |= from <= start && end <= to;
     }
 }
 
@@ -769,19 +886,8 @@ fn files(trace: &Trace, query: &SyscallQuery) -> Result<SyscallFiles, Failure> {
     let mut files: BTreeMap<String, SyscallFile> = BTreeMap::new();
     calls(trace, &selection, |_, call, fds| {
         if opens(call)
-            && let Some(path) = filter::paths(call).first()
+            && let Some(path) = named_path(call, fds)
         {
-            // As the descriptor it makes will be known: from where it is.
-            let dirfd = if call
-                .call
-                .name()
-                .is_some_and(|name| name.starts_with("openat"))
-            {
-                filter::fd_value(call.args[0])
-            } else {
-                AT_FDCWD
-            };
-            let path = fds.resolve(call.process, dirfd, path);
             let entry = files.entry(path.clone()).or_insert_with(|| SyscallFile {
                 path,
                 ..SyscallFile::default()

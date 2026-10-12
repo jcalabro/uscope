@@ -107,11 +107,47 @@ async fn a_trace_is_served_as_costs_lines_callers_files_and_lanes() {
         )
     );
     assert_eq!(missing["failed"], true);
-    let call = tab
-        .ok(
-            "syscallCall",
-            json!({"profile": id, "event": missing["event"]}),
+    expanded(&mut tab, &id, &missing["event"]).await;
+
+    // The failure is placed at the line that made it.
+    let detail = tab
+        .ok("syscallDetail", json!({"profile": id, "call": "openat"}))
+        .await;
+    assert_eq!(detail["errnos"][0]["name"], "ENOENT", "{detail}");
+    let callers = detail["callers"].as_array().expect("callers");
+    assert!(
+        callers
+            .iter()
+            .any(|caller| caller["site"] == "files · syscalls.c:23" && caller["failed"] == 1),
+        "{detail}"
+    );
+    assert_eq!(sum(&detail["whole"]), sum(&detail["selected"]));
+
+    files_and_charts(&mut tab, &id, scratch.path()).await;
+    groups_and_bands(&mut tab, &id, scratch.path()).await;
+
+    let processes = tab.ok("syscallProcesses", json!({"profile": id})).await;
+    assert_eq!(
+        processes["processes"][0]["end"], "exited with 3",
+        "{processes}"
+    );
+    let network = tab.ok("syscallNetwork", json!({"profile": id})).await;
+    assert_eq!(network["endpoints"], json!([]));
+
+    let refused = tab
+        .request(
+            "syscallSummary",
+            json!({"profile": id, "filter": "trace=nosuchcall"}),
         )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    tab.save_traffic("syscalls");
+}
+
+/// The failed open, expanded: its arguments, stack, and source line.
+async fn expanded(tab: &mut Client, id: &str, event: &Value) {
+    let call = tab
+        .ok("syscallCall", json!({"profile": id, "event": event}))
         .await;
     let arguments: Vec<&str> = call["arguments"]
         .as_array()
@@ -130,39 +166,18 @@ async fn a_trace_is_served_as_costs_lines_callers_files_and_lanes() {
         stack.contains(&"files") && stack.contains(&"main"),
         "{call}"
     );
-
-    // The failure is placed at the line that made it.
-    let detail = tab
-        .ok("syscallDetail", json!({"profile": id, "call": "openat"}))
-        .await;
-    assert_eq!(detail["errnos"][0]["name"], "ENOENT", "{detail}");
-    let callers = detail["callers"].as_array().expect("callers");
-    assert!(
-        callers
-            .iter()
-            .any(|caller| caller["site"] == "files · syscalls.c:23" && caller["failed"] == 1),
-        "{detail}"
-    );
-    assert_eq!(sum(&detail["whole"]), sum(&detail["selected"]));
-
-    files_and_charts(&mut tab, &id, scratch.path()).await;
-
-    let processes = tab.ok("syscallProcesses", json!({"profile": id})).await;
+    let site = &call["site"];
     assert_eq!(
-        processes["processes"][0]["end"], "exited with 3",
-        "{processes}"
+        (&site["function"], &site["line"]),
+        (&json!("files"), &json!(23))
     );
-    let network = tab.ok("syscallNetwork", json!({"profile": id})).await;
-    assert_eq!(network["endpoints"], json!([]));
-
-    let refused = tab
-        .request(
-            "syscallSummary",
-            json!({"profile": id, "filter": "trace=nosuchcall"}),
-        )
-        .await;
-    assert!(refused.is_err(), "{refused:?}");
-    tab.save_traffic("syscalls");
+    let first = site["first"].as_u64().expect("a first line");
+    let made = &site["text"][usize::try_from(23 - first).expect("an index")];
+    assert!(
+        made.as_str()
+            .is_some_and(|line| line.contains("\"missing\"")),
+        "{site}"
+    );
 }
 
 /// The files the program used, and every selected call charted once.
@@ -214,6 +229,52 @@ async fn files_and_charts(tab: &mut Client, id: &str, scratch: &Path) {
     assert!(sum(&busy["lanes"][0]["busy"]) > 0);
 }
 
+/// Calls grouped by what they name and where they were made, and a heat
+/// map's row selecting the calls it counts.
+async fn groups_and_bands(tab: &mut Client, id: &str, scratch: &Path) {
+    let grouped = |group: &str| json!({"profile": id, "filter": "trace=openat", "group": group});
+    let by_path = tab.ok("syscallSummary", grouped("path")).await;
+    let missing = scratch.join("missing").display().to_string();
+    let row = by_path["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["key"] == missing.as_str())
+        .unwrap_or_else(|| panic!("{by_path}"));
+    assert_eq!((&row["calls"], &row["errors"]), (&json!(1), &json!(1)));
+    let by_site = tab.ok("syscallSummary", grouped("site")).await;
+    assert!(
+        by_site["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .any(|row| row["key"] == "files · syscalls.c:23" && row["errors"] == 1),
+        "{by_site}"
+    );
+
+    // Each row of the heat map holds the calls of its latency band.
+    let heat = tab
+        .ok(
+            "syscallHeatmap",
+            json!({"profile": id, "filter": "trace=openat", "buckets": 1}),
+        )
+        .await;
+    let (band, count) = heat["counts"]
+        .as_array()
+        .expect("counts")
+        .iter()
+        .enumerate()
+        .find(|(_, count)| count.as_u64() > Some(0))
+        .expect("a counted band");
+    let banded = tab
+        .ok(
+            "syscallSummary",
+            json!({"profile": id, "filter": "trace=openat", "latency": band}),
+        )
+        .await;
+    assert_eq!(&banded["calls"], count, "{banded}");
+}
+
 /// Processes come parents first, each with its threads, calls, and end;
 /// each thread has a lane.
 #[tokio::test]
@@ -236,5 +297,42 @@ async fn a_familys_processes_and_threads_are_served_in_order() {
         lanes["lanes"].as_array().expect("lanes").len(),
         3,
         "{lanes}"
+    );
+
+    // The parent is blocked across the middle of its wait for the child.
+    let waits = tab
+        .ok(
+            "syscallLog",
+            json!({"profile": id, "filter": "trace=wait4", "offset": 0, "limit": 10}),
+        )
+        .await;
+    // Exit lines show whatever the selection, as strace prints them.
+    let wait = waits["lines"]
+        .as_array()
+        .expect("lines")
+        .iter()
+        .find(|line| line["call"] == true)
+        .unwrap_or_else(|| panic!("{waits}"));
+    let (ended, took) = (
+        wait["time"].as_i64().expect("a time"),
+        wait["durationNs"].as_i64().expect("a duration"),
+    );
+    let middle = [ended - took * 3 / 4, ended - took / 4];
+    let lanes = tab
+        .ok(
+            "syscallLanes",
+            json!({"profile": id, "range": middle, "buckets": 4}),
+        )
+        .await;
+    let waiting = lanes["lanes"]
+        .as_array()
+        .expect("lanes")
+        .iter()
+        .find(|lane| lane["tid"] == wait["tid"])
+        .unwrap_or_else(|| panic!("{lanes}"));
+    assert_eq!(
+        waiting["blocked"],
+        json!([true, true, true, true]),
+        "{waiting}"
     );
 }

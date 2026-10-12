@@ -2332,6 +2332,7 @@ mod tests {
         SyscallCallQuery::decl,
         SyscallCall::decl,
         SyscallArgument::decl,
+        SyscallSite::decl,
         SyscallLanesQuery::decl,
         SyscallLanes::decl,
         SyscallLane::decl,

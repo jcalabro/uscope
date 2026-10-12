@@ -1338,9 +1338,14 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
-export type SyscallGroup = "syscall" | "class" | "process" | "thread";
+export type SyscallGroup = "syscall" | "class" | "process" | "thread" | "path" | "site";
 
 export type SyscallSummaryQuery = { group: SyscallGroup, profile: string, 
 /**
@@ -1361,7 +1366,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallSummary = { 
 /**
@@ -1385,7 +1395,7 @@ engine: string | null, processes: number, rows: Array<SyscallRow>, };
 export type SyscallRow = { 
 /**
  * What the row is of, as a filter or query names it: a call's name,
- * a class, a pid or a tid.
+ * a class, a pid, a tid, a path, or a site.
  */
 key: string, name: string, calls: number, errors: number, 
 /**
@@ -1420,7 +1430,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallRate = { 
 /**
@@ -1453,7 +1468,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallHeatmap = { start: number, width: number, 
 /**
@@ -1488,7 +1508,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallDetail = { 
 /**
@@ -1533,7 +1558,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallLog = { 
 /**
@@ -1579,9 +1609,19 @@ entered: number | null, exited: number | null,
 /**
  * What its result means, as `ENOENT (No such file or directory)`.
  */
-result: Array<SyscallToken>, };
+result: Array<SyscallToken>, 
+/**
+ * Where in the source it was made, when its stack says.
+ */
+site: SyscallSite | null, };
 
 export type SyscallArgument = { name: string, tokens: Array<SyscallToken>, };
+
+export type SyscallSite = { function: string, path: string, line: number, 
+/**
+ * The text from line `first`, or why it could not be read.
+ */
+first: number, text: Array<string> | null, unread: string | null, };
 
 export type SyscallLanesQuery = { buckets: number, profile: string, 
 /**
@@ -1602,7 +1642,12 @@ filter: string,
 /**
  * Calls of these threads, by id, or of all.
  */
-threads?: Array<number> | null, };
+threads?: Array<number> | null, 
+/**
+ * Calls whose duration falls in this log2 bucket, as a heat map's
+ * row names it, or all.
+ */
+latency?: number | null, };
 
 export type SyscallLanes = { start: number, width: number, lanes: Array<SyscallLane>, };
 
@@ -1614,7 +1659,11 @@ name: string | null,
 /**
  * Each slice's nanoseconds spent in calls, and failed calls.
  */
-busy: Array<number>, failed: Array<number>, };
+busy: Array<number>, failed: Array<number>, 
+/**
+ * Slices one call spans from end to end: the thread was blocked.
+ */
+blocked: Array<boolean>, };
 
 export type SyscallFiles = { files: Array<SyscallFile>, };
 

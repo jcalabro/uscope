@@ -15,7 +15,7 @@ mod segments;
 mod session;
 mod symbols;
 mod syscalls;
-pub use syscalls::{RecordedEvent, RecordedSyscalls};
+pub use syscalls::{RecordedEvent, RecordedSyscalls, SyscallPlace};
 mod tasks;
 mod zones;
 

@@ -884,7 +884,7 @@ fn source(
 }
 
 /// Lines `first` to `last` of a source file, as it reads now.
-fn source_lines(path: &str, first: u64, last: u64) -> Result<Vec<String>, String> {
+pub(super) fn source_lines(path: &str, first: u64, last: u64) -> Result<Vec<String>, String> {
     let size = std::fs::metadata(path)
         .map_err(|error| format!("{path} cannot be read: {error}"))?
         .len();

@@ -307,19 +307,36 @@ impl Profile {
     /// the call.
     #[must_use]
     pub fn syscall_site(&self, row: u32) -> Option<String> {
+        let place = self.syscall_place(row)?;
+        let file = place.file.rsplit('/').next().unwrap_or(place.file);
+        Some(format!("{} · {file}:{}", place.function, place.line))
+    }
+
+    /// The innermost frame of stack `row` with a source line.
+    #[must_use]
+    pub fn syscall_place(&self, row: u32) -> Option<SyscallPlace<'_>> {
         let capture = &self.capture;
         capture.stack_frames(row).find_map(|frame| {
             let line = capture
                 .frame_lines(frame)
                 .iter()
                 .find(|line| line.file.get() != NONE)?;
-            let function =
-                capture.string(capture.functions[line.function.get() as usize].name.get());
-            let file = capture.string(line.file.get());
-            let file = file.rsplit('/').next().unwrap_or(file);
-            Some(format!("{function} · {file}:{}", line.number.get()))
+            Some(SyscallPlace {
+                function: capture
+                    .string(capture.functions[line.function.get() as usize].name.get()),
+                file: capture.string(line.file.get()),
+                line: line.number.get(),
+            })
         })
     }
+}
+
+/// Where a call was made: a function, and a line of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallPlace<'a> {
+    pub function: &'a str,
+    pub file: &'a str,
+    pub line: u32,
 }
 
 #[cfg(test)]

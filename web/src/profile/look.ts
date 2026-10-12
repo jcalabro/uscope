@@ -71,10 +71,12 @@ export interface ProfileLook {
   sr?: "syscall";
   /** The log line expanded, by its event. */
   ev?: string;
+  /** Calls of one log2 latency bucket, as a heat map's row names it. */
+  sl?: string;
 }
 
 const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones", "syscalls"];
-const SYSCALL_GROUPS: readonly string[] = ["class", "process", "thread"];
+const SYSCALL_GROUPS: readonly string[] = ["class", "process", "thread", "path", "site"];
 const SYSCALL_TABS: readonly string[] = ["log", "files", "network", "processes"];
 const GRANULARITIES: readonly string[] = ["physical", "line", "address"];
 const OPS: readonly TransformOp[] = ["focus", "merge", "drop", "collapse"];
@@ -182,6 +184,10 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   if (ev && /^\d+$/.test(ev)) {
     look.ev = ev;
   }
+  const sl = text("sl");
+  if (sl && /^\d{1,2}$/.test(sl)) {
+    look.sl = sl;
+  }
   return look;
 }
 
@@ -193,6 +199,7 @@ export function syscallQueryOf(profile: string, look: ProfileLook, revision: num
     profile,
     revision,
     ...(range ? { range } : {}),
+    ...(look.sl ? { latency: Number(look.sl) } : {}),
     filter: look.sf ?? "",
   };
 }

@@ -8,7 +8,13 @@ import {
 } from "../../profile/look";
 import { formatBytes, formatDuration, formatInstant } from "../../profile/paint";
 import { bucketLabel, heatAlpha, seriesColor, shownBuckets, stacked } from "../../profile/syscalls";
-import type { SyscallGroup, SyscallQuery, SyscallRow, SyscallToken } from "../../protocol";
+import type {
+  SyscallGroup,
+  SyscallQuery,
+  SyscallRow,
+  SyscallSite,
+  SyscallToken,
+} from "../../protocol";
 import { useShownScheme } from "../../theme";
 import { token, useAnswer, useProfile } from "./context";
 
@@ -30,6 +36,8 @@ const GROUPS: { group: SyscallGroup; label: string }[] = [
   { group: "class", label: "by class" },
   { group: "process", label: "by process" },
   { group: "thread", label: "by thread" },
+  { group: "path", label: "by file" },
+  { group: "site", label: "by call site" },
 ];
 
 /** The profile's system calls: what they cost, when, from where, and what
@@ -58,6 +66,18 @@ export function SyscallsView() {
             </button>
           ))}
         </div>
+        {look.sl ? (
+          <span className="chip profile-chip" title="Calls of this latency">
+            {bucketLabel(Number(look.sl))}
+            <button
+              type="button"
+              aria-label="Remove the latency band"
+              onClick={() => setLook((look) => withLook(look, "sl", undefined))}
+            >
+              ×
+            </button>
+          </span>
+        ) : null}
         {summary.data ? (
           <span className="muted syscalls-counts" data-testid="syscall-counts">
             {summary.data.calls.toLocaleString("en-US")} of{" "}
@@ -218,6 +238,24 @@ function shade(
   context.globalAlpha = 1;
 }
 
+/** Diagonal strokes of `color`, which mark a thread blocked in a call. */
+function hatching(color: string): CanvasPattern | null {
+  const tile = document.createElement("canvas");
+  tile.width = 6;
+  tile.height = 6;
+  const context = tile.getContext("2d");
+  if (!context) {
+    return null;
+  }
+  context.strokeStyle = color;
+  context.globalAlpha = 0.45;
+  context.beginPath();
+  context.moveTo(0, 6);
+  context.lineTo(6, 0);
+  context.stroke();
+  return context.createPattern(tile, "repeat");
+}
+
 /** A lane per thread of its time in calls over the whole profile, with
  * failed calls as red ticks, under the samples' timeline on one clock. */
 function Lanes({ query }: { query: SyscallQuery }) {
@@ -247,8 +285,18 @@ function Lanes({ query }: { query: SyscallQuery }) {
     const x = (bucket: number) => (plot * (data.start + bucket * data.width)) / span;
     const busy = token("--accent");
     const failed = token("--error");
+    const hatch = hatching(busy);
     for (const [index, lane] of lanes.entries()) {
       const top = index * LANE;
+      // Blocked: one call spans the whole slice.
+      if (hatch) {
+        context.fillStyle = hatch;
+        for (const [bucket, blocked] of lane.blocked.entries()) {
+          if (blocked) {
+            context.fillRect(x(bucket), top + 1, Math.max(slice, 1), LANE - 2);
+          }
+        }
+      }
       context.fillStyle = busy;
       for (const [bucket, nanoseconds] of lane.busy.entries()) {
         if (nanoseconds > 0) {
@@ -585,7 +633,7 @@ function Detail({ call, query }: { call: string; query: SyscallQuery }) {
       <div className="pane-head">
         <span className="mono">{call}</span>
       </div>
-      <Heatmap query={selected} />
+      <Heatmap query={selected} call={call} />
       <section>
         <h3>Latency</h3>
         {last < first ? <p className="muted">No call was timed.</p> : null}
@@ -654,7 +702,8 @@ function Detail({ call, query }: { call: string; query: SyscallQuery }) {
 }
 
 /** Calls by when they returned, across, and how long they took, up. */
-function Heatmap({ query }: { query: SyscallQuery }) {
+function Heatmap({ query, call }: { query: SyscallQuery; call: string }) {
+  const { look, setLook } = useProfile();
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const width = useWidth(box);
@@ -720,7 +769,36 @@ function Heatmap({ query }: { query: SyscallQuery }) {
       {/* Measured without the section's padding, and never wider than
           it, so the canvas cannot widen the column it is measured in. */}
       <div ref={box} className="plot">
-        <canvas ref={canvas} style={{ width, height }} role="img" aria-label="Latency heat map" />
+        <canvas
+          ref={canvas}
+          className="clickable"
+          style={{ width, height }}
+          role="img"
+          aria-label="Latency heat map"
+          title="A cell's calls, in the log"
+          onClick={(event) => {
+            if (!data || last < first) {
+              return;
+            }
+            const box = event.currentTarget.getBoundingClientRect();
+            const slices = data.counts.length / data.rows;
+            const slice = Math.floor(((event.clientX - box.left) / box.width) * slices);
+            const row =
+              last - Math.floor(((event.clientY - box.top) / box.height) * (last - first + 1));
+            if (!data.counts[slice * data.rows + row]) {
+              return;
+            }
+            const start = data.start + slice * data.width;
+            const filter = `${look.sf ?? ""} trace=${call}`.trim();
+            setLook((look) => {
+              let next = withLook(look, "range", `${start}-${start + data.width}`);
+              next = withLook(next, "sl", String(row));
+              next = withLook(next, "sf", filter);
+              next = withLook(next, "ev", undefined);
+              return withLook(next, "st", "log");
+            }, true);
+          }}
+        />
       </div>
     </section>
   );
@@ -814,6 +892,7 @@ function Call({ event }: { event: number }) {
         </tbody>
       </table>
       {data.dumps.length > 0 ? <pre className="dump">{data.dumps.join("\n")}</pre> : null}
+      {data.site ? <Site site={data.site} /> : null}
       {data.stack.length > 0 ? (
         <ol className="stack">
           {data.stack.map((name, index) => (
@@ -824,6 +903,32 @@ function Call({ event }: { event: number }) {
         </ol>
       ) : null}
     </div>
+  );
+}
+
+/** Where a call was made, with the lines around it. */
+function Site({ site }: { site: SyscallSite }) {
+  return (
+    <figure className="call-site" data-testid="syscall-site">
+      <figcaption className="mono">
+        {site.function} · {site.path}:{site.line}
+      </figcaption>
+      {site.text ? (
+        <pre className="source-lines">
+          {site.text.map((text, index) => {
+            const number = site.first + index;
+            return (
+              <div key={number} className={number === site.line ? "made" : undefined}>
+                <span className="line-number">{number}</span>
+                {text}
+              </div>
+            );
+          })}
+        </pre>
+      ) : (
+        <p className="muted">{site.unread}</p>
+      )}
+    </figure>
   );
 }
 

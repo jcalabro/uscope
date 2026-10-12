@@ -57,6 +57,10 @@ test("a trace is explored from its costs to one call's arguments and stack", asy
   const call = page.getByTestId("syscall-call");
   await expect(call.getByRole("rowheader", { name: "filename" })).toBeVisible();
   await expect(call.getByRole("listitem").filter({ hasText: /^files$/ })).toBeVisible();
+  // And to the line that made it.
+  const site = call.getByTestId("syscall-site");
+  await expect(site.locator("figcaption")).toContainText(/^files · .*syscalls\.c:23$/);
+  await expect(site.locator(".made")).toContainText('"missing"');
 
   // The address opens the same view.
   await page.reload();
@@ -74,6 +78,41 @@ test("a trace is explored from its costs to one call's arguments and stack", asy
   const files = page.getByTestId("syscall-files");
   await expect(files.getByRole("cell", { name: /\/present$/ })).toHaveCount(1);
   await expect(files.getByRole("cell", { name: /\/missing$/ })).toHaveCount(1);
+
+  // Grouped by file, the failed open is the missing file's.
+  await view.getByRole("button", { name: "Summary", exact: true }).click();
+  await page.getByLabel("Selection").fill("trace=openat");
+  await page.getByLabel("Selection").press("Enter");
+  await page.getByLabel("Group").selectOption("path");
+  await expect(page).toHaveURL(/sg=path/);
+  await expect(table.getByRole("cell", { name: /\/missing$/ })).toHaveCount(1);
+  await page.getByLabel("Group").selectOption("syscall");
+
+  // A cell of the heat map lists its calls: of its time and latency.
+  await table.locator('tr[data-row="openat"] td').nth(1).click();
+  const heat = detail.getByRole("img", { name: "Latency heat map" });
+  await expect(heat).toBeVisible();
+  await heat.evaluate((canvas) => {
+    // Every cell is clicked; an empty one does nothing.
+    const box = canvas.getBoundingClientRect();
+    for (let y = box.bottom - 1; y > box.top; y -= 3) {
+      for (let x = box.left + 1; x < box.right; x += 2) {
+        canvas.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
+      }
+    }
+  });
+  await expect(page).toHaveURL(/st=log/);
+  await expect(page).toHaveURL(/sl=\d+/);
+  const band = view.getByRole("button", { name: "Remove the latency band" });
+  await expect(band).toBeVisible();
+  const calls = page.getByTestId("syscall-log").getByRole("button");
+  await expect(calls.first()).toContainText("openat(");
+  for (const shown of await calls.all()) {
+    await expect(shown).toContainText(/openat\(|\+\+\+/);
+  }
+  await band.click();
+  await expect(page).not.toHaveURL(/sl=/);
+  await page.getByRole("button", { name: /^Remove .* – / }).click();
 
   // Dragging across the lanes selects a range, which a chip names.
   await view.getByRole("button", { name: "Summary", exact: true }).click();
