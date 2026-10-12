@@ -323,7 +323,7 @@ impl Filter {
                 "read" | "reads" | "r" => filter.read_dumps = numbers(value, "descriptor")?,
                 "write" | "writes" | "w" => filter.write_dumps = numbers(value, "descriptor")?,
                 "trace-fds" | "trace-fd" | "fd" | "fds" => {
-                    filter.fds = Some(numbers(value, "descriptor")?)
+                    filter.fds = Some(numbers(value, "descriptor")?);
                 }
                 "raw" | "x" => {
                     let (negated, calls) = set(value)?;

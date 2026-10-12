@@ -8,6 +8,8 @@
 //! `backend::linux::syscalls`, and formatting in the binary's
 //! `present::syscalls`.
 
+mod argnames;
+pub mod blobs;
 pub mod fds;
 pub mod filter;
 pub mod model;
