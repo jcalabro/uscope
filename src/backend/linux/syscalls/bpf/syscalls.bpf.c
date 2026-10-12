@@ -185,6 +185,14 @@ static __always_inline u32 forget(struct scratch *buffer, u32 value, u32 mask)
 	return *spare & mask;
 }
 
+// Fixed as uscope loads the programs, so the verifier drops what they
+// leave unused: a cgroup's processes, by its id and depth, rather than
+// TARGETS'; and the pid namespace ids are shown in, by its inode and depth.
+const volatile u64 cgroup_id = 0;
+const volatile u32 cgroup_level = 0;
+const volatile u32 ns_inum = 0;
+const volatile u32 ns_level = 0;
+
 static __always_inline struct config *config(void)
 {
 	u32 zero = 0;
@@ -195,10 +203,8 @@ static __always_inline struct config *config(void)
 // process is a target.
 static __always_inline int traced(u32 tgid)
 {
-	struct config *settings = config();
-	if (settings && settings->cgroup_id)
-		return bpf_get_current_ancestor_cgroup_id(settings->cgroup_level) ==
-		       settings->cgroup_id;
+	if (cgroup_id)
+		return bpf_get_current_ancestor_cgroup_id(cgroup_level) == cgroup_id;
 	return bpf_map_lookup_elem(&TARGETS, &tgid) != 0;
 }
 
@@ -206,17 +212,16 @@ static __always_inline int traced(u32 tgid)
 // there is none or it is not in it.
 static __always_inline u32 shown_id(struct pid *pid, u32 host)
 {
-	struct config *settings = config();
-	if (!settings || !settings->ns_inum || !pid)
+	if (!pid)
 		return host;
-	u32 level = settings->ns_level & 31;
+	u32 level = ns_level & 31;
 	if (BPF_CORE_READ(pid, level) < level)
 		return host;
 	struct upid upid = {};
 	void *numbers = __builtin_preserve_access_index(&pid->numbers[0]);
 	if (bpf_probe_read_kernel(&upid, sizeof(upid), numbers + level * sizeof(struct upid)))
 		return host;
-	if (BPF_CORE_READ(upid.ns, ns.inum) != settings->ns_inum)
+	if (BPF_CORE_READ(upid.ns, ns.inum) != ns_inum)
 		return host;
 	return upid.nr;
 }
@@ -224,8 +229,17 @@ static __always_inline u32 shown_id(struct pid *pid, u32 host)
 // A task's thread and process ids as the trace shows them.
 static __always_inline void shown(struct task_struct *task, u32 *tid, u32 *tgid)
 {
+	if (!ns_inum)
+		return;
 	*tid = shown_id(BPF_CORE_READ(task, thread_pid), *tid);
 	*tgid = shown_id(BPF_CORE_READ(task, group_leader, thread_pid), *tgid);
+}
+
+// The current task's ids as the trace shows them.
+static __always_inline void shown_current(u32 *tid, u32 *tgid)
+{
+	if (ns_inum)
+		shown(bpf_get_current_task_btf(), tid, tgid);
 }
 
 static __always_inline void lost(void)
@@ -574,12 +588,9 @@ static __always_inline void send_call(u32 tid, u32 tgid, struct entry *entry, u3
 }
 
 // Folds one call into its process's statistics.
-static __always_inline void count(struct call_spec *spec, u32 slot, u64 entered, u64 exited,
-				  s64 ret, int returned)
+static __always_inline void count(struct config *settings, struct call_spec *spec, u32 slot,
+				  u64 entered, u64 exited, s64 ret, int returned)
 {
-	struct config *settings = config();
-	if (!settings)
-		return;
 	u32 generation = (settings->flags & CONFIG_GENERATION) ? 1 : 0;
 	u32 row = spec->stat + generation * settings->rows;
 	struct stat_value *value = bpf_map_lookup_elem(&STATS, &row);
@@ -741,7 +752,7 @@ static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
-	shown(bpf_get_current_task_btf(), &tid, &tgid);
+	shown_current(&tid, &tgid);
 	struct entry entry = {};
 	entry.abi = abi_of(id, &entry.flags);
 	entry.nr = entry.abi == ABI_X32 ? (id & ~X32_SYSCALL_BIT) : id;
@@ -790,7 +801,7 @@ static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
-	shown(bpf_get_current_task_btf(), &tid, &tgid);
+	shown_current(&tid, &tgid);
 	u64 now = bpf_ktime_get_ns();
 	struct config *settings = config();
 	if (!settings)
@@ -836,7 +847,7 @@ static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 		return 0;
 	u32 slot = slot_of(entry.abi, entry.nr);
 	if ((settings->flags & CONFIG_COUNT) && !sent(settings, entry.flags))
-		count(spec, slot, entry.entered, now, ret, 1);
+		count(settings, spec, slot, entry.entered, now, ret, 1);
 	if (sent(settings, entry.flags)) {
 		if (spec->makes)
 			send_files(tid, tgid, spec, &entry, ret);
@@ -1001,7 +1012,7 @@ int process_exit(u64 *ctx)
 		struct call_spec *spec = bpf_map_lookup_elem(&CALLS, &slot);
 		if (spec && spec->selected) {
 			if ((settings->flags & CONFIG_COUNT) && !sent(settings, entry.flags))
-				count(spec, slot, 0, 0, 0, 0);
+				count(settings, spec, slot, 0, 0, 0, 0);
 			if (sent(settings, entry.flags))
 				send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT + 1, 0, 0);
 		}
@@ -1026,7 +1037,7 @@ int signal_deliver(u64 *ctx)
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
-	shown(bpf_get_current_task_btf(), &tid, &tgid);
+	shown_current(&tid, &tgid);
 	struct config *settings = config();
 	if (!settings || !(settings->flags & CONFIG_STREAM))
 		return 0;
@@ -1065,7 +1076,7 @@ int in_flight(struct bpf_iter__task *ctx)
 	struct config *settings = config();
 	if (!settings)
 		return 0;
-	if (!settings->cgroup_id && !bpf_map_lookup_elem(&TARGETS, &(u32){BPF_CORE_READ(task, tgid)}))
+	if (!cgroup_id && !bpf_map_lookup_elem(&TARGETS, &(u32){BPF_CORE_READ(task, tgid)}))
 		return 0;
 	struct entry *held = bpf_task_storage_get(&ENTRIES, task, 0, 0);
 	if (!held || !held->entered)

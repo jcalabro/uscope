@@ -133,13 +133,8 @@ pub struct RawCallSpec {
 pub struct RawConfig {
     pub flags: u32,
     pub elements: u32,
-    pub cgroup_id: u64,
-    pub cgroup_level: u32,
-    pub ns_inum: u32,
-    pub ns_level: u32,
     pub sample: u32,
     pub rows: u32,
-    pub pad: u32,
 }
 
 /// A thread's call in progress (`struct entry`).
@@ -1117,11 +1112,19 @@ impl Loaded {
             attachment.reason,
             attachment.functions
         );
+        let (cgroup_id, cgroup_level) = scope.cgroup.unwrap_or_default();
+        let (ns_inum, ns_level) = scope
+            .namespace
+            .map_or((0, 0), |namespace| (namespace.inum, namespace.level));
         let mut ebpf = EbpfLoader::new()
             .btf(Some(&btf))
             .map_max_entries("EVENTS", engine.ring)
             // Two halves, one counted into while the other is read.
             .map_max_entries("STATS", rows * 2)
+            .override_global("cgroup_id", &cgroup_id, true)
+            .override_global("cgroup_level", &cgroup_level, true)
+            .override_global("ns_inum", &ns_inum, true)
+            .override_global("ns_level", &ns_level, true)
             // aya cannot open task storage itself, which only the
             // programs use.
             .allow_unsupported_maps()
@@ -1163,13 +1166,8 @@ impl Loaded {
             let raw = RawConfig {
                 flags,
                 elements: u32::try_from(options.limits.elements).unwrap_or(u32::MAX),
-                cgroup_id: scope.cgroup.map_or(0, |(id, _)| id),
-                cgroup_level: scope.cgroup.map_or(0, |(_, level)| level),
-                ns_inum: scope.namespace.map_or(0, |namespace| namespace.inum),
-                ns_level: scope.namespace.map_or(0, |namespace| namespace.level),
                 sample: 0,
                 rows,
-                pad: 0,
             };
             let mut value = [0; CONFIG_BYTES];
             value.copy_from_slice(raw.as_bytes());
@@ -2268,13 +2266,8 @@ mod tests {
                 [
                     flags,
                     elements,
-                    cgroup_id,
-                    cgroup_level,
-                    ns_inum,
-                    ns_level,
                     sample,
-                    rows,
-                    pad
+                    rows
                 ]
             ),
             layout!(
