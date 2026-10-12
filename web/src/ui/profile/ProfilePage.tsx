@@ -11,6 +11,7 @@ import {
   withLook,
 } from "../../profile/look";
 import { formatDuration, formatPercent, formatSpan, formatWeight } from "../../profile/paint";
+import { tracedBy, traceNotes } from "../../profile/syscalls";
 import type { ProfileGranularity, ProfileInfo, ProfileSummary } from "../../protocol";
 import { useConnection, useModel } from "../../store";
 import { ProfileContext, type ProfileFocus, useAnswer, useProfile } from "./context";
@@ -479,16 +480,23 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   const stack = setting("stack bytes");
   const paused = summary.gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
   const span = Math.max(summary.duration, 1);
-  const engine = summary.settings.find((each) => each.name === "syscalls")?.value;
+  const by = tracedBy(summary.settings);
+  const vdso =
+    "Calls through the vDSO, such as clock_gettime, never enter the kernel and are not traced";
   const traced =
     summary.syscalls > 0 ? (
       <>
-        <span title="Calls through the vDSO, such as clock_gettime, never enter the kernel and are not traced">
-          {summary.syscalls.toLocaleString("en-US")} calls traced{engine ? ` by ${engine}` : ""}
+        <span title={by.title ? `${by.title}\n${vdso}` : vdso}>
+          {summary.syscalls.toLocaleString("en-US")} calls traced{by.text}
         </span>
         <span className={summary.syscallsLost > 0 ? "warn" : undefined}>
           calls lost {summary.syscallsLost.toLocaleString("en-US")}
         </span>
+        {traceNotes(summary.settings).map((note) => (
+          <span key={note.text} className={note.warn ? "warn" : undefined} title={note.title}>
+            {note.text}
+          </span>
+        ))}
       </>
     ) : null;
   if (summary.samples === 0 && summary.syscalls > 0) {

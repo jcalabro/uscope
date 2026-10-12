@@ -74,3 +74,56 @@ export function shownBuckets(...histograms: readonly (readonly number[])[]): [nu
   }
   return last < 0 ? [0, -1] : [first, last];
 }
+
+/** A capture's setting, as the server lists them. */
+interface Setting {
+  name: string;
+  value: string;
+}
+
+/** A part of a trace's footer, with more on hover. */
+export interface TraceNote {
+  text: string;
+  title?: string;
+  warn?: boolean;
+}
+
+/** How the calls were traced: the engine and, for BPF, how it attached. */
+export function tracedBy(settings: readonly Setting[]): TraceNote {
+  const setting = (name: string) => settings.find((each) => each.name === name)?.value;
+  const engine = setting("syscalls");
+  if (!engine) {
+    return { text: "" };
+  }
+  const attach = setting("attach");
+  const reason = setting("attach reason");
+  return {
+    text: attach ? ` by ${engine} through ${attach}` : ` by ${engine}`,
+    ...(reason ? { title: reason } : {}),
+  };
+}
+
+/** What else shaped the trace: its cgroup, each step the budget took, and
+ * what saved a window. */
+export function traceNotes(settings: readonly Setting[]): TraceNote[] {
+  const notes: TraceNote[] = [];
+  const cgroup = settings.find((each) => each.name === "cgroup")?.value;
+  if (cgroup) {
+    notes.push({ text: `cgroup ${cgroup}` });
+  }
+  const steps = settings
+    .flatMap((each) => {
+      const step = /^budget (\d+)$/.exec(each.name);
+      return step ? [{ step: Number(step[1]), note: each.value }] : [];
+    })
+    .sort((a, b) => a.step - b.step)
+    .map((each) => each.note);
+  if (steps.length > 0) {
+    notes.push({ text: `budget: ${steps[steps.length - 1]}`, title: steps.join("\n"), warn: true });
+  }
+  const trigger = settings.find((each) => each.name === "trigger")?.value;
+  if (trigger) {
+    notes.push({ text: `saved when ${trigger}`, warn: true });
+  }
+  return notes;
+}

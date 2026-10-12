@@ -11,6 +11,8 @@ import {
   seriesColor,
   shownBuckets,
   stacked,
+  tracedBy,
+  traceNotes,
 } from "../src/profile/syscalls";
 
 const roundTrip = (look: ProfileLook) =>
@@ -82,5 +84,47 @@ describe("what the Syscalls view draws", () => {
     for (const hue of hues) {
       expect(hue > 20 && hue < 340).toBe(true);
     }
+  });
+});
+
+describe("what a trace's footer says of how it was made", () => {
+  const settings = (pairs: [string, string][]) => pairs.map(([name, value]) => ({ name, value }));
+
+  it("names the engine and how it attached, with the reason on hover", () => {
+    expect(tracedBy(settings([["syscalls", "ptrace"]]))).toEqual({ text: " by ptrace" });
+    expect(
+      tracedBy(
+        settings([
+          ["syscalls", "bpf"],
+          ["attach", "tp_btf"],
+          ["attach reason", "the list names 40 calls"],
+        ]),
+      ),
+    ).toEqual({ text: " by bpf through tp_btf", title: "the list names 40 calls" });
+    expect(tracedBy([])).toEqual({ text: "" });
+  });
+
+  it("says the cgroup, the budget's last step with every step on hover, and a window's trigger", () => {
+    expect(
+      traceNotes(
+        settings([
+          ["program", "make"],
+          ["budget 10", "counting only"],
+          ["cgroup", "/sys/fs/cgroup/app.slice"],
+          ["budget 2", "one call in 2"],
+          ["budget 1", "cut at 16"],
+          ["trigger", "close failed with errno 9"],
+        ]),
+      ),
+    ).toEqual([
+      { text: "cgroup /sys/fs/cgroup/app.slice" },
+      {
+        text: "budget: counting only",
+        title: "cut at 16\none call in 2\ncounting only",
+        warn: true,
+      },
+      { text: "saved when close failed with errno 9", warn: true },
+    ]);
+    expect(traceNotes(settings([["syscalls", "bpf"]]))).toEqual([]);
   });
 });
