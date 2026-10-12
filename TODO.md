@@ -14,7 +14,6 @@
 
 ## Later
 
-- Sampling and instrumented profilers.
 - Prometheus and OpenTelemetry collectors.
 - Agent skill
 - MCP server
