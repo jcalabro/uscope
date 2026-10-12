@@ -1522,6 +1522,7 @@ dependencies = [
  "anyhow",
  "axum",
  "aya",
+ "aya-obj",
  "clap",
  "cpp_demangle",
  "crc32fast",
