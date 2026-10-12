@@ -16,26 +16,52 @@ use super::table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallSet {
     calls: BTreeSet<SyscallId>,
+    /// The same calls as a bitmap per ABI, by number, which a tracer asks
+    /// about every call it sees.
+    bits: [Vec<u64>; 3],
 }
 
 impl CallSet {
     #[must_use]
     pub fn all() -> Self {
-        Self {
-            calls: table::all().collect(),
-        }
+        Self::of(table::all().collect())
     }
 
     #[must_use]
     pub const fn none() -> Self {
         Self {
             calls: BTreeSet::new(),
+            bits: [Vec::new(), Vec::new(), Vec::new()],
         }
+    }
+
+    fn of(calls: BTreeSet<SyscallId>) -> Self {
+        let mut set = Self {
+            calls,
+            bits: Default::default(),
+        };
+        set.index();
+        set
+    }
+
+    fn index(&mut self) {
+        let mut bits: [Vec<u64>; 3] = Default::default();
+        for id in &self.calls {
+            let words = &mut bits[id.abi as usize];
+            let word = (id.number / 64) as usize;
+            if words.len() <= word {
+                words.resize(word + 1, 0);
+            }
+            words[word] |= 1 << (id.number % 64);
+        }
+        self.bits = bits;
     }
 
     #[must_use]
     pub fn contains(&self, id: SyscallId) -> bool {
-        self.calls.contains(&id)
+        self.bits[id.abi as usize]
+            .get((id.number / 64) as usize)
+            .is_some_and(|word| word & (1 << (id.number % 64)) != 0)
     }
 
     #[must_use]
@@ -67,14 +93,17 @@ impl CallSet {
 
     pub fn insert(&mut self, id: SyscallId) {
         self.calls.insert(id);
+        self.index();
     }
 
     fn extend(&mut self, other: &BTreeSet<SyscallId>) {
         self.calls.extend(other);
+        self.index();
     }
 
     fn remove(&mut self, other: &BTreeSet<SyscallId>) {
         self.calls.retain(|id| !other.contains(id));
+        self.index();
     }
 }
 
@@ -434,8 +463,8 @@ impl Filter {
     }
 }
 
-const fn from(calls: BTreeSet<SyscallId>) -> CallSet {
-    CallSet { calls }
+fn from(calls: BTreeSet<SyscallId>) -> CallSet {
+    CallSet::of(calls)
 }
 
 fn complement(calls: &BTreeSet<SyscallId>) -> CallSet {

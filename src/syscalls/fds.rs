@@ -268,37 +268,40 @@ impl FdTable {
             })
     }
 
-    pub fn apply(&mut self, event: &TraceEvent) {
-        match event {
-            TraceEvent::Call(call) => {
-                let fresh = self
-                    .processes
-                    .get_mut(&call.process)
-                    .map(|process| std::mem::take(&mut process.fresh))
-                    .unwrap_or_default();
-                self.call(call);
-                if let Some(process) = self.processes.get_mut(&call.process) {
-                    for (fd, (read, _)) in fresh {
-                        let Some(made) = process.fds.get_mut(&fd) else {
-                            continue;
-                        };
-                        // A socket's call knows its family and endpoints,
-                        // which its link does not.
-                        if matches!(made.kind, Kind::Socket(_)) {
-                            continue;
-                        }
-                        if read.text.is_empty() {
-                            // The engine read what it is, not its path.
-                            made.cloexec = read.cloexec;
-                            if let Kind::Device(device) = read.kind {
-                                made.kind = Kind::Device(device);
-                            }
-                        } else {
-                            *made = read;
-                        }
+    /// Follows what a call did to its process's descriptors.
+    pub fn apply_call(&mut self, call: &SyscallEvent) {
+        let fresh = self
+            .processes
+            .get_mut(&call.process)
+            .map(|process| std::mem::take(&mut process.fresh))
+            .unwrap_or_default();
+        self.call(call);
+        if let Some(process) = self.processes.get_mut(&call.process) {
+            for (fd, (read, _)) in fresh {
+                let Some(made) = process.fds.get_mut(&fd) else {
+                    continue;
+                };
+                // A socket's call knows its family and endpoints,
+                // which its link does not.
+                if matches!(made.kind, Kind::Socket(_)) {
+                    continue;
+                }
+                if read.text.is_empty() {
+                    // The engine read what it is, not its path.
+                    made.cloexec = read.cloexec;
+                    if let Kind::Device(device) = read.kind {
+                        made.kind = Kind::Device(device);
                     }
+                } else {
+                    *made = read;
                 }
             }
+        }
+    }
+
+    pub fn apply(&mut self, event: &TraceEvent) {
+        match event {
+            TraceEvent::Call(call) => self.apply_call(call),
             TraceEvent::Spawn {
                 parent,
                 child,

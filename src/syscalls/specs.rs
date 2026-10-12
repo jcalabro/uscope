@@ -998,14 +998,37 @@ static SPECS: LazyLock<BTreeMap<&'static str, Spec>> = LazyLock::new(|| {
         .collect()
 });
 
+/// What is known of each call, in the order its ABI's table lists them,
+/// so that looking a call up compares no names.
+static BY_CALL: LazyLock<[Vec<Known>; 3]> = LazyLock::new(|| {
+    Abi::ALL.map(|abi| {
+        super::table::calls(abi)
+            .iter()
+            .map(|&(_, name)| Known {
+                spec: (abi != Abi::X86_32 || !I386_DIFFERS.contains(&name))
+                    .then(|| SPECS.get(name))
+                    .flatten(),
+                arg_names: arg_names_named(name),
+            })
+            .collect()
+    })
+});
+
+#[derive(Clone, Copy)]
+struct Known {
+    spec: Option<&'static Spec>,
+    arg_names: Option<&'static [&'static str]>,
+}
+
+fn known(id: SyscallId) -> Option<Known> {
+    let index = super::table::index(id)?;
+    BY_CALL[id.abi as usize].get(index).copied()
+}
+
 /// The spec of a call, when its arguments are known under its ABI.
 #[must_use]
 pub fn spec(id: SyscallId) -> Option<&'static Spec> {
-    let name = id.name()?;
-    if id.abi == Abi::X86_32 && I386_DIFFERS.contains(&name) {
-        return None;
-    }
-    SPECS.get(name)
+    known(id)?.spec
 }
 
 /// The spec of a call by its name, whatever its ABI.
@@ -1016,7 +1039,11 @@ pub fn spec_named(name: &str) -> Option<&'static Spec> {
 
 /// The names the kernel gives a call's arguments, which `-N` prints.
 #[must_use]
-pub fn arg_names(name: &str) -> Option<&'static [&'static str]> {
+pub fn arg_names(id: SyscallId) -> Option<&'static [&'static str]> {
+    known(id)?.arg_names
+}
+
+fn arg_names_named(name: &str) -> Option<&'static [&'static str]> {
     super::argnames::ARG_NAMES
         .iter()
         .find(|&&(candidate, _)| candidate == name)
@@ -1055,7 +1082,7 @@ mod tests {
         for &(_, name) in table::calls(Abi::X86_64) {
             assert!(names.contains(name), "{name} has no spec");
             let arity = spec_named(name).expect("a spec").args.len();
-            if let Some(arg_names) = arg_names(name) {
+            if let Some(arg_names) = arg_names_named(name) {
                 assert_eq!(arg_names.len(), arity, "{name}'s argument names");
             }
         }

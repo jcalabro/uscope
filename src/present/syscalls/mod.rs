@@ -145,19 +145,21 @@ impl Default for Style {
 pub struct Tokens(pub Vec<Token>);
 
 impl Tokens {
-    pub fn push(&mut self, kind: Kind, text: impl Into<String>) {
-        let text = text.into();
-        if text.is_empty() {
+    pub fn push(&mut self, kind: Kind, text: impl Into<String> + AsRef<str>) {
+        if text.as_ref().is_empty() {
             return;
         }
         // Neighbors of one kind merge, which keeps lines short on the wire.
         if let Some(last) = self.0.last_mut()
             && last.kind == kind
         {
-            last.text.push_str(&text);
+            last.text.push_str(text.as_ref());
             return;
         }
-        self.0.push(Token { kind, text });
+        self.0.push(Token {
+            kind,
+            text: text.into(),
+        });
     }
 
     fn punct(&mut self, text: &str) {
@@ -176,7 +178,22 @@ impl Tokens {
     /// The plain text of the line.
     #[must_use]
     pub fn text(&self) -> String {
-        self.0.iter().map(|token| token.text.as_str()).collect()
+        let mut text = String::with_capacity(self.text_len());
+        self.append_to(&mut text);
+        text
+    }
+
+    /// Appends the plain text of the line to `text`.
+    pub fn append_to(&self, text: &mut String) {
+        for token in &self.0 {
+            text.push_str(&token.text);
+        }
+    }
+
+    /// The bytes of the line's plain text.
+    #[must_use]
+    pub fn text_len(&self) -> usize {
+        self.0.iter().map(|token| token.text.len()).sum()
     }
 }
 
@@ -308,7 +325,7 @@ pub fn argument_values(
             })
             .collect();
     };
-    let names = event.call.name().and_then(specs::arg_names);
+    let names = specs::arg_names(event.call);
     let shown = shown_arguments(event, spec);
     spec.args
         .iter()
@@ -419,7 +436,7 @@ fn arguments(
     }
     let names = style
         .arg_names
-        .then(|| event.call.name().and_then(specs::arg_names))
+        .then(|| specs::arg_names(event.call))
         .flatten();
     let shown = shown_arguments(event, spec);
     for (index, arg) in spec.args.iter().enumerate().take(shown) {

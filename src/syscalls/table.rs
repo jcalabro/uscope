@@ -21,11 +21,14 @@ pub const fn calls(abi: Abi) -> &'static [(u32, &'static str)] {
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 pub(super) fn name(id: SyscallId) -> Option<&'static str> {
-    let calls = calls(id.abi);
-    calls
+    index(id).map(|index| calls(id.abi)[index].1)
+}
+
+/// Where its ABI's table lists a call.
+pub(super) fn index(id: SyscallId) -> Option<usize> {
+    calls(id.abi)
         .binary_search_by_key(&id.number, |&(number, _)| number)
         .ok()
-        .map(|index| calls[index].1)
 }
 
 pub(super) fn number(abi: Abi, name: &str) -> Option<u32> {

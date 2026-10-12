@@ -499,6 +499,277 @@ struct Printer {
     /// Each thread's last ABI, where it is not x86-64's.
     personalities: BTreeMap<u32, Abi>,
     error: Option<io::Error>,
+    /// The ndjson line of a call being written.
+    line: Vec<u8>,
+}
+
+/// Writes a file on a thread of its own, so that the thread reading the
+/// engine spends no time in the kernel's write path: at millions of calls
+/// a second, it has none to spare.
+struct Background {
+    buffer: Vec<u8>,
+    to_writer: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    /// Buffers written, emptied for reuse, or the error writing one met.
+    from_writer: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// Buffers sent and not yet returned.
+    sent: usize,
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The bytes collected before they are sent to be written.
+const BACKGROUND_BYTES: usize = 256 * 1024;
+
+impl Background {
+    fn new(mut file: File) -> Self {
+        let (to_writer, from_main) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let (to_main, from_writer) = std::sync::mpsc::channel();
+        let writer = std::thread::Builder::new()
+            .name("uscope-output".into())
+            .spawn(move || {
+                // An empty buffer asks for a flush.
+                for mut buffer in from_main {
+                    let written = if buffer.is_empty() {
+                        file.flush()
+                    } else {
+                        file.write_all(&buffer)
+                    };
+                    buffer.clear();
+                    if to_main.send(written.map(|()| buffer)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            buffer: Vec::with_capacity(BACKGROUND_BYTES),
+            to_writer: Some(to_writer),
+            from_writer,
+            sent: 0,
+            writer,
+        }
+    }
+
+    fn send(&mut self, buffer: Vec<u8>) -> io::Result<()> {
+        let gone = || io::Error::other("the output thread ended");
+        if self.writer.is_none() {
+            return Err(io::Error::other("the output thread could not start"));
+        }
+        self.to_writer
+            .as_ref()
+            .ok_or_else(gone)?
+            .send(buffer)
+            .map_err(|_| gone())?;
+        self.sent += 1;
+        Ok(())
+    }
+
+    /// Sends what is collected, reusing a written buffer when one is back.
+    fn send_collected(&mut self) -> io::Result<()> {
+        let mut next = None;
+        while let Ok(returned) = self.from_writer.try_recv() {
+            self.sent -= 1;
+            next = Some(returned?);
+        }
+        let next = next.unwrap_or_else(|| Vec::with_capacity(BACKGROUND_BYTES));
+        let full = std::mem::replace(&mut self.buffer, next);
+        self.send(full)
+    }
+}
+
+impl Write for Background {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() >= BACKGROUND_BYTES {
+            self.send_collected()?;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.send_collected()?;
+        }
+        self.send(Vec::new())?;
+        let mut result = Ok(());
+        while self.sent > 0 {
+            let returned = self
+                .from_writer
+                .recv()
+                .map_err(|_| io::Error::other("the output thread ended"))?;
+            self.sent -= 1;
+            if let Err(error) = returned
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        result
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        let _ = self.flush();
+        self.to_writer = None;
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// A call's ndjson record. A traced program can make millions of calls a
+/// second, so it writes its own JSON rather than building a map; its keys
+/// come in name order, as the other records' maps put theirs.
+struct CallRecord {
+    abi: Option<&'static str>,
+    args: Vec<(String, String)>,
+    duration_ns: Option<u64>,
+    errno: Option<String>,
+    name: std::borrow::Cow<'static, str>,
+    number: u32,
+    path: Option<String>,
+    pid: u32,
+    process_exited: bool,
+    ret: Option<i64>,
+    text: String,
+    tid: u32,
+    time_ns: i64,
+    unavailable: bool,
+    unfinished: bool,
+}
+
+impl CallRecord {
+    fn write(&self, out: &mut Vec<u8>) {
+        out.push(b'{');
+        if let Some(abi) = self.abi {
+            json_field(out, b"\"abi\":", abi);
+        }
+        out.extend_from_slice(b"\"args\":{");
+        for (index, (name, value)) in self.args.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            json_string(out, name);
+            out.push(b':');
+            json_string(out, value);
+        }
+        out.extend_from_slice(b"},");
+        if let Some(duration) = self.duration_ns {
+            json_number(
+                out,
+                b"\"duration_ns\":",
+                duration.try_into().unwrap_or(i64::MAX),
+            );
+        }
+        if let Some(errno) = &self.errno {
+            json_field(out, b"\"errno\":", errno);
+        }
+        json_field(out, b"\"name\":", &self.name);
+        json_number(out, b"\"number\":", self.number.into());
+        if let Some(path) = &self.path {
+            json_field(out, b"\"path\":", path);
+        }
+        json_number(out, b"\"pid\":", self.pid.into());
+        if self.process_exited {
+            out.extend_from_slice(b"\"process_exited\":true,");
+        }
+        if let Some(ret) = self.ret {
+            json_number(out, b"\"return\":", ret);
+        }
+        json_field(out, b"\"text\":", &self.text);
+        json_number(out, b"\"tid\":", self.tid.into());
+        json_number(out, b"\"time_ns\":", self.time_ns);
+        out.extend_from_slice(b"\"type\":\"call\"");
+        if self.unavailable {
+            out.extend_from_slice(b",\"unavailable\":true");
+        }
+        if self.unfinished {
+            out.extend_from_slice(b",\"unfinished\":true");
+        }
+        out.push(b'}');
+    }
+}
+
+/// The decimal pairs 00 to 99, for writing numbers two digits at a time,
+/// as itoa does: times have nineteen.
+const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
+    2021222324252627282930313233343536373839\
+    4041424344454647484950515253545556575859\
+    6061626364656667686970717273747576777879\
+    8081828384858687888990919293949596979899";
+
+/// Writes `"key":value,`, given `"key":`.
+fn json_number(out: &mut Vec<u8>, key: &[u8], value: i64) {
+    out.extend_from_slice(key);
+    if value < 0 {
+        out.push(b'-');
+    }
+    let mut digits = [0; 20];
+    let mut rest = value.unsigned_abs();
+    let mut at = digits.len();
+    while rest >= 100 {
+        let pair = usize::try_from(rest % 100).unwrap_or(0) * 2;
+        rest /= 100;
+        at -= 2;
+        digits[at..at + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
+    }
+    let pair = usize::try_from(rest).unwrap_or(0) * 2;
+    if rest >= 10 {
+        at -= 2;
+        digits[at..at + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
+    } else {
+        at -= 1;
+        digits[at] = PAIRS[pair + 1];
+    }
+    out.extend_from_slice(&digits[at..]);
+    out.push(b',');
+}
+
+/// Writes `"key":"value",`, given `"key":`.
+fn json_field(out: &mut Vec<u8>, key: &[u8], value: &str) {
+    out.extend_from_slice(key);
+    json_string(out, value);
+    out.push(b',');
+}
+
+/// Writes a JSON string as `serde_json` does.
+fn json_string(out: &mut Vec<u8>, text: &str) {
+    out.push(b'"');
+    let bytes = text.as_bytes();
+    if !bytes
+        .iter()
+        .any(|&byte| byte < 0x20 || byte == b'"' || byte == b'\\')
+    {
+        out.extend_from_slice(bytes);
+        out.push(b'"');
+        return;
+    }
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        let escape: &[u8] = match byte {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            0x08 => b"\\b",
+            0x0c => b"\\f",
+            0..0x20 => b"",
+            _ => continue,
+        };
+        out.extend_from_slice(&bytes[start..index]);
+        start = index + 1;
+        if escape.is_empty() {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            out.extend_from_slice(b"\\u00");
+            out.push(HEX[usize::from(byte >> 4)]);
+            out.push(HEX[usize::from(byte & 0xf)]);
+        } else {
+            out.extend_from_slice(escape);
+        }
+    }
+    out.extend_from_slice(&bytes[start..]);
+    out.push(b'"');
 }
 
 /// The local zone's offset from UTC now, in seconds.
@@ -540,7 +811,7 @@ impl Printer {
                     None,
                     Some((path.clone(), BTreeMap::new())),
                 ),
-                (_, Some(path)) => (Box::new(io::BufWriter::new(open(path)?)), None, None),
+                (_, Some(path)) => (Box::new(Background::new(open(path)?)), None, None),
                 (Some(_), None) => (
                     Box::new(LineWriter::new(io::stdout())),
                     Some(Renderers::detect(color, false).stdout),
@@ -622,6 +893,7 @@ impl Printer {
             reported: BTreeSet::new(),
             personalities: BTreeMap::new(),
             error: None,
+            line: Vec::new(),
         })
     }
 
@@ -637,6 +909,10 @@ impl Printer {
     }
 
     fn write(&mut self, process: u32, line: &str) {
+        self.write_bytes(process, line.as_bytes());
+    }
+
+    fn write_bytes(&mut self, process: u32, line: &[u8]) {
         let output = match &mut self.per_process {
             Some((path, outputs)) => match outputs.entry(process) {
                 std::collections::btree_map::Entry::Occupied(entry) => Some(entry.into_mut()),
@@ -644,7 +920,7 @@ impl Printer {
                     let mut name = path.clone().into_os_string();
                     name.push(format!(".{process}"));
                     match File::create(&name) {
-                        Ok(file) => Some(entry.insert(Box::new(io::BufWriter::new(file)))),
+                        Ok(file) => Some(entry.insert(Box::new(Background::new(file)))),
                         Err(error) => {
                             self.error.get_or_insert(error);
                             return;
@@ -656,7 +932,7 @@ impl Printer {
         };
         if let Some(output) = output
             && let Err(error) = output
-                .write_all(line.as_bytes())
+                .write_all(line)
                 .and_then(|()| output.write_all(b"\n"))
         {
             self.error.get_or_insert(error);
@@ -803,7 +1079,7 @@ impl Printer {
                 ),
             )
         });
-        self.fds.apply(&TraceEvent::Call(event.clone()));
+        self.fds.apply_call(event);
         let Some((entry, arguments)) = entry else {
             return;
         };
@@ -844,9 +1120,15 @@ impl Printer {
                 self.write(event.process, &text);
             }
             OutputFormat::Ndjson => {
-                let text = format!("{}{}", entry.text(), returned.text());
-                let object = self.record(event, arguments, paths, text);
-                self.json(event.process, object);
+                let mut text = String::with_capacity(entry.text_len() + returned.text_len());
+                entry.append_to(&mut text);
+                returned.append_to(&mut text);
+                let record = self.record(event, arguments, paths, text);
+                let mut line = std::mem::take(&mut self.line);
+                line.clear();
+                record.write(&mut line);
+                self.write_bytes(event.process, &line);
+                self.line = line;
             }
         }
     }
@@ -884,52 +1166,39 @@ impl Printer {
         arguments: Vec<(String, Tokens)>,
         paths: Vec<String>,
         text: String,
-    ) -> Map<String, Value> {
-        {
-            {
-                let mut object = self.base("call", event.time(), Some(event.thread), event.process);
-                object.insert("name".into(), event.call.display_name().into());
-                if event.call.abi != Abi::X86_64 {
-                    object.insert("abi".into(), event.call.abi.suffix().into());
-                }
-                object.insert("number".into(), event.call.number.into());
-                let args: Map<String, Value> = arguments
-                    .into_iter()
-                    .map(|(name, tokens)| (name, tokens.text().into()))
-                    .collect();
-                object.insert("args".into(), args.into());
-                match event.outcome {
-                    Outcome::Returned(value) => {
-                        object.insert("return".into(), value.into());
-                    }
-                    Outcome::Failed(errno) => {
-                        object.insert("return".into(), (-i64::from(errno.0)).into());
-                        object.insert("errno".into(), present::errno(errno).0.into());
-                    }
-                    Outcome::Unfinished => {
-                        object.insert("unfinished".into(), true.into());
-                    }
-                    Outcome::ProcessExited => {
-                        object.insert("process_exited".into(), true.into());
-                    }
-                    Outcome::Unavailable => {
-                        object.insert("unavailable".into(), true.into());
-                    }
-                }
-                if let Some(duration) = event.duration() {
-                    object.insert("duration_ns".into(), duration.into());
-                }
-                let path = paths.into_iter().next().or_else(|| {
-                    filter::descriptors(event)
-                        .find_map(|fd| self.fds.describe(event.process, fd))
-                        .map(|description| description.text.to_string())
-                });
-                if let Some(path) = path {
-                    object.insert("path".into(), path.into());
-                }
-                object.insert("text".into(), text.into());
-                object
-            }
+    ) -> CallRecord {
+        let wall = self.realtime + i128::from(event.time());
+        let (ret, errno) = match event.outcome {
+            Outcome::Returned(value) => (Some(value), None),
+            Outcome::Failed(errno) => (Some(-i64::from(errno.0)), Some(present::errno(errno).0)),
+            _ => (None, None),
+        };
+        let path = paths.into_iter().next().or_else(|| {
+            filter::descriptors(event)
+                .find_map(|fd| self.fds.describe(event.process, fd))
+                .map(|description| description.text.to_string())
+        });
+        let mut args: Vec<(String, String)> = arguments
+            .into_iter()
+            .map(|(name, tokens)| (name, tokens.text()))
+            .collect();
+        args.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        CallRecord {
+            abi: (event.call.abi != Abi::X86_64).then(|| event.call.abi.suffix()),
+            args,
+            duration_ns: event.duration(),
+            errno,
+            name: event.call.display_name(),
+            number: event.call.number,
+            path,
+            pid: event.process,
+            process_exited: event.outcome == Outcome::ProcessExited,
+            ret,
+            text,
+            tid: event.thread,
+            time_ns: i64::try_from(wall).unwrap_or(0),
+            unavailable: event.outcome == Outcome::Unavailable,
+            unfinished: event.outcome == Outcome::Unfinished,
         }
     }
 
@@ -1302,6 +1571,78 @@ impl Sink for Seeds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_record_is_the_json_serde_writes() {
+        let tricky = "q\"b\\n\nr\rt\tb\u{8}f\u{c}c\u{1}d\u{1f}e\u{7f}é😀";
+        let record = CallRecord {
+            abi: Some("32"),
+            args: vec![("buf".into(), tricky.into()), ("fd".into(), "3".into())],
+            duration_ns: Some(1200),
+            errno: Some("ENOENT".into()),
+            name: "openat".into(),
+            number: 257,
+            path: Some(tricky.into()),
+            pid: 10,
+            process_exited: true,
+            ret: Some(-2),
+            text: tricky.into(),
+            tid: 11,
+            time_ns: -5,
+            unavailable: true,
+            unfinished: true,
+        };
+        let mut written = Vec::new();
+        record.write(&mut written);
+        let expected = json!({
+            "abi": "32",
+            "args": {"buf": tricky, "fd": "3"},
+            "duration_ns": 1200,
+            "errno": "ENOENT",
+            "name": "openat",
+            "number": 257,
+            "path": tricky,
+            "pid": 10,
+            "process_exited": true,
+            "return": -2,
+            "text": tricky,
+            "tid": 11,
+            "time_ns": -5,
+            "type": "call",
+            "unavailable": true,
+            "unfinished": true,
+        });
+        assert_eq!(String::from_utf8(written).ok(), Some(expected.to_string()));
+        let bare = CallRecord {
+            abi: None,
+            args: Vec::new(),
+            duration_ns: None,
+            errno: None,
+            name: "getppid".into(),
+            number: 110,
+            path: None,
+            pid: 1,
+            process_exited: false,
+            ret: None,
+            text: "getppid()".into(),
+            tid: 1,
+            time_ns: 0,
+            unavailable: false,
+            unfinished: false,
+        };
+        let mut written = Vec::new();
+        bare.write(&mut written);
+        let expected = json!({
+            "args": {}, "name": "getppid", "number": 110, "pid": 1,
+            "text": "getppid()", "tid": 1, "time_ns": 0, "type": "call",
+        });
+        assert_eq!(String::from_utf8(written).ok(), Some(expected.to_string()));
+        for value in [0, 9, 10, 99, 100, 101, -7, -1000, i64::MIN, i64::MAX] {
+            let mut written = Vec::new();
+            json_number(&mut written, b"", value);
+            assert_eq!(written, format!("{value},").into_bytes());
+        }
+    }
 
     #[test]
     fn durations_and_pids_parse_as_strace_writes_them() {
