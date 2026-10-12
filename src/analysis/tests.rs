@@ -716,8 +716,8 @@ proptest! {
 }
 
 /// A series is every site of one name, binned by time: each bin keeps its
-/// first, last, lowest, and highest value, and values no axis can show
-/// are counted, not drawn.
+/// first, last, lowest, and highest value, values no axis can show are
+/// counted, not drawn, and the value before the range holds into it.
 #[test]
 fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
     let mut builder = CaptureBuilder::new();
@@ -755,8 +755,33 @@ fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
         .map(|bin| (bin.time, bin.first, bin.last, bin.low, bin.high))
         .collect();
     assert_eq!(bins, [(1, 7.0, -2.0, -2.0, 7.0), (15, 4.0, 4.0, 4.0, 4.0)]);
+    assert_eq!((depth.held, depth.continues), (None, true));
     let only = plot_series(&capture, (0, 50), Some(&[two]), 1);
     assert_eq!((only.len(), only[0].values, only[0].unshown), (1, 1, 1));
+
+    // A value holds until the next: a range between values still shows
+    // the one before it, and whether one follows.
+    let between = plot_series(&capture, (20, 35), None, 1);
+    let held: Vec<(&str, Option<f64>, bool, usize)> = between
+        .iter()
+        .map(|series| {
+            let name = capture.string(series.name);
+            (name, series.held, series.continues, series.bins.len())
+        })
+        .collect();
+    assert_eq!(
+        held,
+        [("depth", Some(4.0), true, 0), ("rate", None, false, 1)]
+    );
+    let after_nan = plot_series(&capture, (10, 14), None, 1);
+    assert_eq!(
+        (
+            after_nan[0].held,
+            after_nan[0].unshown,
+            after_nan[0].bins.len()
+        ),
+        (Some(-2.0), 1, 0)
+    );
 }
 
 /// A capture of one thread's samples of stacks of [`FUNCTIONS`], innermost

@@ -899,6 +899,7 @@ fn code(
                         .map(|instruction| protocol::ProfileInstruction {
                             address: instruction.address,
                             text: instruction.text,
+                            target: instruction.target,
                             own: instruction.own,
                             total: instruction.total,
                         })
@@ -1016,6 +1017,8 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
                     [time, bin.first, bin.last, bin.low, bin.high]
                 })
                 .collect(),
+            held: series.held,
+            continues: series.continues,
         })
         .collect();
     let answer = protocol::ProfileZones {

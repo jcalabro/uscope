@@ -1,6 +1,8 @@
 //! Zones as views draw and measure them: each thread's tracks folded to
 //! what a width of pixels can show, and the spread of one site's lengths.
 
+use std::collections::BTreeMap;
+
 use super::index;
 use crate::capture::Capture;
 use crate::capture::records::NONE;
@@ -226,6 +228,10 @@ pub struct PlotSeries {
     pub unshown: u64,
     /// By time, each a bin's values.
     pub bins: Vec<PlotBin>,
+    /// The last value drawable before the range, which holds into it.
+    pub held: Option<f64>,
+    /// Whether a value follows the range, so the last one holds to its end.
+    pub continues: bool,
 }
 
 /// The values a series plotted in one bin of time.
@@ -240,18 +246,37 @@ pub struct PlotBin {
 }
 
 /// Each series' values in `range`, of the threads `threads` selects, by
-/// name, in `bins` bins of equal time.
+/// name, in `bins` bins of equal time, with what holds at either end. A
+/// series with no values in `range` is there when one holds into it.
 pub fn plot_series(
     capture: &Capture,
     range: (i64, i64),
     threads: Option<&[u32]>,
     bins: usize,
 ) -> Vec<PlotSeries> {
-    let mut values: Vec<(&str, u32, i64, f64)> = capture
-        .plots
-        .iter()
+    let chosen = || {
+        capture
+            .plots
+            .iter()
+            .filter(|plot| threads.is_none_or(|threads| threads.contains(&plot.thread.get())))
+    };
+    let name_of = |site: u32| capture.sites[site as usize].name.get();
+    // By name: the last drawable value before the range, and whether any
+    // value follows it.
+    let mut edges: BTreeMap<u32, (Option<(i64, f64)>, bool)> = BTreeMap::new();
+    for plot in chosen() {
+        let (time, value) = (plot.time.get(), f64::from_bits(plot.value.get()));
+        if time < range.0 && value.is_finite() {
+            let held = &mut edges.entry(name_of(plot.site.get())).or_default().0;
+            if held.is_none_or(|(at, _)| at <= time) {
+                *held = Some((time, value));
+            }
+        } else if time >= range.1 {
+            edges.entry(name_of(plot.site.get())).or_default().1 = true;
+        }
+    }
+    let mut values: Vec<(&str, u32, i64, f64)> = chosen()
         .filter(|plot| (range.0..range.1).contains(&plot.time.get()))
-        .filter(|plot| threads.is_none_or(|threads| threads.contains(&plot.thread.get())))
         .map(|plot| {
             let name = capture.sites[plot.site.get() as usize].name.get();
             let value = f64::from_bits(plot.value.get());
@@ -270,6 +295,8 @@ pub fn plot_series(
                 values: 0,
                 unshown: 0,
                 bins: Vec::new(),
+                held: None,
+                continues: false,
             });
         }
         let Some(series) = series.last_mut() else {
@@ -297,6 +324,25 @@ pub fn plot_series(
         }
         last_bin = bin;
     }
+    for (&name, &(held, _)) in &edges {
+        if held.is_some() && series.iter().all(|series| series.name != name) {
+            series.push(PlotSeries {
+                name,
+                values: 0,
+                unshown: 0,
+                bins: Vec::new(),
+                held: None,
+                continues: false,
+            });
+        }
+    }
+    for series in &mut series {
+        if let Some(&(held, continues)) = edges.get(&series.name) {
+            series.held = held.map(|(_, value)| value);
+            series.continues = continues;
+        }
+    }
+    series.sort_by(|a, b| capture.string(a.name).cmp(capture.string(b.name)));
     series
 }
 

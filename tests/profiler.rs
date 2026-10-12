@@ -1209,8 +1209,8 @@ fn a_go_programs_own_profiles_read_as_it_wrote_them() {
 
 /// A function's samples land on its lines and its instructions: each call
 /// of leaf on leaf's first instruction and line, and on the calls in
-/// middle that made them; a file changed since its recording shows no
-/// code.
+/// middle that made them, which name it; a file changed since its
+/// recording shows no code.
 #[test]
 fn a_functions_samples_land_on_its_lines_and_its_instructions() {
     let scratch = support::ScratchDir::new("annotate");
@@ -1259,7 +1259,8 @@ fn a_functions_samples_land_on_its_lines_and_its_instructions() {
     assert!(
         calls
             .iter()
-            .all(|instruction| instruction.text.starts_with("call")),
+            .all(|instruction| instruction.text.starts_with("call")
+                && instruction.target.as_deref() == Some("leaf")),
         "{calls:?}"
     );
     assert_eq!(

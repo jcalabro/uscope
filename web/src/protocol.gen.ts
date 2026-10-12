@@ -1260,7 +1260,11 @@ unplaced: Array<[number, number, number]>, unavailable: string | null, };
 
 export type ProfileCodeBlock = { symbol: string, instructions: Array<ProfileInstruction>, stopped: string | null, };
 
-export type ProfileInstruction = { address: number, text: string, own: number, total: number, };
+export type ProfileInstruction = { address: number, text: string, 
+/**
+ * The function a direct jump or call goes to.
+ */
+target: string | null, own: number, total: number, };
 
 export type ProfileBase = { profile: string, 
 /**
@@ -1279,7 +1283,15 @@ values: number, unshown: number,
  * A bin a pixel wide each: the time from the start of its first
  * value, its first, last, lowest, and highest values.
  */
-bins: Array<[number, number, number, number, number]>, };
+bins: Array<[number, number, number, number, number]>, 
+/**
+ * The value before the range, which holds into it.
+ */
+held: number | null, 
+/**
+ * Whether a value follows the range, so the last holds to its end.
+ */
+continues: boolean, };
 
 export type ProfileMarkKind = "message" | "frame" | "trigger";
 

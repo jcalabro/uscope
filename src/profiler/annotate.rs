@@ -8,7 +8,7 @@ use object::{Object as _, ObjectSection as _, ObjectSymbol as _, SymbolKind};
 
 use super::{Granularity, KeyKind, Profile, Query};
 use crate::capture::records::NONE;
-use crate::disassembly::{AssemblySyntax, RawDecode, decoder_for};
+use crate::disassembly::{AssemblySyntax, InstructionReferenceKind, RawDecode, decoder_for};
 use crate::{MAX_FUNCTION_INSTRUCTIONS, TargetDescription};
 
 /// What a function's samples weigh on one of its source lines.
@@ -34,6 +34,9 @@ pub struct InstructionCost {
     /// Its address in its module's file.
     pub address: u64,
     pub text: String,
+    /// The function a direct jump or call goes to, with the offset into it
+    /// when that is not its start.
+    pub target: Option<String>,
     pub own: u64,
     pub total: u64,
 }
@@ -171,10 +174,23 @@ fn decode(
         .collect();
     symbols.sort_by_key(|symbol| (symbol.address(), std::cmp::Reverse(symbol.size())));
     symbols.dedup_by_key(|symbol| symbol.address());
+    let named = |address: u64| {
+        let index = symbols.partition_point(|symbol| symbol.address() <= address);
+        let symbol = symbols[..index].last()?;
+        let offset = address - symbol.address();
+        (offset < symbol.size()).then_some(())?;
+        let name = symbol.name().ok()?;
+        let name = crate::demangle::qualified_name(name).unwrap_or_else(|| name.to_owned());
+        Some(if offset == 0 {
+            name
+        } else {
+            format!("{name}+{offset:#x}")
+        })
+    };
     let mut decoder = decoder_for(TargetDescription::X86_64, AssemblySyntax::Intel)
         .map_err(|error| error.to_string())?;
     let mut blocks = Vec::new();
-    for symbol in symbols {
+    for symbol in &symbols {
         let (start, end) = (symbol.address(), symbol.address() + symbol.size());
         if addresses.range(start..end).next().is_none() {
             continue;
@@ -204,8 +220,12 @@ fn decode(
                 break;
             }
             let address = start + offset as u64;
-            let RawDecode::Instruction { length, tokens, .. } =
-                decoder.decode(address, &code[offset..], None)
+            let RawDecode::Instruction {
+                length,
+                tokens,
+                references,
+                ..
+            } = decoder.decode(address, &code[offset..], None)
             else {
                 block.stopped = Some(format!("the bytes at {address:#x} are no instruction"));
                 break;
@@ -221,6 +241,10 @@ fn decode(
             block.instructions.push(InstructionCost {
                 address,
                 text: tokens.iter().map(|token| &*token.text).collect(),
+                target: references
+                    .iter()
+                    .find(|(kind, _)| *kind == InstructionReferenceKind::BranchTarget)
+                    .and_then(|&(_, target)| named(target)),
                 own,
                 total,
             });

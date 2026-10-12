@@ -918,6 +918,8 @@ pub struct ProfileCodeBlock {
 pub struct ProfileInstruction {
     pub address: u64,
     pub text: String,
+    /// The function a direct jump or call goes to.
+    pub target: Option<String>,
     pub own: u64,
     pub total: u64,
 }
@@ -1071,6 +1073,10 @@ pub struct ProfilePlot {
     /// A bin a pixel wide each: the time from the start of its first
     /// value, its first, last, lowest, and highest values.
     pub bins: Vec<[f64; 5]>,
+    /// The value before the range, which holds into it.
+    pub held: Option<f64>,
+    /// Whether a value follows the range, so the last holds to its end.
+    pub continues: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
