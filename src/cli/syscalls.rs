@@ -13,12 +13,14 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value, json};
-use uscope::syscall_engines::ptrace::{self, Finished, Target, TraceOptions};
-use uscope::syscall_engines::{Sink, monotonic};
+use uscope::syscall_engines::bpf::{self, BpfOptions};
+use uscope::syscall_engines::ptrace;
+use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
+use uscope::syscalls::StatusSet;
 use uscope::syscalls::captures::Limits;
 use uscope::syscalls::fds::FdTable;
 use uscope::syscalls::filter::{self, Filter};
-use uscope::syscalls::stats::{SyscallStats, bytes_moved};
+use uscope::syscalls::stats::{Folded, SyscallStats, bytes_moved};
 use uscope::syscalls::{Abi, InFlight, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent};
 
 use super::Renderers;
@@ -375,12 +377,7 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
 
 fn trace(args: &SyscallsArgs) -> Result<i32> {
     let mut plan = plan(args)?;
-    if args.engine == EngineArg::Bpf {
-        bail!(
-            "the BPF engine is not available in this build; trace with --engine ptrace, which \
-             needs no privilege"
-        );
-    }
+    let ring = args.ring.as_deref().map(ring_bytes).transpose()?;
     let Some(target) = plan.target.take() else {
         bail!("--cgroup and --container need the BPF engine");
     };
@@ -418,7 +415,25 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
     for &pid in &plan.attached {
         printer.processes.insert(pid);
     }
-    let finished = ptrace::trace(target, &options, &stop, &mut printer);
+    let finished = match args.engine {
+        EngineArg::Ptrace => {
+            ptrace::trace(target, &options, &stop, &mut printer).map_err(anyhow::Error::from)
+        }
+        EngineArg::Bpf => {
+            // The kernel counts on its own what -c alone shows, when
+            // whether a call counts depends only on which call it is.
+            let count_only = args.summary_only
+                && plan.filter.status == StatusSet::ALL
+                && plan.filter.paths.is_empty()
+                && plan.filter.fds.is_none()
+                && plan.filter.slower_than.is_none();
+            let engine = BpfOptions {
+                count_only,
+                ring: ring.unwrap_or(bpf::DEFAULT_RING),
+            };
+            bpf::trace(target, &options, engine, &stop, &mut printer).map_err(anyhow::Error::from)
+        }
+    };
     for &pid in &plan.attached {
         if printer.quiet == 0 && printer.processes.contains(&pid) && !printer.ended.contains(&pid) {
             printer.message(&format!("Process {pid} detached"));
@@ -1242,6 +1257,36 @@ impl Sink for Printer {
         }
         ptrace::seed_descriptors(process, self);
     }
+
+    fn counted(&mut self, stats: Folded) {
+        for ((process, call), stats) in stats.by_call {
+            if self.filter.calls.contains(call)
+                && (self.follow || self.processes.is_empty() || self.processes.contains(&process))
+            {
+                self.stats.entry(call).or_default().merge(&stats);
+            }
+        }
+    }
+}
+
+/// The BPF engine's ring size from `--ring`: bytes, with K or M, a power
+/// of two of whole pages.
+fn ring_bytes(text: &str) -> Result<u32> {
+    let scale = match text.chars().last() {
+        Some('K' | 'k') => 1 << 10,
+        Some('M' | 'm') => 1 << 20,
+        _ => 1,
+    };
+    let number = text.trim_end_matches(['K', 'k', 'M', 'm']);
+    let bytes = number
+        .parse::<u32>()
+        .ok()
+        .and_then(|number| number.checked_mul(scale))
+        .with_context(|| format!("--ring takes bytes, as 16M or 512K, not {text}"))?;
+    if !bytes.is_power_of_two() || bytes < 4096 {
+        bail!("--ring must be a power of two of at least 4K, not {text}");
+    }
+    Ok(bytes)
 }
 
 /// Collects the descriptors a process holds as it begins.

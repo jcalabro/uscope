@@ -1,10 +1,12 @@
 //! The system call engines (`plans/syscalls.html`): each turns what it
 //! sees into the neutral events of `crate::syscalls`.
 
+pub mod bpf;
 pub mod launch;
 pub mod ptrace;
 pub mod seccomp;
 
+use crate::syscalls::stats::Folded;
 use crate::syscalls::{InFlight, TraceEvent};
 
 /// Where an engine sends what it sees, on the engine's own thread.
@@ -24,6 +26,10 @@ pub trait Sink {
     fn in_flight_after(&self) -> Option<u64> {
         None
     }
+
+    /// Statistics an engine counted itself, without reporting the calls,
+    /// once the trace ends.
+    fn counted(&mut self, _stats: Folded) {}
 }
 
-pub use ptrace::monotonic;
+pub use ptrace::{Finished, Target, TraceOptions, monotonic};

@@ -3,6 +3,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -493,7 +494,10 @@ fn the_bpf_engine_is_the_default_and_never_falls_back() {
         .expect("run uscope");
     let message = text(&output.stderr);
     assert!(!output.status.success(), "{message}");
-    assert!(message.contains("--engine ptrace"), "{message}");
+    assert!(
+        message.contains("needs CAP_BPF and CAP_PERFMON") && message.contains("--engine ptrace"),
+        "{message}"
+    );
     assert!(
         !directory.path().join("present").exists(),
         "the program never ran"
@@ -504,4 +508,216 @@ fn the_bpf_engine_is_the_default_and_never_falls_back() {
         .expect("run uscope");
     assert!(text(&nothing.stderr).contains("never traces the whole host"));
     let _ = std::io::stdout().flush();
+}
+
+/// The BPF engine, held to the ptrace engine's output for the same
+/// program. It needs `CAP_BPF` and `CAP_PERFMON`, so these run only
+/// through `just test-bpf`, which starts uscope with the `uscope-bpf`
+/// wrapper that `nixosModules.uscope-bpf` installs.
+mod bpf {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn launcher() -> PathBuf {
+        std::env::var_os("USCOPE_BPF_LAUNCHER").map_or_else(
+            || {
+                panic!(
+                    "USCOPE_BPF_LAUNCHER names no launcher: run these with `just test-bpf`, \
+                     which starts uscope through the uscope-bpf wrapper"
+                )
+            },
+            PathBuf::from,
+        )
+    }
+
+    fn uscope(arguments: &[&str]) -> Command {
+        let mut command = Command::new(launcher());
+        command
+            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .arg("syscalls")
+            .args(arguments)
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// What the engines may differ in besides what any two runs do: the
+    /// environment and credentials the launcher passes on.
+    fn comparable(trace: &str) -> String {
+        let vars = Regex::new(r"/\* \d+ vars \*/").expect("regex");
+        let ids = Regex::new(r"\b(st_uid|st_gid|si_uid)=\d+").expect("regex");
+        let trace = vars.replace_all(trace, "/* vars */");
+        normalized(&ids.replace_all(&trace, "$1=ID"))
+    }
+
+    /// The fixture's trace in `mode` by each engine, with `arguments`, in
+    /// one directory: the ptrace engine's, then the BPF engine's.
+    fn engines(arguments: &[&str], mode: &str) -> (String, String) {
+        let directory = ScratchDir::new("syscalls-engines");
+        let run = |mut command: Command, name: &str| {
+            let out = directory.path().join(name);
+            // A launcher that raises capabilities passes on no loader
+            // variables, so neither run gets any.
+            let output = command
+                .env_clear()
+                .args(arguments)
+                .arg("-o")
+                .arg(&out)
+                .arg("--")
+                .arg(fixture())
+                .arg(mode)
+                .current_dir(directory.path())
+                .output()
+                .expect("run uscope");
+            let read = std::fs::read_to_string(&out).unwrap_or_default();
+            (output.status.code(), text(&output.stderr), read)
+        };
+        let (ptrace_code, ptrace_errors, ptrace) =
+            run(super::uscope(&["--engine", "ptrace"]), "ptrace.out");
+        let (bpf_code, bpf_errors, bpf) = run(uscope(&[]), "bpf.out");
+        assert_eq!(
+            ptrace_code, bpf_code,
+            "exit codes differ: ptrace said {ptrace_errors}, BPF said {bpf_errors}"
+        );
+        (ptrace, bpf)
+    }
+
+    /// Each thread's lines, in order, apart from how threads interleave.
+    fn threads(trace: &str) -> BTreeSet<Vec<String>> {
+        // A file's lines begin with the thread's id once there are two.
+        let prefix = Regex::new(r"^(\d+) +").expect("regex");
+        let mut threads: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for line in trace.lines() {
+            let thread = prefix
+                .captures(line)
+                .map(|captures| captures[1].to_owned())
+                .unwrap_or_default();
+            threads
+                .entry(thread)
+                .or_default()
+                .push(comparable(&prefix.replace(line, "")));
+        }
+        threads.into_values().collect()
+    }
+
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn the_engines_trace_a_program_alike() {
+        for arguments in [
+            &["-yy"][..],
+            &["-e", "trace=%file,%desc", "-y"],
+            &["-X", "raw"],
+            &[
+                "-X",
+                "verbose",
+                "-e",
+                "trace=openat,fstat,rseq,prlimit64,pipe2",
+            ],
+        ] {
+            let (ptrace, bpf) = engines(arguments, "files");
+            assert_same(
+                &comparable(&bpf),
+                &comparable(&ptrace),
+                &format!("with {arguments:?}"),
+            );
+        }
+        let (ptrace, bpf) = engines(&["-e", "trace=getpid@32,getpid@x32,getpid"], "compat");
+        assert_same(&comparable(&bpf), &comparable(&ptrace), "for compat");
+        let (ptrace, bpf) = engines(&["-e", "trace=kill,rt_sigaction"], "signal");
+        assert_same(&comparable(&bpf), &comparable(&ptrace), "for signals");
+    }
+
+    /// Children and threads, each followed alike. A process that is not
+    /// traced is never sent the SIGCHLD its default ignores, which ptrace
+    /// makes the kernel queue, so the comparison leaves it out.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn the_engines_follow_children_and_threads_alike() {
+        let (ptrace, bpf) = engines(&["-yy", "-e", "signal=!SIGCHLD"], "family");
+        let (ours, theirs) = (threads(&bpf), threads(&ptrace));
+        assert_eq!(
+            ours,
+            theirs,
+            "only BPF:\n{:#?}\nonly ptrace:\n{:#?}",
+            ours.difference(&theirs).collect::<Vec<_>>(),
+            theirs.difference(&ours).collect::<Vec<_>>()
+        );
+    }
+
+    /// The kernel counts what `-c` alone shows, which the ptrace engine
+    /// counts from every call it sees.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn the_kernel_counts_calls_as_the_ptrace_engine_does() {
+        let row =
+            Regex::new(r"^\s*[\d.]+\s+[\d.]+\s+\d+\s+(\d+)\s+(\d+\s+)?(\S+)$").expect("regex");
+        let rows = |summary: &str| -> Vec<String> {
+            summary
+                .lines()
+                .filter_map(|line| {
+                    let captures = row.captures(line)?;
+                    Some(format!(
+                        "{} {} {}",
+                        &captures[3],
+                        &captures[1],
+                        captures.get(2).map_or("", |errors| errors.as_str().trim())
+                    ))
+                })
+                .collect()
+        };
+        for mode in ["files", "family"] {
+            let (ptrace, bpf) = engines(&["-c", "-S", "name"], mode);
+            assert!(!rows(&ptrace).is_empty(), "{ptrace}");
+            assert_eq!(
+                rows(&bpf),
+                rows(&ptrace),
+                "in {mode}:\n{bpf}\n---\n{ptrace}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn a_blocked_call_is_reported_in_flight_while_the_program_runs() {
+        let mut command = uscope(&["-e", "trace=read", "--in-flight", "50ms", "--"]);
+        command
+            .arg(fixture())
+            .arg("block")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut running = Running::spawn(&mut command);
+        let line = running.line(|line| line.contains("in flight"));
+        assert!(line.starts_with("read(0, "), "{line}");
+        drop(running.child.stdin.take());
+        let (code, lines) = running.finish();
+        assert_eq!(code, Some(0), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("read(0, \"\", 1)") && line.ends_with("= 0")),
+            "{lines:?}"
+        );
+    }
+
+    /// Attaching needs no consent, since the process never stops: it runs
+    /// on, traced, to its own end, which ends the trace.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn an_attached_process_runs_on_traced_to_its_end() {
+        let mut target = ExternalProcess::spawn(&Scenario::fixture("attach"));
+        let pid = target.process_id().get().to_string();
+        let mut running = Running::spawn(&mut uscope(&["-p", &pid]));
+        running.line(|line| line == format!("uscope: Process {pid} attached"));
+        target.release();
+        // The read began before the trace did.
+        running.line(|line| line.starts_with("read(0, \"x\", 1)") && line.contains("entry unseen"));
+        running.line(|line| line.starts_with("exit_group(23)"));
+        let (code, lines) = running.finish();
+        assert_eq!(code, Some(0), "{lines:?}");
+        assert!(
+            lines.contains(&"+++ exited with 23 +++".to_owned()),
+            "{lines:?}"
+        );
+        target.reaped();
+    }
 }

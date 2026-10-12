@@ -148,13 +148,20 @@ impl SyscallStats {
 /// writes, sends, and receives.
 #[must_use]
 pub fn bytes_moved(event: &SyscallEvent) -> u64 {
-    let Outcome::Returned(value) = event.outcome else {
-        return 0;
+    match event.outcome {
+        Outcome::Returned(value) if moves(event.call) => value.max(0).unsigned_abs(),
+        _ => 0,
+    }
+}
+
+/// Whether a call's result counts the bytes it read or wrote through a
+/// descriptor, as `read` and `sendmsg`'s do.
+#[must_use]
+pub fn moves(call: SyscallId) -> bool {
+    let Some(spec) = specs::spec(call) else {
+        return false;
     };
-    let Some(spec) = specs::spec(event.call) else {
-        return 0;
-    };
-    let moves = spec.args.iter().any(|arg| {
+    spec.args.iter().any(|arg| {
         matches!(
             arg,
             Arg::Mem {
@@ -163,12 +170,7 @@ pub fn bytes_moved(event: &SyscallEvent) -> u64 {
                 direction: Direction::In | Direction::Out,
             }
         )
-    }) && spec.args.first().is_some_and(|arg| matches!(arg, Arg::Fd));
-    if moves {
-        value.max(0).unsigned_abs()
-    } else {
-        0
-    }
+    }) && spec.args.first().is_some_and(|arg| matches!(arg, Arg::Fd))
 }
 
 /// Statistics folded per process and call.

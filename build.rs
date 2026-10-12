@@ -1,5 +1,6 @@
-//! Embeds the web UI's built files in release builds of uscope, and names
-//! the sources the loader was built from.
+//! Embeds the web UI's built files in release builds of uscope, names the
+//! sources the loader was built from, and compiles the syscall tracer's BPF
+//! programs with the flake's clang.
 //!
 //! Development builds read `build/web` at run time instead, so rebuilding
 //! the page never rebuilds the crate. Node is never needed to build uscope:
@@ -15,6 +16,7 @@ fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     sources_digest(&manifest);
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets it"));
+    bpf_programs(&manifest, &out);
     let root = manifest.join("build/web");
     let mut files = Vec::new();
     if std::env::var("PROFILE").as_deref() == Ok("release") {
@@ -74,6 +76,60 @@ fn sources_digest(manifest: &Path) {
         "cargo::rustc-env=USCOPE_SOURCES_DIGEST={:016x}",
         digest.finish()
     );
+}
+
+/// Compiles `src/backend/linux/syscalls/bpf/*.bpf.c` into `OUT_DIR`, with the
+/// unwrapped clang and only the headers the flake names, so that the objects
+/// depend on nothing of the host's. Outside the dev shell the build stops
+/// and says which variable is missing; it never looks for another compiler.
+fn bpf_programs(manifest: &Path, out: &Path) {
+    let directory = manifest.join("src/backend/linux/syscalls/bpf");
+    println!("cargo::rerun-if-changed={}", directory.display());
+    let variable = |name: &str| {
+        println!("cargo::rerun-if-env-changed={name}");
+        std::env::var_os(name).unwrap_or_else(|| {
+            panic!(
+                "{name} is not set: build uscope inside its dev shell (`just dev`), \
+                 which names the clang and headers the BPF programs are built with"
+            )
+        })
+    };
+    let clang = variable("USCOPE_BPF_CLANG");
+    let include = variable("USCOPE_BPF_INCLUDE");
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .expect("read the BPF sources")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().ends_with(".bpf.c"))
+        .collect();
+    sources.sort();
+    for source in sources {
+        let name = source.file_name().expect("a file").to_string_lossy();
+        let object = out.join(name.replace(".bpf.c", ".bpf.o"));
+        let mut command = std::process::Command::new(&clang);
+        command
+            .args([
+                "-target",
+                "bpf",
+                "-O2",
+                "-g",
+                "-Wall",
+                "-Werror",
+                "-nostdinc",
+            ])
+            .arg(format!("-fdebug-prefix-map={}=.", manifest.display()));
+        for path in std::env::split_paths(&include) {
+            command.arg("-I").arg(path);
+        }
+        let status = command
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap_or_else(|error| panic!("run {}: {error}", Path::new(&clang).display()));
+        assert!(status.success(), "compiling {} failed", source.display());
+    }
 }
 
 fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, String)>) {

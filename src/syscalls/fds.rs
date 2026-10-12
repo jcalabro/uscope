@@ -166,6 +166,36 @@ const F_SETFD: u64 = 2;
 const FD_CLOEXEC: u64 = 1;
 const CLOSE_RANGE_CLOEXEC: u64 = 4;
 const EINPROGRESS: u16 = 115;
+const AT_FDCWD: i64 = -100;
+
+/// A path a call named, made absolute against the directory it is
+/// relative to when the table knows it. `.` components go; `..` stay,
+/// since a symbolic link may stand before one.
+fn resolve(process: &Process, dirfd: i64, path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_owned();
+    }
+    let Some(base) = process
+        .fds
+        .get(&dirfd)
+        .map(|description| description.text.clone())
+        .filter(|text| text.starts_with('/'))
+    else {
+        return path.to_owned();
+    };
+    let mut joined = base.trim_end_matches('/').to_owned();
+    for part in path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+    {
+        joined.push('/');
+        joined.push_str(part);
+    }
+    if joined.is_empty() {
+        joined.push('/');
+    }
+    joined
+}
 
 impl FdTable {
     /// Records what the engine read from `/proc` for a process.
@@ -249,14 +279,22 @@ impl FdTable {
                 self.call(call);
                 if let Some(process) = self.processes.get_mut(&call.process) {
                     for (fd, (read, _)) in fresh {
+                        let Some(made) = process.fds.get_mut(&fd) else {
+                            continue;
+                        };
                         // A socket's call knows its family and endpoints,
                         // which its link does not.
-                        if process
-                            .fds
-                            .get(&fd)
-                            .is_some_and(|made| !matches!(made.kind, Kind::Socket(_)))
-                        {
-                            process.fds.insert(fd, read);
+                        if matches!(made.kind, Kind::Socket(_)) {
+                            continue;
+                        }
+                        if read.text.is_empty() {
+                            // The engine read what it is, not its path.
+                            made.cloexec = read.cloexec;
+                            if let Kind::Device(device) = read.kind {
+                                made.kind = Kind::Device(device);
+                            }
+                        } else {
+                            *made = read;
                         }
                     }
                 }
@@ -291,52 +329,62 @@ impl FdTable {
                 device,
                 made,
                 ..
-            } => {
-                let (fd, cloexec) = (*fd, *cloexec);
-                let table = self.processes.entry(*process).or_default();
-                // A socket's link names only its inode; what the trace saw
-                // of its endpoints says more.
-                let known_socket = matches!(
-                    table.fds.get(&fd),
-                    Some(Description {
-                        kind: Kind::Socket(_),
-                        ..
-                    })
-                );
-                if known_socket && text.starts_with("socket:") {
-                    if let Some(description) = table.fds.get_mut(&fd) {
-                        description.cloexec = cloexec;
-                    }
-                    return;
-                }
-                let kind = device.map_or_else(
-                    || {
-                        if text.starts_with("pipe:") {
-                            Kind::Pipe
-                        } else if text.starts_with("socket:") {
-                            Kind::Socket(Socket::default())
-                        } else if text.starts_with('/') {
-                            Kind::File
-                        } else {
-                            Kind::Other
-                        }
-                    },
-                    Kind::Device,
-                );
-                let description = Description {
-                    text: text.clone(),
-                    kind,
-                    cloexec,
-                };
-                let replaced = table.fds.insert(fd, description.clone());
-                if *made {
-                    table.fresh.insert(fd, (description, replaced));
-                } else {
-                    // The engine reads a process's descriptors together.
-                    table.read = true;
-                }
-            }
+            } => self.descriptor(*process, *fd, text, *cloexec, *device, *made),
             TraceEvent::Spawn { .. } | TraceEvent::Signal { .. } => {}
+        }
+    }
+
+    /// Records what the engine read of one descriptor.
+    fn descriptor(
+        &mut self,
+        process: u32,
+        fd: i64,
+        text: &Arc<str>,
+        cloexec: bool,
+        device: Option<super::model::Device>,
+        made: bool,
+    ) {
+        let table = self.processes.entry(process).or_default();
+        // A socket's link names only its inode; what the trace saw
+        // of its endpoints says more.
+        let known_socket = matches!(
+            table.fds.get(&fd),
+            Some(Description {
+                kind: Kind::Socket(_),
+                ..
+            })
+        );
+        if known_socket && text.starts_with("socket:") {
+            if let Some(description) = table.fds.get_mut(&fd) {
+                description.cloexec = cloexec;
+            }
+            return;
+        }
+        let kind = device.map_or_else(
+            || {
+                if text.starts_with("pipe:") {
+                    Kind::Pipe
+                } else if text.starts_with("socket:") {
+                    Kind::Socket(Socket::default())
+                } else if text.starts_with('/') {
+                    Kind::File
+                } else {
+                    Kind::Other
+                }
+            },
+            Kind::Device,
+        );
+        let description = Description {
+            text: text.clone(),
+            kind,
+            cloexec,
+        };
+        let replaced = table.fds.insert(fd, description.clone());
+        if made {
+            table.fresh.insert(fd, (description, replaced));
+        } else {
+            // The engine reads a process's descriptors together.
+            table.read = true;
         }
     }
 
@@ -365,11 +413,14 @@ impl FdTable {
                     .into_owned()
             })
         };
-        let file = |path: Option<String>, cloexec: bool| Description {
-            text: path.unwrap_or_else(|| "?".to_owned()).into(),
-            kind: Kind::File,
-            cloexec,
-        };
+        let file =
+            |process: &Process, dirfd: i64, path: Option<String>, cloexec: bool| Description {
+                text: path
+                    .map_or_else(|| "?".to_owned(), |path| resolve(process, dirfd, &path))
+                    .into(),
+                kind: Kind::File,
+                cloexec,
+            };
         let anonymous = |text: &str, cloexec: bool| Description {
             text: text.into(),
             kind: Kind::Other,
@@ -378,12 +429,12 @@ impl FdTable {
         match name {
             "open" | "creat" => {
                 let cloexec = name == "open" && a[1] & O_CLOEXEC != 0;
-                process.fds.insert(result, file(string(0), cloexec));
+                let made = file(process, AT_FDCWD, string(0), cloexec);
+                process.fds.insert(result, made);
             }
             "openat" => {
-                process
-                    .fds
-                    .insert(result, file(string(1), a[2] & O_CLOEXEC != 0));
+                let made = file(process, fd(a[0]), string(1), a[2] & O_CLOEXEC != 0);
+                process.fds.insert(result, made);
             }
             "openat2" | "open_by_handle_at" | "open_tree" | "fspick" | "fsopen" | "fsmount" => {
                 let path = if name == "openat2" || name == "open_tree" || name == "fspick" {
@@ -391,8 +442,25 @@ impl FdTable {
                 } else {
                     None
                 };
-                process.fds.insert(result, file(path, false));
+                let made = file(process, fd(a[0]), path, false);
+                process.fds.insert(result, made);
             }
+            "chdir" => {
+                if let Some(path) = string(0) {
+                    let directory = resolve(process, AT_FDCWD, &path);
+                    process
+                        .fds
+                        .insert(AT_FDCWD, file(process, AT_FDCWD, Some(directory), false));
+                }
+            }
+            "fchdir" => match process.fds.get(&fd(a[0])).cloned() {
+                Some(directory) => {
+                    process.fds.insert(AT_FDCWD, directory);
+                }
+                None => {
+                    process.fds.remove(&AT_FDCWD);
+                }
+            },
             "close" => {
                 process.fds.remove(&fd(a[0]));
             }

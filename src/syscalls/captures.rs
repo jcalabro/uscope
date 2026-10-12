@@ -131,23 +131,20 @@ fn word(memory: &mut dyn Memory, address: u64, size: usize) -> Option<u64> {
     (read == size).then(|| u64::from_le_bytes(buffer))
 }
 
-/// An array of strings, as `argv`: its elements up to the limit, and its
-/// length when its end was found.
+/// An array of strings, as `argv`: its first `most` elements, each cut at
+/// `limit` bytes, and its length when its end was found.
 fn strings(
     memory: &mut dyn Memory,
     address: u64,
     abi: Abi,
-    limits: Limits,
+    most: usize,
+    limit: usize,
     count_only: bool,
 ) -> (Vec<u8>, CaptureState) {
     let size = usize::from(abi.word_bytes());
     let mut pointers = Vec::new();
     let mut ended = false;
-    let most = if count_only {
-        MOST_COUNTED
-    } else {
-        limits.elements
-    };
+    let most = if count_only { MOST_COUNTED } else { most };
     for index in 0..most {
         let Some(pointer) = word(memory, address + (index * size) as u64, size) else {
             if index == 0 {
@@ -168,8 +165,7 @@ fn strings(
     );
     if !count_only {
         for &pointer in &pointers {
-            // One byte past the limit shows the element was longer.
-            let (text, _) = string(memory, pointer, limits.string + 1);
+            let (text, _) = string(memory, pointer, limit);
             blobs::push_string(&mut blob, &text);
         }
     }
@@ -220,6 +216,140 @@ fn as_count(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
+/// The most bytes one capture holds, which the BPF engine's scratch record
+/// bounds.
+pub const MOST_BYTES: usize = 4096;
+/// Bytes kept of each element of an array of strings or of iovecs.
+pub const MOST_ELEMENT_BYTES: usize = 510;
+
+/// How a copy reads its argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyKind {
+    Path,
+    String,
+    /// An array of strings, its elements read.
+    Strings,
+    /// An array of strings only counted, as an environment.
+    StringsCounted,
+    Bytes,
+    Iovec,
+    Sockaddr,
+    Struct,
+    /// A `select` set, as long as its first argument says.
+    FdSet,
+}
+
+/// How to copy the memory behind one argument. Both engines follow the
+/// same list: the ptrace engine here, the BPF engine's programs from the
+/// table uscope fills with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgCopy {
+    pub arg: u8,
+    pub kind: CopyKind,
+    pub when: ReadAt,
+    /// Whether the call writes it, so that a failed call leaves nothing.
+    pub writes: bool,
+    pub count: Count,
+    /// One structure's bytes.
+    pub size: u32,
+    /// The most bytes kept: of a string, a buffer, the whole array, or
+    /// each element of an array of strings or iovecs.
+    pub limit: u32,
+}
+
+fn limit(bytes: usize) -> u32 {
+    u32::try_from(bytes.min(MOST_BYTES)).unwrap_or(u32::MAX)
+}
+
+/// What to copy of a call's arguments, in argument order.
+#[must_use]
+pub fn copies(call: SyscallId, limits: Limits, verbose: bool) -> Vec<ArgCopy> {
+    let Some(spec) = specs::spec(call) else {
+        return Vec::new();
+    };
+    let name = call.name().unwrap_or_default();
+    let buffer = limits.string.max(limits.dump);
+    let mut copies = Vec::new();
+    for (index, arg) in spec.args.iter().enumerate() {
+        #[expect(clippy::cast_possible_truncation, reason = "six arguments")]
+        let arg_index = index as u8;
+        let (direction, kind, count, size, most) = match *arg {
+            // A string's terminator, and the byte that shows it was cut,
+            // fit in the most bytes.
+            Arg::Path => (
+                Direction::In,
+                CopyKind::Path,
+                Count::One,
+                0,
+                PATH_MAX.min(MOST_BYTES - 2),
+            ),
+            Arg::Str => (
+                Direction::In,
+                CopyKind::String,
+                Count::One,
+                0,
+                limits.string.min(MOST_BYTES - 2),
+            ),
+            Arg::StrArray if index == 2 && !verbose => {
+                (Direction::In, CopyKind::StringsCounted, Count::One, 0, 4)
+            }
+            Arg::StrArray => (
+                Direction::In,
+                CopyKind::Strings,
+                Count::One,
+                0,
+                // One byte past the limit shows the element was longer.
+                (limits.string + 1).min(MOST_ELEMENT_BYTES),
+            ),
+            Arg::Mem {
+                direction,
+                kind,
+                count,
+            } => match kind {
+                MemKind::Bytes => (direction, CopyKind::Bytes, count, 1, buffer),
+                MemKind::Struct(Struct::Iovec) => (
+                    direction,
+                    CopyKind::Iovec,
+                    count,
+                    0,
+                    buffer.min(MOST_ELEMENT_BYTES),
+                ),
+                MemKind::Struct(Struct::Sockaddr) => {
+                    let size = Struct::Sockaddr.size();
+                    (direction, CopyKind::Sockaddr, count, size, size as usize)
+                }
+                MemKind::Struct(Struct::Dirents) => {
+                    (direction, CopyKind::Bytes, count, 1, MOST_BYTES)
+                }
+                // Its length grows with the kernel's features.
+                MemKind::Struct(Struct::Rseq) => (direction, CopyKind::Bytes, count, 1, 64),
+                MemKind::Struct(Struct::FdSet) => (direction, CopyKind::FdSet, count, 0, 128),
+                MemKind::Struct(structure) => {
+                    let size = structure.size();
+                    (
+                        direction,
+                        CopyKind::Struct,
+                        count,
+                        size,
+                        MOST_ELEMENTS * size as usize,
+                    )
+                }
+            },
+            _ => continue,
+        };
+        copies.push(ArgCopy {
+            arg: arg_index,
+            kind,
+            when: read_at(name, direction),
+            writes: direction.writes(),
+            count,
+            size,
+            limit: limit(most),
+        });
+    }
+    copies
+}
+
 /// Copies the arguments a call reads at `phase`. At exit, `outcome` says
 /// how the call ended, which output arguments depend on: a failed call
 /// wrote nothing.
@@ -233,94 +363,67 @@ pub fn capture(
     verbose: bool,
     memory: &mut dyn Memory,
 ) -> Vec<Capture> {
-    let Some(spec) = specs::spec(call) else {
-        return Vec::new();
-    };
-    let name = call.name().unwrap_or_default();
     let returned = outcome.and_then(|outcome| match outcome {
         Outcome::Returned(value) => Some(value),
         _ => None,
     });
+    let result = || returned.map_or(0, |value| as_count(value.max(0).unsigned_abs()));
     let mut captured = Vec::new();
-    for (index, arg) in spec.args.iter().enumerate() {
-        let address = args[index];
-        #[expect(clippy::cast_possible_truncation, reason = "six arguments")]
-        let arg_index = index as u8;
-        let (direction, when) = match *arg {
-            Arg::Path | Arg::Str | Arg::StrArray => (Direction::In, read_at(name, Direction::In)),
-            Arg::Mem { direction, .. } => (direction, read_at(name, direction)),
-            _ => continue,
-        };
-        if when != phase || address == 0 {
+    for copy in copies(call, limits, verbose) {
+        let address = args[usize::from(copy.arg)];
+        if copy.when != phase || address == 0 {
             continue;
         }
         // What a call writes is there only once it succeeded.
-        if phase == ReadAt::Exit && direction.writes() && returned.is_none() {
+        if phase == ReadAt::Exit && copy.writes && returned.is_none() {
             continue;
         }
-        let (blob, state) = match *arg {
-            Arg::Path => string(memory, address, PATH_MAX),
-            Arg::Str => string(memory, address, limits.string),
-            Arg::StrArray => strings(memory, address, call.abi, limits, index == 2 && !verbose),
-            Arg::Mem { kind, count, .. } => {
-                let length = match count {
-                    Count::One => 1,
-                    Count::Arg(n) => as_count(args[usize::from(n)] & 0xffff_ffff_ffff),
-                    Count::Return => {
-                        returned.map_or(0, |value| as_count(value.max(0).unsigned_abs()))
-                    }
-                    Count::PointedBy(n) => {
-                        word(memory, args[usize::from(n)], 4).map_or(0, as_count)
-                    }
-                };
-                match kind {
-                    MemKind::Bytes => {
-                        bytes(memory, address, length, limits.string.max(limits.dump))
-                    }
-                    MemKind::Struct(Struct::Iovec) => {
-                        let budget = if direction == Direction::Out {
-                            returned.map_or(0, |value| as_count(value.max(0).unsigned_abs()))
-                        } else {
-                            usize::MAX
-                        };
-                        iovecs(
-                            memory,
-                            address,
-                            length,
-                            budget,
-                            call.abi,
-                            limits.string.max(limits.dump),
-                        )
-                    }
-                    MemKind::Struct(Struct::Sockaddr) => {
-                        let size = Struct::Sockaddr.size() as usize;
-                        let wanted = if count == Count::One { size } else { length };
-                        bytes(memory, address, wanted, size)
-                    }
-                    MemKind::Struct(Struct::Dirents) => bytes(memory, address, length, 32 * 1024),
-                    // Its length grows with the kernel's features.
-                    MemKind::Struct(Struct::Rseq) => bytes(memory, address, length, 64),
-                    MemKind::Struct(Struct::FdSet) => {
-                        // The set covers the descriptors below the first
-                        // argument.
-                        let wanted = as_count(args[0] & 0xffff_ffff).div_ceil(64) * 8;
-                        bytes(memory, address, wanted, 128)
-                    }
-                    MemKind::Struct(structure) => {
-                        let size = structure.size() as usize;
-                        bytes(
-                            memory,
-                            address,
-                            length.saturating_mul(size),
-                            MOST_ELEMENTS * size,
-                        )
-                    }
-                }
+        let length = match copy.count {
+            Count::One => 1,
+            Count::Arg(n) => as_count(args[usize::from(n)] & 0xffff_ffff_ffff),
+            Count::Return => result(),
+            Count::PointedBy(n) => word(memory, args[usize::from(n)], 4).map_or(0, as_count),
+        };
+        let limit = copy.limit as usize;
+        let (blob, state) = match copy.kind {
+            CopyKind::Path | CopyKind::String => string(memory, address, limit),
+            CopyKind::Strings | CopyKind::StringsCounted => strings(
+                memory,
+                address,
+                call.abi,
+                limits.elements.min(MOST_ELEMENTS),
+                limit,
+                copy.kind == CopyKind::StringsCounted,
+            ),
+            CopyKind::Bytes => bytes(memory, address, length, limit),
+            CopyKind::Iovec => {
+                // What a reading call filled is its result; a write sends
+                // all it names.
+                let budget = if copy.writes { result() } else { usize::MAX };
+                iovecs(memory, address, length, budget, call.abi, limit)
             }
-            _ => continue,
+            CopyKind::Sockaddr => {
+                let wanted = if copy.count == Count::One {
+                    copy.size as usize
+                } else {
+                    length
+                };
+                bytes(memory, address, wanted, limit)
+            }
+            CopyKind::Struct => bytes(
+                memory,
+                address,
+                length.saturating_mul(copy.size as usize),
+                limit,
+            ),
+            CopyKind::FdSet => {
+                // The set covers the descriptors below the first argument.
+                let wanted = as_count(args[0] & 0xffff_ffff).div_ceil(64) * 8;
+                bytes(memory, address, wanted, limit)
+            }
         };
         captured.push(Capture {
-            arg: arg_index,
+            arg: copy.arg,
             when: phase,
             state,
             bytes: Arc::from(blob),

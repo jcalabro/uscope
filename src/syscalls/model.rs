@@ -315,6 +315,9 @@ pub enum TraceEvent {
         /// The descriptor, or `AT_FDCWD` (-100) for the working directory.
         fd: i64,
         time: u64,
+        /// What `/proc/PID/fd/N` links to, or empty for a file whose path
+        /// the engine could not read, which then keeps the path its call
+        /// named.
         text: Arc<str>,
         cloexec: bool,
         /// The device it is, when it is a character or block device.

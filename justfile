@@ -78,6 +78,22 @@ test *ARGS: cache-warm
     ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
+# Runs the BPF engine's tests, which need CAP_BPF and CAP_PERFMON, starting
+# uscope through LAUNCHER: the uscope-bpf wrapper nixosModules.uscope-bpf
+# installs (docs/syscalls.md#privileges). Nothing else in the suite runs
+# with privilege. Arguments go to nextest.
+[doc("Runs the BPF engine's tests through the uscope-bpf wrapper.")]
+[script]
+test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
+    if [[ ! -x "$1" ]]; then
+        echo "error: $1 is missing. The BPF engine's tests need CAP_BPF and CAP_PERFMON:" >&2
+        echo "  import uscope's nixosModules.uscope-bpf, rebuild, and run this again;" >&2
+        echo "  or pass a launcher that grants them: just test-bpf LAUNCHER" >&2
+        exit 1
+    fi
+    ulimit -c 0
+    USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
+
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit
 # leaves the old ones to eviction.
