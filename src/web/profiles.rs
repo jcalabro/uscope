@@ -644,6 +644,7 @@ fn summary(entry: &Entry) -> ProfileSummary {
         samples: profile.samples() as u64,
         weight: profile.total_weight(),
         syscalls: profile.syscall_count(),
+        syscalls_lost: profile.syscalls_lost(),
         duration: end - start,
         threads: profile
             .threads()

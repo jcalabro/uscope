@@ -964,6 +964,10 @@ timed: boolean, samples: number, weight: number,
  */
 syscalls: number, 
 /**
+ * Records of calls the trace's engine lost.
+ */
+syscallsLost: number, 
+/**
  * Nanoseconds from the first sample to the last.
  */
 duration: number, threads: Array<ProfileThread>, 

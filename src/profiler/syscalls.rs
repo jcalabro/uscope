@@ -85,6 +85,12 @@ impl Profile {
             || !capture.syscall_stats.is_empty()
     }
 
+    /// Records of calls the engine lost.
+    #[must_use]
+    pub fn syscalls_lost(&self) -> u64 {
+        self.capture.account(AccountKind::SyscallsLost as u32)
+    }
+
     /// How many system calls the capture holds, as calls or counted.
     #[must_use]
     pub fn syscall_count(&self) -> u64 {

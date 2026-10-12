@@ -479,10 +479,22 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   const stack = setting("stack bytes");
   const paused = summary.gaps.reduce((sum, [from, to]) => sum + (to - from), 0);
   const span = Math.max(summary.duration, 1);
+  const engine = summary.settings.find((each) => each.name === "syscalls")?.value;
+  const traced =
+    summary.syscalls > 0 ? (
+      <>
+        <span title="Calls through the vDSO, such as clock_gettime, never enter the kernel and are not traced">
+          {summary.syscalls.toLocaleString("en-US")} calls traced{engine ? ` by ${engine}` : ""}
+        </span>
+        <span className={summary.syscallsLost > 0 ? "warn" : undefined}>
+          calls lost {summary.syscallsLost.toLocaleString("en-US")}
+        </span>
+      </>
+    ) : null;
   if (summary.samples === 0 && summary.syscalls > 0) {
     return (
       <div className="profile-foot" data-testid="accounting">
-        <span>{summary.syscalls.toLocaleString("en-US")} calls traced</span>
+        {traced}
       </div>
     );
   }
@@ -494,6 +506,7 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
   return (
     <div className="profile-foot" data-testid="accounting">
       <span>{formatWeight(summary.weight, summary.unit)} sampled</span>
+      {traced}
       {source ? <span>{source}</span> : null}
       {stack ? <span>{stack} B of stack copied</span> : null}
       <span className={summary.lost > 0 ? "warn" : undefined}>lost {summary.lost}</span>
