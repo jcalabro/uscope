@@ -3374,15 +3374,16 @@ kbd {
 .log-head {
   display: block;
   width: 100%;
-  padding: 1px 12px;
-  overflow: hidden;
+  /* A long line wraps under its own start, never off the pane. */
+  padding: 1px 12px 1px 32px;
   border: 0;
   background: none;
   color: var(--ink);
   font: inherit;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-indent: -20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
