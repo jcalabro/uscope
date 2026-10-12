@@ -1369,6 +1369,7 @@ build_fixture gcc "$c_fixtures_dir/attach-restart.c" "$output_dir/attach-restart
 build_fixture gcc "$c_fixtures_dir/attach-leader-exits.c" "$output_dir/attach-leader-exits" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/syscall-sweep.c" "$output_dir/syscall-sweep" -O1 -g
+build_fixture gcc "$c_fixtures_dir/syscall-burst.c" "$output_dir/syscall-burst" -O2 -g
 build_fixture gcc "$c_fixtures_dir/syscalls.c" "$output_dir/syscalls" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/attach-fork.c" "$output_dir/attach-fork" \

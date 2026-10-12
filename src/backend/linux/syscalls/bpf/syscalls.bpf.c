@@ -50,23 +50,28 @@ struct {
 	__type(value, struct config);
 } CONFIG SEC(".maps");
 
+// Each thread's call in progress, held in the thread itself: cheaper than
+// any map keyed by its id, and gone with it. The in_flight iterator reads
+// them all.
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
-	__type(key, u32);
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
 	__type(value, struct entry);
-} INFLIGHT SEC(".maps");
+} ENTRIES SEC(".maps");
 
+// Each chosen call's statistics, by its call_spec.stat; uscope sizes it
+// to the calls it chooses.
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, 16384);
-	__type(key, struct stat_key);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
 	__type(value, struct stat_value);
 } STATS SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, 4096);
 	__type(key, struct errno_key);
 	__type(value, u64);
 } ERRNOS SEC(".maps");
@@ -90,6 +95,7 @@ struct scratch {
 		struct exit_record exit;
 		struct signal_record signal;
 		struct file_record file;
+		struct in_flight_record in_flight;
 	};
 };
 
@@ -105,7 +111,6 @@ struct {
 	__uint(max_entries, 16 << 20);
 } EVENTS SEC(".maps");
 
-static const struct stat_value ZERO_STAT;
 
 // `value & mask`, computed where the verifier sees it: the barrier keeps
 // the compiler from dropping a mask it can prove redundant.
@@ -486,21 +491,17 @@ static __always_inline void send_call(u32 tid, u32 tgid, struct entry *entry, u3
 }
 
 // Folds one call into its process's statistics.
-static __always_inline void count(u32 tgid, u32 slot, u64 entered, u64 exited, s64 ret,
-				  int returned, u8 moves)
+static __always_inline void count(struct call_spec *spec, u32 slot, u64 entered, u64 exited,
+				  s64 ret, int returned)
 {
-	struct stat_key key = { .tgid = tgid, .slot = slot };
-	struct stat_value *value = bpf_map_lookup_elem(&STATS, &key);
-	if (!value) {
-		bpf_map_update_elem(&STATS, &key, &ZERO_STAT, BPF_NOEXIST);
-		value = bpf_map_lookup_elem(&STATS, &key);
-		if (!value)
-			return;
-	}
+	u32 row = spec->stat;
+	struct stat_value *value = bpf_map_lookup_elem(&STATS, &row);
+	if (!value)
+		return;
 	value->calls += 1;
 	if (returned && failed(ret)) {
 		value->errors += 1;
-		struct errno_key which = { .tgid = tgid, .slot = slot, .err = (u32)-ret };
+		struct errno_key which = { .slot = slot, .err = (u32)-ret };
 		u64 one = 1;
 		u64 *errors = bpf_map_lookup_elem(&ERRNOS, &which);
 		if (errors)
@@ -521,7 +522,7 @@ static __always_inline void count(u32 tgid, u32 slot, u64 entered, u64 exited, s
 			bucket = 39;
 		value->log2_ns[bucket] += 1;
 	}
-	if (returned && moves && ret > 0)
+	if (returned && spec->moves && ret > 0)
 		value->bytes += ret;
 }
 
@@ -606,12 +607,22 @@ int sys_enter(u64 *ctx)
 	struct call_spec *spec = bpf_map_lookup_elem(&CALLS, &slot);
 	if (!spec || !spec->selected)
 		return 0;
-	read_args(regs, entry.abi, entry.args);
+	struct config *settings = config();
+	if (!settings)
+		return 0;
+	// Counting needs only when the call began.
+	if (settings->flags & CONFIG_STREAM)
+		read_args(regs, entry.abi, entry.args);
 	entry.tgid = tgid;
 	entry.entered = bpf_ktime_get_ns();
-	bpf_map_update_elem(&INFLIGHT, &tid, &entry, BPF_ANY);
-	struct config *settings = config();
-	if (!settings || !(settings->flags & CONFIG_STREAM))
+	struct entry *held = bpf_task_storage_get(&ENTRIES, bpf_get_current_task_btf(), 0,
+						  BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!held) {
+		lost();
+		return 0;
+	}
+	*held = entry;
+	if (!(settings->flags & CONFIG_STREAM))
 		return 0;
 	// Arguments the old image holds, as execve's, are read now.
 	for (u32 index = 0; index < 6; index++) {
@@ -632,34 +643,44 @@ int sys_exit(u64 *ctx)
 		return 0;
 	u64 now = bpf_ktime_get_ns();
 	s64 ret = ctx[1];
+	struct config *settings = config();
+	if (!settings)
+		return 0;
 	struct entry entry = {};
-	struct entry *found = bpf_map_lookup_elem(&INFLIGHT, &tid);
+	struct call_spec *spec;
+	// A held entry whose time is zero has already ended.
+	struct entry *found = bpf_task_storage_get(&ENTRIES, bpf_get_current_task_btf(), 0, 0);
+	if (found && !found->entered)
+		found = 0;
 	if (found) {
 		entry = *found;
-		bpf_map_delete_elem(&INFLIGHT, &tid);
+		found->entered = 0;
+		u32 slot = slot_of(entry.abi, entry.nr);
+		spec = bpf_map_lookup_elem(&CALLS, &slot);
 	} else {
-		// The call began before tracing did.
+		// A call that is not chosen, or one that began before tracing
+		// did, which a launched program's never do but uscope's own.
+		if (settings->flags & CONFIG_SKIP_UNSEEN)
+			return 0;
 		struct pt_regs *regs = (struct pt_regs *)ctx[0];
 		u64 id = BPF_CORE_READ(regs, orig_ax);
 		entry.flags = CALL_ENTRY_UNSEEN;
 		entry.abi = abi_of(id, &entry.flags);
 		entry.nr = entry.abi == ABI_X32 ? (id & ~X32_SYSCALL_BIT) : id;
-		read_args(regs, entry.abi, entry.args);
-	}
-	u32 slot = slot_of(entry.abi, entry.nr);
-	struct call_spec *spec = bpf_map_lookup_elem(&CALLS, &slot);
-	struct config *settings = config();
-	if (!spec || !spec->selected || !settings)
-		return 0;
-	if (!found) {
+		u32 slot = slot_of(entry.abi, entry.nr);
+		spec = bpf_map_lookup_elem(&CALLS, &slot);
+		if (!spec || !spec->selected)
+			return 0;
 		// A new thread's or child's return from the call that made it.
 		if (spec->forks && ret == 0)
 			return 0;
-		if (settings->flags & CONFIG_SKIP_UNSEEN)
-			return 0;
+		read_args(regs, entry.abi, entry.args);
 	}
+	if (!spec || !spec->selected)
+		return 0;
+	u32 slot = slot_of(entry.abi, entry.nr);
 	if (settings->flags & CONFIG_COUNT)
-		count(tgid, slot, entry.entered, now, ret, 1, spec->moves);
+		count(spec, slot, entry.entered, now, ret, 1);
 	if (settings->flags & CONFIG_STREAM) {
 		if (spec->makes)
 			send_files(tid, tgid, spec, &entry, ret);
@@ -749,16 +770,16 @@ int process_exit(u64 *ctx)
 	if (!settings)
 		return 0;
 	// A call the thread never returned from, as exit_group.
-	struct entry *found = bpf_map_lookup_elem(&INFLIGHT, &tid);
-	if (found) {
+	struct entry *found = bpf_task_storage_get(&ENTRIES, task, 0, 0);
+	if (found && found->entered) {
 		struct entry entry = *found;
-		bpf_map_delete_elem(&INFLIGHT, &tid);
+		found->entered = 0;
 		entry.flags |= CALL_PROCESS_EXITED;
 		u32 slot = slot_of(entry.abi, entry.nr);
 		struct call_spec *spec = bpf_map_lookup_elem(&CALLS, &slot);
 		if (spec && spec->selected) {
 			if (settings->flags & CONFIG_COUNT)
-				count(tgid, slot, 0, 0, 0, 0, 0);
+				count(spec, slot, 0, 0, 0, 0);
 			if (settings->flags & CONFIG_STREAM)
 				send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT + 1, 0, 0);
 		}
@@ -808,6 +829,26 @@ int signal_deliver(u64 *ctx)
 	if (bpf_probe_read_kernel(record->info, sizeof(record->info), (void *)ctx[1]))
 		__builtin_memset(record->info, 0, sizeof(record->info));
 	bpf_ringbuf_submit(record, 0);
+	return 0;
+}
+
+// Lists every traced thread's call in progress, for uscope's in-flight
+// scan: one in_flight_record each.
+SEC("iter/task")
+int in_flight(struct bpf_iter__task *ctx)
+{
+	struct task_struct *task = ctx->task;
+	if (!task)
+		return 0;
+	if (!traced(BPF_CORE_READ(task, tgid)))
+		return 0;
+	struct entry *held = bpf_task_storage_get(&ENTRIES, task, 0, 0);
+	if (!held || !held->entered)
+		return 0;
+	struct in_flight_record record = {};
+	record.tid = BPF_CORE_READ(task, pid);
+	record.entry = *held;
+	bpf_seq_write(ctx->meta->seq, &record, sizeof(record));
 	return 0;
 }
 

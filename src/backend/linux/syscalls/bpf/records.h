@@ -115,7 +115,9 @@ struct call_spec {
 	// Whether it creates a thread or process, whose own return from it
 	// is not a call of its own.
 	u8 forks;
-	u8 pad[3];
+	u8 pad;
+	// Its row in STATS, which holds only the chosen calls.
+	u16 stat;
 	struct arg_copy args[6];
 };
 
@@ -134,6 +136,13 @@ struct entry {
 	u8 abi;
 	u8 flags;
 	u8 pad[6];
+};
+
+// What the in_flight iterator writes for each call in progress.
+struct in_flight_record {
+	u32 tid;
+	u32 pad;
+	struct entry entry;
 };
 
 struct record {
@@ -214,11 +223,6 @@ struct file_record {
 	u32 pad;
 };
 
-struct stat_key {
-	u32 tgid;
-	u32 slot;
-};
-
 struct stat_value {
 	u64 calls;
 	u64 errors;
@@ -231,8 +235,6 @@ struct stat_value {
 };
 
 struct errno_key {
-	u32 tgid;
 	u32 slot;
 	u32 err;
-	u32 pad;
 };

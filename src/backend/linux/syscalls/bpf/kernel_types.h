@@ -89,3 +89,14 @@ struct kernel_siginfo {
 } __kernel_preserve;
 
 struct k_sigaction;
+
+struct seq_file;
+
+struct bpf_iter_meta {
+	struct seq_file *seq;
+} __kernel_preserve;
+
+struct bpf_iter__task {
+	struct bpf_iter_meta *meta;
+	struct task_struct *task;
+} __kernel_preserve;

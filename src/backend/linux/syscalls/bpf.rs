@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, RingBuf};
-use aya::programs::BtfTracePoint;
+use aya::programs::{BtfTracePoint, Iter};
 use aya::{Btf, Ebpf, EbpfLoader};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -107,7 +107,8 @@ pub struct RawCallSpec {
     pub makes: u8,
     pub makes_arg: u8,
     pub forks: u8,
-    pub pad: [u8; 3],
+    pub pad: u8,
+    pub stat: u16,
     pub args: [RawArgCopy; 6],
 }
 
@@ -135,6 +136,17 @@ pub struct RawEntry {
     pub abi: u8,
     pub flags: u8,
     pub pad: [u8; 6],
+}
+
+/// `struct in_flight_record`.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
+pub struct RawInFlightRecord {
+    pub tid: u32,
+    pub pad: u32,
+    pub entry: RawEntry,
 }
 
 /// Every record's start (`struct record`).
@@ -245,16 +257,6 @@ pub struct RawFileRecord {
     pub pad: u32,
 }
 
-/// `struct stat_key`.
-#[repr(C)]
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
-)]
-pub struct RawStatKey {
-    pub tgid: u32,
-    pub slot: u32,
-}
-
 /// `struct stat_value`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
@@ -275,18 +277,14 @@ pub struct RawStatValue {
     Debug, Clone, Copy, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
 )]
 pub struct RawErrnoKey {
-    pub tgid: u32,
     pub slot: u32,
     pub err: u32,
-    pub pad: u32,
 }
 
 /// Map values cross as bytes, which aya can hold without unsafe code.
 type Bytes<const N: usize> = [u8; N];
 const SPEC_BYTES: usize = size_of::<RawCallSpec>();
-const ENTRY_BYTES: usize = size_of::<RawEntry>();
 const STAT_BYTES: usize = size_of::<RawStatValue>();
-const STAT_KEY_BYTES: usize = size_of::<RawStatKey>();
 const ERRNO_KEY_BYTES: usize = size_of::<RawErrnoKey>();
 const CONFIG_BYTES: usize = size_of::<RawConfig>();
 
@@ -584,18 +582,17 @@ fn descriptor(process: u32, raw: &RawFileRecord, name: &[u8]) -> TraceEvent {
     }
 }
 
-/// Folds the kernel's per-CPU statistics into one per process and call.
+/// Folds the kernel's per-CPU statistics into one per call, which the
+/// kernel counts over every traced process and `Folded` names by `process`.
 #[must_use]
 pub fn fold(
-    stats: impl IntoIterator<Item = (RawStatKey, Vec<RawStatValue>)>,
+    process: u32,
+    stats: impl IntoIterator<Item = (SyscallId, Vec<RawStatValue>)>,
     errnos: impl IntoIterator<Item = (RawErrnoKey, u64)>,
 ) -> Folded {
     let mut folded = Folded::default();
-    for (key, per_cpu) in stats {
-        let Some(call) = call_of(key.slot) else {
-            continue;
-        };
-        let into = folded.by_call.entry((key.tgid, call)).or_default();
+    for (call, per_cpu) in stats {
+        let into = folded.by_call.entry((process, call)).or_default();
         for value in per_cpu {
             into.merge(&SyscallStats {
                 calls: value.calls,
@@ -617,7 +614,7 @@ pub fn fold(
         if count > 0 {
             *folded
                 .by_call
-                .entry((key.tgid, call))
+                .entry((process, call))
                 .or_default()
                 .errors_by_errno
                 .entry(errno)
@@ -783,29 +780,37 @@ fn load_error(error: impl std::fmt::Display) -> BpfError {
 struct Loaded {
     ebpf: Ebpf,
     targets: HashMap<MapData, u32, u8>,
+    /// The call each row of statistics counts.
+    rows: Vec<SyscallId>,
 }
 
 impl Loaded {
     fn load(options: &TraceOptions, engine: BpfOptions, launch: bool) -> Result<Self, BpfError> {
+        // Every slot when every call is chosen, numbers no table names
+        // among them. Each chosen call has a row of statistics.
+        let all = options.calls.is_all();
+        let chosen: Vec<(u32, SyscallId)> = (0..SLOTS)
+            .filter_map(|slot| Some((slot, call_of(slot)?)))
+            .filter(|&(_, call)| all || options.calls.contains(call))
+            .collect();
+        let rows = u32::try_from(chosen.len().max(1)).unwrap_or(u32::MAX);
         let btf = Btf::from_sys_fs().map_err(load_error)?;
         let mut ebpf = EbpfLoader::new()
             .btf(Some(&btf))
             .map_max_entries("EVENTS", engine.ring)
+            .map_max_entries("STATS", rows)
+            // aya cannot open task storage itself, which only the
+            // programs use.
+            .allow_unsupported_maps()
             .load(OBJECT)
             .map_err(load_error)?;
         {
             let mut calls: Array<_, Bytes<SPEC_BYTES>> =
                 Array::try_from(ebpf.map_mut("CALLS").ok_or_else(|| missing("CALLS"))?)
                     .map_err(load_error)?;
-            // Every slot when every call is chosen, numbers no table names
-            // among them.
-            let all = options.calls.is_all();
-            for slot in 0..SLOTS {
-                let Some(call) = call_of(slot).filter(|&call| all || options.calls.contains(call))
-                else {
-                    continue;
-                };
-                let spec = call_spec(call, options);
+            for (row, &(slot, call)) in chosen.iter().enumerate() {
+                let mut spec = call_spec(call, options);
+                spec.stat = u16::try_from(row).unwrap_or(u16::MAX);
                 let mut value = [0; SPEC_BYTES];
                 value.copy_from_slice(spec.as_bytes());
                 calls.set(slot, value, 0).map_err(load_error)?;
@@ -844,11 +849,21 @@ impl Loaded {
             program.load(tracepoint, &btf).map_err(load_error)?;
             program.attach().map_err(load_error)?;
         }
+        let iterator: &mut Iter = ebpf
+            .program_mut("in_flight")
+            .ok_or_else(|| missing("in_flight"))?
+            .try_into()
+            .map_err(load_error)?;
+        iterator.load("task", &btf).map_err(load_error)?;
         let targets =
             HashMap::try_from(ebpf.take_map("TARGETS").ok_or_else(|| missing("TARGETS"))?)
                 .map_err(load_error)?;
         record!("syscalls bpf: loaded and attached");
-        Ok(Self { ebpf, targets })
+        Ok(Self {
+            ebpf,
+            targets,
+            rows: chosen.into_iter().map(|(_, call)| call).collect(),
+        })
     }
 
     fn target(&mut self, process: u32) -> Result<(), BpfError> {
@@ -856,22 +871,29 @@ impl Loaded {
         self.targets.insert(process, 1, 0).map_err(load_error)
     }
 
-    /// Calls threads have been in for at least `after` nanoseconds.
-    fn in_flight(&self, after: u64) -> Vec<InFlight> {
-        let Some(map) = self.ebpf.map("INFLIGHT") else {
-            return Vec::new();
-        };
-        let Ok(entries) = HashMap::<_, u32, Bytes<ENTRY_BYTES>>::try_from(map) else {
-            return Vec::new();
+    /// Calls threads have been in for at least `after` nanoseconds, which
+    /// the `in_flight` iterator lists from each thread's own storage.
+    fn in_flight(&mut self, after: u64) -> Vec<InFlight> {
+        let listed = match self.list_in_flight() {
+            Ok(listed) => listed,
+            // Only the flight recorder, which release builds leave out,
+            // reads the error.
+            #[cfg_attr(not(debug_assertions), expect(unused_variables))]
+            Err(error) => {
+                record!("syscalls bpf: the in-flight scan failed: {error}");
+                Vec::new()
+            }
         };
         let now = monotonic();
-        let mut calls: Vec<InFlight> = entries
+        let mut calls: Vec<InFlight> = listed
+            .as_chunks::<{ size_of::<RawInFlightRecord>() }>()
+            .0
             .iter()
-            .flatten()
-            .filter_map(|(thread, value)| {
-                let entry = RawEntry::read_from_bytes(&value).ok()?;
+            .filter_map(|bytes| {
+                let record = RawInFlightRecord::read_from_bytes(bytes).ok()?;
+                let entry = record.entry;
                 (now.saturating_sub(entry.entered) >= after).then_some(InFlight {
-                    thread,
+                    thread: record.tid,
                     process: entry.tgid,
                     call: SyscallId::new(abi_of(entry.abi)?, entry.nr),
                     args: entry.args,
@@ -883,9 +905,26 @@ impl Loaded {
         calls
     }
 
+    /// Runs the `in_flight` iterator once: the records it wrote.
+    fn list_in_flight(&mut self) -> Result<Vec<u8>, BpfError> {
+        use std::io::Read as _;
+        let program: &mut Iter = self
+            .ebpf
+            .program_mut("in_flight")
+            .ok_or_else(|| missing("in_flight"))?
+            .try_into()
+            .map_err(load_error)?;
+        let link = program.attach().map_err(load_error)?;
+        let link = program.take_link(link).map_err(load_error)?;
+        let mut file = link.into_file().map_err(load_error)?;
+        let mut listed = Vec::new();
+        file.read_to_end(&mut listed).map_err(load_error)?;
+        Ok(listed)
+    }
+
     /// Calls in progress as the trace ends, which never returned while it
     /// ran.
-    fn unfinished(&self) -> Vec<SyscallEvent> {
+    fn unfinished(&mut self) -> Vec<SyscallEvent> {
         self.in_flight(0)
             .into_iter()
             .map(|call| SyscallEvent {
@@ -914,23 +953,25 @@ impl Loaded {
             .map_or(0, |values| values.iter().sum())
     }
 
-    fn counted(&self) -> Folded {
+    fn counted(&self, process: u32) -> Folded {
         let stats = self
             .ebpf
             .map("STATS")
-            .and_then(|map| {
-                PerCpuHashMap::<_, Bytes<STAT_KEY_BYTES>, Bytes<STAT_BYTES>>::try_from(map).ok()
-            })
+            .and_then(|map| PerCpuArray::<_, Bytes<STAT_BYTES>>::try_from(map).ok())
             .map(|map| {
-                map.iter()
-                    .flatten()
-                    .filter_map(|(key, values)| {
-                        let key = RawStatKey::read_from_bytes(&key).ok()?;
-                        let values = values
+                (0_u32..)
+                    .zip(&self.rows)
+                    .filter_map(|(row, &call)| {
+                        let values = map
+                            .get(&row, 0)
+                            .ok()?
                             .iter()
                             .filter_map(|value| RawStatValue::read_from_bytes(value).ok())
-                            .collect();
-                        Some((key, values))
+                            .collect::<Vec<_>>();
+                        values
+                            .iter()
+                            .any(|value| value.calls > 0)
+                            .then_some((call, values))
                     })
                     .collect::<Vec<_>>()
             })
@@ -951,7 +992,7 @@ impl Loaded {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        fold(stats, errnos)
+        fold(process, stats, errnos)
     }
 }
 
@@ -1030,7 +1071,7 @@ pub fn trace(
     let ring_end = reader.end;
     let Reader { sink, .. } = reader;
     if engine.count_only {
-        sink.counted(loaded.counted());
+        sink.counted(loaded.counted(first));
     }
     drop(loaded);
     let status = gate.as_mut().map(Gate::finish);
@@ -1163,6 +1204,9 @@ impl Reader<'_> {
         while let Some(item) = ring.next() {
             match decode(&item) {
                 Ok(record) => self.handle(record),
+                // Only the flight recorder, which release builds leave
+                // out, reads the error.
+                #[cfg_attr(not(debug_assertions), expect(unused_variables))]
                 Err(error) => {
                     record!("syscalls bpf: undecodable record: {error}");
                     self.sink.event(TraceEvent::Lost {
@@ -1300,7 +1344,7 @@ mod tests {
             layout!(
                 RawCallSpec,
                 "call_spec",
-                [selected, moves, makes, makes_arg, forks, pad, args]
+                [selected, moves, makes, makes_arg, forks, pad, stat, args]
             ),
             layout!(
                 RawFileRecord,
@@ -1314,6 +1358,7 @@ mod tests {
                 [entered, args, nr, tgid, abi, flags, pad]
             ),
             layout!(RawRecord, "record", [kind, size, tid, tgid]),
+            layout!(RawInFlightRecord, "in_flight_record", [tid, pad, entry]),
             layout!(
                 RawCallRecord,
                 "call_record",
@@ -1336,7 +1381,6 @@ mod tests {
                 "signal_record",
                 [header, time, signal, pad, info]
             ),
-            layout!(RawStatKey, "stat_key", [tgid, slot]),
             layout!(
                 RawStatValue,
                 "stat_value",
@@ -1344,7 +1388,7 @@ mod tests {
                     calls, errors, timed, total_ns, min_ns, max_ns, bytes, log2_ns
                 ]
             ),
-            layout!(RawErrnoKey, "errno_key", [tgid, slot, err, pad]),
+            layout!(RawErrnoKey, "errno_key", [slot, err]),
         ];
         for (name, size, fields) in layouts {
             let (c_size, c_fields) = structs
@@ -1466,11 +1510,6 @@ mod tests {
     #[test]
     fn statistics_fold_over_cpus_with_their_errnos() {
         let openat = SyscallId::named(Abi::X86_64, "openat").expect("openat");
-        let key = RawStatKey {
-            tgid: 7,
-            // x86-64 calls fill the first slots.
-            slot: openat.number,
-        };
         let mut one = RawStatValue {
             calls: 3,
             errors: 1,
@@ -1485,13 +1524,13 @@ mod tests {
         let mut two = one;
         two.min_ns = 20;
         let folded = fold(
-            [(key, vec![one, two])],
+            7,
+            [(openat, vec![one, two])],
             [(
                 RawErrnoKey {
-                    tgid: 7,
-                    slot: key.slot,
+                    // x86-64 calls fill the first slots.
+                    slot: openat.number,
                     err: 2,
-                    pad: 0,
                 },
                 2,
             )],

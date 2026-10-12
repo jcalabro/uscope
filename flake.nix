@@ -147,5 +147,22 @@
           ]);
         });
       };
+
+      # The privilege `uscope syscalls` needs for its BPF engine, and
+      # `just test-bpf` for its tests: a wrapper around env that raises
+      # CAP_BPF and CAP_PERFMON into the ambient set before it runs its
+      # command, so they reach uscope through nix develop, systemd-run, and
+      # nextest. Only root and the wheel group may run it. A host imports
+      # it into its own NixOS or system-manager configuration; neither the
+      # dev shell nor the nix store can make a binary with capabilities.
+      nixosModules.uscope-bpf = { pkgs, ... }: {
+        security.wrappers.uscope-bpf = {
+          source = "${pkgs.coreutils}/bin/env";
+          owner = "root";
+          group = "wheel";
+          permissions = "u+rx,g+x";
+          capabilities = "cap_bpf,cap_perfmon+ep";
+        };
+      };
     };
 }
