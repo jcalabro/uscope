@@ -5,7 +5,7 @@ text, a `Vec` as its elements, a hand-rolled C vector as the integers it
 holds. The value as stored stays one step away, as the `[raw]` child,
 `print/r`, or `set views off`. uscope builds in views for the C++, Rust, Go,
 Zig, Odin, D, Nim, and Ada standard libraries, and anyone can write views
-for their own types in the same language; `docs/writing-views.md` is a
+for their own types in the same language; [Writing views](writing-views.md) is a
 tutorial.
 
 A view can only read the stopped program: it cannot write memory, call
@@ -171,7 +171,7 @@ p => unbound: no view's pattern names the type
 
 ## Expressions
 
-A view's expressions are uscope's own (`docs/expressions.md`), evaluated
+A view's expressions are uscope's own ([Expressions](expressions.md)), evaluated
 with `self` as the value presented. A member of `self` is named by its own
 name, and a view's `let`s and the arguments its pattern captured shadow
 members. Nothing the program's frame names is visible, so a view means the
@@ -716,7 +716,7 @@ something => {kind: 0x1, value: 7}
 `visualize` gives a value a drawing in the web page, `uscope web`: a
 chess position as a board, a framebuffer as an image, samples as a plot.
 The view says which data the drawing needs; a **renderer**, a small
-JavaScript file, turns that data into shapes (`docs/visualizers.md`). The
+JavaScript file, turns that data into shapes ([Visualizers](visualizers.md)). The
 terminal and debug adapters never draw, and a `visualize` changes nothing
 they show.
 
@@ -996,4 +996,4 @@ one to eight words.
 A renderer is at most 256 KiB, and a `visualize` takes at most 64 inputs.
 A drawing's inputs hold at most 65,536 values, nested at most 16 deep;
 one drawing reads at most 64 MiB in all.
-What the page allows a renderer is in `docs/visualizers.md`.
+What the page allows a renderer is in [Visualizers](visualizers.md).

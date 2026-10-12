@@ -3,7 +3,7 @@
 A view tells uscope what one of your types stands for: a vector as its
 elements, a tagged union as the value it holds, a queue as the tasks on it.
 This tutorial writes views for a small C program and a Rust one, both in
-uscope's own tests, so everything here runs. `docs/views.md` is the
+uscope's own tests, so everything here runs. [Views](views.md) is the
 reference for the language and says where uscope finds view files; the
 programs here carry their views themselves.
 

@@ -1,0 +1,49 @@
+:root {
+  --vp-c-brand-1: #3157c8;
+  --vp-c-brand-2: #294baa;
+  --vp-c-brand-3: #223f90;
+  --vp-c-brand-soft: rgb(49 87 200 / 14%);
+  --vp-font-family-base: Inter, ui-sans-serif, system-ui, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.dark {
+  --vp-c-brand-1: #8ba8ff;
+  --vp-c-brand-2: #7598ff;
+  --vp-c-brand-3: #5e83ee;
+  --vp-c-brand-soft: rgb(117 152 255 / 16%);
+}
+
+.VPDoc .content-container {
+  max-width: 760px;
+}
+
+.vp-doc p,
+.vp-doc li {
+  line-height: 1.72;
+}
+
+.vp-doc h2 {
+  border-top: 0;
+  margin-top: 2.4rem;
+}
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+}
+
+.vp-doc th {
+  text-align: left;
+}
+
+.VPHero .name,
+.VPHero .text {
+  letter-spacing: -0.035em;
+}
+
+@media (max-width: 700px) {
+  .vp-doc table {
+    display: block;
+  }
+}

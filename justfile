@@ -15,7 +15,7 @@ max_test_threads := "16"
 default: check
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test web-test
+check: lint test web-test docs
 
 # Runs everything to check before committing.
 all: check web-e2e stress sim bench-smoke
@@ -138,6 +138,18 @@ soak MINUTES="10": build-test-programs
 # Installs the web page's locked dependencies.
 web-deps:
     cd web && pnpm install --frozen-lockfile --silent
+
+# Installs the documentation site's locked dependencies.
+docs-deps:
+    cd docs && pnpm install --frozen-lockfile --silent
+
+# Builds the public documentation and fails on broken internal links.
+docs: docs-deps
+    cd docs && ./node_modules/.bin/vitepress build .
+
+# Serves the public documentation with live reload.
+docs-dev: docs-deps
+    cd docs && ./node_modules/.bin/vitepress dev .
 
 # Builds the web page into build/web, where `uscope web` serves it from.
 # Development builds of uscope read it from disk, so rebuilding the page
