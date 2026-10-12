@@ -2,6 +2,7 @@
 //! sees into the neutral events of `crate::syscalls`.
 
 pub mod bpf;
+pub mod capture;
 pub mod info;
 pub mod launch;
 pub mod ptrace;

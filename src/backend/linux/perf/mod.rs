@@ -475,10 +475,14 @@ pub struct LaunchOptions {
 /// The child waits between fork and exec until its events are open. A
 /// thread of its own spawns it, because spawning returns only after the
 /// exec, and stays to wait for its exit: the child dies with that thread.
+/// `held` runs while it waits, its events open, so that what `held` starts
+/// sees it from its first instruction too; an error from `held` ends the
+/// child before it executes.
 pub fn launch(
     mut command: Command,
     options: &EventOptions,
     launch: LaunchOptions,
+    held: impl FnOnce(u32) -> Result<(), String>,
 ) -> Result<Launched, LaunchError> {
     let (pid_read, pid_write) = pipe()?;
     let (go_read, go_write) = pipe()?;
@@ -538,6 +542,12 @@ pub fn launch(
             return Err(LaunchError::Events(error));
         }
     };
+    if let Err(why) = held(pid) {
+        record!("perf launch: closing {pid}'s gate unopened: {why}");
+        drop(go_write);
+        let _ = spawner.join();
+        return Err(LaunchError::Held(why));
+    }
     write_all(&go_write, &[1])?;
     record!("perf launch: {pid} opened its gate");
     Ok(Launched {
@@ -555,6 +565,8 @@ pub enum LaunchError {
     Spawn(#[from] std::io::Error),
     #[error(transparent)]
     Events(OpenError),
+    #[error("{0}")]
+    Held(String),
 }
 
 fn pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {

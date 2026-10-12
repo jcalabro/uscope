@@ -7,8 +7,9 @@ use foldhash::HashMap;
 use super::Capture;
 use super::records::{
     Account, Frame, FrameKind, Function, Gap, GapReason, Line, Mapping, Marker, MarkerKind, Module,
-    NONE, OffCpu, Plot, Process, Range, Sample, Setting, Site, Stack, Task, TaskWait, Thread,
-    ThreadRange, Truncation, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, Zone, ZoneRange,
+    NONE, OffCpu, Plot, Process, Range, Sample, Setting, Site, Stack, Syscall, SyscallErrno,
+    SyscallNote, SyscallStat, Task, TaskWait, Thread, ThreadRange, Truncation, UNSEEN,
+    ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, Zone, ZoneRange,
 };
 use crate::image::{StrId, StringsBuilder};
 
@@ -34,8 +35,12 @@ pub struct CaptureBuilder {
     module_index: HashMap<(u32, u32, [u8; 16]), u32>,
     processes: Vec<Process>,
     live_processes: HashMap<u32, u32>,
+    /// Each pid's and tid's ended rows, which an event from before its end
+    /// still belongs to: an id names one process or thread at a time.
+    ended_processes: HashMap<u32, Vec<u32>>,
     threads: Vec<Thread>,
     live_threads: BTreeMap<u32, u32>,
+    ended_threads: HashMap<u32, Vec<u32>>,
     mappings: Vec<Mapping>,
     frames: Vec<Frame>,
     frame_index: HashMap<(u64, u32, u8), u32>,
@@ -57,6 +62,50 @@ pub struct CaptureBuilder {
     task_index: HashMap<(u32, u64), u32>,
     task_waits: Vec<TaskWait>,
     gaps: Vec<Gap>,
+    syscalls: Vec<Syscall>,
+    syscall_blobs: Vec<u8>,
+    syscall_notes: Vec<SyscallNote>,
+    syscall_stats: Vec<SyscallStat>,
+    syscall_errnos: Vec<SyscallErrno>,
+}
+
+/// Rows kept per thread, as one table in time order per thread and each
+/// thread's range of it.
+fn grouped<T: Timed>(by_thread: Vec<Vec<T>>) -> (Vec<T>, Vec<ThreadRange>) {
+    let mut rows = Vec::with_capacity(by_thread.iter().map(Vec::len).sum());
+    let mut ranges = Vec::new();
+    for (thread, mut samples) in by_thread.into_iter().enumerate() {
+        if samples.is_empty() {
+            continue;
+        }
+        samples.sort_by_key(T::time);
+        ranges.push(ThreadRange {
+            thread: index(thread).into(),
+            start: index(rows.len()).into(),
+            count: index(samples.len()).into(),
+        });
+        rows.extend(samples);
+    }
+    (rows, ranges)
+}
+
+/// Whether a process's span holds `time`.
+const fn covers(process: &Process, time: i64) -> bool {
+    process.start.get() <= time && time <= process.end.get()
+}
+
+/// Whether two spans share a moment.
+const fn overlap(a: (i64, i64), b: (i64, i64)) -> bool {
+    a.0 <= b.1 && b.0 <= a.1
+}
+
+/// When a call happened, for cutting a window: its end, or its entry.
+const fn call_time(call: &Syscall) -> i64 {
+    if call.exited.get() == UNSEEN {
+        call.entered.get()
+    } else {
+        call.exited.get()
+    }
 }
 
 impl CaptureBuilder {
@@ -108,6 +157,13 @@ impl CaptureBuilder {
         if let Some(&process) = self.live_processes.get(&pid) {
             return process;
         }
+        let ended = self.ended_processes.get(&pid).into_iter().flatten();
+        if let Some(&process) = ended
+            .rev()
+            .find(|&&row| covers(&self.processes[row as usize], time))
+        {
+            return process;
+        }
         let process = index(self.processes.len());
         self.processes.push(Process {
             pid: pid.into(),
@@ -129,6 +185,7 @@ impl CaptureBuilder {
     pub fn process_exit(&mut self, pid: u32, time: i64) {
         if let Some(process) = self.live_processes.remove(&pid) {
             self.processes[process as usize].end = time.into();
+            self.ended_processes.entry(pid).or_default().push(process);
             let ended: Vec<u32> = self
                 .live_threads
                 .iter()
@@ -158,6 +215,15 @@ impl CaptureBuilder {
             }
             self.live_threads.remove(&tid);
         }
+        let ended = self.ended_threads.get(&tid).into_iter().flatten();
+        if let Some(&thread) = ended.rev().find(|&&row| {
+            let thread = &self.threads[row as usize];
+            thread.start.get() <= time
+                && time <= thread.end.get()
+                && self.processes[thread.process.get() as usize].pid.get() == pid
+        }) {
+            return thread;
+        }
         let process = self.process(pid, time);
         if self.processes[process as usize].end.get() < time {
             self.processes[process as usize].end = time.into();
@@ -186,6 +252,7 @@ impl CaptureBuilder {
     /// Ends thread `tid` at `time`.
     pub fn thread_exit(&mut self, tid: u32, time: i64) {
         if let Some(thread) = self.live_threads.remove(&tid) {
+            self.ended_threads.entry(tid).or_default().push(thread);
             let thread = &mut self.threads[thread as usize];
             if thread.end.get() < time {
                 thread.end = time.into();
@@ -516,6 +583,7 @@ impl CaptureBuilder {
         self.plots.retain(|plot| plot.time.get() >= time);
         self.markers.retain(|marker| marker.time.get() >= time);
         self.task_waits.retain(|wait| wait.time.get() >= time);
+        self.forget_syscalls(|at| at >= time);
     }
 
     /// Forgets every row of what happened at `time` or after, as a segment
@@ -549,6 +617,36 @@ impl CaptureBuilder {
         self.plots.retain(|plot| plot.time.get() < time);
         self.markers.retain(|marker| marker.time.get() < time);
         self.task_waits.retain(|wait| wait.time.get() < time);
+        self.forget_syscalls(|at| at < time);
+    }
+
+    /// Keeps the calls and notes of the times `keep` keeps, and only their
+    /// bytes, each note still among the calls it came between.
+    fn forget_syscalls(&mut self, keep: impl Fn(i64) -> bool) {
+        let mut kept_before = Vec::with_capacity(self.syscalls.len() + 1);
+        kept_before.push(0);
+        let mut kept = 0;
+        for call in &self.syscalls {
+            kept += u32::from(keep(call_time(call)));
+            kept_before.push(kept);
+        }
+        let blobs = std::mem::take(&mut self.syscall_blobs);
+        let bytes = |start: u32, len: u32| {
+            if start == NONE {
+                &[][..]
+            } else {
+                &blobs[start as usize..(start + len) as usize]
+            }
+        };
+        let calls = std::mem::take(&mut self.syscalls);
+        for call in calls.into_iter().filter(|call| keep(call_time(call))) {
+            self.syscall(call, bytes(call.captures.get(), call.captures_len.get()));
+        }
+        let notes = std::mem::take(&mut self.syscall_notes);
+        for mut note in notes.into_iter().filter(|note| keep(note.time.get())) {
+            note.calls = kept_before[note.calls.get() as usize].into();
+            self.push_note(note, bytes(note.blob.get(), note.blob_len.get()));
+        }
     }
 
     /// Every count, by kind.
@@ -563,6 +661,49 @@ impl CaptureBuilder {
             *value = value.saturating_sub(base.get(kind).copied().unwrap_or(0));
         }
         self.accounts.retain(|_, value| *value > 0);
+    }
+
+    /// Keeps bytes in the blobs: where they start and how many, or
+    /// [`NONE`] for none.
+    fn blob(&mut self, bytes: &[u8]) -> (u32, u32) {
+        if bytes.is_empty() {
+            return (NONE, 0);
+        }
+        let start = index(self.syscall_blobs.len());
+        self.syscall_blobs.extend_from_slice(bytes);
+        (start, index(bytes.len()))
+    }
+
+    /// Records a system call, with the bytes captured behind its
+    /// arguments.
+    pub fn syscall(&mut self, mut call: Syscall, captures: &[u8]) {
+        let (start, len) = self.blob(captures);
+        call.captures = start.into();
+        call.captures_len = len.into();
+        self.syscalls.push(call);
+    }
+
+    /// Records what a system call trace saw besides a call, after the
+    /// calls so far, with its bytes.
+    pub fn syscall_note(&mut self, mut note: SyscallNote, bytes: &[u8]) {
+        note.calls = index(self.syscalls.len()).into();
+        self.push_note(note, bytes);
+    }
+
+    fn push_note(&mut self, mut note: SyscallNote, bytes: &[u8]) {
+        let (start, len) = self.blob(bytes);
+        note.blob = start.into();
+        note.blob_len = len.into();
+        self.syscall_notes.push(note);
+    }
+
+    /// Records a process's statistics of a call that the kernel counted,
+    /// which a trace with no calls holds instead.
+    pub fn syscall_stat(&mut self, mut stat: SyscallStat, errnos: &[SyscallErrno]) {
+        stat.errnos = index(self.syscall_errnos.len()).into();
+        stat.errno_count = index(errnos.len()).into();
+        self.syscall_errnos.extend_from_slice(errnos);
+        self.syscall_stats.push(stat);
     }
 
     /// Records where a task waited.
@@ -623,8 +764,13 @@ impl CaptureBuilder {
                 .push(self.module(path, build_id, module.digest, module.size.get()));
         }
         for process in &capture.processes {
+            // One pid names one process at a time.
             let found = self.processes.iter().position(|existing| {
-                existing.pid == process.pid && existing.start == process.start
+                existing.pid == process.pid
+                    && overlap(
+                        (existing.start.get(), existing.end.get()),
+                        (process.start.get(), process.end.get()),
+                    )
             });
             let index = if let Some(found) = found {
                 index(found)
@@ -645,7 +791,10 @@ impl CaptureBuilder {
             let found = self.threads.iter().position(|existing| {
                 existing.process.get() == process
                     && existing.tid == thread.tid
-                    && existing.start == thread.start
+                    && overlap(
+                        (existing.start.get(), existing.end.get()),
+                        (thread.start.get(), thread.end.get()),
+                    )
             });
             let name = self.copy_string(capture, thread.name.get());
             let index = if let Some(found) = found {
@@ -787,28 +936,52 @@ impl CaptureBuilder {
             self.task_wait(task, wait.time.get(), wait.weight.get(), stack, state);
         }
         self.gaps.extend_from_slice(&capture.gaps);
+        self.absorb_syscalls(capture, map);
+    }
+
+    fn absorb_syscalls(&mut self, capture: &Capture, map: &Remap) {
+        let calls = index(self.syscalls.len());
+        let bytes = |start: u32, len: u32| {
+            if start == NONE {
+                &[][..]
+            } else {
+                &capture.syscall_blobs[start as usize..(start + len) as usize]
+            }
+        };
+        for call in &capture.syscalls {
+            let row = Syscall {
+                thread: Remap::get(&map.threads, call.thread.get()).into(),
+                stack: Remap::get(&map.stacks, call.stack.get()).into(),
+                ..*call
+            };
+            self.syscall(row, bytes(call.captures.get(), call.captures_len.get()));
+        }
+        for note in &capture.syscall_notes {
+            let text = self.copy_string(capture, note.text.get());
+            let row = SyscallNote {
+                thread: Remap::get(&map.threads, note.thread.get()).into(),
+                process: Remap::get(&map.processes, note.process.get()).into(),
+                stack: Remap::get(&map.stacks, note.stack.get()).into(),
+                text: text.into(),
+                calls: (calls + note.calls.get()).into(),
+                ..*note
+            };
+            self.push_note(row, bytes(note.blob.get(), note.blob_len.get()));
+        }
+        for stat in &capture.syscall_stats {
+            let start = stat.errnos.get() as usize;
+            let errnos = &capture.syscall_errnos[start..start + stat.errno_count.get() as usize];
+            let row = SyscallStat {
+                process: Remap::get(&map.processes, stat.process.get()).into(),
+                ..*stat
+            };
+            self.syscall_stat(row, errnos);
+        }
     }
 
     /// The finished capture: each thread's rows in time order, zones by
     /// thread and depth.
     pub fn finish(self) -> Capture {
-        fn grouped<T: Timed>(by_thread: Vec<Vec<T>>) -> (Vec<T>, Vec<ThreadRange>) {
-            let mut rows = Vec::with_capacity(by_thread.iter().map(Vec::len).sum());
-            let mut ranges = Vec::new();
-            for (thread, mut samples) in by_thread.into_iter().enumerate() {
-                if samples.is_empty() {
-                    continue;
-                }
-                samples.sort_by_key(T::time);
-                ranges.push(ThreadRange {
-                    thread: index(thread).into(),
-                    start: index(rows.len()).into(),
-                    count: index(samples.len()).into(),
-                });
-                rows.extend(samples);
-            }
-            (rows, ranges)
-        }
         let (samples, sample_ranges) = grouped(self.samples);
         let (off_cpu, off_cpu_ranges) = grouped(self.off_cpu);
         let frame_symbols = if self.symbols.is_empty() {
@@ -890,6 +1063,11 @@ impl CaptureBuilder {
             tasks: self.tasks,
             task_waits,
             gaps,
+            syscalls: self.syscalls,
+            syscall_blobs: self.syscall_blobs,
+            syscall_notes: self.syscall_notes,
+            syscall_stats: self.syscall_stats,
+            syscall_errnos: self.syscall_errnos,
         }
     }
 }

@@ -1153,13 +1153,63 @@ pub fn trace(
     stop: &AtomicBool,
     sink: &mut dyn Sink,
 ) -> Result<Finished, BpfError> {
+    let start = match target {
+        Target::Launch(command) => Start::Launch(command),
+        Target::Attach(pids) => Start::Attach(pids),
+    };
+    run(start, options, engine, stop, sink)
+}
+
+/// Traces process `pid`, held at another launcher's gate, from its first
+/// call.
+///
+/// It is traced as [`trace`] traces a program it launches. The sink hears
+/// [`Sink::attached`] once the gate may open.
+///
+/// # Errors
+///
+/// As [`trace`]'s.
+pub fn trace_held(
+    pid: u32,
+    options: &TraceOptions,
+    engine: BpfOptions,
+    stop: &AtomicBool,
+    sink: &mut dyn Sink,
+) -> Result<Finished, BpfError> {
+    run(Start::Held(pid), options, engine, stop, sink)
+}
+
+/// How a trace finds its first process.
+enum Start {
+    Launch(std::process::Command),
+    Attach(Vec<u32>),
+    Held(u32),
+}
+
+fn run(
+    start: Start,
+    options: &TraceOptions,
+    engine: BpfOptions,
+    stop: &AtomicBool,
+    sink: &mut dyn Sink,
+) -> Result<Finished, BpfError> {
     Probe::read().check()?;
-    let mut loaded = Loaded::load(options, engine, matches!(target, Target::Launch(_)))?;
+    let mut loaded = Loaded::load(options, engine, !matches!(start, Start::Attach(_)))?;
     let mut gate: Option<Gate> = None;
     let mut live = BTreeSet::new();
     let mut mappings = Vec::new();
-    let first = match target {
-        Target::Launch(command) => {
+    let first = match start {
+        Start::Held(pid) => {
+            loaded.target(pid)?;
+            if options.stacks.is_some() {
+                mappings.push(perf::Events::open(pid, &MAPPINGS).map_err(BpfError::Mappings)?);
+            }
+            seed_descriptors(pid, sink);
+            live.insert(pid);
+            sink.attached(pid);
+            pid
+        }
+        Start::Launch(command) => {
             let mut launched = launch::launch(
                 command,
                 GateOptions {
@@ -1181,7 +1231,7 @@ pub fn trace(
             gate = Some(launched);
             pid
         }
-        Target::Attach(pids) => {
+        Start::Attach(pids) => {
             for &pid in &pids {
                 if ended(pid) {
                     return Err(BpfError::NoProcess(pid));

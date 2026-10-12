@@ -33,7 +33,7 @@ pub struct CaptureFormat;
 
 /// What a capture's tables mean: bump it with any change to what is
 /// stored.
-pub const CAPTURE_REVISION: u32 = 7;
+pub const CAPTURE_REVISION: u32 = 8;
 
 impl Format for CaptureFormat {
     type Kind = CaptureTable;
@@ -92,6 +92,11 @@ pub struct Capture {
     pub tasks: Vec<Task>,
     pub task_waits: Vec<TaskWait>,
     pub gaps: Vec<Gap>,
+    pub syscalls: Vec<Syscall>,
+    pub syscall_blobs: Vec<u8>,
+    pub syscall_notes: Vec<SyscallNote>,
+    pub syscall_stats: Vec<SyscallStat>,
+    pub syscall_errnos: Vec<SyscallErrno>,
 }
 
 /// The limits a capture is read within.
@@ -202,6 +207,16 @@ impl Capture {
         put!(tasks, Tasks);
         put!(task_waits, TaskWaits);
         put!(gaps, Gaps);
+        put!(syscalls, Syscalls);
+        tables.add(
+            CaptureTable::SyscallBlobs,
+            1,
+            self.syscall_blobs.len(),
+            TableBytes::Borrowed(&self.syscall_blobs),
+        );
+        put!(syscall_notes, SyscallNotes);
+        put!(syscall_stats, SyscallStats);
+        put!(syscall_errnos, SyscallErrnos);
         tables.seal(TargetDescription::X86_64)
     }
 
@@ -238,6 +253,11 @@ impl Capture {
             tasks: rows_of(table(CaptureTable::Tasks)),
             task_waits: rows_of(table(CaptureTable::TaskWaits)),
             gaps: rows_of(table(CaptureTable::Gaps)),
+            syscalls: rows_of(table(CaptureTable::Syscalls)),
+            syscall_blobs: table(CaptureTable::SyscallBlobs).to_vec(),
+            syscall_notes: rows_of(table(CaptureTable::SyscallNotes)),
+            syscall_stats: rows_of(table(CaptureTable::SyscallStats)),
+            syscall_errnos: rows_of(table(CaptureTable::SyscallErrnos)),
         };
         capture.validate().map_err(ImageError::Malformed)?;
         Ok(capture)
@@ -471,6 +491,74 @@ impl Capture {
             .any(|pair| pair[1].start.get() < pair[0].end.get())
         {
             return Err("gaps overlap or are out of time order".into());
+        }
+        self.validate_syscalls()
+    }
+
+    /// The system call tables' promises.
+    fn validate_syscalls(&self) -> Result<(), String> {
+        let index = |id: u32, len: usize, what: &str| {
+            if id == NONE || (id as usize) < len {
+                Ok(())
+            } else {
+                Err(format!("{what} {id} is out of bounds"))
+            }
+        };
+        let blob = |start: u32, len: u32, what: &str| {
+            let fits = start == NONE && len == 0
+                || u64::from(start) + u64::from(len) <= self.syscall_blobs.len() as u64;
+            if fits {
+                Ok(())
+            } else {
+                Err(format!("{what} bytes are out of bounds"))
+            }
+        };
+        for call in &self.syscalls {
+            index(call.thread.get(), self.threads.len(), "a call's thread")?;
+            index(call.stack.get(), self.stacks.len(), "a call's stack")?;
+            blob(call.captures.get(), call.captures_len.get(), "a call's")?;
+            let start = call.captures.get() as usize;
+            if start != NONE as usize
+                && records::captures(
+                    &self.syscall_blobs[start..start + call.captures_len.get() as usize],
+                )
+                .is_none()
+            {
+                return Err("a call's captured bytes are malformed".into());
+            }
+            if call.abi > 2 || CallOutcome::from_number(call.outcome).is_none() {
+                return Err("a call has an unknown ABI or outcome".into());
+            }
+        }
+        let mut calls = 0;
+        for note in &self.syscall_notes {
+            if note.calls.get() < calls || note.calls.get() as usize > self.syscalls.len() {
+                return Err("a note is out of order among the calls".into());
+            }
+            calls = note.calls.get();
+            if NoteKind::from_number(note.kind).is_none() {
+                return Err(format!("a note has unknown kind {}", note.kind));
+            }
+            index(note.thread.get(), self.threads.len(), "a note's thread")?;
+            index(note.process.get(), self.processes.len(), "a note's process")?;
+            index(note.stack.get(), self.stacks.len(), "a note's stack")?;
+            if note.text.get() != NONE
+                && !crate::image::valid_reference(&self.strings, note.text.get(), true)
+            {
+                return Err("a note's text names no string".into());
+            }
+            blob(note.blob.get(), note.blob_len.get(), "a note's")?;
+        }
+        for stat in &self.syscall_stats {
+            index(
+                stat.process.get(),
+                self.processes.len(),
+                "statistics' process",
+            )?;
+            let end = u64::from(stat.errnos.get()) + u64::from(stat.errno_count.get());
+            if end > self.syscall_errnos.len() as u64 || stat.abi > 2 {
+                return Err("statistics name no errnos or no ABI".into());
+            }
         }
         Ok(())
     }

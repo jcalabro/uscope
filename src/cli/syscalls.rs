@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value, json};
 use uscope::syscall_engines::bpf::{self, BpfOptions};
+use uscope::syscall_engines::capture::SyscallCapture;
 use uscope::syscall_engines::ptrace;
 use uscope::syscall_engines::stacks::{Frame, SharedStacks};
 use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
@@ -156,7 +157,8 @@ pub struct SyscallsArgs {
     /// The most frames of a stack -k prints.
     #[arg(long, value_name = "LIMIT", default_value_t = 256)]
     stack_trace_frame_limit: usize,
-    /// Write the trace to FILE; `-` is standard output.
+    /// Write the trace to FILE; `-` is standard output. A FILE ending in
+    /// `.usprof` gets a capture, which `uscope report` and the web UI read.
     #[arg(short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
     /// Append to -o's file.
@@ -499,6 +501,20 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
     };
     let mut printer = Printer::new(args, &plan)?;
     printer.stacks.clone_from(&options.stacks);
+    if let Some((_, capture)) = &mut printer.capture {
+        *capture = SyscallCapture::new(options.stacks.clone());
+        let program: Vec<_> = args
+            .command
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        capture.setting("program", &program.join(" "));
+        let engine = match args.engine {
+            EngineArg::Bpf => "bpf",
+            EngineArg::Ptrace => "ptrace",
+        };
+        capture.setting("syscalls", engine);
+    }
     for &pid in &plan.attached {
         printer.processes.insert(pid);
     }
@@ -598,6 +614,8 @@ struct Printer {
     /// With -kk, each frame's source line too.
     stack_lines: bool,
     frame_limit: usize,
+    /// With `-o FILE.usprof`, the file and the capture of what is shown.
+    capture: Option<(PathBuf, SyscallCapture)>,
 }
 
 /// Writes a file on a thread of its own, so that the thread reading the
@@ -945,9 +963,14 @@ impl Printer {
                 .with_context(|| format!("opening {}", path.display()))
         };
         let to_file = args.output.as_ref().filter(|path| path.as_os_str() != "-");
+        let capture = to_file.filter(|path| path.extension().is_some_and(|ext| ext == "usprof"));
+        if capture.is_some() && (args.follow >= 2 || args.append) {
+            bail!("-ff and -A write text: a capture is one file, written once");
+        }
         let color = args.color.unwrap_or_default();
         let (output, renderer, per_process): (Output, Option<Renderer>, _) =
             match (&args.output, to_file) {
+                (_, Some(_)) if capture.is_some() => (Box::new(io::sink()), None, None),
                 (_, Some(path)) if args.follow >= 2 => (
                     Box::new(io::sink()),
                     None,
@@ -1021,6 +1044,7 @@ impl Printer {
             stacks: None,
             stack_lines: plan.stacks.is_some_and(|stacks| stacks.lines),
             frame_limit: args.stack_trace_frame_limit,
+            capture: capture.map(|path| (path.clone(), SyscallCapture::new(None))),
         })
     }
 
@@ -1190,6 +1214,9 @@ impl Printer {
             fds.describe(event.process, fd)
                 .map(|description| description.text.to_string())
         });
+        if shows && let Some((_, capture)) = &mut self.capture {
+            capture.call(event);
+        }
         if shows && self.summarize {
             self.stats.entry(event.call).or_default().add(
                 event.outcome,
@@ -1621,6 +1648,12 @@ impl Printer {
             }
         }
         self.output.flush()?;
+        if let Some((path, capture)) = self.capture.take() {
+            capture
+                .finish()
+                .write(&path)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
         if let Some((_, outputs)) = &mut self.per_process {
             for output in outputs.values_mut() {
                 output.flush()?;
@@ -1634,9 +1667,10 @@ impl Printer {
         }
     }
 
-    /// strace writes -c's table where the trace goes, or to stderr with -ff.
+    /// strace writes -c's table where the trace goes, or to stderr with
+    /// -ff; a capture holds its own.
     fn output_for_summary(&mut self) -> Box<dyn Write + '_> {
-        if self.per_process.is_some() {
+        if self.per_process.is_some() || self.capture.is_some() {
             Box::new(io::stderr())
         } else {
             Box::new(&mut self.output)
@@ -1656,6 +1690,11 @@ impl Printer {
 
 impl Sink for Printer {
     fn event(&mut self, event: TraceEvent) {
+        if let Some((_, capture)) = &mut self.capture
+            && !matches!(event, TraceEvent::Call(_))
+        {
+            capture.event(&event);
+        }
         match &event {
             TraceEvent::Call(call) => {
                 if self.processes.is_empty() {
@@ -1802,13 +1841,16 @@ impl Sink for Printer {
         ptrace::seed_descriptors(process, self);
     }
 
-    fn counted(&mut self, stats: Folded) {
-        for ((process, call), stats) in stats.by_call {
-            if self.filter.calls.contains(call)
+    fn counted(&mut self, mut stats: Folded) {
+        stats.by_call.retain(|&(process, call), _| {
+            self.filter.calls.contains(call)
                 && (self.follow || self.processes.is_empty() || self.processes.contains(&process))
-            {
-                self.stats.entry(call).or_default().merge(&stats);
-            }
+        });
+        for (&(_, call), stats) in &stats.by_call {
+            self.stats.entry(call).or_default().merge(stats);
+        }
+        if let Some((_, capture)) = &mut self.capture {
+            capture.counted(&stats);
         }
     }
 }

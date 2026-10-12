@@ -501,6 +501,74 @@ fn the_summary_counts_calls_errors_and_errnos() {
 }
 
 #[test]
+fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
+    let directory = ScratchDir::new("syscalls-capture");
+    let selection = ["-e", "trace=openat,unlink,write", "-Z"];
+    let shown = trace(directory.path(), &selection, "files");
+    let captured = trace(
+        directory.path(),
+        &[&selection[..], &["-k", "-o", "trace.usprof"]].concat(),
+        "files",
+    );
+    assert_eq!(captured.status.code(), Some(3));
+    assert_eq!(text(&captured.stderr), "", "a capture says nothing more");
+
+    let path = directory.path().join("trace.usprof");
+    let profile = uscope::profiler::Profile::read(&path)
+        .expect("the capture reads")
+        .profile;
+    let syscalls = profile.syscalls();
+    let calls: Vec<_> = syscalls
+        .events
+        .iter()
+        .filter_map(|event| match &event.event {
+            uscope::syscalls::TraceEvent::Call(call) => Some((call, event.stack)),
+            _ => None,
+        })
+        .collect();
+    // -Z shows only the calls that failed, and the capture holds those.
+    let failed = text(&shown.stderr)
+        .lines()
+        .filter(|line| line.contains(" = -1 "))
+        .count();
+    assert!(failed > 0);
+    assert_eq!(calls.len(), failed, "{}", text(&shown.stderr));
+    let mut in_main = 0;
+    for (call, stack) in &calls {
+        assert!(call.outcome.raw().is_some_and(|ret| ret < 0), "{call:?}");
+        let (functions, _) = profile.syscall_stack(stack.expect("a stack"));
+        in_main += usize::from(functions.iter().any(|function| function == "main"));
+    }
+    // The dynamic loader's failed opens come before main.
+    assert!(in_main > 0, "no stack reaches main");
+    assert!(
+        syscalls
+            .events
+            .iter()
+            .any(|event| matches!(&event.event, uscope::syscalls::TraceEvent::Exit { .. })),
+        "the process's end is noted"
+    );
+
+    let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["report", "trace.usprof"])
+        .current_dir(directory.path())
+        .output()
+        .expect("run uscope report");
+    let lines = text(&report.stdout);
+    assert!(report.status.success(), "{}", text(&report.stderr));
+    assert!(
+        lines.contains(&format!("{failed} system calls, {failed} failed")),
+        "{lines}"
+    );
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.split_whitespace().last() == Some("openat")),
+        "{lines}"
+    );
+}
+
+#[test]
 fn ndjson_carries_names_paths_errnos_and_stacks() {
     let directory = ScratchDir::new("syscalls-ndjson");
     let traced = trace(
@@ -895,6 +963,75 @@ mod bpf {
             }
         }
         calls
+    }
+
+    /// `record --syscalls` traces with the BPF engine beside the samples:
+    /// the calls a ptrace trace finds, each with its stack.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn a_recording_holds_its_calls_beside_its_samples() {
+        let directory = ScratchDir::new("syscalls-record");
+        let directory = directory.path();
+        // Each call by number, and whether it failed: what two runs share.
+        let calls = |file: &str| {
+            let profile = uscope::profiler::Profile::read(&directory.join(file))
+                .expect("the capture reads")
+                .profile;
+            let mut calls = BTreeMap::new();
+            for event in profile.syscalls().events {
+                if let uscope::syscalls::TraceEvent::Call(call) = &event.event {
+                    assert!(event.stack.is_some(), "{call:?} has no stack");
+                    let failed = call.outcome.raw().is_some_and(|ret| ret < 0);
+                    *calls.entry((call.call.number, failed)).or_insert(0) += 1;
+                }
+            }
+            calls
+        };
+        let traced = super::uscope(&["--engine", "ptrace", "-f", "-k"])
+            .args(["-e", "trace=write,getppid", "-o", "traced.usprof", "--"])
+            .arg(fixture())
+            .arg("family")
+            .current_dir(directory)
+            .output()
+            .expect("run uscope syscalls");
+        assert!(
+            directory.join("traced.usprof").exists(),
+            "{}",
+            text(&traced.stderr)
+        );
+        let recorded = Command::new(launcher())
+            .env_clear()
+            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .args([
+                "record",
+                "--syscalls",
+                "write,getppid",
+                "-o",
+                "recorded.usprof",
+            ])
+            .arg("--")
+            .arg(fixture())
+            .arg("family")
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope record");
+        assert_eq!(
+            recorded.status.code(),
+            traced.status.code(),
+            "{}",
+            text(&recorded.stderr)
+        );
+        assert_eq!(calls("recorded.usprof"), calls("traced.usprof"));
+
+        let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["report", "recorded.usprof"])
+            .current_dir(directory)
+            .output()
+            .expect("run uscope report");
+        let lines = text(&report.stdout);
+        assert!(lines.contains(" samples, "), "{lines}");
+        assert!(lines.contains(" system calls, "), "{lines}");
     }
 
     /// Copied and unwound by call-frame information, the BPF engine's

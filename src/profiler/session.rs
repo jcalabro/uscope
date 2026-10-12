@@ -16,6 +16,12 @@ use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
 use crate::backend::perf;
+use crate::backend::syscall_engines::bpf::{self, BpfOptions};
+use crate::backend::syscall_engines::capture::SyscallCapture;
+use crate::backend::syscall_engines::stacks::SharedStacks;
+use crate::backend::syscall_engines::{Sink, TraceOptions};
+use crate::capture::Capture;
+use crate::capture::builder::CaptureBuilder;
 use crate::capture::records::{GapReason, MarkerKind};
 
 /// A recording and how its program ended.
@@ -93,13 +99,19 @@ pub fn record_watched(
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
     };
+    let mut syscalls = None;
     let perf::Launched {
         pid,
         mut events,
         exit,
         killer,
         executed,
-    } = perf::launch(command, &events, launch)?;
+    } = perf::launch(command, &events, launch, |pid| {
+        if let Some(calls) = &options.syscalls {
+            syscalls = Some(SyscallTrace::start(pid, calls)?);
+        }
+        Ok(())
+    })?;
     settings(
         &mut processor,
         options,
@@ -130,9 +142,11 @@ pub fn record_watched(
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
         .map_err(RecordError::Start)?;
     record!("record: the program ended: {status}");
-    let profile = Profile {
-        capture: processor.finish(),
-    };
+    let mut capture = processor.finish();
+    if let Some(syscalls) = syscalls {
+        capture = syscalls.merge(&capture).map_err(RecordError::Syscalls)?;
+    }
+    let profile = Profile { capture };
     if let Some(calls) = breakpoint {
         profile.check_bias(&program, calls.bias)?;
     }
@@ -717,4 +731,85 @@ pub(super) fn which(program: &Path) -> Option<PathBuf> {
             .map(|directory| directory.join(program))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// The system call trace a recording runs beside its samples, on the
+/// same clock, with the BPF engine.
+struct SyscallTrace {
+    stop: std::sync::Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<Result<SyscallCapture, String>>,
+}
+
+/// The trace's sink, which says when the trace sees its process.
+struct Held {
+    capture: SyscallCapture,
+    ready: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Sink for Held {
+    fn event(&mut self, event: crate::syscalls::TraceEvent) {
+        self.capture.event(&event);
+    }
+
+    fn attached(&mut self, _process: u32) {
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(());
+        }
+    }
+}
+
+impl SyscallTrace {
+    /// Traces `calls` of process `pid`, held at its gate, and every
+    /// process it starts; returns once the trace sees it.
+    fn start(pid: u32, calls: &crate::syscalls::CallSet) -> Result<Self, String> {
+        let options = TraceOptions {
+            calls: calls.clone(),
+            limits: crate::syscalls::captures::Limits::default(),
+            verbose: false,
+            follow: true,
+            stacks: Some(SharedStacks::default()),
+        };
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (ready, seen) = std::sync::mpsc::channel();
+        let stopped = std::sync::Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("uscope-record-syscalls".into())
+            .spawn(move || {
+                let mut sink = Held {
+                    capture: SyscallCapture::new(options.stacks.clone()),
+                    ready: Some(ready),
+                };
+                sink.capture.setting("syscalls", "bpf");
+                bpf::trace_held(pid, &options, BpfOptions::default(), &stopped, &mut sink)
+                    .map_err(|error| error.to_string())?;
+                Ok(sink.capture)
+            })
+            .map_err(|error| error.to_string())?;
+        if seen.recv().is_ok() {
+            return Ok(Self { stop, thread });
+        }
+        // The trace ended before it saw the process: why is its error.
+        Err(match thread.join() {
+            Ok(Err(why)) => why,
+            _ => "the trace ended before it began".to_owned(),
+        })
+    }
+
+    /// Ends the trace, its program having ended, and merges it with the
+    /// samples.
+    fn merge(self, samples: &Capture) -> Result<Capture, String> {
+        // Whatever the program's last calls sent is in the ring, which the
+        // trace drains before it ends; a process the program left running
+        // goes on untraced.
+        self.stop.store(true, Ordering::Relaxed);
+        let syscalls = self
+            .thread
+            .join()
+            .map_err(|_| "the system call trace panicked".to_owned())??
+            .finish();
+        let mut builder = CaptureBuilder::new();
+        builder.absorb(samples);
+        builder.absorb(&syscalls.capture);
+        Ok(builder.finish())
+    }
 }

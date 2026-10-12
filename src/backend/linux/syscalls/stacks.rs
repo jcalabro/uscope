@@ -11,7 +11,10 @@ use std::sync::Arc;
 use foldhash::HashMap;
 
 use super::super::perf::{self, decode};
+use crate::capture::builder::{CaptureBuilder, LineInput};
+use crate::capture::records::{FrameKind, NONE};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
+use crate::profiler::{OwnedLine, hex, symbolize_lines};
 use crate::syscalls::CallStack;
 use crate::unwind::sample::{
     FrameRules, SampledFrame, SampledState, StackEnd, unwind_memory, unwind_sample,
@@ -31,7 +34,36 @@ struct Mapped {
     end: u64,
     path: Arc<str>,
     loaded: LoadedModule,
+    image: Image,
+}
+
+/// A file's image, if it could be read, and what names the file in a
+/// capture.
+#[derive(Clone, Default)]
+struct Image {
     info: Option<Arc<DebugInfo>>,
+    identity: Option<Arc<Identity>>,
+}
+
+/// What names a module's file in a capture, as the profiler names it.
+#[derive(Debug)]
+struct Identity {
+    build_id: Option<String>,
+    digest: [u8; 16],
+    size: u64,
+}
+
+impl Identity {
+    fn of(data: &[u8]) -> Self {
+        let build_id = object::File::parse(data)
+            .ok()
+            .and_then(|file| object::Object::build_id(&file).ok().flatten().map(hex));
+        Self {
+            build_id,
+            digest: twox_hash::XxHash3_128::oneshot(data).to_le_bytes(),
+            size: data.len() as u64,
+        }
+    }
 }
 
 /// One address of a stack, named.
@@ -58,7 +90,7 @@ pub struct Frame {
 /// process that has ended no longer has.
 pub struct Stacks {
     search: DebugFileSearch,
-    images: HashMap<(PathBuf, u64), Option<Arc<DebugInfo>>>,
+    images: HashMap<(PathBuf, u64), Image>,
     processes: BTreeMap<u32, Vec<Mapped>>,
     rules: FrameRules,
     next_module: u32,
@@ -81,7 +113,7 @@ impl std::fmt::Debug for Stacks {
 #[derive(Clone)]
 enum Vdso {
     Unread,
-    Read((Arc<DebugInfo>, u64)),
+    Read((Image, u64)),
     Unreadable,
 }
 
@@ -131,14 +163,15 @@ impl Stacks {
 
     /// The module a mapping maps, if it is a file's code or the vDSO.
     fn module(&mut self, mmap: &decode::Mmap<'_>) -> Option<Mapped> {
-        let (info, bias) = if perf::is_vdso(mmap) {
-            let (info, link) = self.vdso()?;
-            (Some(info), mmap.start.wrapping_sub(link))
+        let (image, bias) = if perf::is_vdso(mmap) {
+            let (image, link) = self.vdso()?;
+            (image, mmap.start.wrapping_sub(link))
         } else {
             let (file, bias) = perf::identify(mmap)?;
             (self.image(&file, mmap.inode.unwrap_or(0)), bias)
         };
-        let id = info
+        let id = image
+            .info
             .as_ref()
             .map_or(ModuleImageId::new(u32::MAX), |info| info.image.id());
         let loaded = LoadedModule {
@@ -152,11 +185,11 @@ impl Stacks {
             end: mmap.start.saturating_add(mmap.length),
             path: String::from_utf8_lossy(mmap.path).into(),
             loaded,
-            info,
+            image,
         })
     }
 
-    fn vdso(&mut self) -> Option<(Arc<DebugInfo>, u64)> {
+    fn vdso(&mut self) -> Option<(Image, u64)> {
         match &self.vdso {
             Vdso::Read(vdso) => return Some(vdso.clone()),
             Vdso::Unreadable => return None,
@@ -166,7 +199,11 @@ impl Stacks {
         let vdso = perf::own_vdso().and_then(|(data, link)| {
             let path = std::path::Path::new(super::super::vdso::VDSO_NAME);
             let info = crate::debug_info::load_module_bytes(path, &data, id, &self.search).ok()?;
-            Some((Arc::new(info), link))
+            let image = Image {
+                info: Some(Arc::new(info)),
+                identity: Some(Arc::new(Identity::of(&data))),
+            };
+            Some((image, link))
         });
         self.vdso = vdso.clone().map_or(Vdso::Unreadable, Vdso::Read);
         vdso
@@ -207,7 +244,7 @@ impl Stacks {
             .into_iter()
             .flatten()
             .filter_map(|mapped| {
-                let info = mapped.info.as_deref()?;
+                let info = mapped.image.info.as_deref()?;
                 Some(UnwindModule {
                     loaded: mapped.loaded,
                     image: &info.image,
@@ -250,7 +287,7 @@ impl Stacks {
             };
         };
         let code_address = ImageAddress::new(code.wrapping_sub(mapped.loaded.load_bias));
-        let (symbol, source) = mapped.info.as_deref().map_or((None, None), |info| {
+        let (symbol, source) = mapped.image.info.as_deref().map_or((None, None), |info| {
             let image = &info.image;
             let symbol = image.symbolize(code_address).map(|found| {
                 let name = image
@@ -282,13 +319,61 @@ impl Stacks {
             .cloned()
     }
 
+    /// Records a stack of `process`'s in a capture, each frame by its
+    /// module's image address and with its lines, and says which it is.
+    pub(crate) fn capture(
+        &mut self,
+        process: u32,
+        stack: &CallStack,
+        builder: &mut CaptureBuilder,
+    ) -> u32 {
+        if let Some(&first) = stack.addresses.first() {
+            self.cover(process, Some(first));
+        }
+        let mut frames = Vec::with_capacity(stack.addresses.len() + 1);
+        for (index, &address) in stack.addresses.iter().enumerate() {
+            let code = if index == 0 {
+                address
+            } else {
+                address.wrapping_sub(1)
+            };
+            let Some(mapped) = self.mapping_at(process, code) else {
+                frames.push(builder.frame(FrameKind::Native, NONE, code, 0));
+                continue;
+            };
+            let image_address = code.wrapping_sub(mapped.loaded.load_bias);
+            let module = mapped.image.identity.as_ref().map_or(NONE, |identity| {
+                builder.module(
+                    &mapped.path,
+                    identity.build_id.as_deref(),
+                    identity.digest,
+                    identity.size,
+                )
+            });
+            let frame = builder.frame(FrameKind::Native, module, image_address, 0);
+            if let Some(info) = &mapped.image.info
+                && module != NONE
+                && !builder.symbolized(frame)
+            {
+                let lines = symbolize_lines(&info.image, ImageAddress::new(image_address));
+                let inputs: Vec<LineInput<'_>> = lines.iter().map(OwnedLine::input).collect();
+                builder.symbolize(frame, module, &inputs);
+            }
+            frames.push(frame);
+        }
+        if let Some(reason) = stack.truncation() {
+            frames.push(builder.truncation(reason, NONE));
+        }
+        builder.stack(&frames)
+    }
+
     fn modules(&self, process: u32) -> Vec<UnwindModule<'_>> {
         self.processes
             .get(&process)
             .into_iter()
             .flatten()
             .filter_map(|mapped| {
-                let info = mapped.info.as_deref()?;
+                let info = mapped.image.info.as_deref()?;
                 Some(UnwindModule {
                     loaded: mapped.loaded,
                     image: &info.image,
@@ -343,20 +428,23 @@ impl Stacks {
         self.processes.insert(process, modules);
     }
 
-    fn image(&mut self, file: &std::path::Path, inode: u64) -> Option<Arc<DebugInfo>> {
+    fn image(&mut self, file: &std::path::Path, inode: u64) -> Image {
         let key = (file.to_path_buf(), inode);
-        if let Some(info) = self.images.get(&key) {
-            return info.clone();
+        if let Some(image) = self.images.get(&key) {
+            return image.clone();
         }
         let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
-        let info = crate::image::backing::read_input(file)
+        let image = crate::image::backing::read_input(file)
             .ok()
-            .and_then(|(data, _)| {
-                crate::debug_info::load_module_bytes(file, &data, id, &self.search).ok()
+            .map(|(data, _)| Image {
+                info: crate::debug_info::load_module_bytes(file, &data, id, &self.search)
+                    .ok()
+                    .map(Arc::new),
+                identity: Some(Arc::new(Identity::of(&data))),
             })
-            .map(Arc::new);
-        self.images.insert(key, info.clone());
-        info
+            .unwrap_or_default();
+        self.images.insert(key, image.clone());
+        image
     }
 }
 
