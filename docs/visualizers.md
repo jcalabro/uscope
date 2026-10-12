@@ -3,7 +3,7 @@
 A visualizer draws a value in the web page, `uscope web`: a chess position
 as a board, a framebuffer as an image, samples as a plot, a mesh as a
 model you can turn. A view says which
-of a value's data the drawing needs, with `visualize` (`docs/views.md`),
+of a value's data the drawing needs, with `visualize` ([Views](views.md)),
 and a **renderer**, a small JavaScript file, turns that data into a
 picture. The page runs the renderer in a sandbox, checks the picture, and
 draws it. The terminal and debug adapters never draw: a `visualize`

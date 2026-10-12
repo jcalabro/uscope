@@ -1,101 +1,59 @@
 # uscope
 
-uscope is a debugger for native programs on Linux x86-64, written in Rust.
-Use it from your terminal, browser, or from your editor through the Debug
-Adapter Protocol. It debugs C, C++, Rust, Zig, Go, Odin, Fortran, D, Nim,
-and Ada.
+uscope is a native debugger and profiler for Linux x86-64. It understands C,
+C++, Rust, Go, Zig, Odin, Fortran, D, Nim, and Ada programs. You can use it in a
+terminal, in a browser, or through an editor that supports the Debug Adapter
+Protocol.
 
-## Features
+> uscope is under active development. It does not have a supported installation
+> method or stable release yet.
 
-- **Launch, attach, or inspect a crash.** Start a program, attach to one that
-  is already running, or open a core dump.
-- **Breakpoints and watchpoints.** Break on functions, lines, or addresses,
-  with conditions. Watch a variable and stop when its value changes.
-- **Stepping.** `step`, `next`, `stepi`, `nexti`, and `finish`, through inlined
-  calls. Every thread stops and resumes together.
-- **Stacks.** Backtraces through every loaded library, and each caller's
-  variables as they were at its call.
-- **Expressions.** One expression language for every supported language, with
-  exact integer arithmetic.
-- **Views.** Containers display as what they hold. A `Vec` shows its elements,
-  for the C++, Rust, Go, Zig, Odin, D, Nim, and Ada standard libraries and
-  for your own types.
-- **Language runtimes.** Go goroutines and async Rust tasks show up as threads
-  and stacks you can step through, and panics stop the program where they
-  happen.
-- **Profiling.** `uscope record` samples where a program spends its time
-  from outside it, with stacks that are exact or say why they stop, and
-  async tasks shown as stacks of their own. `uscope report` summarizes a
-  profile, and `uscope web` explores it in the browser.
-- **Honest output.** When a value is optimized out or memory cannot be read,
-  uscope says so instead of guessing.
+## Documentation
 
-uscope also has a command-line interface with batch mode for scripts, a
-browser UI (`uscope web`), and a Debug Adapter Protocol server for editors.
+- [Getting started](docs/getting-started.md)
+- [Debugging programs](docs/debugging.md)
+- [Using the browser](docs/browser.md)
+- [Using an editor](docs/editors.md)
+- [Recording and reading profiles](docs/profiling.md)
+- [Expressions](docs/expressions.md)
+- [Views](docs/views.md) and [writing views](docs/writing-views.md)
+- [Supported languages](docs/languages.md)
+- [Command-line reference](docs/reference/command-line.md)
+- [Configuration reference](docs/reference/configuration.md)
+- [Troubleshooting](docs/reference/troubleshooting.md)
+- [Known limits](docs/reference/limitations.md)
 
-## Editors
+## What it can do
 
-uscope runs as a Debug Adapter Protocol server with `uscope dap`. It has a
-VS Code extension and a working Neovim (nvim-dap) setup. Helix, Zed, and Emacs
-(dape) are documented but not yet tested.
+uscope can launch a program, attach to a running process, or inspect a core
+dump. It supports source and instruction stepping, conditional breakpoints,
+hardware watchpoints, stack traces, expressions, memory, registers, and
+disassembly.
 
-## Quick start
+It presents common containers as their contents instead of their internal
+fields. It also understands Go goroutines and async Rust tasks. The profiler
+can record native and logical stacks and open them in the browser interface.
 
-uscope builds inside a pinned Nix environment. With Nix installed:
+When debug information or memory is missing, uscope reports what it could not
+read. It does not fill gaps with guessed values.
 
-```sh
-just dev                    # enter the development environment
-just build-test-programs    # build the sample programs
-just run build/test-programs/basic
-```
+## Platform support
 
-At the `(uscope)` prompt:
-
-```text
-break breakpoint_target
-run
-bt
-finish
-next
-print first
-print/x uscope_value
-```
-
-Other ways to start:
-
-```sh
-uscope ./program -- ARG...         # launch with arguments
-uscope --attach PID                # attach; the process keeps running on exit
-uscope --core core.1234            # open a core dump
-uscope --batch -e 'break f' -e run -e bt ./program
-uscope dap                         # serve DAP on stdio
-```
-
-## Learn more
-
-- [Command line and REPL](docs/cli.md): flags, settings, and commands.
-- [Expressions](docs/expressions.md): the expression language.
-- [Views](docs/views.md): how containers are presented, and
-  [writing your own](docs/writing-views.md).
-- [Editors and DAP](docs/dap.md): setup for VS Code, Neovim, and others.
-- [Profiling](docs/profiling.md): recording and reading profiles.
-- [Go](docs/go.md) and [async Rust and tokio](docs/tokio.md): how uscope
-  handles goroutines and tasks.
-- [AGENTS.md](AGENTS.md): architecture and development rules for contributors.
+uscope currently runs on Linux x86-64. See [known limits](docs/reference/limitations.md)
+for details about targets, debug information, and editor support.
 
 ## Development
 
+Development uses the pinned Nix environment:
+
 ```sh
-just          # format check, Clippy, and the test suite
-just test X   # the tests matching X
-just stress   # the suite ten times under CPU load
-just sim      # simulate random debugger sessions for 30 seconds
-just all      # everything, before committing
+just dev
 ```
 
-See [AGENTS.md](AGENTS.md) for how the code is organized and tested.
+Read [AGENTS.md](AGENTS.md) before changing the project. It links to the
+detailed [developer documentation](dev/index.md).
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
-at your option.
+Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option.

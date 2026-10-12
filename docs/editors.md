@@ -1,0 +1,74 @@
+# Editors
+
+uscope can serve the Debug Adapter Protocol (DAP) over standard input and
+output:
+
+```sh
+uscope dap
+```
+
+The adapter uses the same debugger as the terminal and browser clients. It can
+launch, attach, inspect core dumps, set breakpoints and watchpoints, step,
+evaluate expressions, inspect variables and memory, and show disassembly.
+
+## VS Code
+
+The repository contains an extension under `editors/vscode`.
+
+> TODO: publish the extension and replace the development instructions with an
+> end-user installation path.
+
+For repository development, follow the extension's
+[README on GitHub](https://github.com/jcalabro/uscope/tree/main/editors/vscode).
+
+A launch entry has this shape:
+
+```json
+{
+  "type": "uscope",
+  "request": "launch",
+  "name": "Debug program",
+  "program": "${workspaceFolder}/build/program",
+  "args": ["--verbose"]
+}
+```
+
+Use `"request": "attach"` with a process ID to attach. Core-dump sessions use
+the uscope-specific core setting described by the extension when installed.
+
+## Neovim
+
+The repository contains a tested `nvim-dap` setup in `editors/nvim/uat.lua`.
+A minimal adapter definition starts `uscope dap` as an executable adapter:
+
+```lua
+local dap = require("dap")
+
+dap.adapters.uscope = {
+  type = "executable",
+  command = "uscope",
+  args = { "dap" },
+}
+```
+
+Create launch and attach configurations with `type = "uscope"` and the usual
+DAP `request`, `program`, `args`, and `cwd` fields.
+
+## Other DAP clients
+
+Helix, Zed, and Emacs dape can start an executable DAP adapter. Configure the
+adapter command as `uscope dap` and use the standard launch or attach request.
+
+> TODO: add tested, versioned setup examples for Helix, Zed, and Emacs after
+> they are part of the client acceptance suite.
+
+## Behavior to expect
+
+uscope presents native threads through the standard DAP thread and stack
+requests. Supported language runtimes can also appear as logical tasks. The
+adapter reports optimized-out values and partial stacks as explicit failures or
+unavailable values.
+
+DAP clients differ in which protocol features they expose. If a feature is
+missing from the editor UI, use its debug console or the terminal client to
+check whether the limitation belongs to the client or the adapter.

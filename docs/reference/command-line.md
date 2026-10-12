@@ -1,0 +1,153 @@
+# Command-line reference
+
+## Invocation
+
+```text
+uscope [OPTIONS] EXECUTABLE [-- ARGS...]
+uscope [OPTIONS] --attach PID|NAME [EXECUTABLE]
+uscope [OPTIONS] --core CORE [EXECUTABLE]
+uscope [OPTIONS] --launch NAME [-- ARGS...]
+uscope TOOL
+```
+
+Use `uscope --help` for the complete current option list and `uscope TOOL
+--help` for one tool.
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `dap` | Serve the Debug Adapter Protocol |
+| `web` | Serve a debugging or profiling session to browsers |
+| `views` | Check views, explain binding, or replay recorded kernels |
+| `config` | Inspect, check, create, and trust configuration |
+| `record` | Record a profile |
+| `report` | Print a profile summary or call tree |
+| `convert` | Convert uscope, pprof, folded-stack, and Chrome-trace formats |
+| `symbolize` | Add source lines to a profile recorded for later symbolization |
+
+## Target options
+
+| Option | Meaning |
+|---|---|
+| `-p, --attach PID\|NAME` | Attach by process ID or exact process name |
+| `--core FILE` | Open a core dump |
+| `-l, --launch NAME` | Use a project launch configuration |
+| `--cwd DIR` | Working directory for a launched program |
+| `--env NAME=VALUE` | Add an environment value; repeatable |
+| `--sysroot DIR` | Root used to find files named by a core dump |
+| `--module-path DIR` | Search for missing core-dump modules; repeatable |
+| `--allow-module-mismatch` | Accept a module that cannot be proven to match the dump |
+
+## Debug-information options
+
+| Option | Meaning |
+|---|---|
+| `--source-map FROM TO` | Remap a recorded source prefix; repeatable |
+| `--debug-directory DIR` | Search for separate debug files; repeatable |
+| `--debuginfod` | Use servers listed in `DEBUGINFOD_URLS` |
+| `--no-cache` | Read debug information without the image cache |
+| `--views FILE` | Load a view file ahead of discovered and built-in views |
+
+## Startup and output options
+
+| Option | Meaning |
+|---|---|
+| `-c, --command FILE` | Run commands from a file; repeatable |
+| `-e, --eval COMMAND` | Run one command; repeatable |
+| `--batch` | Exit after commands instead of opening the REPL |
+| `--config FILE` | Use this user configuration file |
+| `--no-config` | Read no configuration files |
+| `--trust-project` | Use active project commands for this session |
+| `--color auto\|always\|never` | Control terminal color |
+| `--disassembly-syntax intel\|att` | Choose assembly syntax |
+| `--timings FILE` | Write a JSON timing and allocation report |
+
+## REPL commands
+
+Commands accept unique prefixes. `help COMMAND` prints the current syntax for
+one command.
+
+### Run control
+
+| Command | Purpose |
+|---|---|
+| `run` | Start or restart a launched program |
+| `continue` | Resume until the next stop |
+| `step` | Step into the next source line or named call |
+| `next` | Step over calls on the next source line |
+| `finish` | Run until the selected frame returns |
+| `stepi`, `nexti` | Step one machine instruction |
+| `advance LOCATION` | Run to a location in the selected frame |
+| `jump LOCATION` | Move the selected thread's next instruction without running |
+| `pause` | Stop a running program |
+| `kill` | Kill the process |
+| `detach` | Detach from a process and leave it running |
+| `quit` | End the session |
+
+### Breakpoints and watchpoints
+
+| Command | Purpose |
+|---|---|
+| `break LOCATION [if EXPR]` | Create a breakpoint |
+| `tbreak LOCATION` | Create a breakpoint removed after one hit |
+| `rbreak REGEX` | Break on functions whose names match |
+| `watch EXPR [if EXPR]` | Stop when the addressed bytes change |
+| `breakpoints` | List breakpoints and watchpoints |
+| `condition ID EXPR` | Set or clear a condition |
+| `ignore ID COUNT` | Ignore the next hits |
+| `enable ID...`, `disable ID...` | Change whether sites stop |
+| `delete ID...` | Remove sites |
+
+IDs can include breakpoint ranges, watchpoint IDs such as `w2`, or `all` where
+the command permits it.
+
+### Stack, threads, and tasks
+
+| Command | Purpose |
+|---|---|
+| `bt` | Show the selected stack |
+| `frame N`, `up`, `down` | Select a frame |
+| `threads`, `thread ID` | List or select native threads |
+| `goroutines`, `goroutine ID` | List or select Go goroutines |
+| `tasks`, `task ID` | List or select runtime tasks |
+| `locals`, `args` | Show variables in the selected frame |
+
+### Values and machine state
+
+| Command | Purpose |
+|---|---|
+| `print EXPR`, `p EXPR` | Evaluate and print a value |
+| `pp EXPR` | Print a value in expanded form |
+| `display EXPR` | Print an expression at every stop |
+| `x ...` | Examine memory |
+| `registers` | Show registers for the selected frame |
+| `disassemble` | Show instructions around a location or function |
+| `info symbol ADDRESS` | Name the symbol containing an address |
+| `list` | Show source around the selected location |
+
+`print` and `pp` accept format suffixes such as `/x` for hexadecimal. Use
+`help print` for the complete set.
+
+### Session settings
+
+| Command | Purpose |
+|---|---|
+| `set NAME VALUE` | Change a session setting |
+| `show NAME` | Show a session setting |
+| `handle SIGNAL ...` | Set stop, print, and delivery policy |
+| `signals` | List signal policy |
+| `source FILE` | Run commands from a file |
+| `help [COMMAND]` | Show help |
+
+## Location forms
+
+Commands that accept a location can use a function name, `file:line`, a bare
+line in the selected file where supported, or `*0xADDRESS`. Function lookup
+uses demangled names and reports ambiguity instead of choosing silently.
+
+## Command files
+
+A command file contains one REPL command per line. Blank lines and lines whose
+first non-space character is `#` are ignored. Startup order is user, project,
+and local configuration commands, then `-c` files, then `-e` commands.
