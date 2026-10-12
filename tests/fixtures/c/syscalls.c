@@ -109,6 +109,21 @@ static void namespaced(void) {
     }
 }
 
+// Asks for its parent's pid until a byte arrives on its input, then prints
+// how many times it asked.
+static void spin(void) {
+    if (fcntl(0, F_SETFL, O_NONBLOCK) != 0) {
+        _exit(30);
+    }
+    unsigned long asked = 0;
+    char byte;
+    while (read(0, &byte, 1) < 0 && errno == EAGAIN) {
+        syscall(SYS_getppid);
+        asked++;
+    }
+    printf("asked %lu\n", asked);
+}
+
 static volatile sig_atomic_t delivered;
 
 static void handler(int signal) {
@@ -173,6 +188,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "block") == 0) {
         block();
+        return 0;
+    }
+    if (strcmp(mode, "spin") == 0) {
+        spin();
         return 0;
     }
     if (strcmp(mode, "namespaced") == 0) {

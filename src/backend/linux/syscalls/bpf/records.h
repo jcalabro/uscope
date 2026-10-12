@@ -57,6 +57,8 @@ enum call_flags {
 	CALL_ABI_UNCERTAIN = 4,
 	// The thread ended inside the call, which never returned.
 	CALL_PROCESS_EXITED = 8,
+	// Left out of the stream by sampling, so counted by the kernel.
+	CALL_SAMPLED_OUT = 16,
 };
 
 enum abi {
@@ -137,7 +139,9 @@ struct config {
 	// Ids shown in this pid namespace, by its inode and depth, when set.
 	u32 ns_inum;
 	u32 ns_level;
-	u32 pad;
+	// While streaming, send one call in this many and count the rest;
+	// 0 or 1 sends them all.
+	u32 sample;
 };
 
 // A thread's call in progress.

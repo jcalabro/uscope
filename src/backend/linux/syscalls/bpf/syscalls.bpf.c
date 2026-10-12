@@ -88,6 +88,34 @@ struct {
 	__type(value, u64);
 } LOST SEC(".maps");
 
+// Each CPU's count of calls, for sampling one in config.sample.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} SAMPLED SEC(".maps");
+
+// Whether this call is the one in `every` that is sent.
+static __always_inline int sampled_in(u32 every)
+{
+	if (every <= 1)
+		return 1;
+	u32 key = 0;
+	u64 *count = bpf_map_lookup_elem(&SAMPLED, &key);
+	if (!count)
+		return 1;
+	*count += 1;
+	return *count % every == 0;
+}
+
+// Whether a call is sent to the stream; the kernel counts those it is not,
+// when it counts.
+static __always_inline int sent(struct config *settings, u8 flags)
+{
+	return (settings->flags & CONFIG_STREAM) && !(flags & CALL_SAMPLED_OUT);
+}
+
 // Where each CPU builds a record. Naming every record here also puts its
 // layout in the object's BTF, which a test compares with the decoders.
 struct scratch {
@@ -708,6 +736,8 @@ static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 		read_args(regs, entry.abi, entry.args);
 	entry.tgid = tgid;
 	entry.entered = bpf_ktime_get_ns();
+	if ((settings->flags & CONFIG_STREAM) && !sampled_in(settings->sample))
+		entry.flags |= CALL_SAMPLED_OUT;
 	struct entry *held = bpf_task_storage_get(&ENTRIES, bpf_get_current_task_btf(), 0,
 						  BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!held) {
@@ -715,7 +745,7 @@ static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 		return 0;
 	}
 	*held = entry;
-	if (!(settings->flags & CONFIG_STREAM))
+	if (!sent(settings, entry.flags))
 		return 0;
 	// Arguments the old image holds, as execve's, are read now.
 	for (u32 index = 0; index < 6; index++) {
@@ -779,9 +809,9 @@ static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 	if (!spec || !spec->selected)
 		return 0;
 	u32 slot = slot_of(entry.abi, entry.nr);
-	if (settings->flags & CONFIG_COUNT)
+	if ((settings->flags & CONFIG_COUNT) && !sent(settings, entry.flags))
 		count(spec, slot, entry.entered, now, ret, 1);
-	if (settings->flags & CONFIG_STREAM) {
+	if (sent(settings, entry.flags)) {
 		if (spec->makes)
 			send_files(tid, tgid, spec, &entry, ret);
 		if (settings->flags & CONFIG_STACKS)
@@ -944,9 +974,9 @@ int process_exit(u64 *ctx)
 		u32 slot = slot_of(entry.abi, entry.nr);
 		struct call_spec *spec = bpf_map_lookup_elem(&CALLS, &slot);
 		if (spec && spec->selected) {
-			if (settings->flags & CONFIG_COUNT)
+			if ((settings->flags & CONFIG_COUNT) && !sent(settings, entry.flags))
 				count(spec, slot, 0, 0, 0, 0);
-			if (settings->flags & CONFIG_STREAM)
+			if (sent(settings, entry.flags))
 				send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT + 1, 0, 0);
 		}
 	}

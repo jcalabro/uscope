@@ -209,7 +209,8 @@ pub struct SyscallsArgs {
     /// The BPF engine's ring buffer: bytes, with K or M.
     #[arg(long, value_name = "SIZE")]
     ring: Option<String>,
-    /// Hold the BPF engine's cost to PERCENT of one CPU by sampling.
+    /// Hold the trace's cost to PERCENT of one CPU: over it, drop stacks,
+    /// cut strings, sample calls, then only count them, a step a second.
     #[arg(long, value_name = "PERCENT")]
     budget: Option<f64>,
     /// Trace every process of a cgroup.
@@ -441,6 +442,11 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
     check_targets(args, &attached)?;
     let launching = !args.command.is_empty();
     let cgroup = args.cgroup.is_some() || args.container.is_some();
+    if let Some(percent) = args.budget
+        && !(percent.is_finite() && percent > 0.0)
+    {
+        bail!("--budget takes a percent of one CPU above 0, not {percent}");
+    }
     let stacks = stacks(args)?;
     if cgroup && stacks.is_some() {
         bail!("-k cannot unwind a cgroup's stacks yet; trace a program or -p PID");
@@ -486,6 +492,7 @@ fn bpf_options(args: &SyscallsArgs, plan: &Plan, ring: Option<u32>) -> BpfOption
             AttachArg::Tracepoint => AttachMode::Tracepoints,
             AttachArg::Fentry => AttachMode::Functions,
         },
+        budget: args.budget,
     }
 }
 
@@ -651,6 +658,8 @@ struct Printer {
     in_flight: Option<u64>,
     /// The cgroup traced, said once its programs are attached.
     cgroup: Option<PathBuf>,
+    /// The budget's notes so far, each a setting of the capture's.
+    budget_notes: u32,
     columns: Vec<Column>,
     sort: Option<Column>,
     /// `CLOCK_REALTIME` minus `CLOCK_MONOTONIC`, and the local zone's
@@ -1091,6 +1100,7 @@ impl Printer {
             sampled: 0,
             in_flight: plan.in_flight,
             cgroup: None,
+            budget_notes: 0,
             columns: plan.columns.clone(),
             sort: plan.sort,
             realtime,
@@ -1900,6 +1910,18 @@ impl Sink for Printer {
 
     fn in_flight_after(&self) -> Option<u64> {
         self.in_flight
+    }
+
+    fn budget(&mut self, _time: u64, note: &str) {
+        if let Some((_, capture)) = &mut self.capture {
+            self.budget_notes += 1;
+            capture.setting(&format!("budget {}", self.budget_notes), note);
+        }
+        // What the trace leaves out from here, said even beside a file's
+        // trace; -qq silences it.
+        if self.quiet < 2 {
+            self.message(&format!("budget: {note}"));
+        }
     }
 
     fn attached_by(&mut self, attachment: &Attachment) {

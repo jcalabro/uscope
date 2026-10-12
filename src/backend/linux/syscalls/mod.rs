@@ -2,6 +2,7 @@
 //! sees into the neutral events of `crate::syscalls`.
 
 pub mod bpf;
+pub mod budget;
 pub mod capture;
 pub mod cgroup;
 pub mod info;
@@ -27,6 +28,10 @@ pub trait Sink {
     /// The calls threads have been blocked in since before `since`, read
     /// every so often while the trace runs.
     fn in_flight(&mut self, _calls: &[InFlight]) {}
+
+    /// What the budget says, at `time`: how it is measured, and each step
+    /// that gave up detail to stay inside it.
+    fn budget(&mut self, _time: u64, _note: &str) {}
 
     /// Nanoseconds a call must have been blocked to be reported in flight;
     /// `None` asks for no reports.

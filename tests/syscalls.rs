@@ -1323,6 +1323,80 @@ mod bpf {
         );
     }
 
+    /// Over its budget, a trace gives up detail a step a second; once it
+    /// samples, the kernel counts the calls it does not send, so the table
+    /// still counts every one.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn over_budget_a_trace_samples_and_still_counts_every_call() {
+        let mut command = uscope(&[
+            "--budget",
+            "0.0001",
+            "-e",
+            "trace=getppid",
+            "-C",
+            "-U",
+            "name,calls",
+            "--",
+        ]);
+        command
+            .arg(fixture())
+            .arg("spin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut running = Running::spawn(&mut command);
+        running.line(|line| line.contains("budget: over budget") && line.contains("cut at 16"));
+        running.line(|line| line.contains("budget: over budget") && line.contains("one call in 2"));
+        running
+            .child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"x")
+            .expect("end the spin");
+        let mut asked = String::new();
+        BufReader::new(running.child.stdout.take().expect("stdout"))
+            .read_line(&mut asked)
+            .expect("the count");
+        let asked = asked
+            .trim()
+            .strip_prefix("asked ")
+            .expect("a count")
+            .to_owned();
+        let (code, lines) = running.finish();
+        assert_eq!(code, Some(0), "{lines:?}");
+        let asked: u64 = asked.parse().expect("a number");
+        let shown = lines
+            .iter()
+            .filter(|line| line.starts_with("getppid()"))
+            .count() as u64;
+        assert!(shown < asked, "{shown} of {asked}");
+        // Before it sampled, the ring overflowed, and what it lost is said.
+        let lost: u64 = lines
+            .iter()
+            .filter_map(|line| {
+                line.strip_prefix("--- lost ")?
+                    .split(' ')
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .sum();
+        let table = lines
+            .iter()
+            .find_map(
+                |line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                    ["getppid", calls] => calls.parse::<u64>().ok(),
+                    _ => None,
+                },
+            )
+            .expect("a row");
+        assert!(
+            table <= asked && asked <= table + lost,
+            "{table} counted and {lost} lost of {asked}"
+        );
+    }
+
     /// Attaching needs no consent, since the process never stops: it runs
     /// on, traced, to its own end, which ends the trace.
     #[test]

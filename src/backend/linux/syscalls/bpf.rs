@@ -25,6 +25,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::super::perf;
 use super::Sink;
+use super::budget::{Budget, CAPPED_BYTES, CAPPED_ELEMENTS, Step};
 use super::cgroup::{self, Cgroup, PidNamespace};
 use super::launch::{self, Gate, GateOptions};
 use super::ptrace::{
@@ -133,7 +134,7 @@ pub struct RawConfig {
     pub cgroup_level: u32,
     pub ns_inum: u32,
     pub ns_level: u32,
-    pub pad: u32,
+    pub sample: u32,
 }
 
 /// A thread's call in progress (`struct entry`).
@@ -897,7 +898,7 @@ fn version(release: &str) -> Option<(u32, u32)> {
 }
 
 /// How the BPF engine runs, beyond what to trace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BpfOptions {
     /// Count in the kernel and report no calls, only their statistics.
     pub count_only: bool,
@@ -907,6 +908,9 @@ pub struct BpfOptions {
     /// information, rather than trust the kernel's walk alone.
     pub stack_copy: bool,
     pub attach: AttachMode,
+    /// Percent of one CPU the trace may cost, giving up detail to stay
+    /// inside it.
+    pub budget: Option<f64>,
 }
 
 impl Default for BpfOptions {
@@ -916,6 +920,7 @@ impl Default for BpfOptions {
             ring: DEFAULT_RING,
             stack_copy: false,
             attach: AttachMode::Auto,
+            budget: None,
         }
     }
 }
@@ -1040,7 +1045,12 @@ struct Loaded {
     targets: HashMap<MapData, u32, u8>,
     /// The call each row of statistics counts.
     rows: Vec<SyscallId>,
+    /// The chosen calls' slots in CALLS.
+    slots: Vec<u32>,
     attachment: Attachment,
+    /// Whether the kernel counts any calls, whose statistics are read
+    /// once the trace ends.
+    counting: bool,
 }
 
 impl Loaded {
@@ -1119,7 +1129,7 @@ impl Loaded {
                 cgroup_level: scope.cgroup.map_or(0, |(_, level)| level),
                 ns_inum: scope.namespace.map_or(0, |namespace| namespace.inum),
                 ns_level: scope.namespace.map_or(0, |namespace| namespace.level),
-                pad: 0,
+                sample: 0,
             };
             let mut value = [0; CONFIG_BYTES];
             value.copy_from_slice(raw.as_bytes());
@@ -1134,8 +1144,81 @@ impl Loaded {
             ebpf,
             targets,
             rows: calls,
+            slots: chosen.iter().map(|&(slot, _)| slot).collect(),
             attachment,
+            counting: engine.count_only,
         })
+    }
+
+    /// Reads the programs' settings, changes them, and writes them back.
+    fn configure(&mut self, change: impl FnOnce(&mut RawConfig)) -> Result<(), BpfError> {
+        let mut config: Array<_, Bytes<CONFIG_BYTES>> = Array::try_from(
+            self.ebpf
+                .map_mut("CONFIG")
+                .ok_or_else(|| missing("CONFIG"))?,
+        )
+        .map_err(load_error)?;
+        let mut raw = RawConfig::read_from_bytes(&config.get(&0, 0).map_err(load_error)?)
+            .map_err(|_| BpfError::Load("the CONFIG map's value has another size".into()))?;
+        change(&mut raw);
+        let mut value = [0; CONFIG_BYTES];
+        value.copy_from_slice(raw.as_bytes());
+        config.set(0, value, 0).map_err(load_error)
+    }
+
+    /// Gives up what `step` names, from the next call on.
+    fn give_up(&mut self, step: Step) -> Result<(), BpfError> {
+        record!("syscalls bpf: over budget: {step}");
+        match step {
+            Step::DropStacks => self.configure(|config| {
+                config.flags &= !(CONFIG_STACKS | CONFIG_STACK_COPY);
+            }),
+            Step::CapStrings => {
+                self.configure(|config| config.elements = config.elements.min(CAPPED_ELEMENTS))?;
+                let mut calls: Array<_, Bytes<SPEC_BYTES>> =
+                    Array::try_from(self.ebpf.map_mut("CALLS").ok_or_else(|| missing("CALLS"))?)
+                        .map_err(load_error)?;
+                for &slot in &self.slots {
+                    let mut spec =
+                        RawCallSpec::read_from_bytes(&calls.get(&slot, 0).map_err(load_error)?)
+                            .map_err(|_| BpfError::Load("a CALLS value has another size".into()))?;
+                    // Paths stay whole for the descriptors they name, and
+                    // structures for their fields.
+                    for arg in &mut spec.args {
+                        // String, Strings, Bytes, and Iovec, as `call_spec`
+                        // numbers them.
+                        if matches!(arg.kind, 2 | 3 | 5 | 6) {
+                            arg.limit = arg.limit.min(CAPPED_BYTES);
+                        }
+                    }
+                    let mut value = [0; SPEC_BYTES];
+                    value.copy_from_slice(spec.as_bytes());
+                    calls.set(slot, value, 0).map_err(load_error)?;
+                }
+                Ok(())
+            }
+            Step::Sample(every) => {
+                self.counting = true;
+                self.configure(|config| {
+                    config.sample = every;
+                    config.flags |= CONFIG_COUNT;
+                })
+            }
+            Step::CountOnly => {
+                self.counting = true;
+                self.configure(|config| {
+                    config.flags = (config.flags & !CONFIG_STREAM) | CONFIG_COUNT;
+                })
+            }
+        }
+    }
+
+    /// Nanoseconds the kernel has spent running the programs, when it
+    /// times them (`kernel.bpf_stats_enabled`).
+    fn run_time(&self) -> Option<u64> {
+        let enabled = std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
+            .is_ok_and(|text| text.trim() == "1");
+        enabled.then(|| self.fdinfo_sum("run_time_ns:"))
     }
 
     fn target(&mut self, process: u32) -> Result<(), BpfError> {
@@ -1231,6 +1314,12 @@ impl Loaded {
     /// The kernel's count of skipped runs of every loaded program, which
     /// it prints among a program descriptor's details.
     fn skipped(&self) -> u64 {
+        self.fdinfo_sum("recursion_misses:")
+    }
+
+    /// The sum over every loaded program of a count the kernel prints
+    /// among its descriptor's details.
+    fn fdinfo_sum(&self, field: &str) -> u64 {
         use std::os::fd::{AsFd as _, AsRawFd as _};
         self.ebpf
             .programs()
@@ -1242,7 +1331,7 @@ impl Loaded {
             .filter_map(|details| {
                 details
                     .lines()
-                    .find_map(|line| line.strip_prefix("recursion_misses:"))
+                    .find_map(|line| line.strip_prefix(field))
                     .and_then(|count| count.trim().parse::<u64>().ok())
             })
             .sum()
@@ -1338,6 +1427,18 @@ fn missing(name: &str) -> BpfError {
 }
 
 /// Whether a process has ended: gone, or a zombie.
+/// The CPU time this process has spent, in nanoseconds.
+fn cpu_time() -> u64 {
+    use nix::sys::resource::{UsageWho, getrusage};
+    getrusage(UsageWho::RUSAGE_SELF).map_or(0, |usage| {
+        let nanoseconds = |time: nix::sys::time::TimeVal| {
+            u64::try_from(time.tv_sec()).unwrap_or(0) * 1_000_000_000
+                + u64::try_from(time.tv_usec()).unwrap_or(0) * 1_000
+        };
+        nanoseconds(usage.user_time()) + nanoseconds(usage.system_time())
+    })
+}
+
 fn ended(process: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{process}/stat")).map_or(true, |stat| {
         stat.rsplit_once(") ")
@@ -1460,6 +1561,14 @@ fn run(
         // not be the host's.
         follow: options.follow && cgroup.is_none(),
         cgroup,
+        budget: engine.budget.map(|percent| {
+            let limits = &options.limits;
+            let long = limits.string > CAPPED_BYTES as usize
+                || limits.dump > CAPPED_BYTES as usize
+                || limits.elements > CAPPED_ELEMENTS as usize;
+            Budget::new(percent, options.stacks.is_some(), long)
+        }),
+        window: (0, 0),
         live,
         first,
         end: None,
@@ -1474,7 +1583,7 @@ fn run(
     let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
     let ring_end = reader.end;
     let Reader { sink, .. } = reader;
-    if engine.count_only {
+    if loaded.counting {
         sink.counted(loaded.counted(first));
     }
     drop(loaded);
@@ -1613,6 +1722,9 @@ struct Reader<'a> {
     follow: bool,
     /// The cgroup traced, which the trace lasts as long as.
     cgroup: Option<Cgroup>,
+    budget: Option<Budget>,
+    /// When the budget's window began, and the CPU time spent by then.
+    window: (u64, u64),
     /// The traced processes still running.
     live: BTreeSet<u32>,
     first: u32,
@@ -1694,6 +1806,7 @@ impl Reader<'_> {
             if now - last_tick >= u64::from(TICK_MS) * 1_000_000 {
                 last_tick = now;
                 self.report_lost(loaded, now);
+                self.hold_budget(loaded, now)?;
                 if let Some(after) = self.sink.in_flight_after() {
                     self.sink.in_flight(&loaded.in_flight(after));
                 }
@@ -1714,6 +1827,44 @@ impl Reader<'_> {
         for (_, entry) in std::mem::take(&mut self.entries) {
             self.sink.event(TraceEvent::Call(entry));
         }
+        Ok(())
+    }
+
+    /// Once a second, gives up a step of detail if tracing cost more than
+    /// its budget: uscope's own CPU time, and the programs' when the kernel
+    /// times them.
+    fn hold_budget(&mut self, loaded: &mut Loaded, now: u64) -> Result<(), BpfError> {
+        let Some(budget) = &mut self.budget else {
+            return Ok(());
+        };
+        let spent = cpu_time() + loaded.run_time().unwrap_or(0);
+        if self.window.0 == 0 {
+            if loaded.run_time().is_none() {
+                self.sink.budget(
+                    now,
+                    "the kernel does not time BPF programs (kernel.bpf_stats_enabled is 0), \
+                     so the budget holds uscope's own CPU time alone",
+                );
+            }
+            self.window = (now, spent);
+            return Ok(());
+        }
+        let (began, before) = self.window;
+        if now - began < 1_000_000_000 {
+            return Ok(());
+        }
+        let used = spent.saturating_sub(before);
+        if let Some(step) = budget.after(used, now - began) {
+            loaded.give_up(step)?;
+            self.sink.budget(
+                now,
+                &format!(
+                    "over budget, at {:.1}% of a CPU: {step}",
+                    super::budget::share(used, now - began)
+                ),
+            );
+        }
+        self.window = (now, spent);
         Ok(())
     }
 
@@ -1893,7 +2044,8 @@ mod tests {
         assert_eq!(chosen.name(), "fentry");
 
         let without = [named(Abi::X86_64, "getppid")];
-        let fallen = attachment(false, &without, AttachMode::Auto, true, &has).expect("tracepoints");
+        let fallen =
+            attachment(false, &without, AttachMode::Auto, true, &has).expect("tracepoints");
         assert_eq!(
             (fallen.name(), fallen.reason.as_str()),
             (
@@ -1920,11 +2072,11 @@ mod tests {
             named(Abi::X86_64, "rt_sigaction"),
             named(Abi::X32, "rt_sigaction"),
         ];
-        let chosen = attachment(false, &sigaction, AttachMode::Auto, false, &no_x32)
-            .expect("an attachment");
+        let chosen =
+            attachment(false, &sigaction, AttachMode::Auto, false, &no_x32).expect("an attachment");
         assert_eq!(chosen.functions, ["__x64_sys_rt_sigaction"]);
-        let fallen = attachment(false, &sigaction, AttachMode::Auto, true, &no_x32)
-            .expect("tracepoints");
+        let fallen =
+            attachment(false, &sigaction, AttachMode::Auto, true, &no_x32).expect("tracepoints");
         assert_eq!(fallen.name(), "tp_btf");
     }
     use crate::syscalls::captures::MOST_BYTES;
@@ -2016,7 +2168,7 @@ mod tests {
                     cgroup_level,
                     ns_inum,
                     ns_level,
-                    pad
+                    sample
                 ]
             ),
             layout!(
