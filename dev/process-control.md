@@ -55,3 +55,202 @@ state consistency, and the absence of surviving inferiors.
 
 Run `just stress` and `just sim 600` before merging lifecycle, run-control,
 attach, or concurrency work.
+
+## Linux backend layout
+
+`src/backend/linux.rs` defines the controller and the state it owns. The
+submodules divide work by behavior:
+
+| Module | Responsibility |
+|---|---|
+| `native` | Real Linux operations and the trait boundary used by simulation |
+| `lifecycle` | Launch, attach, detach, termination, and process ownership |
+| `classify` | Convert raw wait evidence into debugger stop classes |
+| `awaits` | Gather run results and complete the all-stop transition |
+| `stepping`, `step_targets` | Source and instruction execution plans |
+| `breakpoints` | Physical sites, logical owners, hit processing, and repair |
+| `writes` | Mutations that require a valid public stop |
+| `frames`, `async_frames`, `returns` | Native and logical frames and return state |
+| `inspection`, `evaluation`, `presentation` | Read stopped program state |
+| `memory`, `disassembly` | Low-level reads and decoded code |
+| `runtimes` | Runtime discovery and task snapshots |
+| `post_mortem` | Core dumps as a permanent stopped session |
+| `recorded` | Flight-recording wrapper around native operations |
+| `sim_edge` | Adapter from the controller's native contract to the simulator |
+
+Keep a native operation in the smallest interface that represents what the
+controller asks Linux to do. The simulator implements the same observable
+operation. Do not make the simulated edge call controller internals to skip a
+hard behavior.
+
+## Launch and attach
+
+A launched program is created under controller ownership. The controller is
+responsible for its initial stop, configured ptrace options, later execution,
+and eventual reap. If startup fails after creating a process, the failure path
+still owns cleanup.
+
+An attached program already has an external owner. uscope seizes its threads,
+interrupts them, gathers a complete stop, and detaches them on ordinary
+shutdown. Detach must preserve the signal and job-control behavior the session
+promised. Never treat an attached process as one uscope may silently kill.
+
+Threads can appear or disappear while attach is gathering them. The algorithm
+must converge using observed `/proc` and wait state, with a deadline at the
+client boundary. A single process-list snapshot is not proof that every thread
+is controlled.
+
+Core dumps use the same public stopped APIs but no live controller operations.
+Their single stop never resumes. Keep post-mortem behavior explicit rather
+than scattering `if core` checks through the live controller.
+
+## Wait processing
+
+The waiter reports raw wait statuses to the controller. A status is evidence,
+not yet a public stop. Classification considers:
+
+- signal-delivery stops;
+- software and hardware traps;
+- single-step traps;
+- ptrace clone, fork, exec, and exit events;
+- internal interrupt stops used to gather siblings;
+- execution-plan breakpoints;
+- process and thread exits.
+
+Classify before mutating public state. Keep enough raw evidence in development
+recordings to reconstruct why a status received its class.
+
+Linux can report statuses in several valid orders. Code must not rely on a
+particular sibling stopping first or a clone parent arriving before its child.
+The controller reducer should accept every order permitted by the conformance
+rules.
+
+## Building an all-stop
+
+When one tracee stops for a publishable reason, the controller interrupts
+running siblings. During this gathering phase, more statuses may arrive:
+another breakpoint, a signal, an exit, or a thread creation event. Track each
+tracee separately until every live tracee has a known stopped or terminal
+state.
+
+Only then:
+
+1. choose the public stop reason according to the reducer's rules;
+2. preserve each tracee's pending signal;
+3. allocate a new `StopId`;
+4. establish the selected execution context and frame;
+5. invalidate stop-scoped caches;
+6. publish the stopped snapshot and event.
+
+An internal interrupt used to gather a sibling is not a user-visible signal.
+Do not publish it as a pause unless the public pause request is the reason the
+gather began.
+
+## Resume and execution plans
+
+A resume validates the caller's stop, computes how every stopped tracee should
+continue, installs needed execution-plan sites, acknowledges the accepted
+execution, then lets tracees run.
+
+Execution plans implement operations such as source step, next, finish,
+advance, and selected-call stepping. Their breakpoint ownership is separate
+from user breakpoint ownership. Retiring a plan removes only that plan's
+ownership; a physical site remains installed while any owner still needs it.
+
+Each accepted plan gets an `ExecutionId`. A trap may complete the plan, be an
+unrelated user breakpoint, hit a watchpoint, carry a signal, or expose a
+runtime transition the plan follows. Keep those cases explicit. “Trap means
+step complete” is not a valid rule.
+
+## Breakpoint installation and repair
+
+A software breakpoint replaces the first byte of an instruction with `int3`.
+The physical site stores the original byte and its owners. Logical breakpoint
+records store user options such as enabled state, condition, hit count, ignore
+count, and log message.
+
+On a hit, x86-64 reports the instruction pointer after the trap byte. Repair
+rewinds the selected thread, restores the original byte, executes the
+instruction, and reinstalls the trap when owners remain.
+
+More than one thread may have reached the same site before the all-stop
+completed. Repair each co-hit thread sequentially while every sibling remains
+stopped. Letting siblings run during repair can lose hits or execute a
+temporarily unpatched site.
+
+All user memory reads overlay original bytes at installed sites. Writes must
+update the original-byte model correctly so removing a breakpoint does not
+restore stale memory.
+
+## Watchpoints
+
+Hardware watchpoints are planned against x86 debug-register constraints:
+limited slots, supported lengths, alignment, access modes, and addresses. A
+plan must be transactional. If one register assignment fails, restore the
+previous usable plan.
+
+New threads do not necessarily begin with usable copies of the debugger's
+desired debug-register state. Arm and verify them as part of tracee lifecycle.
+DR6 is evidence from the latest debug exception and can be stale at other
+stops; read it only in the context that gives it meaning.
+
+The simulator has conformance rules for watch traps, single-step overlap,
+thread creation, rejected register writes, repeated-string instructions, and
+ptrace memory writes. Update those rules only from real-kernel probes.
+
+## Signals and exceptions
+
+A signal has three independent public choices: stop, print, and pass. Keep the
+pending signal attached to its tracee until resume decides whether to deliver
+it. Suppression is an explicit resume action, not loss during all-stop
+gathering.
+
+Language exceptions such as Go panics and Rust panics are built from runtime
+evidence and reported through neutral exception records. They may share native
+breakpoint machinery, but clients should not need to know the runtime symbol
+that caused them.
+
+SIGKILL, group exit, exec, and fork can invalidate normal assumptions about
+memory, thread lists, and ownership. Handle them as lifecycle transitions,
+not ordinary signals.
+
+## Fork children
+
+When follow-fork behavior is enabled, a fork child begins traced and stopped.
+The session can hand it to a client as a held process. Until a client attaches
+or releases it, ownership must be clear and cleanup must not strand it.
+
+Holding, accepting, refusing, and abandoning children all need tests for
+parent exit, client disconnect, adapter shutdown, and child exit. A child must
+end attached to one controller, running untraced, or reaped; there is no valid
+forgotten state.
+
+## Memory access
+
+Process memory reads can cross mappings, encounter short availability, and
+overlap trap sites. Return the bytes read and a typed completion state. Do not
+turn a partial read into an all-zero suffix.
+
+Writes require the current public stop and should report their actual extent.
+After a write, invalidate any cached presentation, expression result, or
+disassembly that depends on changed state.
+
+## Controller review checklist
+
+For any control-path edit, review these questions:
+
+- Which OS thread executes every native call?
+- Can a reply or event be lost if the tracee exits at this point?
+- What if a sibling stops, exits, clones, or receives a signal between any two
+  native operations?
+- Does every failure path release or retain ownership explicitly?
+- Are pending signals preserved per tracee?
+- Is a public stop emitted only after all live tracees are accounted for?
+- Does a stopped mutation validate its `StopId`?
+- Are user and execution-plan breakpoint owners independent?
+- Can cancellation leave a process, waiter, or reply alive?
+- Does the simulator model this native behavior, or should it report a model
+  gap?
+
+Use the flight recorder to answer these questions for a failure before adding
+new logging.

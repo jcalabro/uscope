@@ -22,8 +22,11 @@ Read the pages that match the work:
 | Repository setup or an unfamiliar subsystem | [`dev/index.md`](dev/index.md), [`dev/architecture.md`](dev/architecture.md) |
 | Run control, breakpoints, signals, or lifecycle | [`dev/process-control.md`](dev/process-control.md), [`dev/testing.md`](dev/testing.md) |
 | ELF, DWARF, unwinding, images, or the cache | [`dev/debug-information.md`](dev/debug-information.md) |
-| Expressions or views | [`dev/architecture.md`](dev/architecture.md), [`docs/expressions.md`](docs/expressions.md), [`docs/views.md`](docs/views.md) |
+| Go goroutines, Rust coroutines, or tokio tasks | [`dev/runtime-models.md`](dev/runtime-models.md), [`dev/testing.md`](dev/testing.md) |
+| Recording, captures, or profile analysis | [`dev/profiling.md`](dev/profiling.md), [`dev/performance.md`](dev/performance.md) |
+| Expressions, inspection, views, or visualizers | [`dev/evaluation-and-views.md`](dev/evaluation-and-views.md), [`docs/expressions.md`](docs/expressions.md), [`docs/views.md`](docs/views.md) |
 | Tests or native fixtures | [`dev/testing.md`](dev/testing.md) |
+| Diagnosing a failure or reading recordings | [`dev/debugging-failures.md`](dev/debugging-failures.md) |
 | Simulator or kernel model | [`dev/simulator.md`](dev/simulator.md) |
 | Timings, allocation, or benchmarks | [`dev/performance.md`](dev/performance.md) |
 | Browser client or web protocol | [`dev/web-ui.md`](dev/web-ui.md) |

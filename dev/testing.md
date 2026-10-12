@@ -76,3 +76,286 @@ an empty value to disable recording.
 
 Record new native control paths with `record!` or the `Recorded` ptrace
 wrapper. Recording must never change what the inferior observes.
+
+## Test layers
+
+Choose the highest layer that proves the behavior without making the test
+needlessly slow or fragile.
+
+| Layer | Use it for | Avoid it for |
+|---|---|---|
+| Pure unit test | Parsers, reducers, indexes, validation, arithmetic, formatting rules | A public workflow already covered by a scenario |
+| Library integration test | Requests, events, process state, cleanup, real compiler output | CLI spelling or terminal decoration |
+| CLI test | Argument parsing, command files, batch status, rendered terminal output | Core debugger semantics |
+| DAP test | Protocol mapping, handles, capabilities, client lifecycle | Behavior already established below the adapter |
+| Web unit/component test | Store transitions, URL state, rendering, sandbox behavior | Real ptrace behavior |
+| Web end-to-end test | Browser/server integration and visible user workflows | Every branch of a pure helper |
+| Simulator | Long interleavings and oracle checks over modeled behavior | Kernel behavior without conformance evidence |
+| Fuzz target | Structured malformed input and parser/validator bounds | Expected user workflows |
+
+Tests can cross layers when the boundary itself is the subject. Avoid
+duplicating the same assertions at every layer. One debugger scenario plus one
+thin client mapping test is usually stronger than three full copies.
+
+## Scenario lifecycle
+
+A `Scenario` owns the debugger, its handle, event subscription, transcript,
+deadline policy, and inferior cleanup. Use its operations instead of manually
+coordinating request and event futures.
+
+A typical scenario should:
+
+1. launch or attach through a support constructor;
+2. wait for the initial event or synchronized fixture marker;
+3. perform one public operation at a time;
+4. assert replies and resulting events separately where ordering matters;
+5. inspect state through `DebuggerHandle`;
+6. call `shutdown` on every successful path.
+
+The harness finalizer treats an unconsumed process or missing shutdown as a
+test failure. Do not bypass it with `mem::forget`, detached tasks, or a raw
+child process.
+
+The transcript should contain user-visible operations and enough state to
+understand a failure. Keep assertions close to the operation they establish;
+an enormous expected transcript is hard to review and tends to preserve
+irrelevant formatting.
+
+## Launch versus new scenarios
+
+`Scenario::launch` uses debug information cached once in the test process.
+This is the normal choice for a checked-in fixture. It keeps the suite fast
+without using the user's on-disk cache.
+
+`Scenario::new` loads from the program for that scenario. Use it when the test
+changes the executable, debug file, source map, view file, or another loader
+input. A test of loading behavior must not accidentally pass through shared
+preloaded metadata.
+
+For attach tests, use `ExternalProcess`. It owns the target and provides
+observable output synchronization. Test both ordinary detach and debugger
+failure where the process is expected to survive.
+
+## Deadlines
+
+Every blocking test operation needs a deadline with a failure message that
+names what was awaited. A deadline is a test failure, not permission to proceed
+with incomplete state.
+
+Negative timing assertions are forbidden. “No event arrived for 100 ms” does
+not prove that no event can arrive. Instead, perform an operation that creates
+an observable boundary, then inspect state or the event stream at that
+boundary.
+
+If a test needs a retry loop over `/proc`, memory, or output, each iteration
+must consume or observe new information and the loop must end at a deadline.
+Busy polling with no yield can starve the controller and manufacture failures.
+
+## Native fixture design
+
+A fixture is a small deterministic program, not a second test harness. Give it
+named source markers and simple synchronization points. Keep the behavior that
+produces the debugger state separate from the behavior that announces it.
+
+Useful synchronization mechanisms include:
+
+- writing a complete line after reaching a barrier;
+- waiting on a pipe, eventfd, condition variable, or atomic state;
+- exposing a stable `/proc` fact;
+- stopping at a named function whose entry is itself the observed event.
+
+Do not use sleeps to order fixture threads. Do not make success depend on OS
+scheduler luck. A fixture loop must have a bounded input or be terminated by
+the scenario owner.
+
+Put sources under `tests/fixtures/<language>`. A Go executable needs its own
+package directory. Keep one conceptual program per fixture unless sharing is
+needed to hold a compiler matrix constant.
+
+Source markers should describe their role, not a test line number. Tests find
+the marker text and derive the line. This keeps harmless source edits from
+requiring numeric updates.
+
+## Building fixtures
+
+`scripts/build-test-programs.sh` is the only fixture build entry point. It
+builds independent outputs concurrently up to the configured job count.
+
+If a build step consumes another output, call `wait_for OUTPUT...` first. If a
+step examines the complete set, call `wait_builds`. A missing wait can read a
+previous build's file and pass locally while racing in a clean checkout.
+
+The tokio fixtures build in their own shell because their Cargo dependencies
+and target directory have separate handling. All fixture dependencies are
+pinned and available to the pure Nix shell; a test run must not fetch from the
+network.
+
+`USCOPE_FIXTURE_JOBS=1` is useful when debugging the build script. It is not a
+fix for a dependency race in the script.
+
+## Compiler matrix
+
+Add a matrix dimension only when it changes emitted code or debug information
+relevant to the behavior. Common dimensions are:
+
+- GCC and Clang;
+- no optimization and optimized output;
+- PIE and fixed-address executables;
+- frame pointers present and omitted;
+- glibc and musl thread/runtime layouts;
+- selected compiler or runtime versions.
+
+Avoid a Cartesian product without a reason. Pick a compact set where each
+variant covers a distinct producer or ABI behavior. Document that reason next
+to the fixture list or test table.
+
+## Unit tests
+
+Unit-test complicated deterministic logic where a failure can identify the
+rule directly. Good subjects include stop classification, hit conditions,
+address translations, image validation, DWARF-expression evaluation, exact
+integer arithmetic, view parsing, capture decoding, and profile aggregation.
+
+Avoid tests whose only assertion repeats a constructor field or private call
+sequence. Such tests make refactoring expensive without protecting a user or
+invariant.
+
+Property tests are useful for algebraic rules, round trips, and bounded input
+spaces. Keep generated cases small enough to shrink quickly and store genuine
+regressions under `proptest-regressions`.
+
+## CLI tests
+
+CLI tests own command parsing, aliases, configuration precedence, batch mode,
+exit status, suggestions, and terminal rendering. They can use a fake or real
+debugger according to the behavior under test.
+
+Do not assert ANSI bytes when semantic tokens or color roles are the contract.
+When exact output is the interface, make the fixture and terminal width
+explicit and keep the expected text short.
+
+## DAP tests
+
+The DAP support harness starts the adapter, speaks framed JSON, tracks request
+sequence numbers, and records events. It also owns terminal requests, fork
+children, and adapter process cleanup.
+
+Test the mapping between DAP and the public debugger:
+
+- capabilities match implemented requests;
+- stopped, continued, thread, module, output, and terminated events have the
+  required ordering;
+- frame, variable, source, and memory handles expire at the right boundary;
+- cancellation and disconnect release all processes and pending replies;
+- child-session and terminal requests have explicit accept and refusal paths.
+
+Use the real-client acceptance scripts only for behavior a protocol test
+cannot establish, such as launch configuration shape or client-specific
+request order.
+
+## Web tests
+
+`just web-test` runs TypeScript checking, SDK declaration checking, Biome,
+Vitest unit tests, and browser component tests. Fake-server transcripts let UI
+tests drive deterministic state without starting ptrace sessions.
+
+`just web-e2e` starts real servers and browsers. Use it for routing, joining,
+sharing, run control, source navigation, large values, drawings, profiles, and
+other complete workflows. Filter one case while developing:
+
+```sh
+just web-e2e --project=chromium -g 'test name'
+```
+
+Run both Chromium and Firefox before merging a browser behavior change. A
+snapshot or screenshot should assert a layout or rendering contract that text
+and DOM state cannot express more clearly.
+
+## Executable documentation
+
+Several public reference pages are test inputs:
+
+- expression rows execute against named evaluator worlds;
+- view examples parse, bind, and run against a fake typed program;
+- tutorial blocks are compared byte-for-byte with fixture source fragments;
+- visualizer examples run in the browser sandbox and validate their pictures.
+
+Preserve fence markers and row grammar when editing these pages. If the
+language changes, update documentation first, observe its failure, then update
+the implementation.
+
+## Cache isolation
+
+No test may read the user's image cache. Under nextest the cache is disabled
+unless `USCOPE_CACHE_DIR` names one. `just test` warms `target/image-cache` and
+passes that path to tests. Cache-specific tests use scratch directories.
+
+`just stress` intentionally omits the warmed cache so repeated runs cover the
+loader. Do not “speed it up” by adding the test cache; that removes part of the
+stress coverage.
+
+Configuration and user view discovery are similarly isolated through a test
+`XDG_CONFIG_HOME` and explicit paths.
+
+## Cleanup assertions
+
+Lifecycle tests must establish more than a returned success. Depending on the
+operation, verify:
+
+- the inferior was reaped or detached as promised;
+- attached processes continue with the intended signal state;
+- held fork children are accepted, released, or reaped;
+- waiter and controller threads terminate;
+- pending requests resolve with a result or terminal error;
+- adapters and web servers close sockets and child sessions;
+- temporary files and continuous-recording workers stop;
+- no process remains under `/proc` after its expected end.
+
+Prefer support owners whose `Drop` aborts the test on a leak over cleanup code
+that runs only after successful assertions.
+
+## Stress and soak
+
+`just stress` builds once, then runs the suite repeatedly with twice as many
+test threads as CPUs and busy loops competing for processors. It stops at the
+first failure so the failing test's flight recording survives.
+
+Use a count and nextest expression to chase a rare test:
+
+```sh
+just stress 100 -E 'binary(dap) & test(/disconnect/)'
+```
+
+Soak tests exercise a long-running scenario repeatedly and are ignored by the
+normal suite. Use the named Just recipe and its contained memory/process
+limits. A soak test still needs observable progress and per-operation
+deadlines.
+
+## Fuzzing
+
+Fuzz targets live in `fuzz/` and call feature-gated library entry points. They
+cover object and debug parsing, image and capture validation, expressions,
+views, disassembly, perf records, and other binary boundaries.
+
+Run fuzzers only through a contained recipe or `scripts/contained.sh`. Keep
+corpora and artifact growth bounded. A discovered crash becomes the smallest
+deterministic regression test at the owning layer; do not rely on a large fuzz
+artifact forever.
+
+## Choosing the final gate
+
+Every change runs `just`. Add these checks according to scope:
+
+| Change | Additional final check |
+|---|---|
+| Lifecycle, run control, attach, signals, concurrency | `just stress` and `just sim 600` |
+| Simulator model or scheduler | `just sim 600` |
+| Web behavior | `just web-e2e` |
+| Image loading or hot debug tables | `just bench-smoke` |
+| Recorder hot path | `just profile-overhead` |
+| Fixture or golden program | `just build-test-programs`; record a manifest only when intentional |
+| Public docs | `just docs` plus executable-doc tests when affected |
+
+`just all` includes the repository's broad pre-commit checks. Run specialized
+long measurements only when the table calls for them; repeating them after
+every small edit wastes time and makes failures harder to attribute.
