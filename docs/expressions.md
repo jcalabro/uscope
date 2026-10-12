@@ -114,6 +114,7 @@ $arg0                  => 18446744073709551516 : integer
 (int)$arg0             => -100 : int
 $arg1                  => 2147287040 : integer
 $path == "/etc/hosts"  => true : bool
+$path                  => "/etc/hosts" : string
 $arg6                  => error unknown-name at `$arg6`
 ```
 

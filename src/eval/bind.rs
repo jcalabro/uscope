@@ -132,8 +132,10 @@ fn bind_as<S: Scope>(
         Finish::Value => binder.value(root)?,
     };
     // A string the expression writes is only compared; one it computes
-    // from the program's text is a value of its own.
-    if matches!(root.op, Op::Constant(Constant::Text(_))) {
+    // from the program's text, or a stop's `$path`, is a value of its own.
+    if matches!(root.op, Op::Constant(Constant::Text(_)))
+        && !matches!(tree.kind(tree.root()), NodeKind::Register(_))
+    {
         return Err(ExpressionError::new(
             ErrorKind::Type,
             root.span,
