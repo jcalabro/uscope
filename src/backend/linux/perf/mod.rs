@@ -23,6 +23,8 @@ pub enum Source {
     Clock { period: Duration },
     /// Every execution of the instruction at `address`.
     Breakpoint { address: u64 },
+    /// No samples: only what the program maps, and its threads.
+    Mappings,
 }
 
 /// How events sample.
@@ -276,6 +278,10 @@ fn attr(options: &EventOptions, start: u64) -> sys::Attr {
             attr.bp_addr = address;
             attr.bp_len = 8;
             attr.sample_period = 1;
+        }
+        Source::Mappings => {
+            attr.kind = sys::TYPE_SOFTWARE;
+            attr.config = sys::COUNT_SW_DUMMY;
         }
     }
     attr

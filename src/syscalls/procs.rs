@@ -106,6 +106,7 @@ impl ProcessTree {
             }
             TraceEvent::Call(_)
             | TraceEvent::Signal { .. }
+            | TraceEvent::ThreadExit { .. }
             | TraceEvent::Lost { .. }
             | TraceEvent::Descriptor { .. } => {}
         }

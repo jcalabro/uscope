@@ -125,6 +125,204 @@ fn files_trace_as_strace_prints_them() {
     }
 }
 
+/// Times, numbers, and dumps of the data that moved print as strace's,
+/// except for the times' values.
+#[test]
+fn times_numbers_and_dumps_print_as_strace_prints_them() {
+    let times = Regex::new(r"\d{2}:\d{2}:\d{2}(\.\d{6})?|\d+\.\d{6}").expect("regex");
+    let untimed = |trace: &str| times.replace_all(trace, "T").into_owned();
+    for arguments in [
+        &[
+            "-e",
+            "trace=pipe2,write,read,writev,readv",
+            "-e",
+            "read=3",
+            "-e",
+            "write=4",
+        ][..],
+        &["-tt", "-T", "-n", "-e", "trace=pipe2,write,read"],
+        &["-t", "-e", "trace=write"],
+        &["-ttt", "-e", "trace=readv"],
+        &["-r", "-e", "trace=read,write"],
+    ] {
+        let (theirs, ours) = both(arguments, "dumps");
+        assert_same(
+            &untimed(&ours),
+            &untimed(&theirs),
+            &format!("with {arguments:?}"),
+        );
+    }
+}
+
+/// `-ff` writes each thread's calls to a file of its own, as strace does.
+#[test]
+fn ff_writes_each_threads_calls_to_its_own_file() {
+    let directory = ScratchDir::new("syscalls-ff");
+    let arguments = ["-ff", "-e", "trace=write,getppid,wait4"];
+    let run = |name: &str, command: &mut Command| {
+        let status = command
+            .args(arguments)
+            .arg("-o")
+            .arg(directory.path().join(name))
+            .arg("--")
+            .arg(fixture())
+            .arg("family")
+            .current_dir(directory.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .expect("run the tracer");
+        assert!(status.success(), "{name}");
+        // Each file's text, in the order its thread began.
+        let mut files: Vec<(u32, String)> = std::fs::read_dir(directory.path())
+            .expect("list")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file = entry.file_name().into_string().ok()?;
+                let id = file.strip_prefix(&format!("{name}."))?.parse().ok()?;
+                Some((id, std::fs::read_to_string(entry.path()).ok()?))
+            })
+            .collect();
+        files.sort_unstable();
+        files.into_iter().map(|(_, text)| text).collect::<Vec<_>>()
+    };
+    let theirs = run("strace", &mut Command::new("strace"));
+    let ours = run("uscope", &mut uscope(&["--engine", "ptrace"]));
+    assert_eq!(ours.len(), theirs.len(), "{ours:#?}\n---\n{theirs:#?}");
+    for (ours, theirs) in ours.iter().zip(&theirs) {
+        assert_same(ours, theirs, "in one thread's file");
+    }
+}
+
+/// `--sample 1/N` prints one call in N while the table counts them all,
+/// and `--slower-than` prints only calls that took that long.
+#[test]
+fn sampling_and_a_duration_floor_choose_which_calls_print() {
+    let directory = ScratchDir::new("syscalls-sample");
+    let calls = |output: &Output| {
+        text(&output.stderr)
+            .lines()
+            .filter(|line| line.starts_with("close("))
+            .count()
+    };
+    let every = trace(directory.path(), &["-e", "trace=close"], "files");
+    let sampled = trace(
+        directory.path(),
+        &[
+            "-e",
+            "trace=close",
+            "--sample",
+            "1/2",
+            "-C",
+            "-U",
+            "name,calls",
+        ],
+        "files",
+    );
+    assert_eq!(calls(&every), 7, "{}", text(&every.stderr));
+    assert_eq!(calls(&sampled), 4, "{}", text(&sampled.stderr));
+    let summary = text(&sampled.stderr);
+    assert!(
+        summary
+            .lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["close", "7"]),
+        "{summary}"
+    );
+
+    let slow = trace(
+        directory.path(),
+        &["-e", "trace=close", "--slower-than", "1h"],
+        "files",
+    );
+    let lines = text(&slow.stderr);
+    assert_eq!(calls(&slow), 0, "{lines}");
+    assert!(lines.contains("+++ exited with 3 +++"), "{lines}");
+    assert!(
+        text(&trace(directory.path(), &["--sample", "2"], "files").stderr)
+            .contains("--sample takes 1/N, not 2")
+    );
+}
+
+/// `-kk` unwinds each call's stack, and each signal's, to the frames
+/// strace's does: the same modules at the same addresses, and in the
+/// program, which has debug information, the same functions, offsets, and
+/// lines. A library's function may go by another of the names its address
+/// has, and where unwinding stops short, each says why in words of its
+/// own.
+#[test]
+fn stacks_unwind_to_the_frames_strace_finds() {
+    let frame = Regex::new(
+        r"^ > (\S+?)\(([^+)]*)(?:\+(0x[0-9a-f?]+))?\) \[(0x[0-9a-f?]+)\](?: (\S+):(\d+))?$",
+    )
+    .expect("regex");
+    let address = Regex::new(r"(?m)^ > .*\[(0x[0-9a-f]+)\]").expect("regex");
+    let program = fixture();
+    let program = program.to_str().expect("path");
+    for (arguments, mode) in [
+        (&["-kk", "-e", "trace=write,read,readv"][..], "dumps"),
+        (&["-f", "-kk", "-e", "trace=write,getppid"], "family"),
+    ] {
+        let (theirs, ours) = both(arguments, mode);
+        let (theirs, ours) = (normalized(&theirs), normalized(&ours));
+        let context = || format!("with {arguments:?}:\n{ours}\n---\n{theirs}");
+        assert_eq!(
+            ours.lines().count(),
+            theirs.lines().count(),
+            "{}",
+            context()
+        );
+        let mut frames = 0;
+        for (our, their) in ours.lines().zip(theirs.lines()) {
+            if our.starts_with(" > [stack ends: ") {
+                assert!(
+                    their.starts_with(" > ") && !frame.is_match(their),
+                    "{our} {their}: {}",
+                    context()
+                );
+                continue;
+            }
+            let (Some(our), Some(their)) = (frame.captures(our), frame.captures(their)) else {
+                assert_eq!(our, their, "{}", context());
+                continue;
+            };
+            frames += 1;
+            let field = |captures: &regex::Captures<'_>, index| {
+                captures.get(index).map(|found| found.as_str().to_owned())
+            };
+            // Module and address, which normalizing leaves as `0x?`, by
+            // the text before normalizing them away.
+            assert_eq!(field(&our, 1), field(&their, 1), "{}", context());
+            if field(&their, 1).as_deref() != Some(program) {
+                continue;
+            }
+            assert_eq!(field(&our, 2), field(&their, 2), "{}", context());
+            assert_eq!(field(&our, 6), field(&their, 6), "{}", context());
+            let (our_file, their_file) = (field(&our, 5), field(&their, 5));
+            // strace names a file as its debug information does; uscope
+            // resolves it against the compilation's directory.
+            assert!(
+                match (our_file.as_deref(), their_file.as_deref()) {
+                    (Some(our), Some(their)) => our.ends_with(their),
+                    (our, their) => our == their,
+                },
+                "{our_file:?} {their_file:?}: {}",
+                context()
+            );
+        }
+        assert!(frames > 0, "{}", context());
+
+        // The addresses themselves, frame by frame.
+        let (theirs, ours) = both(arguments, mode);
+        let addresses = |trace: &str| {
+            address
+                .captures_iter(trace)
+                .map(|captures| captures[1].to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(addresses(&ours), addresses(&theirs), "with {arguments:?}");
+    }
+}
+
 #[test]
 fn signals_and_compat_calls_trace_as_strace_prints_them() {
     let (theirs, ours) = both(&["-e", "trace=kill,rt_sigaction"], "signal");
@@ -303,11 +501,20 @@ fn the_summary_counts_calls_errors_and_errnos() {
 }
 
 #[test]
-fn ndjson_carries_names_paths_and_errnos() {
+fn ndjson_carries_names_paths_errnos_and_stacks() {
     let directory = ScratchDir::new("syscalls-ndjson");
     let traced = trace(
         directory.path(),
-        &["--format", "ndjson", "-Z", "-e", "trace=openat", "-o", "-"],
+        &[
+            "--format",
+            "ndjson",
+            "-Z",
+            "-k",
+            "-e",
+            "trace=openat",
+            "-o",
+            "-",
+        ],
         "files",
     );
     assert_eq!(traced.status.code(), Some(3));
@@ -325,6 +532,23 @@ fn ndjson_carries_names_paths_and_errnos() {
     assert_eq!(missing["return"], -2);
     assert_eq!(missing["args"]["filename"], "\"missing\"");
     assert!(missing["duration_ns"].is_u64());
+    let frames = missing["stack"].as_array().expect("a stack");
+    let files = frames
+        .iter()
+        .find(|frame| frame["symbol"] == "files")
+        .unwrap_or_else(|| panic!("no frame in files: {frames:?}"));
+    assert_eq!(files["module"], fixture().to_str().expect("path"));
+    assert!(
+        files["address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("0x"))
+    );
+    assert!(
+        files["file"]
+            .as_str()
+            .is_some_and(|file| file.ends_with("syscalls.c"))
+    );
+    assert!(files["line"].is_u64());
     assert!(
         records
             .iter()
@@ -550,31 +774,44 @@ mod bpf {
         normalized(&ids.replace_all(&trace, "$1=ID"))
     }
 
-    /// The fixture's trace in `mode` by each engine, with `arguments`, in
-    /// one directory: the ptrace engine's, then the BPF engine's.
+    /// The fixture's trace in `mode` by `command` with `arguments`, run in
+    /// `directory`: its exit code, its errors, and the trace.
+    fn traced(
+        directory: &Path,
+        mut command: Command,
+        arguments: &[&str],
+        mode: &str,
+    ) -> (Option<i32>, String, String) {
+        let out = directory.join("trace.out");
+        // A launcher that raises capabilities passes on no loader
+        // variables, so no run gets any.
+        let output = command
+            .env_clear()
+            .args(arguments)
+            .arg("-o")
+            .arg(&out)
+            .arg("--")
+            .arg(fixture())
+            .arg(mode)
+            .current_dir(directory)
+            .output()
+            .expect("run uscope");
+        let read = std::fs::read_to_string(&out).unwrap_or_default();
+        (output.status.code(), text(&output.stderr), read)
+    }
+
+    /// The fixture's trace in `mode` by each engine, with `arguments`: the
+    /// ptrace engine's, then the BPF engine's.
     fn engines(arguments: &[&str], mode: &str) -> (String, String) {
         let directory = ScratchDir::new("syscalls-engines");
-        let run = |mut command: Command, name: &str| {
-            let out = directory.path().join(name);
-            // A launcher that raises capabilities passes on no loader
-            // variables, so neither run gets any.
-            let output = command
-                .env_clear()
-                .args(arguments)
-                .arg("-o")
-                .arg(&out)
-                .arg("--")
-                .arg(fixture())
-                .arg(mode)
-                .current_dir(directory.path())
-                .output()
-                .expect("run uscope");
-            let read = std::fs::read_to_string(&out).unwrap_or_default();
-            (output.status.code(), text(&output.stderr), read)
-        };
-        let (ptrace_code, ptrace_errors, ptrace) =
-            run(super::uscope(&["--engine", "ptrace"]), "ptrace.out");
-        let (bpf_code, bpf_errors, bpf) = run(uscope(&[]), "bpf.out");
+        let directory = directory.path();
+        let (ptrace_code, ptrace_errors, ptrace) = traced(
+            directory,
+            super::uscope(&["--engine", "ptrace"]),
+            arguments,
+            mode,
+        );
+        let (bpf_code, bpf_errors, bpf) = traced(directory, uscope(&[]), arguments, mode);
         assert_eq!(
             ptrace_code, bpf_code,
             "exit codes differ: ptrace said {ptrace_errors}, BPF said {bpf_errors}"
@@ -587,13 +824,17 @@ mod bpf {
         // A file's lines begin with the thread's id once there are two.
         let prefix = Regex::new(r"^(\d+) +").expect("regex");
         let mut threads: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut thread = String::new();
         for line in trace.lines() {
-            let thread = prefix
-                .captures(line)
-                .map(|captures| captures[1].to_owned())
-                .unwrap_or_default();
+            // A stack's frames follow their call's line, unprefixed.
+            if !line.starts_with(" > ") {
+                thread = prefix
+                    .captures(line)
+                    .map(|captures| captures[1].to_owned())
+                    .unwrap_or_default();
+            }
             threads
-                .entry(thread)
+                .entry(thread.clone())
                 .or_default()
                 .push(comparable(&prefix.replace(line, "")));
         }
@@ -642,6 +883,72 @@ mod bpf {
             ours.difference(&theirs).collect::<Vec<_>>(),
             theirs.difference(&ours).collect::<Vec<_>>()
         );
+    }
+
+    /// Each call's line and the lines of its stack.
+    fn stacks(trace: &str) -> Vec<(String, Vec<String>)> {
+        let mut calls: Vec<(String, Vec<String>)> = Vec::new();
+        for line in comparable(trace).lines() {
+            match calls.last_mut() {
+                Some((_, frames)) if line.starts_with(" > ") => frames.push(line.to_owned()),
+                _ => calls.push((line.to_owned(), Vec::new())),
+            }
+        }
+        calls
+    }
+
+    /// Copied and unwound by call-frame information, the BPF engine's
+    /// stacks are the ptrace engine's, frame for frame. Walked by frame
+    /// pointers alone, each is the start of the ptrace engine's, and says
+    /// why it ends where it is shorter: never a frame the other lacks.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn the_engines_unwind_stacks_alike() {
+        let arguments = [
+            "-e",
+            "trace=write,read,readv,getppid",
+            "-e",
+            "signal=!SIGCHLD",
+        ];
+        for mode in ["dumps", "family", "signal"] {
+            let directory = ScratchDir::new("syscalls-stacks");
+            let directory = directory.path();
+            let (_, errors, ptrace) = traced(
+                directory,
+                super::uscope(&["--engine", "ptrace", "-kk"]),
+                &arguments,
+                mode,
+            );
+            assert!(ptrace.contains(" > "), "{errors}{ptrace}");
+            let (_, errors, copied) =
+                traced(directory, uscope(&["-k=dwarf", "-k"]), &arguments, mode);
+            let (ours, theirs) = (threads(&copied), threads(&ptrace));
+            assert_eq!(
+                ours,
+                theirs,
+                "copied in {mode}: {errors}\nonly BPF:\n{:#?}\nonly ptrace:\n{:#?}",
+                ours.difference(&theirs).collect::<Vec<_>>(),
+                theirs.difference(&ours).collect::<Vec<_>>()
+            );
+
+            let (_, errors, walked) = traced(directory, uscope(&["-kk"]), &arguments, mode);
+            let (walked, whole) = (stacks(&walked), stacks(&ptrace));
+            assert_eq!(walked.len(), whole.len(), "walked in {mode}: {errors}");
+            for ((call, frames), (whole_call, whole_frames)) in walked.iter().zip(&whole) {
+                assert_eq!(call, whole_call);
+                let named = frames
+                    .iter()
+                    .filter(|frame| !frame.starts_with(" > [stack ends: "))
+                    .count();
+                assert!(
+                    whole_frames.starts_with(&frames[..named])
+                        && (named == whole_frames.len() || frames.len() == named + 1),
+                    "walked in {mode}, {call}:\n{}\n---\n{}",
+                    frames.join("\n"),
+                    whole_frames.join("\n")
+                );
+            }
+        }
     }
 
     /// The kernel counts what `-c` alone shows, which the ptrace engine

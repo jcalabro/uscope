@@ -3,6 +3,7 @@
 //! bytes its engine captured become tokens, which the CLI colors and the
 //! web turns into spans.
 
+pub mod dumps;
 mod names;
 pub mod sets;
 mod structs;
@@ -1115,7 +1116,7 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
             }
             out.punct("} ---");
         }
-        TraceEvent::Exit { end, .. } => {
+        TraceEvent::Exit { end, .. } | TraceEvent::ThreadExit { end, .. } => {
             out.punct("+++ ");
             match end {
                 ProcessEnd::Exited(code) => out.push(Kind::Text, format!("exited with {code}")),

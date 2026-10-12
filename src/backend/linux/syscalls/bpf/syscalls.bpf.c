@@ -28,6 +28,11 @@
 #define MOST_IOVECS 16
 #define MOST_COUNTED 4096
 #define MAX_ERRNO 4095
+// The most frames of the kernel's walk, as perf's default.
+#define STACK_FRAMES 127
+// A stack copy, in chunks that each read or fail whole.
+#define STACK_CHUNK 512
+#define STACK_CHUNKS 16
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -95,6 +100,7 @@ struct scratch {
 		struct exit_record exit;
 		struct signal_record signal;
 		struct file_record file;
+		struct stack_record stack;
 		struct in_flight_record in_flight;
 	};
 };
@@ -575,6 +581,62 @@ static __always_inline void send_file(u32 tid, u32 tgid, s32 fd)
 		lost();
 }
 
+// Sends the stack of the current thread, whose user registers `regs`
+// holds, before the call or signal record that follows: the kernel's
+// walk of its frame pointers, and with CONFIG_STACK_COPY, a copy of its
+// top, as far as it reads.
+static __always_inline void send_stack(void *ctx, u32 tid, u32 tgid, struct pt_regs *regs,
+				       u32 flags)
+{
+	u32 zero = 0;
+	struct scratch *buffer = bpf_map_lookup_elem(&BUFFER, &zero);
+	if (!buffer)
+		return;
+	struct stack_record *record = &buffer->stack;
+	record->header.kind = RECORD_STACK;
+	record->header.tid = tid;
+	record->header.tgid = tgid;
+	record->regs[0] = BPF_CORE_READ(regs, ax);
+	record->regs[1] = BPF_CORE_READ(regs, dx);
+	record->regs[2] = BPF_CORE_READ(regs, cx);
+	record->regs[3] = BPF_CORE_READ(regs, bx);
+	record->regs[4] = BPF_CORE_READ(regs, si);
+	record->regs[5] = BPF_CORE_READ(regs, di);
+	record->regs[6] = BPF_CORE_READ(regs, bp);
+	record->regs[7] = BPF_CORE_READ(regs, sp);
+	record->regs[8] = BPF_CORE_READ(regs, r8);
+	record->regs[9] = BPF_CORE_READ(regs, r9);
+	record->regs[10] = BPF_CORE_READ(regs, r10);
+	record->regs[11] = BPF_CORE_READ(regs, r11);
+	record->regs[12] = BPF_CORE_READ(regs, r12);
+	record->regs[13] = BPF_CORE_READ(regs, r13);
+	record->regs[14] = BPF_CORE_READ(regs, r14);
+	record->regs[15] = BPF_CORE_READ(regs, r15);
+	record->regs[16] = BPF_CORE_READ(regs, ip);
+	long walked = bpf_get_stack(ctx, buffer->data + sizeof(*record), STACK_FRAMES * 8,
+				    BPF_F_USER_STACK);
+	u32 frames = walked > 0 ? (u32)walked / 8 : 0;
+	if (frames > STACK_FRAMES)
+		frames = STACK_FRAMES;
+	record->frames = frames;
+	u32 copied = 0;
+	if (flags & CONFIG_STACK_COPY) {
+		u32 base = sizeof(*record) + bounded(frames * 8, 1023);
+		u64 sp = record->regs[7];
+		for (u32 chunk = 0; chunk < STACK_CHUNKS; chunk++) {
+			if (bpf_probe_read_user(buffer->data + base + chunk * STACK_CHUNK, STACK_CHUNK,
+						(void *)(sp + chunk * STACK_CHUNK)))
+				break;
+			copied += STACK_CHUNK;
+		}
+	}
+	record->copied = copied;
+	u32 size = sizeof(*record) + frames * 8 + copied;
+	record->header.size = size;
+	if (bpf_ringbuf_output(&EVENTS, buffer->data, bounded(size, 16383), 0))
+		lost();
+}
+
 // Describes the descriptors a call made, as its spec says.
 static __always_inline void send_files(u32 tid, u32 tgid, struct call_spec *spec,
 				       struct entry *entry, s64 ret)
@@ -684,6 +746,8 @@ int sys_exit(u64 *ctx)
 	if (settings->flags & CONFIG_STREAM) {
 		if (spec->makes)
 			send_files(tid, tgid, spec, &entry, ret);
+		if (settings->flags & CONFIG_STACKS)
+			send_stack(ctx, tid, tgid, (struct pt_regs *)ctx[0], settings->flags);
 		send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT, ret, now);
 	}
 	return 0;
@@ -757,6 +821,23 @@ int process_exec(u64 *ctx)
 	return 0;
 }
 
+static __always_inline void send_exit(u32 tid, u32 tgid, u64 now, s32 code, u32 last)
+{
+	struct exit_record *record = bpf_ringbuf_reserve(&EVENTS, sizeof(*record), 0);
+	if (!record) {
+		lost();
+		return;
+	}
+	record->header.kind = RECORD_EXIT;
+	record->header.size = sizeof(*record);
+	record->header.tid = tid;
+	record->header.tgid = tgid;
+	record->time = now;
+	record->code = code;
+	record->last = last;
+	bpf_ringbuf_submit(record, 0);
+}
+
 SEC("tp_btf/sched_process_exit")
 int process_exit(u64 *ctx)
 {
@@ -784,23 +865,16 @@ int process_exit(u64 *ctx)
 				send_call(tid, tgid, &entry, RECORD_CALL, READ_EXIT + 1, 0, 0);
 		}
 	}
-	if (BPF_CORE_READ(task, signal, live.counter) != 0)
-		return 0;
-	// The process's last thread.
-	bpf_map_delete_elem(&TARGETS, &tgid);
-	struct exit_record *record = bpf_ringbuf_reserve(&EVENTS, sizeof(*record), 0);
-	if (!record) {
-		lost();
-		return 0;
-	}
-	record->header.kind = RECORD_EXIT;
-	record->header.size = sizeof(*record);
-	record->header.tid = tid;
-	record->header.tgid = tgid;
-	record->time = now;
-	record->code = BPF_CORE_READ(task, exit_code);
-	record->pad = 0;
-	bpf_ringbuf_submit(record, 0);
+	s32 code = BPF_CORE_READ(task, exit_code);
+	u32 last = BPF_CORE_READ(task, signal, live.counter) == 0;
+	if (last)
+		bpf_map_delete_elem(&TARGETS, &tgid);
+	// A thread's own end, as a tracer reaps it; the leader's is its
+	// process's, however early it left.
+	if (tid != tgid && (settings->flags & CONFIG_STREAM))
+		send_exit(tid, tgid, now, code, 0);
+	if (last)
+		send_exit(tid, tgid, now, code, 1);
 	return 0;
 }
 
@@ -814,6 +888,10 @@ int signal_deliver(u64 *ctx)
 	struct config *settings = config();
 	if (!settings || !(settings->flags & CONFIG_STREAM))
 		return 0;
+	if (settings->flags & CONFIG_STACKS) {
+		struct pt_regs *regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
+		send_stack(ctx, (u32)ids, tgid, regs, settings->flags);
+	}
 	struct signal_record *record = bpf_ringbuf_reserve(&EVENTS, sizeof(*record), 0);
 	if (!record) {
 		lost();

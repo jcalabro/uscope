@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, LineWriter, Write};
 use std::path::PathBuf;
@@ -15,13 +16,16 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value, json};
 use uscope::syscall_engines::bpf::{self, BpfOptions};
 use uscope::syscall_engines::ptrace;
+use uscope::syscall_engines::stacks::{Frame, SharedStacks};
 use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
 use uscope::syscalls::StatusSet;
 use uscope::syscalls::captures::Limits;
 use uscope::syscalls::fds::FdTable;
 use uscope::syscalls::filter::{self, Filter};
 use uscope::syscalls::stats::{Folded, SyscallStats, bytes_moved};
-use uscope::syscalls::{Abi, InFlight, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent};
+use uscope::syscalls::{
+    Abi, CallStack, InFlight, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent,
+};
 
 use super::Renderers;
 use super::terminal::{ColorChoice, Renderer, Role};
@@ -137,9 +141,21 @@ pub struct SyscallsArgs {
     /// Print the time each call took.
     #[arg(short = 'T')]
     durations: bool,
-    /// Print the stack of each call.
-    #[arg(short = 'k', action = clap::ArgAction::Count)]
-    stacks: u8,
+    /// Print the stack of each call; -kk adds source lines. -k=dwarf has
+    /// the BPF engine copy the stack and unwind it by call-frame
+    /// information, rather than walk its frame pointers.
+    #[arg(
+        short = 'k',
+        value_name = "UNWIND",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "fp",
+        action = clap::ArgAction::Append
+    )]
+    stacks: Vec<String>,
+    /// The most frames of a stack -k prints.
+    #[arg(long, value_name = "LIMIT", default_value_t = 256)]
+    stack_trace_frame_limit: usize,
     /// Write the trace to FILE; `-` is standard output.
     #[arg(short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
@@ -266,6 +282,24 @@ fn pids(texts: &[String]) -> Result<Vec<u32>> {
     Ok(pids)
 }
 
+/// A frame as strace's -k prints it: the module, the symbol and the
+/// offset from it, and the address within the module.
+fn frame_text(frame: &Frame) -> String {
+    match (&frame.module, &frame.symbol) {
+        (Some(module), Some((symbol, offset))) => {
+            format!(
+                "{module}({symbol}+{offset:#x}) [{:#x}]",
+                frame.image_address
+            )
+        }
+        (Some(module), None) => format!("{module}() [{:#x}]", frame.image_address),
+        (None, _) => format!("[unmapped] [{:#x}]", frame.address),
+    }
+}
+
+/// The calls that end a thread or its process.
+const ENDING: [&str; 2] = ["exit", "exit_group"];
+
 /// Everything the flags decide, checked.
 struct Plan {
     filter: Filter,
@@ -276,6 +310,42 @@ struct Plan {
     in_flight: Option<u64>,
     columns: Vec<Column>,
     sort: Option<Column>,
+    stacks: Option<Stacks>,
+}
+
+/// What -k asked for.
+#[derive(Debug, Clone, Copy)]
+struct Stacks {
+    /// Unwind a copy of the stack by call-frame information, rather than
+    /// walk the frame pointers; the ptrace engine always does.
+    dwarf: bool,
+    /// Name each frame's source line, as -kk does.
+    lines: bool,
+}
+
+/// What -k asks for: given as -k, -kk, or -k=dwarf.
+fn stacks(args: &SyscallsArgs) -> Result<Option<Stacks>> {
+    let given: Vec<&str> = args.stacks.iter().map(String::as_str).collect();
+    if given.is_empty() {
+        return Ok(None);
+    }
+    if !given
+        .iter()
+        .all(|&unwind| unwind == "fp" || unwind == "dwarf")
+    {
+        bail!("-k takes nothing, or =dwarf");
+    }
+    let dwarf = given.contains(&"dwarf");
+    if dwarf && args.engine == EngineArg::Ptrace {
+        bail!(
+            "-k=dwarf needs the BPF engine; the ptrace engine always unwinds by call-frame \
+             information"
+        );
+    }
+    Ok(Some(Stacks {
+        dwarf,
+        lines: given.len() > 1,
+    }))
 }
 
 fn plan(args: &SyscallsArgs) -> Result<Plan> {
@@ -351,9 +421,8 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
              Pass --stop-every-call to accept that, or use --engine bpf"
         );
     }
-    if args.stacks > 0 {
-        bail!("-k is not supported yet");
-    }
+    let stacks = stacks(args)?;
+
     let target = if launching {
         let mut command = Command::new(&args.command[0]);
         command.args(&args.command[1..]);
@@ -372,6 +441,7 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
         in_flight,
         columns,
         sort,
+        stacks,
     })
 }
 
@@ -402,16 +472,33 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             calls.insert(id);
         }
     }
+    // -n numbers a process's exit line with the call that ended it.
+    if args.numbers {
+        for abi in Abi::ALL {
+            for name in ENDING {
+                if let Some(id) = SyscallId::named(abi, name) {
+                    calls.insert(id);
+                }
+            }
+        }
+    }
     let options = TraceOptions {
         calls,
         limits: Limits {
             string: args.string_limit.max(1),
+            dump: if plan.filter.read_dumps.is_empty() && plan.filter.write_dumps.is_empty() {
+                0
+            } else {
+                uscope::syscalls::captures::MOST_BYTES
+            },
             ..Limits::default()
         },
         verbose: args.verbose,
         follow: plan.follow,
+        stacks: plan.stacks.map(|_| SharedStacks::default()),
     };
     let mut printer = Printer::new(args, &plan)?;
+    printer.stacks.clone_from(&options.stacks);
     for &pid in &plan.attached {
         printer.processes.insert(pid);
     }
@@ -430,6 +517,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             let engine = BpfOptions {
                 count_only,
                 ring: ring.unwrap_or(bpf::DEFAULT_RING),
+                stack_copy: plan.stacks.is_some_and(|stacks| stacks.dwarf),
             };
             bpf::trace(target, &options, engine, &stop, &mut printer).map_err(anyhow::Error::from)
         }
@@ -494,6 +582,10 @@ struct Printer {
     processes: BTreeSet<u32>,
     ended: BTreeSet<u32>,
     names: BTreeMap<u32, String>,
+    /// The number of the call that ended each process, and each thread,
+    /// when one did.
+    endings: BTreeMap<u32, u32>,
+    thread_endings: BTreeMap<u32, u32>,
     /// In-flight calls already reported, by thread and entry time.
     reported: BTreeSet<(u32, u64)>,
     /// Each thread's last ABI, where it is not x86-64's.
@@ -501,6 +593,11 @@ struct Printer {
     error: Option<io::Error>,
     /// The ndjson line of a call being written.
     line: Vec<u8>,
+    /// Names the frames of each call's stack, with -k.
+    stacks: Option<SharedStacks>,
+    /// With -kk, each frame's source line too.
+    stack_lines: bool,
+    frame_limit: usize,
 }
 
 /// Writes a file on a thread of its own, so that the thread reading the
@@ -631,6 +728,8 @@ struct CallRecord {
     pid: u32,
     process_exited: bool,
     ret: Option<i64>,
+    /// The stack, already JSON: an array of frames.
+    stack: Option<String>,
     text: String,
     tid: u32,
     time_ns: i64,
@@ -675,6 +774,11 @@ impl CallRecord {
         }
         if let Some(ret) = self.ret {
             json_number(out, b"\"return\":", ret);
+        }
+        if let Some(stack) = &self.stack {
+            out.extend_from_slice(b"\"stack\":");
+            out.extend_from_slice(stack.as_bytes());
+            out.push(b',');
         }
         json_field(out, b"\"text\":", &self.text);
         json_number(out, b"\"tid\":", self.tid.into());
@@ -791,6 +895,44 @@ fn zone_offset(seconds: i64) -> i64 {
     }
 }
 
+/// How a thread or process ended, as ndjson writes it.
+fn insert_end(object: &mut Map<String, Value>, end: ProcessEnd) {
+    match end {
+        ProcessEnd::Exited(code) => {
+            object.insert("code".into(), code.into());
+        }
+        ProcessEnd::Killed { signal, core } => {
+            object.insert("signal".into(), present::signal(signal).into());
+            object.insert("core".into(), core.into());
+        }
+    }
+}
+
+/// How the flags say calls print.
+const fn style(args: &SyscallsArgs) -> Style {
+    Style {
+        string_limit: args.string_limit,
+        hex: match args.hex {
+            0 => Hex::Never,
+            1 => Hex::NonAscii,
+            _ => Hex::All,
+        },
+        constants: match args.constants {
+            None | Some(ConstantsArg::Abbrev) => Constants::Abbrev,
+            Some(ConstantsArg::Raw) => Constants::Raw,
+            Some(ConstantsArg::Verbose) => Constants::Verbose,
+        },
+        verbose: args.verbose,
+        fds: match args.decode_fds {
+            0 => FdStyle::Number,
+            1 => FdStyle::Paths,
+            _ => FdStyle::All,
+        },
+        arg_names: args.arg_names,
+        raw: false,
+    }
+}
+
 impl Printer {
     fn new(args: &SyscallsArgs, plan: &Plan) -> Result<Self> {
         let open = |path: &std::path::Path| -> Result<File> {
@@ -835,27 +977,7 @@ impl Printer {
         Ok(Self {
             filter: plan.filter.clone(),
             format: args.format,
-            style: Style {
-                string_limit: args.string_limit,
-                hex: match args.hex {
-                    0 => Hex::Never,
-                    1 => Hex::NonAscii,
-                    _ => Hex::All,
-                },
-                constants: match args.constants {
-                    None | Some(ConstantsArg::Abbrev) => Constants::Abbrev,
-                    Some(ConstantsArg::Raw) => Constants::Raw,
-                    Some(ConstantsArg::Verbose) => Constants::Verbose,
-                },
-                verbose: args.verbose,
-                fds: match args.decode_fds {
-                    0 => FdStyle::Number,
-                    1 => FdStyle::Paths,
-                    _ => FdStyle::All,
-                },
-                arg_names: args.arg_names,
-                raw: false,
-            },
+            style: style(args),
             renderer,
             output,
             bare_pid: to_file.is_some() && plan.follow,
@@ -890,10 +1012,15 @@ impl Printer {
             processes: BTreeSet::new(),
             ended: BTreeSet::new(),
             names: BTreeMap::new(),
+            endings: BTreeMap::new(),
+            thread_endings: BTreeMap::new(),
             reported: BTreeSet::new(),
             personalities: BTreeMap::new(),
             error: None,
             line: Vec::new(),
+            stacks: None,
+            stack_lines: plan.stacks.is_some_and(|stacks| stacks.lines),
+            frame_limit: args.stack_trace_frame_limit,
         })
     }
 
@@ -912,13 +1039,25 @@ impl Printer {
         self.write_bytes(process, line.as_bytes());
     }
 
-    fn write_bytes(&mut self, process: u32, line: &[u8]) {
+    /// Writes a line of one thread's, which -ff writes to the thread's own
+    /// file, as strace does.
+    fn write_thread(&mut self, process: u32, thread: u32, line: &str) {
+        let file = if self.per_process.is_some() && thread != 0 {
+            thread
+        } else {
+            process
+        };
+        self.write_bytes(file, line.as_bytes());
+    }
+
+    /// Writes a line to the trace, or with -ff to `file`'s.
+    fn write_bytes(&mut self, file: u32, line: &[u8]) {
         let output = match &mut self.per_process {
-            Some((path, outputs)) => match outputs.entry(process) {
+            Some((path, outputs)) => match outputs.entry(file) {
                 std::collections::btree_map::Entry::Occupied(entry) => Some(entry.into_mut()),
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     let mut name = path.clone().into_os_string();
-                    name.push(format!(".{process}"));
+                    name.push(format!(".{file}"));
                     match File::create(&name) {
                         Ok(file) => Some(entry.insert(Box::new(Background::new(file)))),
                         Err(error) => {
@@ -1040,6 +1179,10 @@ impl Printer {
         if !self.follow && !self.processes.is_empty() && !self.processes.contains(&event.process) {
             return;
         }
+        if event.call.name().is_some_and(|name| ENDING.contains(&name)) {
+            self.endings.insert(event.process, event.call.number);
+            self.thread_endings.insert(event.thread, event.call.number);
+        }
         let paths = filter::paths(event);
         let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         let fds = &self.fds;
@@ -1097,28 +1240,7 @@ impl Printer {
         );
         self.personality(event);
         match self.format {
-            OutputFormat::Text => {
-                let mut line = self.leader(
-                    event.thread,
-                    event.process,
-                    event.time(),
-                    Some(event.call.number),
-                );
-                line.0.extend(entry.0);
-                let width = line.text().len();
-                // strace pads so that ` = ` begins at the column.
-                if width + 1 < self.column {
-                    line.push(Kind::Punctuation, " ".repeat(self.column - 1 - width));
-                }
-                line.0.extend(returned.0);
-                if self.durations
-                    && let Some(duration) = event.duration()
-                {
-                    line.push(Kind::Time, format!(" <{}>", present::seconds(duration)));
-                }
-                let text = self.paint(&line);
-                self.write(event.process, &text);
-            }
+            OutputFormat::Text => self.text(event, entry, returned),
             OutputFormat::Ndjson => {
                 let mut text = String::with_capacity(entry.text_len() + returned.text_len());
                 entry.append_to(&mut text);
@@ -1129,6 +1251,122 @@ impl Printer {
                 record.write(&mut line);
                 self.write_bytes(event.process, &line);
                 self.line = line;
+            }
+        }
+    }
+
+    /// A stack as ndjson writes it: each frame's module, its address there,
+    /// symbol, offset, and source line, and last, why it ends short.
+    fn stack_json(&self, process: u32, stack: &CallStack) -> Value {
+        let Some(stacks) = &self.stacks else {
+            return Value::Null;
+        };
+        let frames = stacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .frames(process, &stack.addresses);
+        let mut array: Vec<Value> = frames
+            .iter()
+            .map(|frame| {
+                let mut object = Map::new();
+                object.insert(
+                    "address".into(),
+                    format!("{:#x}", frame.image_address).into(),
+                );
+                if let Some(module) = &frame.module {
+                    object.insert("module".into(), module.as_ref().into());
+                }
+                if let Some((symbol, offset)) = &frame.symbol {
+                    object.insert("symbol".into(), symbol.as_ref().into());
+                    object.insert("offset".into(), (*offset).into());
+                }
+                if let Some((file, line)) = &frame.source {
+                    object.insert("file".into(), file.as_str().into());
+                    object.insert("line".into(), (*line).into());
+                }
+                Value::Object(object)
+            })
+            .collect();
+        if let Some(reason) = stack.truncation() {
+            array.push(json!({ "ends": reason.describe() }));
+        }
+        Value::Array(array)
+    }
+
+    /// The lines naming the frames of a call's stack, up to the limit, and
+    /// why it ends short, if it does.
+    fn stack_lines(&self, process: u32, stack: &CallStack) -> Vec<String> {
+        let Some(stacks) = &self.stacks else {
+            return Vec::new();
+        };
+        let addresses = &stack.addresses[..stack.addresses.len().min(self.frame_limit)];
+        let frames = stacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .frames(process, addresses);
+        let mut lines: Vec<String> = frames
+            .iter()
+            .map(|frame| {
+                let mut line = format!(" > {}", frame_text(frame));
+                if self.stack_lines
+                    && let Some((file, number)) = &frame.source
+                {
+                    let _ = write!(line, " {file}:{number}");
+                }
+                line
+            })
+            .collect();
+        if addresses.len() < stack.addresses.len() {
+            lines.push(format!(
+                " > ... {} more frames",
+                stack.addresses.len() - addresses.len()
+            ));
+        } else if let Some(reason) = stack.truncation() {
+            lines.push(format!(" > [stack ends: {}]", reason.describe()));
+        }
+        lines
+    }
+
+    /// Dumps what a call read or wrote through a descriptor `-e read=` or
+    /// `-e write=` names.
+    fn dump(&mut self, event: &SyscallEvent) {
+        let Some((fd, direction)) = present::dumps::moves(event) else {
+            return;
+        };
+        let dumps = match direction {
+            present::dumps::Direction::Read => &self.filter.read_dumps,
+            present::dumps::Direction::Write => &self.filter.write_dumps,
+        };
+        if !dumps.contains(&fd) {
+            return;
+        }
+        for line in present::dumps::dump(event) {
+            self.write_thread(event.process, event.thread, &line);
+        }
+    }
+
+    /// A call's line as strace writes it, with its dumps and stack.
+    fn text(&mut self, event: &SyscallEvent, entry: Tokens, returned: Tokens) {
+        let (thread, process) = (event.thread, event.process);
+        let mut line = self.leader(thread, process, event.time(), Some(event.call.number));
+        line.0.extend(entry.0);
+        let width = line.text().len();
+        // strace pads so that ` = ` begins at the column.
+        if width + 1 < self.column {
+            line.push(Kind::Punctuation, " ".repeat(self.column - 1 - width));
+        }
+        line.0.extend(returned.0);
+        if self.durations
+            && let Some(duration) = event.duration()
+        {
+            line.push(Kind::Time, format!(" <{}>", present::seconds(duration)));
+        }
+        let text = self.paint(&line);
+        self.write_thread(process, thread, &text);
+        self.dump(event);
+        if let Some(stack) = &event.stack {
+            for line in self.stack_lines(process, stack) {
+                self.write_thread(process, thread, &line);
             }
         }
     }
@@ -1194,6 +1432,10 @@ impl Printer {
             pid: event.process,
             process_exited: event.outcome == Outcome::ProcessExited,
             ret,
+            stack: event
+                .stack
+                .as_ref()
+                .map(|stack| self.stack_json(event.process, stack).to_string()),
             text,
             tid: event.thread,
             time_ns: i64::try_from(wall).unwrap_or(0),
@@ -1239,6 +1481,14 @@ impl Printer {
                 }
                 (process, process)
             }
+            TraceEvent::ThreadExit {
+                thread, process, ..
+            } => {
+                if self.quiet >= 2 {
+                    return;
+                }
+                (thread, process)
+            }
             TraceEvent::Lost { .. } => (0, 0),
             _ => return,
         };
@@ -1253,56 +1503,79 @@ impl Printer {
                 let Some(tokens) = present::other(event) else {
                     return;
                 };
-                let mut line = self.leader(thread, process, event.time(), None);
+                let number = match event {
+                    TraceEvent::Exit { process, .. } => self.endings.get(process).copied(),
+                    TraceEvent::ThreadExit { thread, .. } => {
+                        self.thread_endings.get(thread).copied()
+                    }
+                    _ => None,
+                };
+                let mut line = self.leader(thread, process, event.time(), number);
                 line.0.extend(tokens.0);
                 let text = self.paint(&line);
-                self.write(process, &text);
+                self.write_thread(process, thread, &text);
+                if let TraceEvent::Signal {
+                    stack: Some(stack), ..
+                } = event
+                {
+                    for line in self.stack_lines(process, stack) {
+                        self.write_thread(process, thread, &line);
+                    }
+                }
             }
             OutputFormat::Ndjson => {
-                let object = match *event {
-                    TraceEvent::Signal {
-                        thread,
-                        process,
-                        time,
-                        signal,
-                        code,
-                        sender,
-                        ..
-                    } => {
-                        let mut object = self.base("signal", time, Some(thread), process);
-                        object.insert("signal".into(), present::signal(signal).into());
-                        if let Some(code) = code {
-                            object.insert("code".into(), code.into());
-                        }
-                        if let Some(sender) = sender {
-                            object.insert("sender".into(), sender.into());
-                        }
-                        object
-                    }
-                    TraceEvent::Exit { process, time, end } => {
-                        let mut object = self.base("exit", time, None, process);
-                        match end {
-                            ProcessEnd::Exited(code) => {
-                                object.insert("code".into(), code.into());
-                            }
-                            ProcessEnd::Killed { signal, core } => {
-                                object.insert("signal".into(), present::signal(signal).into());
-                                object.insert("core".into(), core.into());
-                            }
-                        }
-                        object
-                    }
-                    TraceEvent::Lost { time, count } => {
-                        let mut object = self.base("lost", time, None, 0);
-                        object.remove("pid");
-                        object.insert("count".into(), count.into());
-                        object
-                    }
-                    _ => return,
-                };
-                self.json(process, object);
+                if let Some(object) = self.other_json(event) {
+                    self.json(process, object);
+                }
             }
         }
+    }
+
+    /// A signal, exit, or loss as ndjson writes it.
+    fn other_json(&self, event: &TraceEvent) -> Option<Map<String, Value>> {
+        Some(match *event {
+            TraceEvent::Signal {
+                thread,
+                process,
+                time,
+                signal,
+                code,
+                sender,
+                ..
+            } => {
+                let mut object = self.base("signal", time, Some(thread), process);
+                object.insert("signal".into(), present::signal(signal).into());
+                if let Some(code) = code {
+                    object.insert("code".into(), code.into());
+                }
+                if let Some(sender) = sender {
+                    object.insert("sender".into(), sender.into());
+                }
+                object
+            }
+            TraceEvent::ThreadExit {
+                thread,
+                process,
+                time,
+                end,
+            } => {
+                let mut object = self.base("thread_exit", time, Some(thread), process);
+                insert_end(&mut object, end);
+                object
+            }
+            TraceEvent::Exit { process, time, end } => {
+                let mut object = self.base("exit", time, None, process);
+                insert_end(&mut object, end);
+                object
+            }
+            TraceEvent::Lost { time, count } => {
+                let mut object = self.base("lost", time, None, 0);
+                object.remove("pid");
+                object.insert("count".into(), count.into());
+                object
+            }
+            _ => return None,
+        })
     }
 
     /// Prints the table and flushes every output.
@@ -1435,7 +1708,9 @@ impl Sink for Printer {
             TraceEvent::Signal {
                 thread, process, ..
             } => self.note_thread(*thread, *process),
-            TraceEvent::Lost { .. } | TraceEvent::Descriptor { .. } => {}
+            TraceEvent::ThreadExit { .. }
+            | TraceEvent::Lost { .. }
+            | TraceEvent::Descriptor { .. } => {}
         }
         self.other(&event);
         self.fds.apply(&event);
@@ -1586,6 +1861,7 @@ mod tests {
             pid: 10,
             process_exited: true,
             ret: Some(-2),
+            stack: Some(json!([{"module": tricky}]).to_string()),
             text: tricky.into(),
             tid: 11,
             time_ns: -5,
@@ -1605,6 +1881,7 @@ mod tests {
             "pid": 10,
             "process_exited": true,
             "return": -2,
+            "stack": [{"module": tricky}],
             "text": tricky,
             "tid": 11,
             "time_ns": -5,
@@ -1624,6 +1901,7 @@ mod tests {
             pid: 1,
             process_exited: false,
             ret: None,
+            stack: None,
             text: "getppid()".into(),
             tid: 1,
             time_ns: 0,

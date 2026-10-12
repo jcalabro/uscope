@@ -211,6 +211,25 @@ impl EventFlags {
     }
 }
 
+/// The stack of the thread that made a call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallStack {
+    /// The instruction after the call's, then each return address,
+    /// innermost first.
+    pub addresses: Arc<[u64]>,
+    /// Why it ends short of its outermost frame, as a
+    /// [`Truncation`](crate::capture::records::Truncation)'s number.
+    pub truncated: Option<u8>,
+}
+
+impl CallStack {
+    /// Why the stack ends short of its outermost frame, if it does.
+    #[must_use]
+    pub fn truncation(&self) -> Option<crate::capture::records::Truncation> {
+        crate::capture::records::Truncation::from_number(self.truncated?.into())
+    }
+}
+
 /// One system call one thread made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyscallEvent {
@@ -228,9 +247,8 @@ pub struct SyscallEvent {
     pub entered: Option<u64>,
     /// `CLOCK_MONOTONIC` nanoseconds at exit, when it was seen.
     pub exited: Option<u64>,
-    /// Return addresses in the thread's user stack, innermost first, when
-    /// stacks were asked for.
-    pub stack: Option<Arc<[u64]>>,
+    /// The thread's user stack, when stacks were asked for.
+    pub stack: Option<CallStack>,
     pub flags: EventFlags,
 }
 
@@ -277,6 +295,9 @@ pub enum TraceEvent {
         sender: Option<u32>,
         /// The whole `siginfo_t`, when the engine read it.
         info: Option<Arc<[u8]>>,
+        /// The thread's stack where the signal found it, when stacks were
+        /// asked for.
+        stack: Option<CallStack>,
     },
     /// A thread created a process or a thread.
     Spawn {
@@ -296,6 +317,14 @@ pub enum TraceEvent {
     },
     /// A process ended.
     Exit {
+        process: u32,
+        time: u64,
+        end: ProcessEnd,
+    },
+    /// A thread other than its process's leader ended, which only the
+    /// ptrace engine reports.
+    ThreadExit {
+        thread: u32,
         process: u32,
         time: u64,
         end: ProcessEnd,
@@ -345,6 +374,7 @@ impl TraceEvent {
             | Self::Spawn { time, .. }
             | Self::Exec { time, .. }
             | Self::Exit { time, .. }
+            | Self::ThreadExit { time, .. }
             | Self::Lost { time, .. }
             | Self::Descriptor { time, .. } => *time,
         }

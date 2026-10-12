@@ -6,6 +6,7 @@ pub mod info;
 pub mod launch;
 pub mod ptrace;
 pub mod seccomp;
+pub mod stacks;
 
 use crate::syscalls::stats::Folded;
 use crate::syscalls::{InFlight, TraceEvent};

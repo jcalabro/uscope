@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -94,6 +95,31 @@ static void compat(void) {
     __asm__ volatile("syscall" : "=a"(result) : "a"(0x40000000L | 39) : "rcx", "r11", "memory");
 }
 
+static void dumps(void) {
+    // Data through a pipe, written whole and in parts, read whole and in
+    // parts, for -e read= and -e write= to dump.
+    int pipes[2];
+    if (pipe(pipes) != 0) {
+        _exit(15);
+    }
+    static const char text[] = "a dump of\tforty-odd bytes\x01\x02 over three lines\n";
+    if (write(pipes[1], text, sizeof text - 1) != sizeof text - 1) {
+        _exit(16);
+    }
+    char buffer[64];
+    if (read(pipes[0], buffer, sizeof buffer) != sizeof text - 1) {
+        _exit(17);
+    }
+    struct iovec parts[2] = {{(void *)"two ", 4}, {(void *)"parts\n", 6}};
+    if (writev(pipes[1], parts, 2) != 10) {
+        _exit(18);
+    }
+    struct iovec into[2] = {{buffer, 3}, {buffer + 3, 61}};
+    if (readv(pipes[0], into, 2) != 10) {
+        _exit(19);
+    }
+}
+
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "files";
     if (strcmp(mode, "files") == 0) {
@@ -114,6 +140,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "compat") == 0) {
         compat();
+        return 0;
+    }
+    if (strcmp(mode, "dumps") == 0) {
+        dumps();
         return 0;
     }
     return 2;

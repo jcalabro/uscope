@@ -23,6 +23,8 @@ enum record_kind {
 	RECORD_SIGNAL = 6,
 	// What a descriptor the call that follows made refers to.
 	RECORD_FILE = 7,
+	// The stack of the thread whose call or signal follows.
+	RECORD_STACK = 8,
 };
 
 // Which descriptors a call makes, from call_spec.makes.
@@ -42,6 +44,11 @@ enum config_flags {
 	// Leave out calls whose entry was not seen: a launched program's are
 	// uscope's own, made before it executes.
 	CONFIG_SKIP_UNSEEN = 8,
+	// Send each call's and signal's stack: the kernel's walk of its
+	// frame pointers.
+	CONFIG_STACKS = 16,
+	// With each stack, a copy of its top, for uscope to unwind.
+	CONFIG_STACK_COPY = 32,
 };
 
 // Bits of call_record.flags, as EventFlags.
@@ -192,12 +199,14 @@ struct exec_record {
 	u32 len;
 };
 
+// A thread's end, and when it was the last, its process's.
 struct exit_record {
 	struct record header;
 	u64 time;
 	// The exit code as wait(2) encodes it.
 	s32 code;
-	u32 pad;
+	// Whether the process ended with the thread.
+	u32 last;
 };
 
 struct signal_record {
@@ -207,6 +216,17 @@ struct signal_record {
 	u32 pad;
 	// The kernel's siginfo, as much as every kind of signal fills.
 	u8 info[48];
+};
+
+// Followed by `frames` addresses, the kernel's walk of the frame pointers
+// from the instruction, then `copied` bytes of the stack from its pointer.
+struct stack_record {
+	struct record header;
+	u32 frames;
+	u32 copied;
+	// The user registers by DWARF number: ax, dx, cx, bx, si, di, bp, sp,
+	// r8 to r15, and the instruction pointer.
+	u64 regs[17];
 };
 
 // Followed by the dentry's name, `len` bytes.

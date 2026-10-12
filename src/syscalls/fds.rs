@@ -333,7 +333,9 @@ impl FdTable {
                 made,
                 ..
             } => self.descriptor(*process, *fd, text, *cloexec, *device, *made),
-            TraceEvent::Spawn { .. } | TraceEvent::Signal { .. } => {}
+            TraceEvent::Spawn { .. }
+            | TraceEvent::Signal { .. }
+            | TraceEvent::ThreadExit { .. } => {}
         }
     }
 

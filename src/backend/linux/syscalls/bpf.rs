@@ -22,6 +22,7 @@ use aya::programs::{BtfTracePoint, Iter};
 use aya::{Btf, Ebpf, EbpfLoader};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+use super::super::perf;
 use super::Sink;
 use super::launch::{self, Gate, GateOptions};
 use super::ptrace::{Finished, Target, TraceOptions, monotonic, seed_descriptors};
@@ -29,9 +30,10 @@ use crate::syscalls::captures::{self, CopyKind};
 use crate::syscalls::specs::{self, Arg, Count, MemKind, Ret, Struct};
 use crate::syscalls::stats::{self, BUCKETS, Folded};
 use crate::syscalls::{
-    Abi, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt,
-    SyscallEvent, SyscallId, SyscallStats, TraceEvent,
+    Abi, CallStack, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, ProcessEnd,
+    ReadAt, SyscallEvent, SyscallId, SyscallStats, TraceEvent,
 };
+use crate::unwind::sample::SampledState;
 
 /// The programs, as `build.rs` compiled them.
 static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/syscalls.bpf.o"));
@@ -53,6 +55,7 @@ const RECORD_EXEC: u32 = 4;
 const RECORD_EXIT: u32 = 5;
 const RECORD_SIGNAL: u32 = 6;
 const RECORD_FILE: u32 = 7;
+const RECORD_STACK: u32 = 8;
 
 const MAKES_RESULT: u8 = 1;
 const MAKES_PAIR: u8 = 2;
@@ -68,6 +71,8 @@ const CONFIG_STREAM: u32 = 1;
 const CONFIG_COUNT: u32 = 2;
 const CONFIG_FOLLOW: u32 = 4;
 const CONFIG_SKIP_UNSEEN: u32 = 8;
+const CONFIG_STACKS: u32 = 16;
+const CONFIG_STACK_COPY: u32 = 32;
 
 const CALL_PROCESS_EXITED: u8 = 8;
 /// The flags a call record shares with [`EventFlags`].
@@ -226,7 +231,7 @@ pub struct RawExitRecord {
     pub header: RawRecord,
     pub time: u64,
     pub code: i32,
-    pub pad: u32,
+    pub last: u32,
 }
 
 /// `struct signal_record`.
@@ -255,6 +260,17 @@ pub struct RawFileRecord {
     pub len: u32,
     pub cloexec: u32,
     pub pad: u32,
+}
+
+/// `struct stack_record`, which the kernel's walk and the stack's copy
+/// follow.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct RawStackRecord {
+    pub header: RawRecord,
+    pub frames: u32,
+    pub copied: u32,
+    pub regs: [u64; 17],
 }
 
 /// `struct stat_value`.
@@ -431,6 +447,21 @@ pub enum Record {
     /// The arguments a call read at its entry; its exit follows.
     Entry(SyscallEvent),
     Event(TraceEvent),
+    /// The stack of the thread whose call or signal follows.
+    Stack(SampledStack),
+}
+
+/// A thread's stack as the kernel saw it, to unwind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampledStack {
+    pub thread: u32,
+    pub process: u32,
+    /// The user registers by DWARF number.
+    pub registers: [(u16, u64); 17],
+    /// The kernel's walk of the frame pointers, the instruction first.
+    pub chain: Vec<u64>,
+    /// The stack's bytes from its pointer up, if copied.
+    pub copy: Vec<u8>,
 }
 
 /// Why a record could not be decoded.
@@ -503,10 +534,19 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
         }
         RECORD_EXIT => {
             let raw: RawExitRecord = read(bytes)?;
-            Ok(Record::Event(TraceEvent::Exit {
-                process: header.tgid,
-                time: raw.time,
-                end: process_end(raw.code),
+            Ok(Record::Event(if raw.last == 0 {
+                TraceEvent::ThreadExit {
+                    thread: header.tid,
+                    process: header.tgid,
+                    time: raw.time,
+                    end: process_end(raw.code),
+                }
+            } else {
+                TraceEvent::Exit {
+                    process: header.tgid,
+                    time: raw.time,
+                    end: process_end(raw.code),
+                }
             }))
         }
         RECORD_SIGNAL => {
@@ -529,8 +569,10 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
                 code: Some(code),
                 sender,
                 info: Some(Arc::from(&info[..])),
+                stack: None,
             }))
         }
+        RECORD_STACK => stack_record(header, bytes),
         RECORD_FILE => {
             let raw: RawFileRecord = read(bytes)?;
             let start = size_of::<RawFileRecord>();
@@ -541,6 +583,33 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
         }
         kind => Err(DecodeError::Kind(kind)),
     }
+}
+
+/// A stack record and the walk and copy that follow it.
+fn stack_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
+    let raw: RawStackRecord = read(bytes)?;
+    let start = size_of::<RawStackRecord>();
+    let chain_end = start + raw.frames as usize * 8;
+    let chain = bytes
+        .get(start..chain_end)
+        .ok_or(DecodeError::Short(bytes.len()))?;
+    let copy = bytes
+        .get(chain_end..chain_end + raw.copied as usize)
+        .ok_or(DecodeError::Short(bytes.len()))?;
+    #[expect(clippy::cast_possible_truncation, reason = "seventeen registers")]
+    let registers = std::array::from_fn(|index| (index as u16, raw.regs[index]));
+    Ok(Record::Stack(SampledStack {
+        thread: header.tid,
+        process: header.tgid,
+        registers,
+        chain: chain
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| u64::from_le_bytes(*word))
+            .collect(),
+        copy: copy.to_vec(),
+    }))
 }
 
 /// A call record and the captures that follow it.
@@ -686,6 +755,8 @@ pub enum BpfError {
     Load(String),
     #[error("tracing failed: {0}")]
     System(#[from] nix::errno::Errno),
+    #[error("following what the program maps, for its stacks, failed: {0}")]
+    Mappings(#[source] super::super::perf::OpenError),
 }
 
 /// What to do if the engine is missing a privilege.
@@ -810,6 +881,9 @@ pub struct BpfOptions {
     pub count_only: bool,
     /// The ring buffer's bytes: a power of two, in pages.
     pub ring: u32,
+    /// With stacks, copy each stack's top to unwind by call-frame
+    /// information, rather than trust the kernel's walk alone.
+    pub stack_copy: bool,
 }
 
 impl Default for BpfOptions {
@@ -817,6 +891,7 @@ impl Default for BpfOptions {
         Self {
             count_only: false,
             ring: DEFAULT_RING,
+            stack_copy: false,
         }
     }
 }
@@ -879,6 +954,12 @@ impl Loaded {
             }
             if launch {
                 flags |= CONFIG_SKIP_UNSEEN;
+            }
+            if options.stacks.is_some() {
+                flags |= CONFIG_STACKS;
+                if engine.stack_copy {
+                    flags |= CONFIG_STACK_COPY;
+                }
             }
             let raw = RawConfig {
                 flags,
@@ -1076,6 +1157,7 @@ pub fn trace(
     let mut loaded = Loaded::load(options, engine, matches!(target, Target::Launch(_)))?;
     let mut gate: Option<Gate> = None;
     let mut live = BTreeSet::new();
+    let mut mappings = Vec::new();
     let first = match target {
         Target::Launch(command) => {
             let mut launched = launch::launch(
@@ -1088,6 +1170,10 @@ pub fn trace(
             .map_err(BpfError::Spawn)?;
             let pid = launched.pid;
             loaded.target(pid)?;
+            if options.stacks.is_some() {
+                // Enabled as it executes, as the profiler's are.
+                mappings.push(perf::Events::open(pid, &MAPPINGS).map_err(BpfError::Mappings)?);
+            }
             // Held at its gate, it has the descriptors it will execute with.
             seed_descriptors(pid, sink);
             live.insert(pid);
@@ -1101,6 +1187,17 @@ pub fn trace(
                     return Err(BpfError::NoProcess(pid));
                 }
                 loaded.target(pid)?;
+                if let Some(stacks) = &options.stacks {
+                    mappings.push(
+                        perf::Events::attach(pid, &MAPPINGS, MAPPING_EVENTS)
+                            .map_err(BpfError::Mappings)?,
+                    );
+                    // What it mapped before, while it is there to read.
+                    stacks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .read_maps(pid);
+                }
                 live.insert(pid);
                 sink.attached(pid);
             }
@@ -1114,6 +1211,11 @@ pub fn trace(
         first,
         end: None,
         entries: BTreeMap::new(),
+        stacks: options.stacks.clone(),
+        sampled: BTreeMap::new(),
+        mappings,
+        batch: Vec::new(),
+        perf: Vec::new(),
         lost: 0,
     };
     let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
@@ -1143,6 +1245,17 @@ pub fn trace(
     Ok(Finished { end })
 }
 
+/// Events that sample nothing and say what the traced processes map.
+const MAPPINGS: perf::EventOptions = perf::EventOptions {
+    source: perf::Source::Mappings,
+    stack_bytes: 0,
+    ring_pages: 64,
+    switches: false,
+};
+
+/// The most such events an attach opens: one per thread and CPU.
+const MAPPING_EVENTS: usize = 65_536;
+
 /// Reads the ring and turns records into events.
 struct Reader<'a> {
     sink: &'a mut dyn Sink,
@@ -1153,6 +1266,14 @@ struct Reader<'a> {
     end: Option<ProcessEnd>,
     /// Arguments read at a call's entry, by thread, until its exit.
     entries: BTreeMap<u32, SyscallEvent>,
+    /// Unwinds each stack, when stacks were asked for.
+    stacks: Option<super::stacks::SharedStacks>,
+    /// Each thread's stack, until the call or signal it precedes.
+    sampled: BTreeMap<u32, SampledStack>,
+    /// What the traced processes map, as they map it, for their stacks.
+    mappings: Vec<perf::Events>,
+    batch: Vec<Record>,
+    perf: Vec<u8>,
     lost: u64,
 }
 
@@ -1250,9 +1371,12 @@ impl Reader<'_> {
     }
 
     fn drain(&mut self, ring: &mut RingBuf<MapData>) {
+        // A stack's code was mapped before the stack was sent, so the
+        // mappings read after the records name all it needs.
+        let mut batch = std::mem::take(&mut self.batch);
         while let Some(item) = ring.next() {
             match decode(&item) {
-                Ok(record) => self.handle(record),
+                Ok(record) => batch.push(record),
                 // Only the flight recorder, which release builds leave
                 // out, reads the error.
                 #[cfg_attr(not(debug_assertions), expect(unused_variables))]
@@ -1265,14 +1389,79 @@ impl Reader<'_> {
                 }
             }
         }
+        self.map();
+        for record in std::mem::take(&mut batch) {
+            self.handle(record);
+        }
+        self.batch = batch;
+    }
+
+    /// Takes in what the traced processes mapped since last asked, in the
+    /// order they mapped it.
+    fn map(&mut self) {
+        let Some(stacks) = &self.stacks else {
+            return;
+        };
+        self.perf.clear();
+        for events in &mut self.mappings {
+            events.drain(&mut self.perf);
+        }
+        let mut records = Vec::new();
+        let mut offset = 0;
+        while let Some(Ok((record, length))) = perf::decode::next(&self.perf[offset..]) {
+            records.push((record.time().unwrap_or(0), offset));
+            offset += length;
+        }
+        records.sort_unstable();
+        let mut stacks = stacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, offset) in records {
+            match perf::decode::next(&self.perf[offset..]) {
+                Some(Ok((perf::decode::Record::Mmap(mmap), _))) if mmap.executable => {
+                    stacks.mapped(&mmap);
+                }
+                Some(Ok((
+                    perf::decode::Record::Comm {
+                        pid, exec: true, ..
+                    },
+                    _,
+                ))) => stacks.forget(pid),
+                Some(Ok((perf::decode::Record::Fork { pid, ppid, .. }, _))) if pid != ppid => {
+                    stacks.forked(ppid, pid);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Unwinds the stack the kernel sent before a thread's call or signal.
+    fn unwind(&mut self, thread: u32) -> Option<CallStack> {
+        let sampled = self.sampled.remove(&thread)?;
+        let stacks = self.stacks.as_ref()?;
+        let mut stacks = stacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(stacks.unwind_sampled(
+            sampled.process,
+            SampledState {
+                registers: &sampled.registers,
+                stack: &sampled.copy,
+                chain: &sampled.chain,
+            },
+        ))
     }
 
     fn handle(&mut self, record: Record) {
         match record {
+            Record::Stack(stack) => {
+                self.sampled.insert(stack.thread, stack);
+            }
             Record::Entry(entry) => {
                 self.entries.insert(entry.thread, entry);
             }
             Record::Call(mut call) => {
+                call.stack = self.unwind(call.thread);
                 if let Some(entry) = self.entries.remove(&call.thread) {
                     if Some(entry.entered.unwrap_or(0)) == call.entered.or(Some(0)) {
                         let mut captured = entry.captured;
@@ -1290,6 +1479,9 @@ impl Reader<'_> {
                 // A file record precedes its call, whose exit it shares.
                 if let TraceEvent::Descriptor { time, .. } = &mut event {
                     *time = monotonic();
+                }
+                if let TraceEvent::Signal { thread, stack, .. } = &mut event {
+                    *stack = self.unwind(*thread);
                 }
                 match &event {
                     TraceEvent::Spawn { child, thread, .. } if !*thread && self.follow => {
@@ -1424,7 +1616,7 @@ mod tests {
                 [header, time, child, child_tgid]
             ),
             layout!(RawExecRecord, "exec_record", [header, time, former, len]),
-            layout!(RawExitRecord, "exit_record", [header, time, code, pad]),
+            layout!(RawExitRecord, "exit_record", [header, time, code, last]),
             layout!(
                 RawSignalRecord,
                 "signal_record",
@@ -1438,6 +1630,11 @@ mod tests {
                 ]
             ),
             layout!(RawErrnoKey, "errno_key", [slot, err]),
+            layout!(
+                RawStackRecord,
+                "stack_record",
+                [header, frames, copied, regs]
+            ),
         ];
         for (name, size, fields) in layouts {
             let (c_size, c_fields) = structs
@@ -1535,6 +1732,7 @@ mod tests {
             limits: captures::Limits::default(),
             verbose: false,
             follow: true,
+            stacks: None,
         };
         let execve = SyscallId::named(Abi::X86_64, "execve").expect("execve");
         let spec = call_spec(execve, &options);

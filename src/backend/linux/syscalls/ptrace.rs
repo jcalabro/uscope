@@ -49,6 +49,8 @@ pub struct TraceOptions {
     pub verbose: bool,
     /// Reports calls of the processes the targets create, not only theirs.
     pub follow: bool,
+    /// Unwinds each reported call's stack, when given.
+    pub stacks: Option<super::stacks::SharedStacks>,
 }
 
 /// What to trace.
@@ -463,6 +465,7 @@ impl Tracer<'_> {
             for event in made(process, call, outcome, &captured, exited) {
                 self.emit(event);
             }
+            let stack = self.stack(process, tid);
             self.emit(TraceEvent::Call(SyscallEvent {
                 thread: tid,
                 process,
@@ -472,11 +475,40 @@ impl Tracer<'_> {
                 outcome,
                 entered,
                 exited: Some(exited),
-                stack: None,
+                stack,
                 flags,
             }));
         }
         self.resume(tid, None)
+    }
+
+    /// The stack of a thread stopped at a call's exit, when asked for.
+    fn stack(&self, process: u32, tid: u32) -> Option<crate::syscalls::CallStack> {
+        let stacks = self.options.stacks.as_ref()?;
+        let registers = ptrace::getregs(Pid::from_raw(tid.cast_signed())).ok()?;
+        let registers = [
+            (0, registers.rax),
+            (1, registers.rdx),
+            (2, registers.rcx),
+            (3, registers.rbx),
+            (4, registers.rsi),
+            (5, registers.rdi),
+            (6, registers.rbp),
+            (7, registers.rsp),
+            (8, registers.r8),
+            (9, registers.r9),
+            (10, registers.r10),
+            (11, registers.r11),
+            (12, registers.r12),
+            (13, registers.r13),
+            (14, registers.r14),
+            (15, registers.r15),
+            (16, registers.rip),
+        ];
+        let mut stacks = stacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(stacks.unwind_live(process, tid, &registers))
     }
 
     fn syscall_stop(&mut self, tid: u32, seccomp: bool) -> Result<(), Errno> {
@@ -549,6 +581,12 @@ impl Tracer<'_> {
                     self.threads.insert(tid, moved);
                 }
                 let process = self.thread(tid).process;
+                if let Some(stacks) = &self.options.stacks {
+                    stacks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .forget(process);
+                }
                 if self.reports(process) {
                     let path = std::fs::read_link(format!("/proc/{tid}/exe"))
                         .map_or_else(|_| "?".into(), |path| path.to_string_lossy().into());
@@ -601,6 +639,7 @@ impl Tracer<'_> {
                 code,
                 sender,
                 info: info.map(|info| Arc::from(&info[..])),
+                stack: self.stack(process, tid),
             });
         }
         self.resume(tid, Some(signal))
@@ -613,6 +652,14 @@ impl Tracer<'_> {
         let process = thread.process;
         self.unfinished(tid, thread, Outcome::Unfinished);
         if tid != process {
+            if self.reports(process) {
+                self.emit(TraceEvent::ThreadExit {
+                    thread: tid,
+                    process,
+                    time: monotonic(),
+                    end,
+                });
+            }
             return;
         }
         // A leader's exit comes after every other thread's: the process is

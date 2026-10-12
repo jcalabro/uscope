@@ -22,8 +22,8 @@ pub mod table;
 
 pub use filter::{CallSet, Filter, FilterError, StatusSet};
 pub use model::{
-    Abi, Capture, CaptureState, Device, Errno, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt,
-    SyscallEvent, SyscallId, TraceEvent,
+    Abi, CallStack, Capture, CaptureState, Device, Errno, EventFlags, InFlight, Outcome,
+    ProcessEnd, ReadAt, SyscallEvent, SyscallId, TraceEvent,
 };
 pub use stats::SyscallStats;
 
