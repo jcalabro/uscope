@@ -22,6 +22,7 @@ Use `uscope --help` for the complete current option list and `uscope TOOL
 | `views` | Check views, explain binding, or replay recorded kernels |
 | `config` | Inspect, check, create, and trust configuration |
 | `record` | Record a profile |
+| `syscalls` | Trace system calls, as strace does; see [System calls](../syscalls.md) |
 | `report` | Print a profile summary or call tree |
 | `convert` | Convert uscope, pprof, folded-stack, and Chrome-trace formats |
 | `symbolize` | Add source lines to a profile recorded for later symbolization |
@@ -98,9 +99,11 @@ one command.
 | `ignore ID COUNT` | Ignore the next hits |
 | `enable ID...`, `disable ID...` | Change whether sites stop |
 | `delete ID...` | Remove sites |
+| `catch syscall [entry\|exit] [CALL...] [if EXPR]` | Stop at system calls |
+| `info catchpoints` | List catchpoints |
 
-IDs can include breakpoint ranges, watchpoint IDs such as `w2`, or `all` where
-the command permits it.
+IDs can include breakpoint ranges, watchpoint IDs such as `w2`, catchpoint
+IDs such as `c1`, or `all` where the command permits it.
 
 ### Stack, threads, and tasks
 

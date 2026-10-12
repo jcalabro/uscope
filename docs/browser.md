@@ -54,6 +54,17 @@ The profile pages include call trees, functions, flame views, timelines,
 source and disassembly costs, blocked-time lanes, task stacks, and
 instrumentation zones when the recording contains them.
 
+A file with system calls, from `uscope syscalls -o FILE.usprof` or `uscope
+record --syscalls`, has a Syscalls view. It lists calls in a table you can
+group by call, class, process, thread, file, or call site, with a log of the
+calls themselves, a heat map of their latency over time, and tabs for files,
+network connections, and processes. See [System calls](syscalls.md).
+
+With no target, the page can also start a program and trace its system calls.
+It uses the ptrace engine, which needs no privilege. The trace updates every
+two seconds while the program runs, and the Processes tab shows what each
+thread is blocked in.
+
 ## Serve through a tunnel or proxy
 
 The default loopback listener is available only on the same machine. Use an

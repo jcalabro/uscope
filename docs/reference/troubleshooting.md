@@ -46,6 +46,21 @@ that both processes are in compatible PID and mount namespaces.
 When a process is in another mount namespace, uscope also uses
 `/proc/PID/root` to find the files that process mapped.
 
+## System call tracing is refused
+
+`uscope syscalls` uses the BPF engine unless told otherwise, and it never
+falls back to ptrace on its own. When the engine cannot run, the error names
+the one thing missing:
+
+- **Linux older than 5.15, or no BTF.** BTF comes from building the kernel
+  with `CONFIG_DEBUG_INFO_BTF=y`; check for `/sys/kernel/btf/vmlinux`.
+- **Missing `CAP_BPF` or `CAP_PERFMON`.** See
+  [Give uscope the BPF privileges](../syscalls.md#give-uscope-the-bpf-privileges).
+- **Kernel lockdown for confidentiality.** This mode forbids the BPF programs
+  uscope needs. Boot with `lockdown=integrity` or without lockdown.
+
+In each case, `--engine ptrace` still traces a program you launch.
+
 ## A stack ends early
 
 Stack unwinding depends on frame pointers, DWARF unwind information, saved

@@ -11,6 +11,7 @@ will change:
 - [Expressions, inspection, and views](evaluation-and-views.md)
 - [Runtime models](runtime-models.md)
 - [Profiling](profiling.md)
+- [System call tracing](syscalls.md)
 - [Testing](testing.md)
 - [Diagnosing failures](debugging-failures.md)
 - [Simulator](simulator.md)
@@ -32,6 +33,7 @@ will change:
 | Change views or visualizers | `src/view/`, `views/`, `web/src/visualize/` | `tests/debugger/views.rs`, `web/test/drawing.test.tsx` |
 | Change goroutines, tasks, or async frames | `src/runtime_model/`, `src/backend/linux/runtimes.rs` | [runtime models](runtime-models.md) |
 | Change profiling or capture analysis | `src/profiler/`, `src/capture/`, `src/analysis/` | [profiling](profiling.md) |
+| Change system call tracing or catchpoints | `src/syscalls/`, `src/backend/linux/syscalls/` | [system call tracing](syscalls.md) |
 | Change the CLI, DAP server, or web UI | `src/cli/`, `src/dap/`, `src/web/`, `web/src/` | [web UI](web-ui.md) and the client test suites |
 | Add or diagnose an integration test | `tests/support/mod.rs`, `tests/fixtures/` | [testing](testing.md), [diagnosing failures](debugging-failures.md) |
 | Change simulated kernel behavior | `src/sim/`, `src/backend/linux/sim_edge.rs` | [simulator](simulator.md), `plans/simulator.md` |
@@ -80,6 +82,7 @@ Use focused checks while editing. `just all` is the final local gate.
 | `src/eval` | Pure expression parser, binder, and evaluator |
 | `src/view` | View parser, binding, and presentation |
 | `src/profiler`, `src/analysis` | Recording and profile analysis |
+| `src/syscalls`, `src/backend/linux/syscalls` | System call model and tracing engines |
 | `src/sim` | Deterministic debugger simulator |
 | `src/cli`, `src/dap`, `src/web` | User-interface clients |
 | `web` | Browser client |

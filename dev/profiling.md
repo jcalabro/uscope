@@ -158,6 +158,10 @@ Format changes need:
 Do not let an external format dictate the internal model. Conversion may lose
 facts; make that loss a property of the converter.
 
+A capture can also hold system calls, from `uscope syscalls -o` or
+`record --syscalls`. Their tables, and how a recording merges a trace with its
+samples, are described in [system call tracing](syscalls.md#captures).
+
 ## Rolling and continuous recordings
 
 A rolling window evicts records older than its retained interval while keeping

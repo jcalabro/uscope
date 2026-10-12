@@ -80,8 +80,8 @@ test *ARGS: cache-warm
 
 # Runs the BPF engine's tests, which need CAP_BPF and CAP_PERFMON, starting
 # uscope through LAUNCHER: the uscope-bpf wrapper nixosModules.uscope-bpf
-# installs (docs/syscalls.md#privileges). Nothing else in the suite runs
-# with privilege. Arguments go to nextest.
+# installs (dev/syscalls.md). Nothing else in the suite runs with privilege.
+# Arguments go to nextest.
 [doc("Runs the BPF engine's tests through the uscope-bpf wrapper.")]
 [script]
 test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs

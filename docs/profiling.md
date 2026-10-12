@@ -94,6 +94,21 @@ uscope record --continuous profiles --segment 60 --keep 24h --pid 1842
 `uscope report profiles` and `uscope web profiles` read the retained segments
 as one profile. Old segments are deleted after the `--keep` duration.
 
+## Record system calls too
+
+`--syscalls SET` traces system calls beside the samples, with their stacks:
+
+```sh
+uscope record --syscalls %file,%net -o server.usprof -- ./server
+```
+
+`SET` is `all`, or calls and classes as `uscope syscalls -e trace=` takes
+them. The browser shows the calls on the timeline with the samples. A rolling
+window or continuous recording keeps each saved file's own calls.
+
+It works only for a program `record` starts, not with `--pid`, and needs the
+BPF engine's privileges. See [System calls](syscalls.md).
+
 ## Resolve symbols now or later
 
 The default, `--symbols now`, reads source lines from debug information on the

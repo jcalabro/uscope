@@ -20,6 +20,8 @@ features:
     details: Follow Go goroutines and async Rust tasks as logical stacks, including the places where they wait.
   - title: Record profiles
     details: Sample native programs from outside the process and explore CPU time, blocked time, tasks, and instrumented work.
+  - title: Trace system calls
+    details: See each call a program makes, as strace prints it, or count them in the kernel without stopping the program.
 ---
 
 uscope runs on Linux x86-64 and understands programs written in C, C++, Rust,
@@ -32,6 +34,7 @@ Go, Zig, Odin, Fortran, D, Nim, and Ada.
 - [Use the browser interface](browser.md)
 - [Connect an editor](editors.md)
 - [Record and inspect a profile](profiling.md)
+- [Trace system calls](syscalls.md)
 
 ## Learn the data model
 

@@ -43,6 +43,9 @@ intentional. Use `just bench --compare BASE` to compare a larger run.
 preset. It takes minutes and stays outside the normal gate. Compare results
 with `bench/overhead.json`; update the baseline only for a deliberate change.
 
+`just syscall-overhead` measures what each system call tracing engine adds to
+a call. See [system call tracing](syscalls.md#overhead).
+
 ## Profilers
 
 The default shell contains command-line profiling tools. For the larger tools

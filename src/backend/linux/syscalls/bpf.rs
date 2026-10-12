@@ -787,7 +787,7 @@ const REMEDY: &str = "  uscope uses eBPF so it never stops or slows the traced p
   not fall back to ptrace on its own. To continue, one of:
     - run it from a unit with AmbientCapabilities=CAP_BPF CAP_PERFMON
     - on NixOS or system-manager, import uscope's bpf module and run through
-      /run/wrappers/bin/uscope-bpf (docs/syscalls.md#privileges)
+      /run/wrappers/bin/uscope-bpf (docs/syscalls.md#give-uscope-the-bpf-privileges)
     - trace a program you launch with --engine ptrace, which stops the
       program at each chosen call";
 
