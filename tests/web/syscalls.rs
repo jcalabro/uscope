@@ -119,7 +119,7 @@ async fn a_trace_is_served_as_costs_lines_callers_files_and_lanes() {
     assert!(
         callers
             .iter()
-            .any(|caller| caller["site"] == "files · syscalls.c:23" && caller["failed"] == 1),
+            .any(|caller| caller["site"] == "files · syscalls.c:24" && caller["failed"] == 1),
         "{detail}"
     );
     assert_eq!(sum(&detail["whole"]), sum(&detail["selected"]));
@@ -170,10 +170,10 @@ async fn expanded(tab: &mut Client, id: &str, event: &Value) {
     let site = &call["site"];
     assert_eq!(
         (&site["function"], &site["line"]),
-        (&json!("files"), &json!(23))
+        (&json!("files"), &json!(24))
     );
     let first = site["first"].as_u64().expect("a first line");
-    let made = &site["text"][usize::try_from(23 - first).expect("an index")];
+    let made = &site["text"][usize::try_from(24 - first).expect("an index")];
     assert!(
         made.as_str()
             .is_some_and(|line| line.contains("\"missing\"")),
@@ -249,7 +249,7 @@ async fn groups_and_bands(tab: &mut Client, id: &str, scratch: &Path) {
             .as_array()
             .expect("rows")
             .iter()
-            .any(|row| row["key"] == "files · syscalls.c:23" && row["errors"] == 1),
+            .any(|row| row["key"] == "files · syscalls.c:24" && row["errors"] == 1),
         "{by_site}"
     );
 

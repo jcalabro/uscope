@@ -43,7 +43,7 @@ test("a trace is explored from its costs to one call's arguments and stack", asy
   await expect(page).toHaveURL(/sc=openat/);
   const detail = page.getByTestId("syscall-detail");
   await expect(detail).toContainText("ENOENT");
-  await expect(page.getByTestId("syscall-callers")).toContainText("files · syscalls.c:23");
+  await expect(page.getByTestId("syscall-callers")).toContainText("files · syscalls.c:24");
   await expect(detail.getByRole("img", { name: "Latency heat map" })).toBeVisible();
 
   // Its line reads as strace prints it, and opens to its arguments.
@@ -60,7 +60,7 @@ test("a trace is explored from its costs to one call's arguments and stack", asy
   await expect(call.getByRole("listitem").filter({ hasText: /^files$/ })).toBeVisible();
   // And to the line that made it.
   const site = call.getByTestId("syscall-site");
-  await expect(site.locator("figcaption")).toContainText(/^files · .*syscalls\.c:23$/);
+  await expect(site.locator("figcaption")).toContainText(/^files · .*syscalls\.c:24$/);
   await expect(site.locator(".made")).toContainText('"missing"');
 
   // The address opens the same view.
