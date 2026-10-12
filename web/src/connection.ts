@@ -72,6 +72,11 @@ export class Connection {
     void this.#attemptConnection();
   }
 
+  /** Whether it was started and not stopped since. */
+  get started(): boolean {
+    return !this.#stopped;
+  }
+
   stop(): void {
     this.#stopped = true;
     if (this.#timer !== null) {
@@ -202,6 +207,26 @@ export class Connection {
     this.#pending.clear();
     this.#binary.clear();
   }
+}
+
+/** Takes `connection` out of the session while the browser keeps the page
+ * to come back to, which it may do with the socket still open, leaving
+ * someone in everyone's presence who has gone, and rejoins once the page is
+ * shown again. */
+export function leaveWhileCached(connection: Connection, page: EventTarget): void {
+  let paused = false;
+  page.addEventListener("pagehide", (event) => {
+    if ((event as PageTransitionEvent).persisted && connection.started) {
+      paused = true;
+      connection.stop();
+    }
+  });
+  page.addEventListener("pageshow", (event) => {
+    if ((event as PageTransitionEvent).persisted && paused) {
+      paused = false;
+      connection.start();
+    }
+  });
 }
 
 /** Connects a browser WebSocket to this page's server. */

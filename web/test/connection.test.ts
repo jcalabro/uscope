@@ -2,7 +2,7 @@
 // browser, or speaks another version.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Connection, type TransportHandlers } from "../src/connection";
+import { Connection, leaveWhileCached, type TransportHandlers } from "../src/connection";
 import type { Link, ModelEvent } from "../src/model";
 import { PROTOCOL_VERSION } from "../src/protocol";
 
@@ -143,5 +143,43 @@ describe("answers", () => {
     await expect(asked).rejects.toMatchObject({ kind: "forbidden", message: "view only" });
     expect(events.filter((event) => event.type === "message")).toEqual([]);
     connection.stop();
+  });
+});
+
+describe("a page the browser keeps to come back to", () => {
+  const transition = (type: string, persisted: boolean) =>
+    Object.assign(new Event(type), { persisted });
+
+  it("leaves the session while kept, and rejoins when shown again", async () => {
+    const { connection, attempts } = harness();
+    const page = new EventTarget();
+    leaveWhileCached(connection, page);
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    attempts[0]?.open();
+    attempts[0]?.message(hello());
+
+    // Leaving for good closes the socket anyway; only a kept page pauses.
+    page.dispatchEvent(transition("pagehide", false));
+    const asked = connection.request("pause");
+    page.dispatchEvent(transition("pagehide", true));
+    await expect(asked).rejects.toThrow("the connection to uscope closed");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(attempts).toHaveLength(1);
+
+    page.dispatchEvent(transition("pageshow", true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toHaveLength(2);
+    connection.stop();
+  });
+
+  it("does not connect a page that had not", async () => {
+    const { connection, attempts } = harness();
+    const page = new EventTarget();
+    leaveWhileCached(connection, page);
+    page.dispatchEvent(transition("pagehide", true));
+    page.dispatchEvent(transition("pageshow", true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toHaveLength(0);
   });
 });

@@ -9,7 +9,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { withinBase } from "./base";
-import { browserAuthorized, browserConnect } from "./connection";
+import { browserAuthorized, browserConnect, leaveWhileCached } from "./connection";
 import { forgetting } from "./forget";
 import { createAppRouter } from "./router";
 import { isString, read } from "./storage";
@@ -31,6 +31,7 @@ const session = createSession(
   },
 );
 forgetting(session.store);
+leaveWhileCached(session.connection, window);
 // The join page connects once it has traded its token for a cookie.
 if (withinBase(window.location.pathname) !== "/join") {
   session.connection.start();
