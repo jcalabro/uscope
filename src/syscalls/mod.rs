@@ -1,0 +1,28 @@
+//! System call tracing's neutral model (`plans/syscalls.html`).
+//!
+//! It holds the events both engines produce, the call tables and argument specs that drive
+//! decoding, strace's selection language, and what follows from a stream
+//! of events: descriptor tables, the process tree, and statistics.
+//!
+//! Everything here is pure. Engines live at the edge, in
+//! `backend::linux::syscalls`, and formatting in the binary's
+//! `present::syscalls`.
+
+pub mod fds;
+pub mod filter;
+pub mod model;
+pub mod procs;
+pub mod sockaddr;
+pub mod specs;
+pub mod stats;
+pub mod table;
+
+pub use filter::{CallSet, Filter, FilterError, StatusSet};
+pub use model::{
+    Abi, Capture, CaptureState, Errno, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt,
+    SyscallEvent, SyscallId, TraceEvent,
+};
+pub use stats::SyscallStats;
+
+#[cfg(test)]
+mod tests;

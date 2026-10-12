@@ -39,6 +39,7 @@ mod runtime_model;
 #[doc(hidden)]
 pub mod sim;
 mod source_map;
+pub mod syscalls;
 #[cfg(test)]
 mod test_memory;
 pub mod timings;

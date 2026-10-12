@@ -86,6 +86,12 @@
         PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
+        # build.rs compiles the syscall tracer's BPF programs with clang
+        # itself, not its wrapper, which adds host flags that a BPF target
+        # rejects, against libbpf's BPF headers and the kernel's UAPI
+        # headers, whose syscall numbers also generate src/syscalls' tables.
+        USCOPE_BPF_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+        USCOPE_BPF_INCLUDE = "${pkgs.libbpf}/include:${pkgs.linuxHeaders}/include";
         packages = with pkgs; [
           rust
           cargo-fuzz
