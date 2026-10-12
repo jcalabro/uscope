@@ -88,6 +88,23 @@ struct {
 	__type(value, u64);
 } LOST SEC(".maps");
 
+// A map of maps whose only use is that setting its element waits until
+// every program running has finished: after a generation's switch, none
+// still counts into the old one.
+struct fence_token {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u32);
+} FENCE_TOKEN SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__array(values, struct fence_token);
+} FENCE SEC(".maps");
+
 // Each CPU's count of calls, for sampling one in config.sample.
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -560,14 +577,18 @@ static __always_inline void send_call(u32 tid, u32 tgid, struct entry *entry, u3
 static __always_inline void count(struct call_spec *spec, u32 slot, u64 entered, u64 exited,
 				  s64 ret, int returned)
 {
-	u32 row = spec->stat;
+	struct config *settings = config();
+	if (!settings)
+		return;
+	u32 generation = (settings->flags & CONFIG_GENERATION) ? 1 : 0;
+	u32 row = spec->stat + generation * settings->rows;
 	struct stat_value *value = bpf_map_lookup_elem(&STATS, &row);
 	if (!value)
 		return;
 	value->calls += 1;
 	if (returned && failed(ret)) {
 		value->errors += 1;
-		struct errno_key which = { .slot = slot, .err = (u32)-ret };
+		struct errno_key which = { .slot = slot | (generation << 31), .err = (u32)-ret };
 		u64 one = 1;
 		u64 *errors = bpf_map_lookup_elem(&ERRNOS, &which);
 		if (errors)

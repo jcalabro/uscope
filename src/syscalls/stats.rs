@@ -180,6 +180,13 @@ pub struct Folded {
 }
 
 impl Folded {
+    /// Adds every call `other` counted.
+    pub fn merge(&mut self, other: &Self) {
+        for (key, stats) in &other.by_call {
+            self.by_call.entry(*key).or_default().merge(stats);
+        }
+    }
+
     pub fn add(&mut self, event: &SyscallEvent) {
         self.by_call
             .entry((event.process, event.call))

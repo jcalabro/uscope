@@ -229,10 +229,6 @@ pub const fn restarts(Errno(number): Errno) -> bool {
 
 /// The error number an errno name names.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "catchpoint conditions compare $errno with names")
-)]
 pub fn errno_named(name: &str) -> Option<Errno> {
     names::ERRNOS
         .iter()

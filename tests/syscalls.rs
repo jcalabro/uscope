@@ -1043,20 +1043,21 @@ mod bpf {
     /// Children and threads, each followed alike. A process that is not
     /// traced is never sent the SIGCHLD its default ignores, which ptrace
     /// makes the kernel queue, so the comparison leaves it out. Joining
-    /// the thread waits on a futex, or finds it gone with EAGAIN, as the
-    /// thread's exit races the join, so that result is left out too.
+    /// the thread waits on a futex, finds it gone with EAGAIN, or finds it
+    /// gone before calling at all, as the thread's exit races the join, so
+    /// that futex is left out too.
     #[test]
     #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
     fn the_engines_follow_children_and_threads_alike() {
         let (ptrace, bpf) = engines(&["-yy", "-e", "signal=!SIGCHLD"], "family");
-        let joined = Regex::new(r"^(futex\(.*FUTEX_WAIT_BITSET.*\)) = .*$").expect("regex");
+        let joined = Regex::new(r"^futex\(.*FUTEX_WAIT_BITSET").expect("regex");
         let threads = |trace: &str| {
             threads(trace)
                 .into_iter()
                 .map(|lines| {
                     lines
                         .into_iter()
-                        .map(|line| joined.replace(&line, "$1 = joined").into_owned())
+                        .filter(|line| !joined.is_match(line))
                         .collect::<Vec<_>>()
                 })
                 .collect::<BTreeSet<_>>()
@@ -1395,6 +1396,130 @@ mod bpf {
             table <= asked && asked <= table + lost,
             "{table} counted and {lost} lost of {asked}"
         );
+    }
+
+    /// Counted continuously, every segment holds its own span's calls: the
+    /// kernel counts into one half of its statistics while uscope reads and
+    /// clears the other, so the segments together count every call.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn continuous_counts_split_into_segments_that_sum_to_every_call() {
+        let directory = ScratchDir::new("syscalls-continuous");
+        let segments = directory.path().join("segments");
+        // Made here, so that the test can clean up what a launcher running
+        // as another user writes in it.
+        std::fs::create_dir(&segments).expect("make the directory");
+        // Relative to the working directory, which a launcher shares.
+        let mut command = uscope(&[
+            "-c",
+            "--continuous",
+            "segments",
+            "--segment",
+            "200ms",
+            "-e",
+            "trace=getppid",
+            "--",
+        ]);
+        command
+            .arg(fixture())
+            .arg("spin")
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut running = Running::spawn(&mut command);
+        let written = || {
+            std::fs::read_dir(&segments).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "usprof"))
+                    .count()
+            })
+        };
+        let end = Instant::now() + DEADLINE;
+        // Polls for files the trace writes and says nothing of.
+        while written() < 3 {
+            assert!(Instant::now() < end, "only {} segments", written());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        running
+            .child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"x")
+            .expect("end the spin");
+        let mut asked = String::new();
+        BufReader::new(running.child.stdout.take().expect("stdout"))
+            .read_line(&mut asked)
+            .expect("the count");
+        let asked = asked
+            .trim()
+            .strip_prefix("asked ")
+            .expect("a count")
+            .to_owned();
+        let (code, lines) = running.finish();
+        assert_eq!(code, Some(0), "{lines:?}");
+
+        let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .arg("report")
+            .arg(&segments)
+            .output()
+            .expect("run uscope report");
+        let table = text(&report.stdout);
+        assert!(
+            table
+                .lines()
+                .any(|line| line.split_whitespace().last() == Some("getppid")
+                    && line.split_whitespace().any(|cell| cell == asked)),
+            "{asked} calls: {table}"
+        );
+    }
+
+    /// A call that fails as a trigger names saves the calls before it.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn a_failing_call_saves_the_window_before_it() {
+        let directory = ScratchDir::new("syscalls-trigger");
+        std::fs::create_dir_all(directory.path().join("segments/windows"))
+            .expect("make the directories");
+        let output = uscope(&[
+            "--continuous",
+            "segments",
+            "--trigger-errno",
+            "EBADF",
+            "-e",
+            "trace=write,close",
+            "--",
+        ])
+        .arg(fixture())
+        .arg("fails")
+        .current_dir(directory.path())
+        .output()
+        .expect("run uscope");
+        let message = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{message}");
+        let saved = message
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("uscope: close failed with errno 9: saved the last ")?
+                    .split_once(" calls to ")
+            })
+            .unwrap_or_else(|| panic!("{message}"));
+        let window = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .arg("report")
+            .arg(directory.path().join(saved.1))
+            .output()
+            .expect("run uscope report");
+        let table = text(&window.stdout);
+        let calls = |name: &str| {
+            table.lines().find_map(|line| {
+                let cells: Vec<&str> = line.split_whitespace().collect();
+                (cells.last() == Some(&name)).then(|| cells[cells.len() - 2].to_owned())
+            })
+        };
+        // The window holds the write before the failed close.
+        assert_eq!(calls("write").as_deref(), Some("1"), "{table}");
+        assert!(calls("close").is_some(), "{table}");
     }
 
     /// Attaching needs no consent, since the process never stops: it runs

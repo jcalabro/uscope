@@ -49,6 +49,9 @@ enum config_flags {
 	CONFIG_STACKS = 16,
 	// With each stack, a copy of its top, for uscope to unwind.
 	CONFIG_STACK_COPY = 32,
+	// Count into the second half of STATS, and ERRNOS keys with their top
+	// bit set, while uscope reads and clears the first, and the reverse.
+	CONFIG_GENERATION = 64,
 };
 
 // Bits of call_record.flags, as EventFlags.
@@ -142,6 +145,9 @@ struct config {
 	// While streaming, send one call in this many and count the rest;
 	// 0 or 1 sends them all.
 	u32 sample;
+	// The rows of statistics in each half of STATS.
+	u32 rows;
+	u32 pad;
 };
 
 // A thread's call in progress.

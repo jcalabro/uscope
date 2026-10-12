@@ -190,6 +190,11 @@ int main(int argc, char **argv) {
         block();
         return 0;
     }
+    if (strcmp(mode, "fails") == 0) {
+        // A write, then a close that fails as nothing before it does.
+        syscall(SYS_write, 1, "a\n", 2);
+        return close(-1) == -1 && errno == EBADF ? 0 : 1;
+    }
     if (strcmp(mode, "spin") == 0) {
         spin();
         return 0;

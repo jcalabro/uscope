@@ -486,7 +486,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
 }
 
 /// A duration in seconds, or with a unit: `90`, `30m`, `24h`, or `7d`.
-fn duration(text: &str) -> Result<Duration> {
+pub(super) fn duration(text: &str) -> Result<Duration> {
     let (number, unit) = match text.char_indices().last() {
         Some((at, unit @ ('s' | 'm' | 'h' | 'd'))) => (&text[..at], unit),
         _ => (text, 's'),

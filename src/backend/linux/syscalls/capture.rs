@@ -84,6 +84,12 @@ impl SyscallCapture {
         self.builder.setting(key, value);
     }
 
+    /// Says the capture spans `start` to `end`, whatever its events do.
+    pub fn span(&mut self, start: u64, end: u64) {
+        self.saw(start);
+        self.saw(end);
+    }
+
     fn saw(&mut self, time: u64) {
         if time != 0 {
             self.first = Some(self.first.map_or(time, |first| first.min(time)));

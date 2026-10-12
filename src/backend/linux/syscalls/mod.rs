@@ -5,6 +5,7 @@ pub mod bpf;
 pub mod budget;
 pub mod capture;
 pub mod cgroup;
+pub mod continuous;
 pub mod info;
 pub mod launch;
 pub mod ptrace;
@@ -28,6 +29,18 @@ pub trait Sink {
     /// The calls threads have been blocked in since before `since`, read
     /// every so often while the trace runs.
     fn in_flight(&mut self, _calls: &[InFlight]) {}
+
+    /// Called every tick of the engine's reader, at `time`.
+    fn tick(&mut self, _time: u64) {}
+
+    /// Whether a segment of a continuous trace ends at `time`.
+    fn segment_due(&mut self, _time: u64) -> bool {
+        false
+    }
+
+    /// Ends the segment at `time`; what the kernel counted over it has
+    /// just been given to [`Sink::counted`].
+    fn end_segment(&mut self, _time: u64) {}
 
     /// What the budget says, at `time`: how it is measured, and each step
     /// that gave up detail to stay inside it.

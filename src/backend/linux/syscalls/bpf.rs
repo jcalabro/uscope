@@ -17,7 +17,9 @@ use std::os::fd::AsFd as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, RingBuf};
+use aya::maps::{
+    Array, ArrayOfMaps, HashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues, RingBuf,
+};
 use aya::programs::{BtfTracePoint, FEntry, FExit, Iter};
 use aya::{Btf, Ebpf, EbpfLoader};
 use aya_obj::btf::BtfKind;
@@ -78,6 +80,7 @@ const CONFIG_FOLLOW: u32 = 4;
 const CONFIG_SKIP_UNSEEN: u32 = 8;
 const CONFIG_STACKS: u32 = 16;
 const CONFIG_STACK_COPY: u32 = 32;
+const CONFIG_GENERATION: u32 = 64;
 
 const CALL_PROCESS_EXITED: u8 = 8;
 /// The flags a call record shares with [`EventFlags`].
@@ -135,6 +138,8 @@ pub struct RawConfig {
     pub ns_inum: u32,
     pub ns_level: u32,
     pub sample: u32,
+    pub rows: u32,
+    pub pad: u32,
 }
 
 /// A thread's call in progress (`struct entry`).
@@ -1047,6 +1052,13 @@ struct Loaded {
     rows: Vec<SyscallId>,
     /// The chosen calls' slots in CALLS.
     slots: Vec<u32>,
+    /// What waits out the programs running, and what it is set to.
+    fence: (
+        ArrayOfMaps<MapData, Array<MapData, u32>>,
+        Array<MapData, u32>,
+    ),
+    /// The half of the statistics being counted into.
+    generation: u32,
     attachment: Attachment,
     /// Whether the kernel counts any calls, whose statistics are read
     /// once the trace ends.
@@ -1083,7 +1095,8 @@ impl Loaded {
         let mut ebpf = EbpfLoader::new()
             .btf(Some(&btf))
             .map_max_entries("EVENTS", engine.ring)
-            .map_max_entries("STATS", rows)
+            // Two halves, one counted into while the other is read.
+            .map_max_entries("STATS", rows * 2)
             // aya cannot open task storage itself, which only the
             // programs use.
             .allow_unsupported_maps()
@@ -1130,6 +1143,8 @@ impl Loaded {
                 ns_inum: scope.namespace.map_or(0, |namespace| namespace.inum),
                 ns_level: scope.namespace.map_or(0, |namespace| namespace.level),
                 sample: 0,
+                rows,
+                pad: 0,
             };
             let mut value = [0; CONFIG_BYTES];
             value.copy_from_slice(raw.as_bytes());
@@ -1139,10 +1154,21 @@ impl Loaded {
         let targets =
             HashMap::try_from(ebpf.take_map("TARGETS").ok_or_else(|| missing("TARGETS"))?)
                 .map_err(load_error)?;
+        let fence = (
+            ArrayOfMaps::try_from(ebpf.take_map("FENCE").ok_or_else(|| missing("FENCE"))?)
+                .map_err(load_error)?,
+            Array::try_from(
+                ebpf.take_map("FENCE_TOKEN")
+                    .ok_or_else(|| missing("FENCE_TOKEN"))?,
+            )
+            .map_err(load_error)?,
+        );
         record!("syscalls bpf: loaded and attached");
         Ok(Self {
             ebpf,
             targets,
+            fence,
+            generation: 0,
             rows: calls,
             slots: chosen.iter().map(|&(slot, _)| slot).collect(),
             attachment,
@@ -1337,7 +1363,52 @@ impl Loaded {
             .sum()
     }
 
+    /// The statistics counted so far into the half being counted into.
     fn counted(&self, process: u32) -> Folded {
+        self.half(self.generation, process)
+    }
+
+    /// The statistics counted since the last call, or since tracing began:
+    /// the kernel switches halves, every program that might still count
+    /// into the old one finishes, and the old one is read and cleared.
+    fn take_counted(&mut self, process: u32) -> Result<Folded, BpfError> {
+        let old = self.generation;
+        self.configure(|config| config.flags ^= CONFIG_GENERATION)?;
+        self.generation ^= 1;
+        let (fence, token) = &mut self.fence;
+        fence.set(0, token, 0).map_err(load_error)?;
+        let folded = self.half(old, process);
+        let rows = u32::try_from(self.rows.len().max(1)).unwrap_or(u32::MAX);
+        if let Some(map) = self.ebpf.map_mut("STATS") {
+            let mut stats =
+                PerCpuArray::<_, Bytes<STAT_BYTES>>::try_from(map).map_err(load_error)?;
+            let cpus = aya::util::nr_cpus().map_err(|(_, error)| load_error(error))?;
+            for row in 0..rows {
+                let zeros =
+                    PerCpuValues::try_from(vec![[0; STAT_BYTES]; cpus]).map_err(load_error)?;
+                stats.set(old * rows + row, zeros, 0).map_err(load_error)?;
+            }
+        }
+        if let Some(map) = self.ebpf.map_mut("ERRNOS") {
+            let mut errnos = PerCpuHashMap::<_, Bytes<ERRNO_KEY_BYTES>, u64>::try_from(map)
+                .map_err(load_error)?;
+            let keys: Vec<_> = errnos
+                .keys()
+                .flatten()
+                .filter(|key| {
+                    RawErrnoKey::read_from_bytes(key).is_ok_and(|key| key.slot >> 31 == old)
+                })
+                .collect();
+            for key in keys {
+                errnos.remove(&key).map_err(load_error)?;
+            }
+        }
+        Ok(folded)
+    }
+
+    /// The statistics in half `half` of the maps.
+    fn half(&self, half: u32, process: u32) -> Folded {
+        let rows = u32::try_from(self.rows.len().max(1)).unwrap_or(u32::MAX);
         let stats = self
             .ebpf
             .map("STATS")
@@ -1347,7 +1418,7 @@ impl Loaded {
                     .zip(&self.rows)
                     .filter_map(|(row, &call)| {
                         let values = map
-                            .get(&row, 0)
+                            .get(&(half * rows + row), 0)
                             .ok()?
                             .iter()
                             .filter_map(|value| RawStatValue::read_from_bytes(value).ok())
@@ -1368,10 +1439,10 @@ impl Loaded {
                 map.iter()
                     .flatten()
                     .filter_map(|(key, values)| {
-                        Some((
-                            RawErrnoKey::read_from_bytes(&key).ok()?,
-                            values.iter().sum::<u64>(),
-                        ))
+                        let mut key = RawErrnoKey::read_from_bytes(&key).ok()?;
+                        (key.slot >> 31 == half).then_some(())?;
+                        key.slot &= !(1 << 31);
+                        Some((key, values.iter().sum::<u64>()))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1807,6 +1878,14 @@ impl Reader<'_> {
                 last_tick = now;
                 self.report_lost(loaded, now);
                 self.hold_budget(loaded, now)?;
+                self.sink.tick(now);
+                if self.sink.segment_due(now) {
+                    if loaded.counting {
+                        let counted = loaded.take_counted(self.first)?;
+                        self.sink.counted(counted);
+                    }
+                    self.sink.end_segment(now);
+                }
                 if let Some(after) = self.sink.in_flight_after() {
                     self.sink.in_flight(&loaded.in_flight(after));
                 }
@@ -2168,7 +2247,9 @@ mod tests {
                     cgroup_level,
                     ns_inum,
                     ns_level,
-                    sample
+                    sample,
+                    rows,
+                    pad
                 ]
             ),
             layout!(
