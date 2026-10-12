@@ -126,7 +126,11 @@ pub struct RawCallSpec {
 pub struct RawConfig {
     pub flags: u32,
     pub elements: u32,
-    pub pad: u64,
+    pub cgroup_id: u64,
+    pub cgroup_level: u32,
+    pub ns_inum: u32,
+    pub ns_level: u32,
+    pub pad: u32,
 }
 
 /// A thread's call in progress (`struct entry`).
@@ -648,10 +652,24 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
     }
     let unseen = raw.flags & 2 != 0;
     let exited_inside = raw.flags & CALL_PROCESS_EXITED != 0;
+    let call = SyscallId::new(abi, raw.nr);
+    // Only these end a thread inside them. Any other call returns first,
+    // so its return went unseen: a function's exit programs are skipped
+    // for calls in progress whenever another tracer attaches to it.
+    let ends = call
+        .name()
+        .is_some_and(|name| matches!(name, "exit" | "exit_group" | "execve" | "execveat"));
+    if exited_inside && !ends {
+        record!("syscalls bpf: {call:?} on {} never returned", header.tid);
+        return Ok(Record::Event(TraceEvent::Lost {
+            time: monotonic(),
+            count: 1,
+        }));
+    }
     let event = SyscallEvent {
         thread: header.tid,
         process: header.tgid,
-        call: SyscallId::new(abi, raw.nr),
+        call,
         args: raw.args,
         captured,
         outcome: if header.kind == RECORD_ENTRY {
@@ -1076,6 +1094,10 @@ impl Loaded {
             let raw = RawConfig {
                 flags,
                 elements: u32::try_from(options.limits.elements).unwrap_or(u32::MAX),
+                cgroup_id: 0,
+                cgroup_level: 0,
+                ns_inum: 0,
+                ns_level: 0,
                 pad: 0,
             };
             let mut value = [0; CONFIG_BYTES];
@@ -1171,15 +1193,38 @@ impl Loaded {
             .collect()
     }
 
-    /// Records the ring had no room for, over every CPU.
+    /// Records the programs dropped, and the times the kernel skipped a
+    /// program because it was already running on that CPU: a bound on
+    /// what the trace is missing, since a skip may have been of a thread
+    /// it does not trace.
     fn lost(&self) -> u64 {
-        let Some(map) = self.ebpf.map("LOST") else {
-            return 0;
-        };
-        PerCpuArray::<_, u64>::try_from(map)
-            .ok()
-            .and_then(|lost| lost.get(&0, 0).ok())
-            .map_or(0, |values| values.iter().sum())
+        let dropped = self.ebpf.map("LOST").map_or(0, |map| {
+            PerCpuArray::<_, u64>::try_from(map)
+                .ok()
+                .and_then(|lost| lost.get(&0, 0).ok())
+                .map_or(0, |values| values.iter().sum())
+        });
+        dropped + self.skipped()
+    }
+
+    /// The kernel's count of skipped runs of every loaded program, which
+    /// it prints among a program descriptor's details.
+    fn skipped(&self) -> u64 {
+        use std::os::fd::{AsFd as _, AsRawFd as _};
+        self.ebpf
+            .programs()
+            .filter_map(|(_, program)| program.fd().ok())
+            .filter_map(|fd| {
+                let raw = fd.as_fd().as_raw_fd();
+                std::fs::read_to_string(format!("/proc/self/fdinfo/{raw}")).ok()
+            })
+            .filter_map(|details| {
+                details
+                    .lines()
+                    .find_map(|line| line.strip_prefix("recursion_misses:"))
+                    .and_then(|count| count.trim().parse::<u64>().ok())
+            })
+            .sum()
     }
 
     fn counted(&self, process: u32) -> Folded {
@@ -1521,6 +1566,8 @@ impl Reader<'_> {
             }
             if self.live.is_empty() {
                 self.drain(&mut ring);
+                // Whatever was lost since the last tick.
+                self.report_lost(loaded, monotonic());
                 break;
             }
             let now = monotonic();
@@ -1825,7 +1872,11 @@ mod tests {
                 "file_record",
                 [header, fd, mode, ino, magic, rdev, len, cloexec, pad]
             ),
-            layout!(RawConfig, "config", [flags, elements, pad]),
+            layout!(
+                RawConfig,
+                "config",
+                [flags, elements, cgroup_id, cgroup_level, ns_inum, ns_level, pad]
+            ),
             layout!(
                 RawEntry,
                 "entry",
@@ -1940,8 +1991,9 @@ mod tests {
             CaptureState::Truncated { wanted: u32::MAX }
         );
 
-        // A thread that ended inside its call, whose entry was not seen.
-        let bytes = call_bytes(RECORD_CALL, 2 | CALL_PROCESS_EXITED, &[]);
+        // A thread that ended inside exit_group, whose entry was not seen.
+        let mut bytes = call_bytes(RECORD_CALL, 2 | CALL_PROCESS_EXITED, &[]);
+        bytes[std::mem::offset_of!(RawCallRecord, nr)..][..4].copy_from_slice(&231_u32.to_ne_bytes());
         let Ok(Record::Call(call)) = decode(&bytes) else {
             panic!("a call");
         };
@@ -1950,6 +2002,13 @@ mod tests {
             (Outcome::ProcessExited, None, None)
         );
         assert!(call.flags.contains(EventFlags::ENTRY_UNSEEN));
+        // Every other call returns before its thread ends, so one held
+        // then had its return go unseen.
+        let bytes = call_bytes(RECORD_CALL, CALL_PROCESS_EXITED, &[]);
+        assert!(matches!(
+            decode(&bytes),
+            Ok(Record::Event(TraceEvent::Lost { count: 1, .. }))
+        ));
 
         let mut bytes = call_bytes(RECORD_CALL, 0, &[(1, 0, b"/etc/hosts")]);
         let header = size_of::<RawCallRecord>();

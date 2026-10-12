@@ -140,15 +140,47 @@ static __always_inline u32 forget(struct scratch *buffer, u32 value, u32 mask)
 	return *spare & mask;
 }
 
-static __always_inline int traced(u32 tgid)
-{
-	return bpf_map_lookup_elem(&TARGETS, &tgid) != 0;
-}
-
 static __always_inline struct config *config(void)
 {
 	u32 zero = 0;
 	return bpf_map_lookup_elem(&CONFIG, &zero);
+}
+
+// Whether the current task is traced: it is in the cgroup, or its
+// process is a target.
+static __always_inline int traced(u32 tgid)
+{
+	struct config *settings = config();
+	if (settings && settings->cgroup_id)
+		return bpf_get_current_ancestor_cgroup_id(settings->cgroup_level) ==
+		       settings->cgroup_id;
+	return bpf_map_lookup_elem(&TARGETS, &tgid) != 0;
+}
+
+// The number `pid` has in the namespace ids are shown in, or `host` when
+// there is none or it is not in it.
+static __always_inline u32 shown_id(struct pid *pid, u32 host)
+{
+	struct config *settings = config();
+	if (!settings || !settings->ns_inum || !pid)
+		return host;
+	u32 level = settings->ns_level & 31;
+	if (BPF_CORE_READ(pid, level) < level)
+		return host;
+	struct upid upid = {};
+	void *numbers = __builtin_preserve_access_index(&pid->numbers[0]);
+	if (bpf_probe_read_kernel(&upid, sizeof(upid), numbers + level * sizeof(struct upid)))
+		return host;
+	if (BPF_CORE_READ(upid.ns, ns.inum) != settings->ns_inum)
+		return host;
+	return upid.nr;
+}
+
+// A task's thread and process ids as the trace shows them.
+static __always_inline void shown(struct task_struct *task, u32 *tid, u32 *tgid)
+{
+	*tid = shown_id(BPF_CORE_READ(task, thread_pid), *tid);
+	*tgid = shown_id(BPF_CORE_READ(task, group_leader, thread_pid), *tgid);
 }
 
 static __always_inline void lost(void)
@@ -660,6 +692,7 @@ static __always_inline int on_enter(struct pt_regs *regs, u64 id)
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
+	shown(bpf_get_current_task_btf(), &tid, &tgid);
 	struct entry entry = {};
 	entry.abi = abi_of(id, &entry.flags);
 	entry.nr = entry.abi == ABI_X32 ? (id & ~X32_SYSCALL_BIT) : id;
@@ -701,15 +734,24 @@ static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
+	shown(bpf_get_current_task_btf(), &tid, &tgid);
 	u64 now = bpf_ktime_get_ns();
 	struct config *settings = config();
 	if (!settings)
 		return 0;
 	struct entry entry = {};
 	struct call_spec *spec;
-	// A held entry whose time is zero has already ended.
-	struct entry *found = bpf_task_storage_get(&ENTRIES, bpf_get_current_task_btf(), 0, 0);
-	if (found && !found->entered)
+	// A held entry whose time is zero has already ended. Asked to create
+	// one, the kernel fails only when it cannot take its per-CPU task
+	// storage lock, as when another program holds it on this CPU: the
+	// entry is there but unread, so the call is lost, not unseen.
+	struct entry *found = bpf_task_storage_get(&ENTRIES, bpf_get_current_task_btf(), 0,
+						   BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!found) {
+		lost();
+		return 0;
+	}
+	if (!found->entered)
 		found = 0;
 	if (found) {
 		entry = *found;
@@ -810,12 +852,16 @@ int process_fork(u64 *ctx)
 		lost();
 		return 0;
 	}
+	u32 parent_tid = (u32)bpf_get_current_pid_tgid();
+	shown(parent, &parent_tid, &parent_tgid);
+	u32 child_tid = BPF_CORE_READ(child, pid);
+	shown(child, &child_tid, &child_tgid);
 	record->header.kind = RECORD_SPAWN;
 	record->header.size = sizeof(*record);
-	record->header.tid = (u32)bpf_get_current_pid_tgid();
+	record->header.tid = parent_tid;
 	record->header.tgid = parent_tgid;
 	record->time = bpf_ktime_get_ns();
-	record->child = BPF_CORE_READ(child, pid);
+	record->child = child_tid;
 	record->child_tgid = child_tgid;
 	bpf_ringbuf_submit(record, 0);
 	return 0;
@@ -836,8 +882,10 @@ int process_exec(u64 *ctx)
 	if (!settings || !(settings->flags & CONFIG_STREAM) || !buffer)
 		return 0;
 	struct exec_record *record = (void *)buffer->data;
+	u32 tid = BPF_CORE_READ(task, pid);
+	shown(task, &tid, &tgid);
 	record->header.kind = RECORD_EXEC;
-	record->header.tid = BPF_CORE_READ(task, pid);
+	record->header.tid = tid;
 	record->header.tgid = tgid;
 	record->time = bpf_ktime_get_ns();
 	record->former = former;
@@ -881,6 +929,8 @@ int process_exit(u64 *ctx)
 	u32 tid = BPF_CORE_READ(task, pid);
 	if (!traced(tgid))
 		return 0;
+	u32 host = tgid;
+	shown(task, &tid, &tgid);
 	u64 now = bpf_ktime_get_ns();
 	struct config *settings = config();
 	if (!settings)
@@ -903,7 +953,7 @@ int process_exit(u64 *ctx)
 	s32 code = BPF_CORE_READ(task, exit_code);
 	u32 last = BPF_CORE_READ(task, signal, live.counter) == 0;
 	if (last)
-		bpf_map_delete_elem(&TARGETS, &tgid);
+		bpf_map_delete_elem(&TARGETS, &host);
 	// A thread's own end, as a tracer reaps it; the leader's is its
 	// process's, however early it left.
 	if (tid != tgid && (settings->flags & CONFIG_STREAM))
@@ -917,15 +967,16 @@ SEC("tp_btf/signal_deliver")
 int signal_deliver(u64 *ctx)
 {
 	u64 ids = bpf_get_current_pid_tgid();
-	u32 tgid = ids >> 32;
+	u32 tgid = ids >> 32, tid = (u32)ids;
 	if (!traced(tgid))
 		return 0;
+	shown(bpf_get_current_task_btf(), &tid, &tgid);
 	struct config *settings = config();
 	if (!settings || !(settings->flags & CONFIG_STREAM))
 		return 0;
 	if (settings->flags & CONFIG_STACKS) {
 		struct pt_regs *regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
-		send_stack(ctx, (u32)ids, tgid, regs, settings->flags);
+		send_stack(ctx, tid, tgid, regs, settings->flags);
 	}
 	struct signal_record *record = bpf_ringbuf_reserve(&EVENTS, sizeof(*record), 0);
 	if (!record) {
@@ -934,7 +985,7 @@ int signal_deliver(u64 *ctx)
 	}
 	record->header.kind = RECORD_SIGNAL;
 	record->header.size = sizeof(*record);
-	record->header.tid = (u32)ids;
+	record->header.tid = tid;
 	record->header.tgid = tgid;
 	record->time = bpf_ktime_get_ns();
 	record->signal = (s32)ctx[0];
@@ -953,13 +1004,20 @@ int in_flight(struct bpf_iter__task *ctx)
 	struct task_struct *task = ctx->task;
 	if (!task)
 		return 0;
-	if (!traced(BPF_CORE_READ(task, tgid)))
+	// Only a traced thread holds an entry; a cgroup's are not the
+	// iterator's own, which traced() asks about.
+	struct config *settings = config();
+	if (!settings)
+		return 0;
+	if (!settings->cgroup_id && !bpf_map_lookup_elem(&TARGETS, &(u32){BPF_CORE_READ(task, tgid)}))
 		return 0;
 	struct entry *held = bpf_task_storage_get(&ENTRIES, task, 0, 0);
 	if (!held || !held->entered)
 		return 0;
 	struct in_flight_record record = {};
+	u32 tgid = held->tgid;
 	record.tid = BPF_CORE_READ(task, pid);
+	shown(task, &record.tid, &tgid);
 	record.entry = *held;
 	bpf_seq_write(ctx->meta->seq, &record, sizeof(record));
 	return 0;

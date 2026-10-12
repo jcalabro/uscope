@@ -44,13 +44,16 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// What differs between two runs of one program: addresses, ids, and
-/// random bytes.
+/// random bytes. A loss is left out: the kernel counts runs it skipped on
+/// any process's behalf, so one can be reported while every call of the
+/// program's was seen, and a real loss leaves the traces differing anyway.
 fn normalized(trace: &str) -> String {
     let addresses = Regex::new(r"0x[0-9a-f]+").expect("regex");
     let ids = Regex::new(r"\b\d{4,}\b").expect("regex");
     let random = Regex::new(r#"getrandom\("[^"]*""#).expect("regex");
     trace
         .lines()
+        .filter(|line| !line.starts_with("--- lost "))
         .map(|line| {
             let line = random.replace_all(line, "getrandom(\"\"");
             let line = addresses.replace_all(&line, "0x?");
@@ -976,11 +979,25 @@ mod bpf {
 
     /// Children and threads, each followed alike. A process that is not
     /// traced is never sent the SIGCHLD its default ignores, which ptrace
-    /// makes the kernel queue, so the comparison leaves it out.
+    /// makes the kernel queue, so the comparison leaves it out. Joining
+    /// the thread waits on a futex, or finds it gone with EAGAIN, as the
+    /// thread's exit races the join, so that result is left out too.
     #[test]
     #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
     fn the_engines_follow_children_and_threads_alike() {
         let (ptrace, bpf) = engines(&["-yy", "-e", "signal=!SIGCHLD"], "family");
+        let joined = Regex::new(r"^(futex\(.*FUTEX_WAIT_BITSET.*\)) = .*$").expect("regex");
+        let threads = |trace: &str| {
+            threads(trace)
+                .into_iter()
+                .map(|lines| {
+                    lines
+                        .into_iter()
+                        .map(|line| joined.replace(&line, "$1 = joined").into_owned())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<BTreeSet<_>>()
+        };
         let (ours, theirs) = (threads(&bpf), threads(&ptrace));
         assert_eq!(
             ours,
@@ -1173,10 +1190,15 @@ mod bpf {
         drop(running.child.stdin.take());
         let (code, lines) = running.finish();
         assert_eq!(code, Some(0), "{lines:?}");
+        // Its return is seen, or the trace says it lost what it could not
+        // read: the kernel skips a program's run on a CPU where another run
+        // of it was preempted, and fails to take its task storage lock where
+        // another program holds it.
         assert!(
-            lines
-                .iter()
-                .any(|line| line.starts_with("read(0, \"\", 1)") && line.ends_with("= 0")),
+            lines.iter().any(|line| {
+                (line.starts_with("read(0, \"\", 1)") && line.ends_with("= 0"))
+                    || line.starts_with("--- lost ")
+            }),
             "{lines:?}"
         );
     }

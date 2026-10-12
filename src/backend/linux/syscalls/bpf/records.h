@@ -131,7 +131,13 @@ struct call_spec {
 struct config {
 	u32 flags;
 	u32 elements;
-	u64 pad;
+	// A cgroup's processes, by its id and depth, rather than TARGETS'.
+	u64 cgroup_id;
+	u32 cgroup_level;
+	// Ids shown in this pid namespace, by its inode and depth, when set.
+	u32 ns_inum;
+	u32 ns_level;
+	u32 pad;
 };
 
 // A thread's call in progress.

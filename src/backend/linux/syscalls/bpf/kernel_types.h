@@ -79,6 +79,25 @@ struct files_struct {
 	struct fdtable *fdt;
 } __kernel_preserve;
 
+struct ns_common {
+	unsigned int inum;
+} __kernel_preserve;
+
+struct pid_namespace {
+	struct ns_common ns;
+} __kernel_preserve;
+
+struct upid {
+	int nr;
+	struct pid_namespace *ns;
+} __kernel_preserve;
+
+// A pid's number in each namespace from the host's down, `level` deep.
+struct pid {
+	unsigned int level;
+	struct upid numbers[1];
+} __kernel_preserve;
+
 struct task_struct {
 	struct thread_info thread_info;
 	int pid;
@@ -86,6 +105,8 @@ struct task_struct {
 	int exit_code;
 	struct signal_struct *signal;
 	struct files_struct *files;
+	struct pid *thread_pid;
+	struct task_struct *group_leader;
 } __kernel_preserve;
 
 struct linux_binprm {
