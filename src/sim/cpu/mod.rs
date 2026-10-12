@@ -51,6 +51,9 @@ pub const RSP: usize = 4;
 pub const RBP: usize = 5;
 pub const RSI: usize = 6;
 pub const RDI: usize = 7;
+pub const R8: usize = 8;
+pub const R9: usize = 9;
+pub const R10: usize = 10;
 pub const R11: usize = 11;
 
 /// One thread's user-visible register state.

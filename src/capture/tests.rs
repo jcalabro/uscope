@@ -52,6 +52,45 @@ fn sample_capture(offset: i64) -> Capture {
             reserved: 0.into(),
         },
     );
+    // A read that returned three bytes, behind a signal.
+    let mut captured = vec![1, 1, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0];
+    captured.extend_from_slice(b"abc");
+    builder.syscall_note(
+        SyscallNote {
+            time: (offset + 7).into(),
+            value: 10.into(),
+            extra: 0.into(),
+            thread: worker.into(),
+            process: 0.into(),
+            text: NONE.into(),
+            stack: deep.into(),
+            blob: NONE.into(),
+            blob_len: 0.into(),
+            calls: 0.into(),
+            kind: NoteKind::Signal as u8,
+            flags: 0,
+            reserved: [0; 10],
+        },
+        &[0; 128],
+    );
+    builder.syscall(
+        Syscall {
+            entered: (offset + 7).into(),
+            exited: (offset + 8).into(),
+            ret: 3.into(),
+            args: [3, 0x1000, 16, 0, 0, 0].map(Into::into),
+            thread: worker.into(),
+            number: 0.into(),
+            stack: deep.into(),
+            captures: NONE.into(),
+            captures_len: 0.into(),
+            abi: 0,
+            outcome: CallOutcome::Returned as u8,
+            flags: 0,
+            reserved: 0,
+        },
+        &captured,
+    );
     builder.finish()
 }
 
@@ -191,6 +230,15 @@ fn validation_rejects_every_out_of_bounds_reference() {
     let mut broken = valid.clone();
     broken.zones[0].end = (-1).into();
     assert!(broken.validate().is_err(), "a zone ending before it starts");
+    let mut broken = valid.clone();
+    broken.syscall_notes[0].calls = 2.into();
+    assert!(broken.validate().is_err(), "a note after calls not there");
+    let mut broken = valid.clone();
+    broken.syscalls[0].captures_len = 14.into();
+    assert!(broken.validate().is_err(), "captured bytes cut short");
+    let mut broken = valid.clone();
+    broken.syscall_notes[0].kind = 0;
+    assert!(broken.validate().is_err(), "a note of no kind");
     let mut broken = valid;
     broken.strings.pop();
     assert!(broken.validate().is_err(), "an unterminated string pool");

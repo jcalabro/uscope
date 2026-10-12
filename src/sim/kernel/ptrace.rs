@@ -9,7 +9,7 @@ use super::{
     DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Thread, Tid, Tracing,
     WaitStatus,
 };
-use crate::sim::cpu::Registers;
+use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, Registers};
 #[cfg(test)]
 use crate::sim::world::Sabotage;
 
@@ -213,6 +213,7 @@ impl Kernel {
     }
 
     /// `PTRACE_GETEVENTMSG`: the message of the latest event stop, or zero.
+    /// At a system-call-stop it says which (K-SYS-1).
     pub fn event_message(&self, tid: Tid) -> Result<u64, Errno> {
         match self.stopped(tid)?.state {
             State::Stopped {
@@ -223,6 +224,10 @@ impl Kernel {
                 kind: StopKind::Event(_, message),
                 ..
             } => Ok(message),
+            State::Stopped {
+                kind: StopKind::Syscall { exit },
+                ..
+            } => Ok(if exit { 2 } else { 1 }),
             _ => Ok(0),
         }
     }
@@ -261,7 +266,26 @@ impl Kernel {
     ) -> Result<(), Errno> {
         let thread = self.stopped_mut(tid)?;
         thread.single_step = single_step;
+        thread.syscall_stops = false;
+        thread.resumed = true;
         match thread.state {
+            State::Stopped {
+                kind: StopKind::Syscall { .. },
+                ..
+            } => {
+                // K-SYS-5: a signal passed here is sent to the process.
+                // SIGKILL is the only one modeled.
+                if signal.is_some_and(|signal| signal != libc::SIGKILL) {
+                    self.gap("a signal other than SIGKILL passed at a system-call-stop");
+                    return Err(Errno::ENOSYS);
+                }
+                thread.state = State::Running;
+                thread.report = None;
+                if signal.is_some() {
+                    let group = thread.tgid;
+                    self.kill_process(group, super::ExitStatus::Signal(libc::SIGKILL, false));
+                }
+            }
             State::Stopped {
                 kind: StopKind::Signal(_),
                 ..
@@ -293,6 +317,60 @@ impl Kernel {
             _ => unreachable!("a resumed thread was stopped"),
         }
         Ok(())
+    }
+
+    /// `PTRACE_SYSCALL`: resumes a stopped thread as `PTRACE_CONT` does,
+    /// to stop next at a system call's entry or exit (K-SYS-1, K-SYS-2).
+    /// Resuming with a signal from a system-call-stop is not modeled.
+    pub fn resume_to_call(&mut self, tid: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        self.resume(tid, signal, false)?;
+        self.threads
+            .get_mut(&tid)
+            .expect("the resumed thread")
+            .syscall_stops = true;
+        Ok(())
+    }
+
+    /// `PTRACE_GET_SYSCALL_INFO` (K-SYS-1, K-SYS-2, K-SYS-4): the call a
+    /// thread stopped at the entry or exit of, or only the architecture at
+    /// any other stop.
+    pub fn call_info(&self, tid: Tid) -> Result<CallInfo, Errno> {
+        let thread = self.stopped(tid)?;
+        let State::Stopped { kind, .. } = thread.state else {
+            unreachable!("a stopped thread has stop information");
+        };
+        let general = &thread.registers.general;
+        let args = [
+            general[RDI],
+            general[RSI],
+            general[RDX],
+            general[R10],
+            general[R8],
+            general[R9],
+        ];
+        #[cfg(test)]
+        let args = if self.sabotage == Some(Sabotage::MisreportCallArguments) {
+            let mut args = args;
+            args[1] = args[1].wrapping_add(1);
+            args
+        } else {
+            args
+        };
+        Ok(match kind {
+            StopKind::Syscall { exit: false } => CallInfo {
+                op: 1,
+                number: thread.orig_rax,
+                args,
+                value: 0,
+            },
+            StopKind::Syscall { exit: true } => CallInfo {
+                op: 2,
+                number: 0,
+                args: [0; 6],
+                value: general[RAX].cast_signed(),
+            },
+            _ => CallInfo::default(),
+        })
     }
 
     /// `PTRACE_SEIZE` with `options`: the caller traces the thread, which
@@ -367,6 +445,8 @@ impl Kernel {
         }
         thread.tracing = Tracing::Untraced;
         thread.single_step = false;
+        // K-SYS-6: an untraced thread stops at no call.
+        thread.syscall_stops = false;
         thread.options = Options::default();
         thread.report = None;
         let state = thread.state;
@@ -399,6 +479,19 @@ impl Kernel {
                 kind: StopKind::Event(..) | StopKind::Group(_),
                 ..
             } => self.threads.get_mut(&tid).expect("the thread").state = State::Running,
+            // K-SYS-6: the call goes on, made or returning, untraced.
+            State::Stopped {
+                kind: StopKind::Syscall { .. },
+                ..
+            } => {
+                if signal.is_some() {
+                    self.gap("a signal passed detaching at a system-call-stop");
+                    return Err(Errno::ENOSYS);
+                }
+                let thread = self.threads.get_mut(&tid).expect("the thread");
+                thread.state = State::Running;
+                thread.syscall_stops = false;
+            }
             State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..
@@ -437,4 +530,17 @@ impl Kernel {
             thread.pending.contains(signal)
         }
     }
+}
+
+/// What `PTRACE_GET_SYSCALL_INFO` reports, for x86-64 alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallInfo {
+    /// 1 at an entry, 2 at an exit, 0 at any other stop.
+    pub op: u8,
+    /// The call, at an entry.
+    pub number: u64,
+    /// Its arguments, at an entry.
+    pub args: [u64; 6],
+    /// What it returned, at an exit.
+    pub value: i64,
 }

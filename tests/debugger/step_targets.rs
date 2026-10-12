@@ -318,3 +318,42 @@ async fn a_breakpoint_on_a_passed_call_does_not_take_the_step_into_it() {
         }
     }
 }
+
+/// A step into a call the program then skips stops at the next line, even
+/// when that line begins with another call whose breakpoint declines the
+/// hit: the step reaches the line before it reaches the call.
+#[tokio::test]
+async fn a_skipped_call_ends_the_step_at_the_next_line_on_a_declining_breakpoint() {
+    for fixture in ["step-targets-gcc-o0", "step-targets-clang-o0"] {
+        let mut scenario = stopped_at(fixture, "targets: skipped").await;
+        let next = source_line(SOURCE, "targets: after skipped");
+        let condition =
+            uscope::HitCondition::new(uscope::HitComparison::Equal, 5).expect("a hit condition");
+        scenario
+            .operation(
+                "declining breakpoint",
+                scenario.handle().add_breakpoint_with_hit_condition(
+                    BreakpointSpec::Source {
+                        path: "step-targets.c".into(),
+                        line: uscope::LineNumber::new(next).expect("a line"),
+                    },
+                    condition,
+                ),
+            )
+            .await;
+        let call = calling(&targets(&scenario).await, "add").call;
+        assert_eq!(
+            scenario.step_into_to_stop(call).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            },
+            "{fixture}"
+        );
+        assert_eq!(
+            place(&scenario).await,
+            ("main".to_owned(), next),
+            "{fixture}"
+        );
+        scenario.shutdown().await;
+    }
+}

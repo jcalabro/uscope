@@ -1206,3 +1206,149 @@ fn k_perf_1_a_sample_holds_the_threads_registers_chain_and_stack() {
         record.wait(leader);
     });
 }
+
+/// K-SYS-1: `PTRACE_SYSCALL` stops a thread at its next system call's
+/// entry, for `SIGTRAP | 0x80` from itself, with `rip` after the
+/// instruction, `rax` `-ENOSYS`, event message 1, and `orig_rax` and
+/// `PTRACE_GET_SYSCALL_INFO` naming the call and its arguments. K-SYS-2:
+/// continuing it the same way makes the call and stops at its exit, with
+/// message 2 and the result in `rax` and the info; `PTRACE_CONT` from an
+/// entry makes the call and runs on. K-SYS-4: at any other stop the info
+/// names no call.
+#[test]
+fn k_sys_1_a_thread_stops_at_a_system_calls_entry_and_exit() {
+    dual_run("straight", &["1"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.call(leader);
+        for _ in 0..3 {
+            record.resume_to_call(leader, None);
+            record.wait(leader);
+            record.stop(leader);
+            record.system_call(leader);
+            record.event_message(leader);
+            record.call(leader);
+        }
+        record.resume(leader, None);
+        record.wait(leader);
+        record.system_call(leader);
+        record.event_message(leader);
+        record.call(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SYS-3: a call that stops at an event stops there between its entry
+/// and exit. Continued with `PTRACE_SYSCALL`, `clone` stops at its exit
+/// returning the new thread, which, already past its own return, first
+/// stops at its next call's entry. `exit` and `exit_group` stop at their
+/// exit events and never return.
+#[test]
+fn k_sys_3_event_stops_fall_between_a_calls_entry_and_exit() {
+    dual_run("threads", &["1", "main"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume_to_call(leader, None);
+        record.wait(leader);
+        record.call(leader);
+        record.resume_to_call(leader, None);
+        let child = record.cloned(leader);
+        record.call(leader);
+        record.wait(child);
+        record.stop(child);
+        record.resume_to_call(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        let returned = record
+            .tracee
+            .registers(leader)
+            .map(|(registers, _)| registers.general[RAX] == u64::from(child.cast_unsigned()));
+        record.note(format!("clone returned thread 1: {returned:?}"));
+        record.call(leader);
+        // The leader stays stopped until the worker is gone, or its group
+        // exit would race the worker's own.
+        record.resume_to_call(child, None);
+        record.wait(child);
+        record.stop(child);
+        record.system_call(child);
+        record.call(child);
+        record.resume_to_call(child, None);
+        record.wait(child);
+        record.event_message(child);
+        record.call(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SYS-4: a single step from a call's entry makes the call and reports
+/// `TRAP_BRKPT` after it, with its result, as a step across `syscall`
+/// does (K-TRAP-1).
+#[test]
+fn k_sys_4_a_step_from_a_calls_entry_traps_after_the_call() {
+    dual_run("straight", &["1"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume_to_call(leader, None);
+        record.wait(leader);
+        record.step(leader);
+        record.wait(leader);
+        record.stop(leader);
+        record.system_call(leader);
+        record.call(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SYS-5: SIGKILL takes a thread from a call's entry to its exit event,
+/// without making the call, whether the tracer sends it or passes it on
+/// as it resumes the thread.
+#[test]
+fn k_sys_5_sigkill_at_a_calls_entry_skips_the_call() {
+    for passed in [false, true] {
+        dual_run("straight", &["1"], |record| {
+            let leader = record.leader();
+            record.set_options(leader);
+            record.resume_to_call(leader, None);
+            record.wait(leader);
+            if passed {
+                record.resume_to_call(leader, Some(libc::SIGKILL));
+            } else {
+                let result = record.tracee.kill();
+                record.result("kill", result);
+            }
+            record.wait(leader);
+            record.system_call(leader);
+            record.event_message(leader);
+            record.call(leader);
+            record.resume(leader, None);
+            record.wait(leader);
+        });
+    }
+}
+
+/// K-SYS-6: a thread detached at a call's entry makes the call, and one
+/// detached at its exit returns from it, and either runs on untraced.
+#[test]
+fn k_sys_6_a_thread_detached_at_a_call_makes_it() {
+    for stops in [1, 2] {
+        dual_run_then_exit("straight", &["1"], |record| {
+            let leader = record.leader();
+            record.set_options(leader);
+            for _ in 0..stops {
+                record.resume_to_call(leader, None);
+                record.wait(leader);
+            }
+            record.detach(leader, None);
+        });
+    }
+}

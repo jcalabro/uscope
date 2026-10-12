@@ -65,6 +65,7 @@ pub use async_frames::resume_address;
 mod awaits;
 mod breakpoints;
 mod callers;
+mod catchpoints;
 mod classify;
 mod core_dump;
 mod core_files;
@@ -100,6 +101,7 @@ pub mod sim_edge;
 mod stack_watches;
 mod step_targets;
 mod stepping;
+pub mod syscalls;
 mod tls;
 mod vdso;
 mod visualizers;
@@ -342,6 +344,15 @@ struct TraceThread {
     /// The watchpoints whose hits this thread stops for since its last
     /// public stop, with each hit's number.
     watch_hits: BTreeMap<WatchpointId, u64>,
+    /// The system call the thread stopped at the entry of, with what was
+    /// read there, while its exit stop is still to come.
+    syscall: Option<catchpoints::Entered>,
+    /// Whether the thread's step makes a system call, which stops at its
+    /// entry and exit for the catchpoints.
+    stepping_call: bool,
+    /// Whether the thread is at an event stop inside a system call, which
+    /// returns when it next runs.
+    inside_call: bool,
     /// The thread's name as of its start or the last published stop.
     name: Option<Arc<str>>,
 }
@@ -360,6 +371,9 @@ impl TraceThread {
             debugger_stop_pending: false,
             armed: None,
             watch_hits: BTreeMap::new(),
+            syscall: None,
+            stepping_call: false,
+            inside_call: false,
             name: None,
         }
     }
@@ -718,6 +732,16 @@ enum Edit {
         stops: crate::ExceptionStops,
         reply: Reply<crate::ExceptionStops>,
     },
+    AddCatchpoint {
+        calls: Arc<[crate::syscalls::SyscallId]>,
+        phase: crate::CatchPhase,
+        condition: Option<crate::Condition>,
+        reply: Reply<crate::Catchpoint>,
+    },
+    RemoveCatchpoint {
+        id: crate::CatchpointId,
+        reply: Reply<crate::Catchpoint>,
+    },
     /// Bring modules and breakpoints up to date after the loader changed
     /// the loaded libraries.
     RefreshModules,
@@ -1021,7 +1045,11 @@ impl Inferior {
     }
 
     /// Ends `pid`'s step over the front repair group's breakpoint at `address`.
-    fn finish_current_repair(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+    pub(super) fn finish_current_repair(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+    ) -> Result<()> {
         let thread = self.thread_mut(pid)?;
         thread.stopped_at_breakpoint = None;
         thread.trapped_at = None;
@@ -1195,6 +1223,9 @@ struct Controller<P: InspectionOps> {
     breakpoints: breakpoints::UserBreakpoints,
     next_breakpoint_id: u64,
     next_watchpoint_id: u64,
+    /// The system-call catchpoints, which outlive any process.
+    catchpoints: BTreeMap<crate::CatchpointId, crate::Catchpoint>,
+    next_catchpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
     attach_reply: Option<Reply<StopId>>,
     /// How many times the attach in progress found threads it had not
@@ -1316,6 +1347,8 @@ impl<P: InspectionOps> Controller<P> {
             inferior: None,
             breakpoints: breakpoints::UserBreakpoints::default(),
             next_breakpoint_id: 1,
+            catchpoints: BTreeMap::new(),
+            next_catchpoint_id: 1,
             next_watchpoint_id: 1,
             launch_reply: None,
             attach_reply: None,
@@ -1508,6 +1541,20 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::SetExceptionStops { stops, reply } => {
                 self.edit(Edit::SetExceptionStops { stops, reply });
+            }
+            Request::AddCatchpoint {
+                calls,
+                phase,
+                condition,
+                reply,
+            } => self.edit(Edit::AddCatchpoint {
+                calls,
+                phase,
+                condition,
+                reply,
+            }),
+            Request::RemoveCatchpoint { id, reply } => {
+                self.edit(Edit::RemoveCatchpoint { id, reply });
             }
             Request::Launch { options, reply } => self.start(Start::Launch(*options, reply)),
             Request::Attach {
@@ -2011,6 +2058,8 @@ impl<P: InspectionOps> Controller<P> {
             | Request::RemoveWatchpoint { .. }
             | Request::RemoveAllWatchpoints { .. }
             | Request::SetExceptionStops { .. }
+            | Request::AddCatchpoint { .. }
+            | Request::RemoveCatchpoint { .. }
             | Request::Launch { .. }
             | Request::Attach { .. }
             | Request::LaunchByExec { .. }
@@ -2163,13 +2212,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_event_stop(pid, signal)
             }
             WaitEvent::PtraceEvent(pid, _, event) => self.handle_ptrace_event(pid, event),
-            WaitEvent::PtraceSyscall(pid) => self.handle_classified_stop(
-                pid,
-                ClassifiedStop::Unclassifiable(RawStopRecord {
-                    status: "ptrace syscall stop while syscall tracing is unsupported".to_owned(),
-                    siginfo: Err(Errno::EINVAL),
-                }),
-            ),
+            WaitEvent::PtraceSyscall(pid) => self.handle_syscall_stop(pid),
             WaitEvent::Stopped(pid, signal) => {
                 let initial = self
                     .inferior
@@ -2242,6 +2285,7 @@ impl<P: InspectionOps> Controller<P> {
                 presentation: None,
                 breakpoints: Arc::from(&*self.breakpoints),
                 watchpoints: Arc::from([]),
+                catchpoints: self.catchpoints.values().cloned().collect(),
             };
         };
         let process_id = process_id(inferior.tgid);
@@ -2298,6 +2342,7 @@ impl<P: InspectionOps> Controller<P> {
                 .map(|record| record.watchpoint.clone())
                 .collect::<Vec<_>>()
                 .into(),
+            catchpoints: self.catchpoints.values().cloned().collect(),
         }
     }
 

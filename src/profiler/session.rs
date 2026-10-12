@@ -16,6 +16,12 @@ use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
 use crate::backend::perf;
+use crate::backend::syscall_engines::bpf::{self, BpfOptions};
+use crate::backend::syscall_engines::capture::SyscallCapture;
+use crate::backend::syscall_engines::stacks::SharedStacks;
+use crate::backend::syscall_engines::{Sink, TraceOptions};
+use crate::capture::Capture;
+use crate::capture::builder::CaptureBuilder;
 use crate::capture::records::{GapReason, MarkerKind};
 
 /// A recording and how its program ended.
@@ -93,13 +99,19 @@ pub fn record_watched(
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
     };
+    let mut syscalls = None;
     let perf::Launched {
         pid,
         mut events,
         exit,
         killer,
         executed,
-    } = perf::launch(command, &events, launch)?;
+    } = perf::launch(command, &events, launch, |pid| {
+        if let Some(calls) = &options.syscalls {
+            syscalls = Some(SyscallTrace::start(pid, calls, options)?);
+        }
+        Ok(())
+    })?;
     settings(
         &mut processor,
         options,
@@ -118,6 +130,7 @@ pub fn record_watched(
         watch,
         options,
         started,
+        syscalls.as_ref(),
         || exit.is_finished(),
         || {
             record!("record: stopping, killing {pid}");
@@ -130,9 +143,11 @@ pub fn record_watched(
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
         .map_err(RecordError::Start)?;
     record!("record: the program ended: {status}");
-    let profile = Profile {
-        capture: processor.finish(),
-    };
+    let mut capture = processor.finish();
+    if let Some(syscalls) = syscalls {
+        capture = syscalls.merge(&capture).map_err(RecordError::Syscalls)?;
+    }
+    let profile = Profile { capture };
     if let Some(calls) = breakpoint {
         profile.check_bias(&program, calls.bias)?;
     }
@@ -183,6 +198,7 @@ pub fn record_attached(
         watch,
         options,
         Some(pid),
+        None,
         || process.exited(),
         || {
             record!("record: stopping, detaching from {pid}");
@@ -286,12 +302,14 @@ fn settings(
 /// `options`, once the program `started` names has started. When `watch`
 /// stops the recording, `stop` ends it at once when it says so, or else
 /// waits for `ended`.
+#[expect(clippy::too_many_arguments, reason = "each is one part of a recording")]
 fn drive(
     processor: &mut record::Processor,
     events: &mut perf::Events,
     watch: &mut Watch<'_>,
     options: &RecordOptions,
     started: Option<u32>,
+    syscalls: Option<&SyscallTrace>,
     mut ended: impl FnMut() -> bool,
     mut stop: impl FnMut() -> bool,
 ) {
@@ -381,6 +399,8 @@ fn drive(
                 } else {
                     processor.snapshot()
                 };
+                // The calls of the same span, on the same clock.
+                let capture = syscalls.map_or_else(|| capture.clone(), |trace| trace.cut(&capture));
                 (save.to)(Profile { capture });
             }
         }
@@ -717,4 +737,241 @@ pub(super) fn which(program: &Path) -> Option<PathBuf> {
             .map(|directory| directory.join(program))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// The system call trace a recording runs beside its samples, on the
+/// same clock, with the BPF engine.
+struct SyscallTrace {
+    stop: std::sync::Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<Result<(), String>>,
+    shared: std::sync::Arc<std::sync::Mutex<Shared>>,
+    stacks: Option<SharedStacks>,
+}
+
+/// What a recording keeps of its trace until the profile is taken.
+enum Kept {
+    /// Every call, for a profile of the whole recording.
+    All(Box<SyscallCapture>),
+    /// The calls since the last segment.
+    Since(std::collections::VecDeque<crate::syscalls::TraceEvent>),
+    /// The calls of the last span of this many nanoseconds.
+    Window(u64, std::collections::VecDeque<crate::syscalls::TraceEvent>),
+}
+
+impl Kept {
+    /// Keeps `event`, letting a window's oldest go.
+    fn keep(&mut self, event: crate::syscalls::TraceEvent) {
+        match self {
+            Self::All(capture) => capture.event(&event),
+            Self::Since(events) => events.push_back(event),
+            Self::Window(span, events) => {
+                events.push_back(event);
+                Self::trim(*span, events, monotonic());
+            }
+        }
+    }
+
+    fn trim(
+        span: u64,
+        events: &mut std::collections::VecDeque<crate::syscalls::TraceEvent>,
+        now: u64,
+    ) {
+        let since = now.saturating_sub(span);
+        while events.front().is_some_and(|event| event.time() < since) {
+            events.pop_front();
+        }
+    }
+}
+
+/// The trace's settings and what it keeps, shared by its sink and the
+/// recording that cuts it.
+struct Shared {
+    kept: Kept,
+    settings: Vec<(String, String)>,
+}
+
+/// The trace's sink, which says when the trace sees its process.
+struct Held {
+    shared: std::sync::Arc<std::sync::Mutex<Shared>>,
+    ready: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Held {
+    fn shared(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Sink for Held {
+    fn event(&mut self, event: crate::syscalls::TraceEvent) {
+        self.shared().kept.keep(event);
+    }
+
+    fn attached_by(&mut self, attachment: &crate::syscall_engines::bpf::Attachment) {
+        let mut shared = self.shared();
+        shared
+            .settings
+            .push(("attach".into(), attachment.name().into()));
+        shared
+            .settings
+            .push(("attach reason".into(), attachment.reason.clone()));
+        if let Kept::All(capture) = &mut shared.kept {
+            capture.setting("attach", attachment.name());
+            capture.setting("attach reason", &attachment.reason);
+        }
+    }
+
+    fn attached(&mut self, _process: u32) {
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(());
+        }
+    }
+}
+
+impl SyscallTrace {
+    /// Traces `calls` of process `pid`, held at its gate, and every
+    /// process it starts; returns once the trace sees it.
+    fn start(
+        pid: u32,
+        calls: &crate::syscalls::CallSet,
+        recording: &RecordOptions,
+    ) -> Result<Self, String> {
+        let options = TraceOptions {
+            calls: calls.clone(),
+            limits: crate::syscalls::captures::Limits::default(),
+            verbose: false,
+            follow: true,
+            stacks: Some(SharedStacks::default()),
+        };
+        let stacks = options.stacks.clone();
+        let kept = match (recording.window, recording.segment) {
+            (Some(window), _) => Kept::Window(
+                u64::try_from(window.as_nanos()).unwrap_or(u64::MAX),
+                std::collections::VecDeque::new(),
+            ),
+            (None, Some(_)) => Kept::Since(std::collections::VecDeque::new()),
+            (None, None) => {
+                let mut capture = SyscallCapture::new(stacks.clone());
+                capture.setting("syscalls", "bpf");
+                Kept::All(Box::new(capture))
+            }
+        };
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared {
+            kept,
+            settings: vec![("syscalls".into(), "bpf".into())],
+        }));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (ready, seen) = std::sync::mpsc::channel();
+        let stopped = std::sync::Arc::clone(&stop);
+        let mut sink = Held {
+            shared: std::sync::Arc::clone(&shared),
+            ready: Some(ready),
+        };
+        let thread = std::thread::Builder::new()
+            .name("uscope-record-syscalls".into())
+            .spawn(move || {
+                bpf::trace_held(pid, &options, BpfOptions::default(), &stopped, &mut sink)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| error.to_string())?;
+        if seen.recv().is_ok() {
+            return Ok(Self {
+                stop,
+                thread,
+                shared,
+                stacks,
+            });
+        }
+        // The trace ended before it saw the process: why is its error.
+        Err(match thread.join() {
+            Ok(Err(why)) => why,
+            _ => "the trace ended before it began".to_owned(),
+        })
+    }
+
+    /// `samples` with the calls of their span: a segment's since the last,
+    /// or a window's last span.
+    fn cut(&self, samples: &Capture) -> Capture {
+        cut(&self.shared, self.stacks.as_ref(), samples)
+    }
+
+    /// Ends the trace, its program having ended, and merges it with the
+    /// samples.
+    fn merge(self, samples: &Capture) -> Result<Capture, String> {
+        // Whatever the program's last calls sent is in the ring, which the
+        // trace drains before it ends; a process the program left running
+        // goes on untraced.
+        let Self {
+            stop,
+            thread,
+            shared,
+            stacks,
+        } = self;
+        stop.store(true, Ordering::Relaxed);
+        thread
+            .join()
+            .map_err(|_| "the system call trace panicked".to_owned())??;
+        let kept = {
+            let mut shared = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(
+                &mut shared.kept,
+                Kept::Since(std::collections::VecDeque::new()),
+            )
+        };
+        match kept {
+            Kept::All(capture) => {
+                let mut builder = CaptureBuilder::new();
+                builder.absorb(samples);
+                builder.absorb(&capture.finish().capture);
+                Ok(builder.finish())
+            }
+            kept => {
+                shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .kept = kept;
+                Ok(cut(&shared, stacks.as_ref(), samples))
+            }
+        }
+    }
+}
+
+/// `samples` with the calls `shared` keeps for their span.
+fn cut(
+    shared: &std::sync::Mutex<Shared>,
+    stacks: Option<&SharedStacks>,
+    samples: &Capture,
+) -> Capture {
+    let mut capture = SyscallCapture::new(stacks.cloned());
+    {
+        let mut shared = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, value) in &shared.settings {
+            capture.setting(key, value);
+        }
+        match &mut shared.kept {
+            Kept::All(_) => return samples.clone(),
+            Kept::Since(events) => {
+                for event in events.drain(..) {
+                    capture.event(&event);
+                }
+            }
+            Kept::Window(span, events) => {
+                Kept::trim(*span, events, monotonic());
+                for event in events.iter() {
+                    capture.event(event);
+                }
+            }
+        }
+    }
+    let mut builder = CaptureBuilder::new();
+    builder.absorb(samples);
+    builder.absorb(&capture.finish().capture);
+    builder.finish()
 }

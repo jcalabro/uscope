@@ -209,6 +209,7 @@ pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
         | StopReason::ProgramBreakpoint { .. }
         | StopReason::Breakpoint { .. }
         | StopReason::Watchpoint { .. }
+        | StopReason::Syscall(_)
         | StopReason::WatchpointInvalidated { .. }
         | StopReason::WatchpointArmFailed { .. }
         | StopReason::Step { .. }

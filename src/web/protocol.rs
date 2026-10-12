@@ -36,6 +36,9 @@ pub struct Envelope {
     pub request: Request,
 }
 
+mod syscalls;
+pub use syscalls::*;
+
 /// What a tab can ask for.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -158,6 +161,28 @@ pub enum Request {
     RecordProfile(RecordProfile),
     /// Ends a recording, killing its program.
     StopRecording(ProfileRef),
+    /// What a profile's system calls cost, grouped.
+    SyscallSummary(SyscallSummaryQuery),
+    /// Calls per slice of time, stacked.
+    SyscallRate(SyscallRateQuery),
+    /// Calls by time and latency.
+    SyscallHeatmap(SyscallHeatmapQuery),
+    /// One call's latency, errors, and callers.
+    SyscallDetail(SyscallDetailQuery),
+    /// A page of the trace as strace prints it.
+    SyscallLog(SyscallLogQuery),
+    /// One call of the trace, expanded.
+    SyscallCall(SyscallCallQuery),
+    /// Each thread's time in calls.
+    SyscallLanes(SyscallLanesQuery),
+    /// What the calls did with files.
+    SyscallFiles(SyscallQuery),
+    /// What the calls did over sockets.
+    SyscallNetwork(SyscallQuery),
+    /// The processes the trace saw.
+    SyscallProcesses(SyscallQuery),
+    /// What a live trace's threads are blocked in.
+    SyscallInFlight(SyscallInFlightQuery),
 }
 
 /// A stop, which must be current.
@@ -714,6 +739,10 @@ pub struct RecordProfile {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub window: Option<f64>,
+    /// Traces system calls instead of sampling.
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub syscalls: Option<RecordSyscalls>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -955,6 +984,10 @@ pub struct ProfileSummary {
     pub timed: bool,
     pub samples: u64,
     pub weight: u64,
+    /// System calls its trace holds, which the Syscalls view shows.
+    pub syscalls: u64,
+    /// Records of calls the trace's engine lost.
+    pub syscalls_lost: u64,
     /// Nanoseconds from the first sample to the last.
     pub duration: i64,
     pub threads: Vec<ProfileThread>,
@@ -2285,6 +2318,42 @@ mod tests {
         ProfileMarkKind::decl,
         ProfileZoneStatsQuery::decl,
         ProfileZoneStats::decl,
+        SyscallQuery::decl,
+        SyscallGroup::decl,
+        SyscallSummaryQuery::decl,
+        SyscallSummary::decl,
+        SyscallRow::decl,
+        SyscallCount::decl,
+        SyscallRateBy::decl,
+        SyscallRateQuery::decl,
+        SyscallRate::decl,
+        SyscallSeries::decl,
+        SyscallHeatmapQuery::decl,
+        SyscallHeatmap::decl,
+        SyscallDetailQuery::decl,
+        SyscallDetail::decl,
+        SyscallCaller::decl,
+        SyscallLogQuery::decl,
+        SyscallLog::decl,
+        SyscallLine::decl,
+        SyscallToken::decl,
+        SyscallCallQuery::decl,
+        SyscallCall::decl,
+        SyscallArgument::decl,
+        SyscallSite::decl,
+        SyscallLanesQuery::decl,
+        SyscallLanes::decl,
+        SyscallLane::decl,
+        SyscallFiles::decl,
+        SyscallFile::decl,
+        SyscallNetwork::decl,
+        SyscallEndpoint::decl,
+        SyscallProcesses::decl,
+        RecordSyscalls::decl,
+        SyscallInFlightQuery::decl,
+        SyscallInFlight::decl,
+        SyscallBlocked::decl,
+        SyscallProcess::decl,
         ProfileZoneAt::decl,
         ProfileLabelValue::decl,
         RecordProfile::decl,

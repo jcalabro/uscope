@@ -496,7 +496,12 @@ async fn a_profile_shows_where_tasks_waited_and_what_each_ran() {
 }
 
 /// Waits for the profiles list to show `id` as `matches` accepts.
-async fn listed(tab: &mut Client, id: &str, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+pub async fn listed(
+    tab: &mut Client,
+    id: &str,
+    what: &str,
+    matches: impl Fn(&Value) -> bool,
+) -> Value {
     loop {
         let message = tab
             .expect(what, |message| message["type"] == "profiles")

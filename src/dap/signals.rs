@@ -6,9 +6,11 @@
 //! debugger's defaults, so a client that never changes them sees the same
 //! stops as the console. A signal filter's `condition`, when the client
 //! supports filter options, replaces its group with a comma-separated list
-//! of signals.
+//! of signals. The system-call filter stops at the calls its condition
+//! names, or at every call.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use uscope::ExceptionStops;
@@ -90,14 +92,29 @@ pub fn filters() -> Value {
             "default": filter.default,
         })
     });
-    signals.chain(exceptions).collect()
+    let syscalls = json!({
+        "filter": SYSCALLS,
+        "label": "System calls",
+        "description": "Stop as system calls begin and return. While this is on, every call \
+                        the program makes stops its thread briefly.",
+        "default": false,
+        "supportsCondition": true,
+        "conditionDescription": "Comma-separated calls to stop at, such as openat,connect; every call when empty",
+    });
+    signals.chain(exceptions).chain([syscalls]).collect()
 }
+
+/// The filter that stops at system calls.
+const SYSCALLS: &str = "syscalls";
 
 /// Which signals and exceptions stop, as the exception filters select them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     stopping: BTreeSet<u64>,
     exceptions: ExceptionStops,
+    /// The system calls that stop, every call when empty, when the filter
+    /// is on.
+    syscalls: Option<Arc<[uscope::syscalls::SyscallId]>>,
 }
 
 impl Default for Selection {
@@ -114,6 +131,26 @@ impl Default for Selection {
     }
 }
 
+/// Every call of every ABI the comma-separated `text` names.
+fn syscall_list(text: &str) -> Result<Arc<[uscope::syscalls::SyscallId]>, String> {
+    let mut calls = Vec::new();
+    for name in text
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let named: Vec<_> = uscope::syscalls::Abi::ALL
+            .into_iter()
+            .filter_map(|abi| uscope::syscalls::SyscallId::named(abi, name))
+            .collect();
+        if named.is_empty() {
+            return Err(format!("unknown system call '{name}'"));
+        }
+        calls.extend(named);
+    }
+    Ok(calls.into())
+}
+
 impl Selection {
     /// Whether the signal with this code stops.
     pub fn stops(&self, code: u64) -> bool {
@@ -125,11 +162,18 @@ impl Selection {
         self.exceptions
     }
 
+    /// The system calls that stop, every one when empty, or none when the
+    /// filter is off.
+    pub const fn syscalls(&self) -> Option<&Arc<[uscope::syscalls::SyscallId]>> {
+        self.syscalls.as_ref()
+    }
+
     /// Reads a `setExceptionBreakpoints` request, returning the selection
     /// and one breakpoint per filter and filter option, in request order.
     pub fn parse(arguments: &SetExceptionBreakpointsArguments) -> (Self, Vec<Value>) {
         let mut enabled = BTreeMap::new();
         let mut exceptions = ExceptionStops::NONE;
+        let mut syscalls = None;
         let mut breakpoints = Vec::new();
         let options = arguments.filter_options.iter().flatten().map(|option| {
             (
@@ -146,6 +190,16 @@ impl Selection {
             .map(|id| (id.as_str(), None))
             .chain(options)
         {
+            if id == SYSCALLS {
+                match syscall_list(condition.unwrap_or_default()) {
+                    Ok(calls) => {
+                        syscalls = Some(calls);
+                        breakpoints.push(json!({"verified": true}));
+                    }
+                    Err(message) => breakpoints.push(unverified(&message)),
+                }
+                continue;
+            }
             if let Some(chosen) = exceptions.with(id, true) {
                 if condition.is_some() {
                     breakpoints.push(unverified(&format!(
@@ -174,6 +228,7 @@ impl Selection {
         (
             Self {
                 exceptions,
+                syscalls,
                 ..Self::from_filters(&enabled)
             },
             breakpoints,
@@ -204,6 +259,7 @@ impl Selection {
         Self {
             stopping,
             exceptions: ExceptionStops::default(),
+            syscalls: None,
         }
     }
 }

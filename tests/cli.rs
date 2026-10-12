@@ -777,7 +777,7 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
         "  break        b           Set a breakpoint",
         "  finish       fin, f      Run until the selected frame returns",
         "  continue     c           Continue execution",
-        "  delete       del, d      Delete breakpoints, and watchpoints wID",
+        "  delete       del, d      Delete breakpoints, watchpoints wID, and catchpoints cID",
         "  clear        cls         Clear and redraw the terminal",
         "  help         h, ?        Show command help",
         "  Clear and redraw the terminal\n  aliases: cls",
@@ -2471,6 +2471,44 @@ fn view_files_loaded_together_stack_as_on_the_command_line() {
     assert_eq!(listings.len(), 2, "{output}");
     assert!(listings[0][1].contains("second.views"), "{output}");
     assert_eq!(listings[0], listings[1], "{output}");
+}
+
+/// The project root is the nearest directory with `.uscope/` or `.git`, so
+/// a repository inside another project, as a git worktree often is, is a
+/// project of its own and never reads the outer one's settings or state.
+#[test]
+fn a_repository_inside_a_project_is_its_own_project() {
+    let directory = support::ScratchDir::new("cli-project-root");
+    let outer = directory.path().join("outer");
+    let inner = outer.join("worktrees/inner");
+    let subdirectory = inner.join("src");
+    fs::create_dir_all(outer.join(".uscope/state")).expect("make the outer project");
+    fs::create_dir_all(&subdirectory).expect("make the inner repository");
+    // A worktree's `.git` is a file.
+    fs::write(inner.join(".git"), "gitdir: elsewhere\n").expect("mark the repository");
+    let root = |start: &std::path::Path| {
+        let output = uscope_command()
+            .current_dir(start)
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .args(["config", "path"])
+            .output()
+            .expect("run uscope");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        root(&subdirectory),
+        format!("project root: {}", inner.display())
+    );
+    // From the outer project's own directories, it is still the root.
+    assert_eq!(
+        root(&outer.join("worktrees")),
+        format!("project root: {}", outer.display())
+    );
 }
 
 #[test]
@@ -5079,6 +5117,10 @@ fn jump_moves_the_thread_to_resume_elsewhere_in_its_function() {
 #[test]
 fn step_goes_into_one_call_of_the_line() {
     let line = |marker: &str| support::source_line("tests/fixtures/c/step-targets.c", marker);
+    let next = format!(
+        "stopped after source step in main at tests/fixtures/c/step-targets.c:{}",
+        line("targets: recursive")
+    );
     let (output, errors) = piped(
         &["build/test-programs/step-targets-gcc-o0"],
         &[
@@ -5110,7 +5152,7 @@ fn step_goes_into_one_call_of_the_line() {
             "  (indirect)",
             "  strlen",
             // Stepping into code without source goes on to the next line.
-            "stopped after source step in main at tests/fixtures/c/step-targets.c:29",
+            &next,
         ],
     );
     assert_in_order(
@@ -5452,4 +5494,37 @@ fn record_writes_a_profile_that_report_summarizes() {
             "{line:?} in\n{tree}"
         );
     }
+}
+
+#[test]
+fn catch_syscall_stops_where_strace_would_print_and_reads_the_call() {
+    let stdout = batch(
+        &["build/test-programs/catch-gcc-o0"],
+        &[
+            "catch syscall write if $arg0 == 1",
+            "run",
+            "print $arg0",
+            "continue",
+            "print $ret",
+            "info catchpoints",
+            "delete c1",
+            "info catch",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "catchpoint c1: write at entry and exit, if $arg0 == 1",
+            r#"stopped at catchpoint c1 as the call began: write(1, "to stdout\n", 10)"#,
+            "(integer) $arg0 = 1",
+            r#"stopped at catchpoint c1 as the call returned: write(1, "to stdout\n", 10) = 10"#,
+            "(integer) $ret = 10",
+            // Both writes count, at their entries and exits.
+            "c1: write at entry and exit, if $arg0 == 1, 4 hits",
+            "deleted catchpoint c1",
+            "no catchpoints",
+            "inferior exited with status 0",
+        ],
+    );
 }

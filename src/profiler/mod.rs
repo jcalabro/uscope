@@ -10,9 +10,12 @@ mod formats;
 mod frame_pointers;
 mod probes;
 mod record;
+pub(crate) use record::{OwnedLine, hex, symbolize as symbolize_lines};
 mod segments;
 mod session;
 mod symbols;
+mod syscalls;
+pub use syscalls::{RecordedEvent, RecordedSyscalls, SyscallPlace};
 mod tasks;
 mod zones;
 
@@ -192,6 +195,9 @@ pub struct RecordOptions {
     /// then holds only modules' build ids and addresses: for hosts that
     /// keep no debug information.
     pub symbols_later: bool,
+    /// The system calls to trace beside the samples, with the BPF engine,
+    /// each with its stack: a program the recording starts only.
+    pub syscalls: Option<crate::syscalls::CallSet>,
 }
 
 impl RecordOptions {
@@ -215,6 +221,7 @@ impl RecordOptions {
             probe_timeout: std::time::Duration::from_secs(10),
             debug_directories: Vec::new(),
             symbols_later: false,
+            syscalls: None,
         }
     }
 }
@@ -234,6 +241,8 @@ pub enum RecordError {
     Attach(#[from] perf::OpenError),
     #[error("starting the program failed: {0}")]
     Start(std::io::Error),
+    #[error("tracing system calls failed: {0}")]
+    Syscalls(String),
     #[error("the program has no function named '{0}'")]
     NoSuchFunction(String),
     #[error("{count} functions are named '{name}'; name one by its symbol")]

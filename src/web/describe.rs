@@ -471,6 +471,7 @@ const fn reason_kind(reason: &StopReason) -> &'static str {
         StopReason::Watchpoint { .. } => "watchpoint",
         StopReason::WatchpointInvalidated { .. } => "watchpointInvalidated",
         StopReason::WatchpointArmFailed { .. } => "watchpointArmFailed",
+        StopReason::Syscall(_) => "syscall",
         StopReason::Step { .. } => "step",
         StopReason::StepIncomplete { .. } => "stepIncomplete",
         StopReason::TaskEnded { .. } => "taskEnded",

@@ -1,0 +1,262 @@
+# System calls
+
+`uscope syscalls` shows the system calls a program makes. Its output and most
+of its flags match strace, so a strace command line usually works with
+`uscope` in place of `strace`. Use it to see which files a program opens, why a
+call fails, or where a program spends its time waiting on the kernel.
+
+## Trace a program
+
+Put the program and its arguments after `--`:
+
+```sh
+uscope syscalls -- ./server --port 8080
+```
+
+Each call prints as it returns:
+
+```text
+openat(AT_FDCWD, "/etc/hostname", O_RDONLY) = 3
+read(3, "localhost\n", 262144)          = 10
+close(3)                                = 0
++++ exited with 0 +++
+```
+
+Children and threads are traced too. Pass `--no-follow` to trace only the
+program itself. When the trace ends, `uscope syscalls` exits with the
+program's exit status.
+
+To trace a process that is already running, give its ID:
+
+```sh
+uscope syscalls -p 1842
+```
+
+Stop tracing with Ctrl-C. The process keeps running. uscope never traces the
+whole machine, so a target is always required.
+
+## Choose what to show
+
+`-e trace=` picks calls by name or by class, as strace does:
+
+```sh
+uscope syscalls -e trace=openat,close -- ./server
+uscope syscalls -e trace=%file,%net -- ./server
+```
+
+Other filters narrow the output further:
+
+| Option | Shows |
+|---|---|
+| `-z` | Only calls that succeeded |
+| `-Z` | Only calls that failed |
+| `-P PATH` | Only calls that name `PATH`, by argument or descriptor |
+| `--trace-fds 3,4` | Only calls on these descriptors |
+| `--slower-than 10ms` | Only calls that took at least this long |
+| `--sample 1/N` | One call in N; the table still counts every call |
+
+A few options change how calls print: `-y` shows what each descriptor refers
+to, `-T` shows how long each call took, `-t` adds the time of day, and
+`-s SIZE` sets how much of each string is shown. `--format ndjson` writes one
+JSON object per line for other programs to read.
+
+A call that is still blocked after a second is reported while it waits, with
+how long it has been blocked so far. Change the threshold with
+`--in-flight`, or turn it off with `--in-flight off`.
+
+Run `uscope syscalls --help` for every option.
+
+## Count calls
+
+`-c` prints a table of calls, errors, and time instead of the calls
+themselves:
+
+```sh
+uscope syscalls -c -- ls /
+```
+
+```text
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ ...
+100.00    0.003840          37       103        36 total
+```
+
+`-C` prints both. `-S` sorts the table and `-U` chooses its columns, which
+include `p50`, `p90`, and `p99` latencies.
+
+## Show where calls come from
+
+`-k` prints the stack of each call. `-kk` adds source lines:
+
+```sh
+uscope syscalls -kk -e trace=openat -- ./server
+```
+
+The BPF engine, described below, finds stacks by walking frame pointers. A
+program built without them gives short stacks; `-k=dwarf` copies part of the
+stack and unwinds it with the program's debug information instead. A stack
+that ends early says why.
+
+## Save a trace and open it later
+
+When the `-o` file name ends in `.usprof`, uscope saves the whole trace:
+
+```sh
+uscope syscalls -o server.usprof -- ./server
+```
+
+`uscope report server.usprof` prints the `-c` table. `uscope web
+server.usprof` opens the trace in the browser, where you can filter calls,
+group them by file, process, or call site, see latency over time, and open any
+call to read its arguments and stack.
+
+Any other `-o` name gets the text output, as strace writes it.
+
+## Choose an engine
+
+uscope has two ways to see system calls.
+
+The default **BPF engine** runs small programs in the kernel. The traced
+program never stops, and each call costs it about a tenth of a microsecond.
+It needs the `CAP_BPF` and `CAP_PERFMON` capabilities, Linux 5.15 or newer, and
+the kernel's BTF type information.
+
+The **ptrace engine** stops the program at each traced call, as strace does.
+It needs no special privilege, but each call costs several microseconds.
+Choose it with `--engine ptrace`:
+
+```sh
+uscope syscalls --engine ptrace -- ./server
+```
+
+uscope never switches engines on its own. If the BPF engine cannot run, uscope
+says why and stops.
+
+The ptrace engine filters calls in the kernel when it starts the program, so
+calls you did not ask for cost nothing. A running process cannot be given that
+filter. Attaching the ptrace engine therefore stops the process at every
+system call, and uscope asks you to accept that with `--stop-every-call`.
+
+## Give uscope the BPF privileges
+
+The BPF engine needs `CAP_BPF` and `CAP_PERFMON`. Without them it stops and
+explains what is missing.
+
+From a systemd unit, grant them as ambient capabilities:
+
+```ini
+[Service]
+AmbientCapabilities=CAP_BPF CAP_PERFMON
+```
+
+On NixOS, uscope's flake has a module that installs a wrapper with these
+capabilities. Import `nixosModules.uscope-bpf`, rebuild, and run uscope
+through it:
+
+```sh
+/run/wrappers/bin/uscope-bpf uscope syscalls -- ./server
+```
+
+The wrapper is open to members of the `wheel` group.
+
+uscope cannot use a BPF token, which some container managers offer instead of
+capabilities. When it finds one, the error says so.
+
+## Trace a container or cgroup
+
+Trace every process in a cgroup, including ones that start later:
+
+```sh
+uscope syscalls --cgroup /sys/fs/cgroup/system.slice/server.service
+```
+
+Or name a container by its ID. Docker, Podman, containerd, and CRI-O
+containers are found by their cgroup names, and the first 12 characters of the
+ID are enough:
+
+```sh
+uscope syscalls --container 3f9c2a1b8e07
+```
+
+Process IDs are shown as the processes inside see them, when they all share
+one PID namespace. Otherwise uscope shows the host's IDs and says why. The
+trace ends when you stop it or the cgroup is removed.
+
+A cgroup trace needs the BPF engine. It cannot show stacks.
+
+## Limit what tracing costs
+
+`--budget PERCENT` holds uscope to a share of one CPU:
+
+```sh
+uscope syscalls --budget 1 --container 3f9c2a1b8e07
+```
+
+Each second it is over budget, uscope gives up one more kind of detail:
+first stacks, then the end of long strings, then it shows only one call in
+2, 4, and up to 64, and finally it only counts calls. Paths are never cut.
+Every call is still counted, and uscope prints each step as it takes it.
+A saved trace keeps the steps, and the browser shows them under the trace.
+
+## Trace continuously
+
+`--continuous DIR` traces until stopped and writes a file of statistics every
+minute:
+
+```sh
+uscope syscalls --continuous traces --keep 24h --container 3f9c2a1b8e07
+```
+
+`--segment` sets how long each file covers, and `--keep` how long files are
+kept. `uscope report traces` and `uscope web traces` read the files as one
+trace.
+
+The files hold counts and latencies, not individual calls. To keep the calls
+around a problem, uscope holds the latest `--window` of calls (10 seconds by
+default) and saves them to `traces/windows` when:
+
+- a call takes at least `--trigger-slower-than`;
+- a call fails with an error named by `--trigger-errno`, such as
+  `EIO,ENOSPC`;
+- uscope receives `SIGUSR2`.
+
+At most one window is saved per window length, so a burst of failures does
+not save the same calls over and over.
+
+## Record system calls with a profile
+
+`uscope record --syscalls` traces calls alongside a CPU profile, on the same
+clock:
+
+```sh
+uscope record --syscalls %file,%net -o server.usprof -- ./server
+```
+
+It takes the same sets as `-e trace=`, or `all`. In the browser, the calls
+appear on the timeline beside the samples. It uses the BPF engine and needs
+its privileges, and it cannot be used with `--pid`. See
+[Profiling](profiling.md#record-system-calls-too).
+
+## Stop at a system call in the debugger
+
+The debugger can stop a program at a system call. See
+[Stop at system calls](debugging.md#stop-at-system-calls).
+
+## What is not traced
+
+Some calls, such as `clock_gettime` and `gettimeofday`, usually run in the
+vDSO without entering the kernel. Neither engine sees them.
+
+Under heavy load, the BPF engine can fall behind and drop calls. It says how
+many:
+
+```text
+--- lost 4502 events ---
+```
+
+For a short list of calls, the BPF engine attaches to the kernel functions
+behind them, which costs other processes nothing. While it does, a call in
+progress is lost if another tracer attaches to or detaches from the same
+function. uscope counts that call as lost rather than show it without its
+result.

@@ -14,6 +14,7 @@ presents one all-stop process.
 | `src/backend/linux/run_control.rs`, `src/backend/linux/stepping.rs`, `src/backend/linux/step_targets.rs` | Resume, pause, and stepping plans |
 | `src/backend/linux/breakpoints.rs`, `src/backend/linux/watchpoints.rs`, `src/backend/linux/writes.rs` | Breakpoint sites, hardware watches, and stopped-state writes |
 | `src/backend/linux/signals.rs`, `src/backend/linux/awaits.rs` | Signal policy and asynchronous wait coordination |
+| `src/backend/linux/catchpoints.rs` | System call catchpoints; see [system call tracing](syscalls.md) |
 | `src/backend/linux/recorded.rs`, `src/backend/linux/sim_edge.rs` | Recorded native calls and the simulator boundary |
 | `tests/debugger/`, `tests/watchpoints.rs`, `tests/hit_counts.rs` | End-to-end process-control behavior |
 | `tests/fixtures/c/` | Native programs used to force lifecycle and concurrency states |

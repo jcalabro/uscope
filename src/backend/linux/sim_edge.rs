@@ -333,6 +333,7 @@ fn wait_event(status: WaitStatus) -> WaitEvent {
         WaitStatus::GroupStop(_, number) => {
             WaitEvent::PtraceEvent(pid, signal(number), libc::PTRACE_EVENT_STOP)
         }
+        WaitStatus::Syscall(_) => WaitEvent::PtraceSyscall(pid),
     }
 }
 
@@ -349,7 +350,8 @@ fn wait_status(event: &WaitEvent) -> String {
             WaitStatus::GroupStop(pid.as_raw(), signal.number())
         }
         WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
-        WaitEvent::PtraceSyscall(pid) | WaitEvent::Continued(pid) => {
+        WaitEvent::PtraceSyscall(pid) => WaitStatus::Syscall(pid.as_raw()),
+        WaitEvent::Continued(pid) => {
             return format!("{event:?} for {pid}");
         }
     };
@@ -597,6 +599,26 @@ impl LinuxTraceOps for SimTrace {
         self.kernel_mut()
             .resume(tid(pid), signal.map(Signal::number), true)
             .map_err(system)
+    }
+
+    fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        self.kernel_mut()
+            .resume_to_call(tid(pid), signal.map(Signal::number))
+            .map_err(system)
+    }
+
+    fn syscall_info(
+        &self,
+        pid: Pid,
+    ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno> {
+        let info = self.kernel().call_info(tid(pid))?;
+        Ok(super::syscalls::info::SyscallInfo {
+            op: info.op,
+            arch: super::syscalls::info::AUDIT_ARCH_X86_64,
+            number: info.number,
+            args: info.args,
+            value: info.value,
+        })
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {

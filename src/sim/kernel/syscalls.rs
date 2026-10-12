@@ -4,10 +4,7 @@ use nix::errno::Errno;
 use nix::libc;
 
 use super::{ENOSYS_RESULT, ExitStatus, Happening, Kernel, Thread, Tid};
-use crate::sim::cpu::{RAX, RDI, RDX, RSI, RSP};
-
-/// `r10`, a system call's fourth argument.
-const R10: usize = 10;
+use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, RSP};
 
 const SYS_WRITE: u64 = 1;
 const SYS_SCHED_YIELD: u64 = 24;
@@ -25,10 +22,57 @@ const SYS_EXIT_GROUP: u64 = 231;
 /// CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM`.
 const THREAD_FLAGS: u64 = 0x50f00;
 
+/// A call the kernel served, as a tracer of system calls would see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Served {
+    pub tid: Tid,
+    pub tgid: Tid,
+    pub number: u32,
+    pub args: [u64; 6],
+    /// What it returned, or `None` for one that ended its thread.
+    pub returned: Option<i64>,
+}
+
+/// Serves the system call a thread just entered with `syscall`, as
+/// [`dispatch`] does, and notes it served.
+pub(super) fn serve(kernel: &mut Kernel, tid: Tid) -> bool {
+    let thread = &kernel.threads[&tid];
+    let group = thread.tgid;
+    let number = u32::try_from(thread.orig_rax).unwrap_or(u32::MAX);
+    let general = &thread.registers.general;
+    let args = [
+        general[RDI],
+        general[RSI],
+        general[RDX],
+        general[R10],
+        general[R8],
+        general[R9],
+    ];
+    let yielded = dispatch(kernel, tid);
+    let returned = kernel
+        .threads
+        .get(&tid)
+        .filter(|thread| !thread.state.exiting())
+        .map(|thread| {
+            thread
+                .returning
+                .unwrap_or(thread.registers.general[RAX])
+                .cast_signed()
+        });
+    kernel.served.push(Served {
+        tid,
+        tgid: group,
+        number,
+        args,
+        returned,
+    });
+    yielded
+}
+
 /// Serves the system call a thread just entered with `syscall`, leaving
 /// its result in `rax` unless the call stops or ends the thread. Returns
 /// whether the thread yielded the CPU.
-pub(super) fn serve(kernel: &mut Kernel, tid: Tid) -> bool {
+fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
     let registers = kernel.threads[&tid].registers;
     let argument = |index: usize| registers.general[index];
     #[expect(
@@ -36,7 +80,8 @@ pub(super) fn serve(kernel: &mut Kernel, tid: Tid) -> bool {
         reason = "exit statuses are ints, the low half of the register"
     )]
     let code = argument(RDI) as i32;
-    let result = match registers.general[RAX] {
+    // The call `orig_rax` names, which a tracer at its entry may change.
+    let result = match kernel.threads[&tid].orig_rax {
         SYS_WRITE => write(kernel, tid, argument(RDI), argument(RSI), argument(RDX)),
         SYS_SCHED_YIELD => {
             set_result(kernel, tid, 0);

@@ -320,7 +320,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.finish_barrier_if_ready();
         }
 
-        self.ptrace.continue_execution(pid, None)?;
+        if self.catchpoints.is_empty() {
+            self.ptrace.continue_execution(pid, None)?;
+        } else {
+            self.ptrace.continue_to_syscall(pid, None)?;
+        }
         thread.state = NativeThreadState::Running;
         self.bump_revision();
         if let Some(reply) = self.launch_reply.take() {
@@ -568,14 +572,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         match event {
             libc::PTRACE_EVENT_CLONE => {
                 thread.state = NativeThreadState::Stopped;
+                thread.inside_call = true;
                 self.handle_clone_event(pid)
             }
             libc::PTRACE_EVENT_FORK => {
                 thread.state = NativeThreadState::Stopped;
+                thread.inside_call = true;
                 self.handle_fork_event(pid)
             }
             libc::PTRACE_EVENT_EXEC => {
                 thread.state = NativeThreadState::Stopped;
+                thread.inside_call = true;
                 self.handle_exec_event(pid)
             }
             libc::PTRACE_EVENT_EXIT => {
@@ -1424,14 +1431,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             // SIGKILL may have moved the thread on to its exit stop since
             // this status, so continuing it may let it exit: the children it
             // forked are found while `/proc` still lists them.
-            WaitEvent::Stopped(pid, _) | WaitEvent::PtraceEvent(pid, _, _) => {
+            WaitEvent::Stopped(pid, _)
+            | WaitEvent::PtraceEvent(pid, _, _)
+            | WaitEvent::PtraceSyscall(pid) => {
                 self.adopt_unannounced_fork_children(pid);
                 self.kill_inferior()
                     .and_then(|()| self.ptrace.continue_during_shutdown(pid))
             }
-            other => Err(backend_error(LinuxError::UnexpectedWait(format!(
-                "{other:?}"
-            )))),
+            other @ WaitEvent::Continued(_) => Err(backend_error(LinuxError::UnexpectedWait(
+                format!("{other:?}"),
+            ))),
         };
         if let Err(error) = result {
             self.finish_shutdown(Err(error));
@@ -1488,16 +1497,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     Ok(())
                 })
             }
-            WaitEvent::PtraceEvent(pid, _, _) => {
+            // A thread detached at a system call goes on with it.
+            WaitEvent::PtraceEvent(pid, _, _) | WaitEvent::PtraceSyscall(pid) => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
                 inferior.and_then(|inferior| {
                     inferior.thread_mut(pid)?.state = NativeThreadState::Stopped;
                     Ok(())
                 })
             }
-            other => Err(backend_error(LinuxError::UnexpectedWait(format!(
-                "{other:?}"
-            )))),
+            other @ WaitEvent::Continued(_) => Err(backend_error(LinuxError::UnexpectedWait(
+                format!("{other:?}"),
+            ))),
         };
         if let Err(error) = result.and_then(|()| self.detach_when_stopped()) {
             self.finish_shutdown(Err(error));

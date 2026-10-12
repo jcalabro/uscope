@@ -60,10 +60,22 @@ pub enum CaptureTable {
     TaskWaits = 23,
     /// Spans the recording did not sample, in time order.
     Gaps = 24,
+    /// System calls, in the order they were seen.
+    Syscalls = 25,
+    /// The bytes calls' and signals' engines copied, which rows name by
+    /// offset.
+    SyscallBlobs = 26,
+    /// What a system call trace saw besides calls: signals, processes and
+    /// threads made and ended, programs executed, descriptors, losses.
+    SyscallNotes = 27,
+    /// Each process's statistics of each call it made.
+    SyscallStats = 28,
+    /// The errnos each row of statistics counts, row by row.
+    SyscallErrnos = 29,
 }
 
 impl CaptureTable {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 29] = [
         Self::Strings,
         Self::Settings,
         Self::Modules,
@@ -88,6 +100,11 @@ impl CaptureTable {
         Self::Tasks,
         Self::TaskWaits,
         Self::Gaps,
+        Self::Syscalls,
+        Self::SyscallBlobs,
+        Self::SyscallNotes,
+        Self::SyscallStats,
+        Self::SyscallErrnos,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -461,6 +478,8 @@ pub enum AccountKind {
     SnapshotChanged = 25,
     /// Task snapshots read while the program ran.
     LiveSnapshots = 26,
+    /// System call records the kernel's ring had no room for.
+    SyscallsLost = 27,
 }
 
 /// A count of something the views must show.
@@ -662,12 +681,222 @@ pub struct TaskWait {
     pub reserved: U32,
 }
 
+/// The time of a call's end or entry that was not seen.
+pub const UNSEEN: i64 = i64::MIN;
+
+/// One system call.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct Syscall {
+    /// When it entered and returned, [`UNSEEN`] when either was not seen.
+    pub entered: I64,
+    pub exited: I64,
+    /// What it returned: a negative errno when it failed.
+    pub ret: I64,
+    pub args: [U64; 6],
+    /// Its thread's row.
+    pub thread: U32,
+    pub number: U32,
+    /// The thread's stack, or [`NONE`].
+    pub stack: U32,
+    /// The bytes behind its arguments, as the engines' captures: each an
+    /// argument, when it was read, its state, a pad byte, the bytes wanted
+    /// and the bytes kept as `u32`s, then the bytes kept.
+    pub captures: U32,
+    pub captures_len: U32,
+    /// A [`crate::syscalls::Abi`] by its index.
+    pub abi: u8,
+    /// A [`CallOutcome`].
+    pub outcome: u8,
+    /// The event's [`crate::syscalls::EventFlags`].
+    pub flags: u8,
+    pub reserved: u8,
+}
+
+/// How a call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CallOutcome {
+    Returned = 0,
+    Failed = 1,
+    /// Still running when the trace ended.
+    Unfinished = 2,
+    /// Its process ended while it ran.
+    ProcessExited = 3,
+    /// Its result could not be read.
+    Unavailable = 4,
+}
+
+impl CallOutcome {
+    pub const fn from_number(number: u8) -> Option<Self> {
+        Some(match number {
+            0 => Self::Returned,
+            1 => Self::Failed,
+            2 => Self::Unfinished,
+            3 => Self::ProcessExited,
+            4 => Self::Unavailable,
+            _ => return None,
+        })
+    }
+}
+
+/// Something a system call trace saw besides a call.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct SyscallNote {
+    pub time: I64,
+    /// A signal's number, a child's pid, an exit's code as `wait(2)`
+    /// encodes it, a descriptor, or a count lost.
+    pub value: I64,
+    /// A signal's code above its sender, or a device's numbers: block in
+    /// the top bit, its major above its minor.
+    pub extra: U64,
+    /// Its thread's row, or [`NONE`].
+    pub thread: U32,
+    /// Its process's row, or [`NONE`].
+    pub process: U32,
+    /// A program's path, or what a descriptor refers to.
+    pub text: U32,
+    /// A signal's stack.
+    pub stack: U32,
+    /// A signal's `siginfo_t`, in the blobs.
+    pub blob: U32,
+    pub blob_len: U32,
+    /// How many calls came before it, which places it among them: an
+    /// engine may stamp a note later than the call after it.
+    pub calls: U32,
+    /// A [`NoteKind`].
+    pub kind: u8,
+    /// [`NoteKind`]'s flags.
+    pub flags: u8,
+    pub reserved: [u8; 10],
+}
+
+/// The bytes behind a call's arguments, decoded from its captures'
+/// encoding, or `None` when it is malformed.
+#[must_use]
+pub fn captures(mut bytes: &[u8]) -> Option<Vec<crate::syscalls::Capture>> {
+    use crate::syscalls::{Capture, CaptureState, ReadAt};
+    let mut captures = Vec::new();
+    while !bytes.is_empty() {
+        let (head, rest) = bytes.split_first_chunk::<12>()?;
+        let word =
+            |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        let len = word(8) as usize;
+        if rest.len() < len {
+            return None;
+        }
+        let state = match head[2] {
+            0 => CaptureState::Complete,
+            1 => CaptureState::Truncated { wanted: word(4) },
+            2 => CaptureState::Unreadable,
+            3 => CaptureState::NotRequested,
+            _ => return None,
+        };
+        let when = match head[1] {
+            0 => ReadAt::Entry,
+            1 => ReadAt::Exit,
+            _ => return None,
+        };
+        captures.push(Capture {
+            arg: head[0],
+            when,
+            state,
+            bytes: rest[..len].into(),
+        });
+        bytes = &rest[len..];
+    }
+    Some(captures)
+}
+
+/// A [`SyscallNote`]'s flags: a signal's code and sender, a spawn's
+/// thread, and a descriptor's facts.
+pub mod note_flags {
+    pub const SIGNAL_CODE: u8 = 1;
+    pub const SIGNAL_SENDER: u8 = 2;
+    pub const SPAWN_THREAD: u8 = 1;
+    pub const FD_CLOEXEC: u8 = 1;
+    pub const FD_MADE: u8 = 2;
+    pub const FD_DEVICE: u8 = 4;
+}
+
+/// What a [`SyscallNote`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NoteKind {
+    /// A signal delivered; flags say whether it has a code and a sender.
+    Signal = 1,
+    /// A process or thread made; flag 1 when a thread.
+    Spawn = 2,
+    Exec = 3,
+    Exit = 4,
+    ThreadExit = 5,
+    /// What a descriptor refers to; flags: close-on-exec, made by the next
+    /// call, a device.
+    Descriptor = 6,
+    Lost = 7,
+}
+
+impl NoteKind {
+    pub const fn from_number(number: u8) -> Option<Self> {
+        Some(match number {
+            1 => Self::Signal,
+            2 => Self::Spawn,
+            3 => Self::Exec,
+            4 => Self::Exit,
+            5 => Self::ThreadExit,
+            6 => Self::Descriptor,
+            7 => Self::Lost,
+            _ => return None,
+        })
+    }
+}
+
+/// One process's statistics of one call.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct SyscallStat {
+    pub calls: U64,
+    pub errors: U64,
+    pub timed: U64,
+    pub total_ns: U64,
+    pub min_ns: U64,
+    pub max_ns: U64,
+    pub bytes: U64,
+    pub log2_ns: [U64; crate::syscalls::stats::BUCKETS],
+    /// The process's row, or [`NONE`] for every process.
+    pub process: U32,
+    pub number: U32,
+    /// Its rows of errnos.
+    pub errnos: U32,
+    pub errno_count: U32,
+    pub abi: u8,
+    pub reserved: [u8; 7],
+}
+
+/// How many of a call's failures had one errno.
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
+)]
+pub struct SyscallErrno {
+    pub count: U64,
+    pub errno: U16,
+    pub reserved: [u8; 6],
+}
+
 macro_rules! records {
     ($($record:ty => $table:ident),* $(,)?) => {
         /// Each table's record size, for the directory.
         pub const fn stride(table: CaptureTable) -> usize {
             match table {
-                CaptureTable::Strings => 1,
+                CaptureTable::Strings | CaptureTable::SyscallBlobs => 1,
                 CaptureTable::SampleRanges => size_of::<ThreadRange>(),
                 CaptureTable::OffCpuRanges => size_of::<ThreadRange>(),
                 $(CaptureTable::$table => size_of::<$record>(),)*
@@ -710,7 +939,13 @@ records! {
     Task => Tasks,
     TaskWait => TaskWaits,
     Gap => Gaps,
+    Syscall => Syscalls,
+    SyscallNote => SyscallNotes,
+    SyscallStat => SyscallStats,
+    SyscallErrno => SyscallErrnos,
 }
+
+const _: () = assert!(size_of::<Syscall>() == 96 && size_of::<SyscallNote>() == 64);
 
 const _: () = assert!(size_of::<Frame>() == 16);
 const _: () = assert!(size_of::<Stack>() == 8);

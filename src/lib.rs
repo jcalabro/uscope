@@ -39,6 +39,9 @@ mod runtime_model;
 #[doc(hidden)]
 pub mod sim;
 mod source_map;
+pub mod syscalls;
+/// The engines that trace system calls into [`syscalls`]' events.
+pub use backend::syscall_engines;
 #[cfg(test)]
 mod test_memory;
 pub mod timings;
@@ -114,14 +117,15 @@ pub use model::{
     VisualizerReference,
 };
 pub use protocol::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
-    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebugFileOptions, DebuggerEvent,
-    ExceptionDisposition, ExceptionFilter, ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus,
-    FramePresentation, GlobalVariableQuery, HeldChild, HeldProcess, HitComparison, HitCondition,
-    InferiorState, InvalidatedWatchpoint, KernelSource, LanguageException, LanguageExceptionKind,
-    LaunchOptions, LogPart, MAX_DRAWING_BYTES, ModuleIdentity, NumberKind, Numbers, PresentedFrame,
-    ProcessId, Renderer, ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot,
-    StepKind, StepTarget, StopId, StopReason, TaskEnding, ThreadSnapshot, ThreadState, TypeViews,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CatchPhase,
+    Catchpoint, CatchpointId, ConditionOwner, CoreDumpInfo, CoreDumpOptions, CoreModule,
+    CoreModuleState, DebugFileOptions, DebuggerEvent, ExceptionDisposition, ExceptionFilter,
+    ExceptionInfo, ExceptionStops, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery,
+    HeldChild, HeldProcess, HitComparison, HitCondition, InferiorState, InvalidatedWatchpoint,
+    KernelSource, LanguageException, LanguageExceptionKind, LaunchOptions, LogPart,
+    MAX_DRAWING_BYTES, ModuleIdentity, NumberKind, Numbers, PresentedFrame, ProcessId, Renderer,
+    ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind, StepTarget,
+    StopId, StopReason, SyscallStop, TaskEnding, ThreadSnapshot, ThreadState, TypeViews,
     ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation, VisualizerBinding,
     VisualizerInput, VisualizerInputs, VisualizerValue, WatchAccess, WatchScope, WatchTarget,
     Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation,
@@ -904,6 +908,31 @@ impl DebuggerHandle {
     /// Disarms one watchpoint and returns its prior definition.
     pub async fn remove_watchpoint(&self, id: WatchpointId) -> Result<Watchpoint> {
         self.request(|reply| Request::RemoveWatchpoint { id, reply })
+            .await
+    }
+
+    /// Stops threads at `calls`, every call when empty, at the phase
+    /// given, when `condition` holds. While any catchpoint exists, every
+    /// thread stops at each of its calls, which costs microseconds a call.
+    /// Catchpoints outlive the process, as breakpoints do.
+    pub async fn add_catchpoint(
+        &self,
+        calls: Arc<[syscalls::SyscallId]>,
+        phase: CatchPhase,
+        condition: Option<Condition>,
+    ) -> Result<Catchpoint> {
+        self.request(|reply| Request::AddCatchpoint {
+            calls,
+            phase,
+            condition,
+            reply,
+        })
+        .await
+    }
+
+    /// Removes a catchpoint and returns its prior definition.
+    pub async fn remove_catchpoint(&self, id: CatchpointId) -> Result<Catchpoint> {
+        self.request(|reply| Request::RemoveCatchpoint { id, reply })
             .await
     }
 

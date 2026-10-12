@@ -24,6 +24,7 @@ Read the pages that match the work:
 | ELF, DWARF, unwinding, images, or the cache | [`dev/debug-information.md`](dev/debug-information.md) |
 | Go goroutines, Rust coroutines, or tokio tasks | [`dev/runtime-models.md`](dev/runtime-models.md), [`dev/testing.md`](dev/testing.md) |
 | Recording, captures, or profile analysis | [`dev/profiling.md`](dev/profiling.md), [`dev/performance.md`](dev/performance.md) |
+| System call tracing, its BPF programs, or catchpoints | [`dev/syscalls.md`](dev/syscalls.md) |
 | Expressions, inspection, views, or visualizers | [`dev/evaluation-and-views.md`](dev/evaluation-and-views.md), [`docs/expressions.md`](docs/expressions.md), [`docs/views.md`](docs/views.md) |
 | Tests or native fixtures | [`dev/testing.md`](dev/testing.md) |
 | Diagnosing a failure or reading recordings | [`dev/debugging-failures.md`](dev/debugging-failures.md) |

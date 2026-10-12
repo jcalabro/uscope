@@ -126,6 +126,11 @@ pub struct RecordArgs {
     /// When frames get their source lines.
     #[arg(long, value_enum, default_value = "now")]
     symbols: SymbolsArg,
+    /// Trace these system calls too, with their stacks, as `uscope syscalls
+    /// -e trace=SET` names them: `all`, or names and classes such as
+    /// `%file,%net,connect`. Needs the BPF engine's privileges.
+    #[arg(long, value_name = "SET", conflicts_with = "pid")]
+    syscalls: Option<String>,
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -350,6 +355,14 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
     }
+    if let Some(set) = &args.syscalls {
+        let filter = uscope::syscalls::Filter::parse(
+            &[format!("trace={set}")],
+            &crate::present::syscalls::signal_named,
+        )
+        .map_err(|error| anyhow::anyhow!("--syscalls: {error}"))?;
+        options.syscalls = Some(filter.calls);
+    }
     if args.continuous.is_some() {
         let every = Duration::try_from_secs_f64(args.segment).context("--segment")?;
         anyhow::ensure!(!every.is_zero(), "--segment is a number of seconds");
@@ -469,7 +482,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
 }
 
 /// A duration in seconds, or with a unit: `90`, `30m`, `24h`, or `7d`.
-fn duration(text: &str) -> Result<Duration> {
+pub(super) fn duration(text: &str) -> Result<Duration> {
     let (number, unit) = match text.char_indices().last() {
         Some((at, unit @ ('s' | 'm' | 'h' | 'd'))) => (&text[..at], unit),
         _ => (text, 's'),
@@ -498,7 +511,10 @@ fn numbered(path: &std::path::Path, number: u32) -> PathBuf {
 
 /// Keeps Ctrl-C from ending uscope, setting `stop` if there is one, and
 /// sets `trigger` at each SIGUSR2.
-fn handle_signals(stop: Option<Arc<AtomicBool>>, trigger: Arc<AtomicBool>) -> Result<()> {
+pub(super) fn handle_signals(
+    stop: Option<Arc<AtomicBool>>,
+    trigger: Arc<AtomicBool>,
+) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let (installed, ready) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -563,7 +579,15 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
         )?;
     }
     symbolize_here(&mut profile, out)?;
+    // A trace alone, which no recording sampled.
+    if profile.has_syscalls() && profile.setting("weight").is_none() {
+        return syscall_summary(&profile, out);
+    }
     summary(&profile, out)?;
+    if profile.has_syscalls() {
+        writeln!(out)?;
+        syscall_summary(&profile, out)?;
+    }
     let total = profile.total_weight();
     let percent = |value: u64| {
         if total == 0 {
@@ -721,6 +745,40 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
                 times => format!("{times} times; the first time"),
             }
         )?;
+    }
+    Ok(())
+}
+
+/// The system calls a capture holds, as `uscope syscalls -c` shows them.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "seconds need no more precision than f64's"
+)]
+fn syscall_summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
+    use crate::present::syscalls::{errno, summary};
+    let syscalls = profile.syscalls();
+    let calls = syscalls.stats().per_call();
+    let (start, end) = profile.span();
+    let program = profile.setting("program").unwrap_or("the program");
+    let made: u64 = calls.values().map(|stats| stats.calls).sum();
+    let failed: u64 = calls.values().map(|stats| stats.errors).sum();
+    writeln!(
+        out,
+        "{program}: {made} system calls, {failed} failed, over {:.3} s",
+        end.saturating_sub(start) as f64 / 1e9
+    )?;
+    if syscalls.lost > 0 {
+        writeln!(
+            out,
+            "The kernel had no room for {} records: every count is a lower bound.",
+            syscalls.lost
+        )?;
+    }
+    writeln!(out)?;
+    let errno = |number: u16| errno(uscope::syscalls::Errno(number)).0;
+    let sort = summary::sort_key("time").map_err(anyhow::Error::msg)?;
+    for line in summary::table(&calls, &summary::Column::DEFAULT, sort, &errno) {
+        writeln!(out, "{line}")?;
     }
     Ok(())
 }

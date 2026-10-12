@@ -86,6 +86,9 @@ enum Tool {
     /// Run reference workloads bare and under each preset, and report what
     /// recording cost them.
     Overhead(OverheadArgs),
+    /// Time a getppid loop bare and under each syscall-tracing engine, and
+    /// report what tracing cost each call.
+    SyscallOverhead(SyscallOverheadArgs),
     /// Group the blocks a DHAT profile records by the first uscope function
     /// that allocated them.
     Heap {
@@ -124,6 +127,32 @@ struct OverheadArgs {
     /// Fail unless the prod preset costs every workload less than PERCENT.
     #[arg(long, value_name = "PERCENT")]
     check: Option<f64>,
+}
+
+#[derive(clap::Args)]
+struct SyscallOverheadArgs {
+    /// Where the built fixtures are.
+    #[arg(long, default_value = "build/test-programs")]
+    programs: PathBuf,
+    /// The uscope executable to trace with.
+    #[arg(long, default_value = "target/release/uscope")]
+    uscope: PathBuf,
+    /// Starts uscope with `CAP_BPF` and `CAP_PERFMON`, given its path and
+    /// arguments.
+    #[arg(long, default_value = "/run/wrappers/bin/uscope-bpf")]
+    launcher: PathBuf,
+    /// Runs of each setup.
+    #[arg(long, default_value_t = 5)]
+    runs: usize,
+    /// Calls each run of the loop makes.
+    #[arg(long, default_value_t = 3_000_000)]
+    calls: u64,
+    /// Write every run as JSON to FILE.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// Compare with the runs a saved report holds.
+    #[arg(long, value_name = "BASE")]
+    compare: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -268,6 +297,7 @@ fn run(args: Args) -> Result<bool> {
             },
         ),
         Tool::Overhead(overhead) => run_overhead(&overhead),
+        Tool::SyscallOverhead(args) => run_syscall_overhead(&args),
         Tool::Heap { profile, rows } => {
             print!("{}", heap_text(&profile, rows)?);
             Ok(true)
@@ -312,6 +342,46 @@ fn run_overhead(args: &OverheadArgs) -> Result<bool> {
         );
     }
     Ok(over.is_empty())
+}
+
+fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
+    use std::fmt::Write as _;
+    use uscope::tools::syscall_overhead;
+    let options = syscall_overhead::Options {
+        programs: args.programs.clone(),
+        uscope: args.uscope.clone(),
+        launcher: args.launcher.clone(),
+        runs: args.runs,
+        calls: args.calls,
+    };
+    let runs = syscall_overhead::measure(&options, |run| {
+        eprintln!("{}: {:.1} ns a call", run.setup, run.ns_per_call);
+    })?;
+    if let Some(out) = &args.out {
+        std::fs::write(out, serde_json::to_string_pretty(&runs)?)?;
+    }
+    let base = match &args.compare {
+        Some(path) => Some(syscall_overhead::summarize(&serde_json::from_slice::<
+            Vec<syscall_overhead::Run>,
+        >(&std::fs::read(
+            path,
+        )?)?)),
+        None => None,
+    };
+    let mut table = String::from("setup         ns/call     added   noise\n");
+    for summary in syscall_overhead::summarize(&runs) {
+        let was = base
+            .as_deref()
+            .and_then(|base| base.iter().find(|old| old.setup == summary.setup))
+            .map_or_else(String::new, |was| format!(" (was {:+.1})", was.added_ns));
+        writeln!(
+            table,
+            "{:<12} {:>8.1} {:>+9.1}{was} {:>7.1}",
+            summary.setup, summary.ns_per_call, summary.added_ns, summary.noise_ns
+        )?;
+    }
+    print!("{table}");
+    Ok(true)
 }
 
 /// The summaries as a table, each cost beside the base's when given.

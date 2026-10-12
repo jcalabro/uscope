@@ -12,11 +12,13 @@ mod describe;
 mod draw;
 mod frame;
 mod inspect;
+mod live;
 mod lowlevel;
 mod picker;
 mod profiles;
 mod protocol;
 mod session;
+mod syscalls;
 pub mod terminal;
 mod values;
 

@@ -185,6 +185,8 @@ const STACK_CHECKS: &[&str] = &[
     "expressions",
     "breakpoint conditions",
     "entry values",
+    // What a stop at a call shows of a buffer on the stack.
+    "catch stops",
 ];
 
 /// A kernel that misreports small numbers on the stack shows variables
@@ -348,4 +350,33 @@ fn hidden_continues_fail_transparency() {
         "received SIGCONT",
         &["transparency"],
     );
+}
+
+/// A kernel that lets a call a catchpoint stops run past its entry, though
+/// the thread was resumed to stop there, hides it from the debugger, which
+/// catch accounting catches.
+#[test]
+fn a_skipped_call_stop_fails_catch_accounting() {
+    assert_eq!(
+        first_failure_with(Sabotage::SkipCallStops),
+        "catch accounting"
+    );
+}
+
+/// A kernel that misreports a call's argument makes the debugger report a
+/// call the thread did not make, which catch stops catch.
+#[test]
+fn a_misreported_call_argument_fails_catch_stops() {
+    assert_eq!(
+        first_failure_with(Sabotage::MisreportCallArguments),
+        "catch stops"
+    );
+}
+
+/// A model of the tracepoint stream that drops calls from a full ring
+/// without counting them lost hides them, which the tracing oracle
+/// catches.
+#[test]
+fn uncounted_lost_calls_fail_the_tracing_oracle() {
+    assert_eq!(first_failure_with(Sabotage::LoseTracedCalls), "tracing");
 }

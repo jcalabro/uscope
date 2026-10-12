@@ -1368,6 +1368,18 @@ build_fixture gcc "$c_fixtures_dir/attach-restart.c" "$output_dir/attach-restart
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/attach-leader-exits.c" "$output_dir/attach-leader-exits" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/syscall-sweep.c" "$output_dir/syscall-sweep" -O1 -g
+build_fixture gcc "$c_fixtures_dir/syscall-burst.c" "$output_dir/syscall-burst" -O2 -g
+for variant in "gcc-o0 gcc -O0 -fno-omit-frame-pointer -fPIE -pie" \
+    "clang-o2-nopie clang -O2 -fomit-frame-pointer -no-pie"; do
+    read -r name compiler flags <<<"$variant"
+    # shellcheck disable=SC2086
+    build_fixture "$compiler" "$c_fixtures_dir/catch.c" "$output_dir/catch-${name}" \
+        -g3 -gdwarf-5 -pthread $flags
+done
+build_fixture gcc "$c_fixtures_dir/catch.c" "$output_dir/catch-spin" -O0 -g3 -DSPIN -pthread
+build_fixture gcc "$c_fixtures_dir/syscalls.c" "$output_dir/syscalls" \
+    -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/attach-fork.c" "$output_dir/attach-fork" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/exited-leader.c" "$output_dir/exited-leader" \

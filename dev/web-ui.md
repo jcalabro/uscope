@@ -12,6 +12,7 @@ like the CLI and DAP server.
 | `src/web/protocol.rs` | Rust protocol types and TypeScript generation source |
 | `src/web/assets.rs`, `src/web/auth.rs` | Built-page serving and access control |
 | `src/web/inspect.rs`, `src/web/values.rs`, `src/web/draw.rs`, `src/web/profiles.rs` | Server adapters for major page features |
+| `src/web/syscalls.rs`, `web/src/profile/syscalls.ts`, `web/src/ui/profile/SyscallsView.tsx` | A profile's Syscalls view; see [system call tracing](syscalls.md) |
 | `web/src/store.ts`, `web/src/connection.ts`, `web/src/actions.ts` | Browser state, transport, and user actions |
 | `web/src/router.tsx`, `web/src/tab.ts`, `web/src/ui/` | URL state, per-tab view, and React interface |
 | `web/src/protocol.gen.ts` | Generated TypeScript protocol; do not edit by hand |

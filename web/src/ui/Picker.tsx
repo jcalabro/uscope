@@ -292,6 +292,10 @@ function RecordForm() {
   const [preset, setPreset] = useState<RecordPreset>("development");
   const [function_, setFunction] = useState("");
   const [window_, setWindow] = useState("");
+  // System calls are traced with ptrace instead of sampled.
+  const [traced, setTraced] = useState(false);
+  const [calls, setCalls] = useState("");
+  const [stacks, setStacks] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const words = splitWords(form.arguments);
@@ -314,8 +318,9 @@ function RecordForm() {
         cwd: form.cwd.trim() || null,
         environment: environment.pairs,
         preset,
-        function: function_.trim() || null,
-        window: seconds,
+        function: traced ? null : function_.trim() || null,
+        window: traced ? null : seconds,
+        syscalls: traced ? { filter: calls.trim(), stacks } : null,
       });
       void navigate({ to: "/profile/$profile", params: { profile: started.profile } });
     } catch (failure) {
@@ -332,7 +337,22 @@ function RecordForm() {
           {error}
         </div>
       )}
-      <Field label="Program" note="Sampled from outside, so it runs at full speed.">
+      <div className="segmented">
+        <button type="button" aria-pressed={!traced} onClick={() => setTraced(false)}>
+          CPU samples
+        </button>
+        <button type="button" aria-pressed={traced} onClick={() => setTraced(true)}>
+          System calls
+        </button>
+      </div>
+      <Field
+        label="Program"
+        note={
+          traced
+            ? "Traced with ptrace, which stops it a few microseconds at each call it traces."
+            : "Sampled from outside, so it runs at full speed."
+        }
+      >
         {(id) => (
           <PathInput
             id={id}
@@ -384,54 +404,81 @@ function RecordForm() {
           )}
         </Field>
       </div>
-      <div className="two">
-        <Field label="Preset">
-          {(id) => (
-            <select
-              id={id}
-              className="input"
-              value={preset}
-              onChange={(event) => setPreset(event.target.value as RecordPreset)}
+      {traced ? (
+        <div className="two">
+          <Field label="Calls" note="As strace's -e takes them; empty traces every call.">
+            {(id) => (
+              <input
+                id={id}
+                className="input mono"
+                value={calls}
+                onChange={(event) => setCalls(event.target.value)}
+                placeholder="trace=%file,%net"
+                spellCheck={false}
+              />
+            )}
+          </Field>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={stacks}
+              onChange={(event) => setStacks(event.target.checked)}
+            />
+            Each call's stack, as -k unwinds it
+          </label>
+        </div>
+      ) : (
+        <>
+          <div className="two">
+            <Field label="Preset">
+              {(id) => (
+                <select
+                  id={id}
+                  className="input"
+                  value={preset}
+                  onChange={(event) => setPreset(event.target.value as RecordPreset)}
+                >
+                  {PRESETS.map(({ preset, label }) => (
+                    <option key={preset} value={preset}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+            <Field label="Calls of" note="A function to sample each call of, instead of CPU time.">
+              {(id) => (
+                <input
+                  id={id}
+                  className="input"
+                  value={function_}
+                  onChange={(event) => setFunction(event.target.value)}
+                  placeholder="app::handle"
+                  spellCheck={false}
+                />
+              )}
+            </Field>
+          </div>
+          <div className="two">
+            <Field
+              label="Keep the last"
+              note="Seconds of the recording to keep, which the page shows and saves; empty keeps all of it."
             >
-              {PRESETS.map(({ preset, label }) => (
-                <option key={preset} value={preset}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label="Calls of" note="A function to sample each call of, instead of CPU time.">
-          {(id) => (
-            <input
-              id={id}
-              className="input"
-              value={function_}
-              onChange={(event) => setFunction(event.target.value)}
-              placeholder="app::handle"
-              spellCheck={false}
-            />
-          )}
-        </Field>
-      </div>
-      <div className="two">
-        <Field
-          label="Keep the last"
-          note="Seconds of the recording to keep, which the page shows and saves; empty keeps all of it."
-        >
-          {(id) => (
-            <input
-              id={id}
-              className="input"
-              value={window_}
-              onChange={(event) => setWindow(event.target.value)}
-              placeholder="all"
-              inputMode="decimal"
-              aria-invalid={!validWindow}
-            />
-          )}
-        </Field>
-      </div>
+              {(id) => (
+                <input
+                  id={id}
+                  className="input"
+                  value={window_}
+                  onChange={(event) => setWindow(event.target.value)}
+                  placeholder="all"
+                  inputMode="decimal"
+                  aria-invalid={!validWindow}
+                />
+              )}
+            </Field>
+          </div>
+        </>
+      )}
       <div className="actions">
         <button type="submit" className="button primary" disabled={!valid || working}>
           Record

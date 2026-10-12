@@ -69,6 +69,11 @@ requests. Supported language runtimes can also appear as logical tasks. The
 adapter reports optimized-out values and partial stacks as explicit failures or
 unavailable values.
 
+The adapter's exception filters include **System calls**, which stops at
+system calls as [`catch syscall`](debugging.md#stop-at-system-calls) does. Its
+condition is a comma-separated list of calls, such as `openat,connect`; leave
+it empty to stop at every call.
+
 DAP clients differ in which protocol features they expose. If a feature is
 missing from the editor UI, use its debug console or the terminal client to
 check whether the limitation belongs to the client or the adapter.

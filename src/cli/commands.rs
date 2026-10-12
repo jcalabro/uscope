@@ -107,12 +107,21 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     /// Returns the inclusive range of argument counts the usage accepts. A
-    /// final `[words...]` takes the rest of the line, and every word of a
-    /// bracketed group such as `[hits hit-condition]` is optional.
+    /// final `[words...]` takes the rest of the line, every word of a
+    /// bracketed group such as `[hits hit-condition]` is optional, and a
+    /// usage of alternatives such as `a [x] | a y z` accepts any of them.
     fn arity(&self) -> (usize, usize) {
+        self.usage
+            .split(" | ")
+            .map(Self::form_arity)
+            .reduce(|(low, high), (minimum, maximum)| (low.min(minimum), high.max(maximum)))
+            .unwrap_or((0, 0))
+    }
+
+    fn form_arity(form: &str) -> (usize, usize) {
         let mut grouped = false;
         let mut range = (0, 0);
-        for word in self.usage.split_whitespace().skip(1) {
+        for word in form.split_whitespace().skip(1) {
             let optional = grouped || word.starts_with('[');
             grouped = optional && !word.ends_with(']');
             let (minimum, maximum) = range;
@@ -212,15 +221,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         Catch,
         "catch",
         [],
-        "catch [exception] [on|off]",
-        "Show or choose which exceptions language runtimes report stop, such as rust-panic"
+        "catch [exception] [on|off] | catch syscall [entry|exit] [call...] [if <expr>]",
+        "Show or choose which exceptions language runtimes report stop, such as rust-panic, or stop at system calls, every one when none is named; $arg0..$arg5, $ret, and $path read the call"
     ),
     command!(
         Delete,
         "delete",
         ["del", "d"],
         "delete <ids...>",
-        "Delete breakpoints, and watchpoints wID, by id, range such as 3-5, or all breakpoints"
+        "Delete breakpoints, watchpoints wID, and catchpoints cID, by id, range such as 3-5, or all breakpoints"
     ),
     command!(
         Enable,
@@ -668,7 +677,7 @@ impl Cli {
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => self.info(&arguments, rest, spec).await?,
             Command::Handle => self.handle_signal(&arguments).await?,
-            Command::Catch => self.catch(&arguments, spec).await?,
+            Command::Catch => self.catch(&arguments, rest, spec).await?,
             Command::Delete => self.delete(&arguments, false, spec).await?,
             Command::Enable => self.set_enabled(&arguments, true, spec).await?,
             Command::Disable => self.set_enabled(&arguments, false, spec).await?,
@@ -786,6 +795,9 @@ impl Cli {
         Ok(match (arguments[0], arguments.get(1)) {
             ("breakpoints" | "break", None) => self.list_breakpoints().await?,
             ("watchpoints" | "watch", None) => self.list_watchpoints().await?,
+            ("catchpoints" | "catch", None) => {
+                format::catchpoints(&debugger.snapshot().await?.catchpoints, renderer)
+            }
             ("core", None) => debugger
                 .core_dump()
                 .map(|core| format::core_dump(core, renderer))
@@ -890,6 +902,11 @@ impl Cli {
     /// every watchpoint, whose ids bare numbers name.
     async fn delete(&self, words: &[&str], watches: bool, spec: &CommandSpec) -> Result<String> {
         let renderer = self.renderers.stdout;
+        let (caught, words) = self.delete_catchpoints(words, spec).await?;
+        if words.is_empty() && !caught.is_empty() {
+            return Ok(format::deleted(&caught.join(", "), renderer));
+        }
+        let words = words.as_slice();
         let Some(ids) = self.existing_ids(words, watches, spec).await? else {
             let what = if watches {
                 plural(
@@ -3060,9 +3077,91 @@ impl Cli {
 }
 
 impl Cli {
+    /// `catch syscall [entry|exit] [call...] [if EXPR]`: stops at the calls
+    /// named, by name or number, or at every call.
+    async fn catch_syscall(&self, rest: &str, spec: &CommandSpec) -> Result<String> {
+        let rest = rest.trim_start().strip_prefix("syscall").unwrap_or(rest);
+        let (words, condition) = match rest.split_once(" if ") {
+            Some((words, condition)) => (words, Some(condition.trim())),
+            None => rest
+                .trim()
+                .strip_prefix("if ")
+                .map_or((rest, None), |condition| ("", Some(condition.trim()))),
+        };
+        let mut words = words.split_whitespace().peekable();
+        let phase = match words.peek().copied() {
+            Some("entry") => uscope::CatchPhase::Entry,
+            Some("exit") => uscope::CatchPhase::Exit,
+            _ => uscope::CatchPhase::Both,
+        };
+        if phase != uscope::CatchPhase::Both {
+            words.next();
+        }
+        let mut calls = Vec::new();
+        for word in words {
+            let named = uscope::syscalls::Abi::ALL
+                .into_iter()
+                .filter_map(|abi| {
+                    word.parse::<u32>().map_or_else(
+                        |_| uscope::syscalls::SyscallId::named(abi, word),
+                        |number| {
+                            (abi == uscope::syscalls::Abi::X86_64)
+                                .then(|| uscope::syscalls::SyscallId::new(abi, number))
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            if named.is_empty() {
+                bail!("no system call is named {word}");
+            }
+            calls.extend(named);
+        }
+        let condition = condition
+            .filter(|condition| !condition.is_empty())
+            .map(uscope::Condition::parse)
+            .transpose()
+            .map_err(|error| anyhow!("{error}"))?;
+        if rest.trim() == "if" {
+            return Err(spec.usage_error());
+        }
+        let catchpoint = self
+            .debugger
+            .add_catchpoint(calls.into(), phase, condition)
+            .await?;
+        Ok(format::catchpoint(&catchpoint, self.renderers.stdout))
+    }
+
+    /// Deletes the catchpoints `words` name as `cID`, and returns what it
+    /// deleted and the other words.
+    async fn delete_catchpoints<'a>(
+        &self,
+        words: &[&'a str],
+        spec: &CommandSpec,
+    ) -> Result<(Vec<String>, Vec<&'a str>)> {
+        let renderer = self.renderers.stdout;
+        let (catchpoints, others): (Vec<&str>, Vec<&str>) =
+            words.iter().partition(|word| word.starts_with('c'));
+        let mut deleted = Vec::new();
+        for word in catchpoints {
+            let id = word[1..]
+                .parse()
+                .map(uscope::CatchpointId::new)
+                .map_err(|_| spec.usage_error())?;
+            self.debugger.remove_catchpoint(id).await?;
+            deleted.push(format!(
+                "catchpoint {}",
+                renderer.paint(Role::Metadata, format!("c{id}"))
+            ));
+        }
+        Ok((deleted, others))
+    }
+
     /// Lists the exceptions runtimes report and whether each stops, or
     /// shows one, or chooses whether it does.
-    async fn catch(&self, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
+    async fn catch(&self, arguments: &[&str], rest: &str, spec: &CommandSpec) -> Result<String> {
+        if arguments.first() == Some(&"syscall") {
+            return self.catch_syscall(rest, spec).await;
+        }
         let current = *self
             .exceptions
             .lock()

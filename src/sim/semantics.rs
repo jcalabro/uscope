@@ -273,7 +273,8 @@ impl Begun {
             rip: thread.registers.rip,
             shadow: thread.shadow.clone(),
             retired: thread.retired,
-            inside_call: thread.returning.is_some(),
+            // At a call's entry, the call is still to be made.
+            inside_call: thread.returning.is_some() || thread.entered,
             frame: presentation.map(|presentation| presentation.frame.clone()),
             hidden_inline_frames: presentation
                 .map_or(0, |presentation| presentation.hidden_inline_frames),

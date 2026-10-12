@@ -393,6 +393,7 @@ mod tests {
                 temporary: false,
             }]),
             watchpoints: Arc::from([]),
+            catchpoints: Arc::from([]),
         }
     }
 

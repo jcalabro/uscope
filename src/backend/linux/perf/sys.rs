@@ -42,6 +42,8 @@ const _: () = assert!(std::mem::size_of::<Attr>() == 136);
 pub const TYPE_SOFTWARE: u32 = 1;
 pub const TYPE_BREAKPOINT: u32 = 5;
 pub const COUNT_SW_CPU_CLOCK: u64 = 0;
+/// An event that counts nothing, for the records of mappings and threads.
+pub const COUNT_SW_DUMMY: u64 = 9;
 pub const BREAKPOINT_EXECUTE: u32 = 4;
 
 /// `perf_event_attr` flag bits.

@@ -3111,3 +3111,420 @@ kbd {
   flex: none;
   text-align: right;
 }
+
+/* The Syscalls view. */
+
+.syscalls {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.syscalls-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.syscalls-filter {
+  display: flex;
+  flex: 1 1 260px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.syscalls-filter .input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 7px;
+  font: 12px var(--mono);
+}
+
+.syscalls-filter .input[aria-invalid] {
+  border-color: var(--error);
+}
+
+.syscalls-counts {
+  font-size: 12px;
+}
+
+.error-text {
+  color: var(--error);
+}
+
+.syscalls-counts .warn {
+  color: var(--changed);
+}
+
+.syscalls-body {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.syscalls-summary {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.syscalls-rate {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+}
+
+.syscalls-rate canvas {
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.syscalls-legend {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.syscalls-legend .segmented {
+  margin: 0 0 4px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 2px;
+}
+
+.syscalls-split {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
+  min-height: 0;
+}
+
+.syscalls-split > :only-child {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 760px) {
+  .syscalls-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.syscalls-table-pane,
+.syscalls-detail {
+  overflow: auto;
+}
+
+.syscalls-detail {
+  border-left: 1px solid var(--line);
+}
+
+.syscalls-detail section {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.syscalls-detail h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.syscalls-detail canvas {
+  display: block;
+}
+
+.syscalls-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.syscalls-table th,
+.syscalls-table td {
+  padding: 2px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.syscalls-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.syscalls-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.syscalls-table tbody tr[data-row] {
+  cursor: pointer;
+}
+
+.syscalls-table tbody tr:hover {
+  background: var(--select-bg);
+}
+
+.syscalls-table tr.selected {
+  background: var(--accent-soft);
+}
+
+.syscalls-table .errno-row td {
+  border-bottom-style: dashed;
+  padding-left: 28px;
+}
+
+.syscalls-table .sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.syscalls-table .sort[aria-pressed="true"] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.syscalls-table .disclose {
+  width: 16px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.histogram-row {
+  display: grid;
+  grid-template-columns: 76px 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+  font-size: 11px;
+}
+
+.histogram-bar {
+  position: relative;
+  height: 10px;
+}
+
+.histogram-bar > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 2px;
+}
+
+.histogram-bar .whole {
+  background: var(--line-strong);
+}
+
+.histogram-bar .chosen {
+  background: var(--accent);
+}
+
+.histogram-bar .error {
+  background: var(--error);
+}
+
+.caller {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.syscalls-log {
+  padding: 4px 0;
+}
+
+.log-lines {
+  font-size: 12px;
+}
+
+.log-head {
+  display: block;
+  width: 100%;
+  /* A long line wraps under its own start, never off the pane. */
+  padding: 1px 12px 1px 32px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  text-indent: -20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.log-head:disabled {
+  color: var(--ink-2);
+  cursor: default;
+}
+
+.log-head:hover:not(:disabled) {
+  background: var(--select-bg);
+}
+
+.log-line.failed .log-head {
+  box-shadow: inset 2px 0 var(--error);
+}
+
+.log-call {
+  margin: 2px 12px 6px 28px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--surface-2);
+}
+
+.log-call th {
+  padding-right: 12px;
+  color: var(--ink-2);
+  font-weight: 500;
+  text-align: left;
+  vertical-align: top;
+}
+
+.log-call td {
+  overflow-wrap: anywhere;
+}
+
+.log-call .dump {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
+.log-call .stack {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.syscalls-log > .button {
+  margin: 6px 12px;
+}
+
+.pad {
+  padding: 8px 12px;
+}
+
+.tk-name {
+  color: var(--f);
+  font-weight: 600;
+}
+
+.tk-punct {
+  color: var(--ink-2);
+}
+
+.tk-number,
+.tk-address {
+  color: var(--n);
+}
+
+.tk-string {
+  color: var(--s);
+}
+
+.tk-constant {
+  color: var(--k);
+}
+
+.tk-fd,
+.tk-path,
+.tk-pid {
+  color: var(--t);
+}
+
+.tk-error {
+  color: var(--error);
+}
+
+.tk-comment,
+.tk-time,
+.tk-missing {
+  color: var(--c);
+}
+
+.syscalls-detail {
+  min-width: 0;
+}
+
+.latency-map .plot {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.latency-map canvas,
+.syscalls-rate canvas,
+.syscall-lanes canvas {
+  max-width: 100%;
+}
+
+.syscalls-body,
+.syscalls-split {
+  grid-template-rows: auto;
+}
+
+.syscalls-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.latency-map canvas.clickable {
+  cursor: pointer;
+}
+
+.call-site {
+  margin: 6px 0 0;
+}
+
+.call-site figcaption {
+  color: var(--ink-2);
+}
+
+.call-site .source-lines {
+  margin: 4px 0 0;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.call-site .line-number {
+  display: inline-block;
+  width: 4ch;
+  margin-right: 1ch;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+.call-site .made {
+  background: var(--select-bg);
+}

@@ -239,6 +239,9 @@ struct Target {
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
     applied_exceptions: uscope::ExceptionStops,
+    /// The catchpoint the system-call filter made, and the calls it
+    /// catches.
+    applied_syscalls: Option<(Arc<[uscope::syscalls::SyscallId]>, uscope::CatchpointId)>,
     console: Cli,
     syntax: uscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
@@ -733,6 +736,7 @@ impl Session {
             applied_policies: default_policies.clone(),
             default_policies,
             applied_exceptions: uscope::ExceptionStops::default(),
+            applied_syscalls: None,
             console,
             syntax,
             images: HashMap::new(),
@@ -1460,7 +1464,7 @@ impl Session {
                 self.data_invalidated(&invalidated).await?;
             }
             DebuggerEvent::WatchpointsChanged { .. } => self.sync_data().await?,
-            DebuggerEvent::StateChanged { .. } => {}
+            DebuggerEvent::CatchpointsChanged { .. } | DebuggerEvent::StateChanged { .. } => {}
         }
         Ok(())
     }
@@ -1508,6 +1512,9 @@ impl Session {
                     || format!("watchpoint {watchpoint}"),
                     |entry| format!("data breakpoint {}", entry.id),
                 ),
+            uscope::ConditionOwner::Catchpoint(catchpoint) => {
+                format!("system-call catchpoint {catchpoint}")
+            }
         };
         self.client
             .important(format!(
@@ -2220,6 +2227,20 @@ impl Session {
                 .map_err(error)?;
             target.applied_exceptions = exceptions;
         }
+        let syscalls = self.exceptions.syscalls();
+        if target.applied_syscalls.as_ref().map(|(calls, _)| calls) != syscalls {
+            if let Some((_, id)) = target.applied_syscalls.take() {
+                target.handle.remove_catchpoint(id).await.map_err(error)?;
+            }
+            if let Some(calls) = syscalls {
+                let catchpoint = target
+                    .handle
+                    .add_catchpoint(Arc::clone(calls), uscope::CatchPhase::Both, None)
+                    .await
+                    .map_err(error)?;
+                target.applied_syscalls = Some((Arc::clone(calls), catchpoint.id));
+            }
+        }
         for code in uscope::signal_codes() {
             let mut policy = target.default_policies[&code];
             policy.stop = self.exceptions.stops(code);
@@ -2644,6 +2665,18 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
             "exception",
             Some(format!("watchpoints could not be armed: {description}")),
             Some("watchpoint failure".to_owned()),
+        ),
+        StopReason::Syscall(stop) => (
+            "exception",
+            Some(crate::present::syscalls::caught(stop)),
+            Some(
+                if stop.returned.is_some() {
+                    "system call returned"
+                } else {
+                    "system call"
+                }
+                .to_owned(),
+            ),
         ),
         StopReason::Breakpoint { .. }
         | StopReason::Watchpoint { .. }

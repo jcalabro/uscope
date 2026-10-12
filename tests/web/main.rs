@@ -13,4 +13,5 @@ mod lowlevel;
 mod profiles;
 mod running;
 mod sessions;
+mod syscalls;
 mod terminal;

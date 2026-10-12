@@ -792,8 +792,8 @@ A type's view is the first that binds, from these sources in order:
    `$XDG_CONFIG_HOME/uscope/views` (or `~/.config/uscope/views`), each
    directory's in name order. The project root is the nearest directory,
    from the one uscope runs in upwards (for the debug adapter, the launch
-   request's `cwd`), that holds `.uscope/`, then the nearest that holds
-   `.git`, so a session started anywhere in a project finds its views.
+   request's `cwd`), that holds `.uscope/` or `.git`, so a session started
+   anywhere in a project finds its views.
 3. **The program's own**: views a module carries in its
    `.debug_uscope_views` section, which present only that module's own
    types, so that one library never restyles another's.

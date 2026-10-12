@@ -130,6 +130,63 @@ pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
     output
 }
 
+/// A new catchpoint: `catchpoint c1: syscalls openat, read, at entry and
+/// exit, if $ret < 0`.
+pub fn catchpoint(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> String {
+    format!(
+        "{} {}",
+        renderer.paint(Role::Success, "catchpoint"),
+        catchpoint_line(catchpoint, renderer)
+    )
+}
+
+fn catchpoint_line(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> String {
+    let mut names: Vec<String> = catchpoint
+        .calls
+        .iter()
+        .map(|call| call.display_name().into_owned())
+        .collect();
+    names.dedup();
+    let calls = if names.is_empty() {
+        "every system call".to_owned()
+    } else {
+        names.join(", ")
+    };
+    let phase = match catchpoint.phase {
+        uscope::CatchPhase::Entry => "at entry",
+        uscope::CatchPhase::Exit => "at exit",
+        uscope::CatchPhase::Both => "at entry and exit",
+    };
+    let condition = catchpoint
+        .condition
+        .as_ref()
+        .map(|condition| format!(", if {}", condition.expression().text()))
+        .unwrap_or_default();
+    format!(
+        "{}: {} {phase}{condition}",
+        renderer.paint(Role::Metadata, format!("c{}", catchpoint.id)),
+        renderer.paint(Role::Name, calls)
+    )
+}
+
+/// Every catchpoint, one a line, with its hits.
+pub fn catchpoints(catchpoints: &[uscope::Catchpoint], renderer: Renderer) -> String {
+    if catchpoints.is_empty() {
+        return renderer.paint(Role::Metadata, "no catchpoints").to_string();
+    }
+    catchpoints
+        .iter()
+        .map(|catchpoint| {
+            format!(
+                "{}, {}",
+                catchpoint_line(catchpoint, renderer),
+                plural(catchpoint.hit_count, "hit")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn deleted(what: &str, renderer: Renderer) -> String {
     format!("{} {what}", renderer.paint(Role::Success, "deleted"))
 }
@@ -163,11 +220,42 @@ fn hit_condition(
     Some(text)
 }
 
-/// Names the breakpoint or watchpoint a condition belongs to.
+/// A catchpoint's stop: `stopped at catchpoint c1 as the call began:
+/// openat(AT_FDCWD, "/etc/hosts", O_RDONLY)`.
+fn caught_stop(stop: &uscope::SyscallStop, renderer: Renderer) -> String {
+    format!(
+        "{} at {} {} {}",
+        renderer.paint(Role::Current, "stopped"),
+        catchpoint_ids(&stop.catchpoints, renderer),
+        if stop.returned.is_some() {
+            "as the call returned:"
+        } else {
+            "as the call began:"
+        },
+        renderer.paint(Role::Name, crate::present::syscalls::caught(stop))
+    )
+}
+
+/// `catchpoint c1` or `catchpoints c1, c2`.
+fn catchpoint_ids(ids: &[uscope::CatchpointId], renderer: Renderer) -> String {
+    let noun = if ids.len() == 1 {
+        "catchpoint"
+    } else {
+        "catchpoints"
+    };
+    let ids: Vec<String> = ids
+        .iter()
+        .map(|id| renderer.paint(Role::Metadata, format!("c{id}")).to_string())
+        .collect();
+    format!("{noun} {}", ids.join(", "))
+}
+
+/// Names the breakpoint, watchpoint, or catchpoint a condition belongs to.
 pub fn condition_owner(owner: ConditionOwner) -> String {
     match owner {
         ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
         ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
+        ConditionOwner::Catchpoint(id) => format!("catchpoint {id}"),
     }
 }
 
@@ -810,6 +898,7 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
         StopReason::WatchpointInvalidated { invalidated } => {
             watchpoint_invalidations(invalidated, renderer)
         }
+        StopReason::Syscall(stop) => caught_stop(stop, renderer),
         StopReason::WatchpointArmFailed {
             thread_id,
             description,

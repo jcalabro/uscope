@@ -246,12 +246,22 @@ const SIGNAL_ACTIONS: &[&str] = &["stop", "nostop", "print", "noprint", "pass", 
 /// names, or of what it points to.
 /// What `catch`'s argument at `argument` may be: an exception filter, then
 /// whether it stops.
-fn exception_words(argument: usize) -> Vec<String> {
+fn exception_words(argument: usize, first: Option<&str>) -> Vec<String> {
     if argument == 0 {
-        uscope::ExceptionStops::filters()
+        let mut words: Vec<String> = uscope::ExceptionStops::filters()
             .iter()
             .map(|filter| filter.id.to_owned())
-            .collect()
+            .collect();
+        words.push("syscall".to_owned());
+        words
+    } else if first == Some("syscall") {
+        let mut words = words_of(&["entry", "exit", "if"]);
+        words.extend(
+            uscope::syscalls::table::calls(uscope::syscalls::Abi::X86_64)
+                .iter()
+                .map(|&(_, name)| name.to_owned()),
+        );
+        words
     } else {
         words_of(&["on", "off"])
     }
@@ -333,7 +343,7 @@ pub fn complete(
             .filter_map(uscope::signal_name)
             .collect(),
         Command::Handle => words_of(SIGNAL_ACTIONS),
-        Command::Catch => exception_words(argument),
+        Command::Catch => exception_words(argument, words.get(1).copied()),
         Command::Help if argument == 0 => {
             COMMANDS.iter().map(|spec| spec.name.to_owned()).collect()
         }

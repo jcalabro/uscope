@@ -1021,7 +1021,7 @@ impl Processor {
 }
 
 /// One source line of a frame, owned until the builder interns it.
-pub(super) struct OwnedLine {
+pub struct OwnedLine {
     function: Arc<str>,
     file: Option<String>,
     line: u32,
@@ -1031,7 +1031,7 @@ pub(super) struct OwnedLine {
 }
 
 impl OwnedLine {
-    pub(super) fn input(&self) -> LineInput<'_> {
+    pub fn input(&self) -> LineInput<'_> {
         LineInput {
             function: &self.function,
             file: self.file.as_deref(),
@@ -1048,7 +1048,7 @@ impl OwnedLine {
 
 /// The source lines of the code at `address`, innermost inlined function
 /// first, ending with the function the code physically belongs to.
-pub(super) fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
+pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
     let location = image.locate(address);
     let path = |file| {
         image
@@ -1130,7 +1130,7 @@ fn qualified(function: &crate::FunctionInfo) -> Arc<str> {
         .map_or_else(|| function.name.clone(), Arc::from)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut text, byte| {
         let _ = write!(text, "{byte:02x}");

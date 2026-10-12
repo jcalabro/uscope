@@ -4,9 +4,19 @@
 // rather than node numbers, so a link opens the same view of the same
 // profile anywhere.
 
-import type { ProfileGranularity, ProfileQuery, ProfileTransform, TransformOp } from "../protocol";
+import type {
+  ProfileGranularity,
+  ProfileQuery,
+  ProfileTransform,
+  SyscallGroup,
+  SyscallQuery,
+  TransformOp,
+} from "../protocol";
 
-export type ProfileView = "flame" | "tree" | "functions" | "zones";
+export type ProfileView = "flame" | "tree" | "functions" | "zones" | "syscalls";
+
+/** The Syscalls view's tabs; the summary when absent. */
+export type SyscallTab = "log" | "files" | "network" | "processes";
 
 export interface ProfileLook {
   /** The view shown; the flame graph when absent. */
@@ -49,9 +59,25 @@ export interface ProfileLook {
   /** What the selected function shows: its source lines or its code,
    * rather than its callers and callees. */
   ann?: "lines" | "code";
+  /** The Syscalls view's selection, in strace's `-e` syntax. */
+  sf?: string;
+  /** What the Syscalls summary's rows are of; calls when absent. */
+  sg?: Exclude<SyscallGroup, "syscall">;
+  /** The call selected in the Syscalls summary, by name. */
+  sc?: string;
+  /** The Syscalls view's tab. */
+  st?: SyscallTab;
+  /** The rate chart stacks calls rather than classes. */
+  sr?: "syscall";
+  /** The log line expanded, by its event. */
+  ev?: string;
+  /** Calls of one log2 latency bucket, as a heat map's row names it. */
+  sl?: string;
 }
 
-const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones"];
+const VIEWS: readonly ProfileView[] = ["flame", "tree", "functions", "zones", "syscalls"];
+const SYSCALL_GROUPS: readonly string[] = ["class", "process", "thread", "path", "site"];
+const SYSCALL_TABS: readonly string[] = ["log", "files", "network", "processes"];
 const GRANULARITIES: readonly string[] = ["physical", "line", "address"];
 const OPS: readonly TransformOp[] = ["focus", "merge", "drop", "collapse"];
 
@@ -137,7 +163,45 @@ export function validateProfileLook(search: Record<string, unknown>): ProfileLoo
   if (ann === "lines" || ann === "code") {
     look.ann = ann;
   }
+  for (const key of ["sf", "sc"] as const) {
+    const value = text(key);
+    if (value) {
+      look[key] = value;
+    }
+  }
+  const sg = text("sg");
+  if (sg && SYSCALL_GROUPS.includes(sg)) {
+    look.sg = sg as ProfileLook["sg"] & string;
+  }
+  const st = text("st");
+  if (st && SYSCALL_TABS.includes(st)) {
+    look.st = st as SyscallTab;
+  }
+  if (text("sr") === "syscall") {
+    look.sr = "syscall";
+  }
+  const ev = text("ev");
+  if (ev && /^\d+$/.test(ev)) {
+    look.ev = ev;
+  }
+  const sl = text("sl");
+  if (sl && /^\d{1,2}$/.test(sl)) {
+    look.sl = sl;
+  }
   return look;
+}
+
+/** The Syscalls view's query of `profile`: the look's selection over its
+ * time range. */
+export function syscallQueryOf(profile: string, look: ProfileLook, revision: number): SyscallQuery {
+  const range = look.range ? parseRange(look.range) : null;
+  return {
+    profile,
+    revision,
+    ...(range ? { range } : {}),
+    ...(look.sl ? { latency: Number(look.sl) } : {}),
+    filter: look.sf ?? "",
+  };
 }
 
 /** Parses `START-END`, a nonempty range of whole nanoseconds. */

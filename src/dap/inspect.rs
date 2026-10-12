@@ -977,6 +977,10 @@ impl Session {
             StopReason::WatchpointArmFailed { description, .. } => {
                 ("watchpoint failure".to_owned(), description.to_string())
             }
+            StopReason::Syscall(stop) => (
+                "system call".to_owned(),
+                crate::present::syscalls::caught(stop),
+            ),
             StopReason::LanguageException(exception) => {
                 let id = super::session::language_exception_text(exception.kind).to_owned();
                 let mut body = json!({

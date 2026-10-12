@@ -31,6 +31,21 @@ narrower limits and report them when used.
   information.
 - Core dumps are read-only.
 
+## System calls
+
+- `uscope syscalls` traces x86-64 programs, including their 32-bit and x32
+  calls.
+- The BPF engine needs Linux 5.15 or newer with BTF, `CAP_BPF`, and
+  `CAP_PERFMON`. It cannot use a BPF token.
+- The ptrace engine stops the program at each traced call, at a cost of
+  several microseconds a call. Attaching it stops every call.
+- Calls answered in the vDSO, such as `clock_gettime`, are not traced.
+- The BPF engine can drop calls under load and reports how many it lost.
+- A cgroup or container trace cannot show stacks.
+- `record --syscalls` cannot be used with `--pid`.
+- While a debugger catchpoint exists, every system call stops its thread
+  briefly.
+
 ## Languages and runtimes
 
 - C, C++, Rust, Go, Zig, Odin, Fortran, D, Nim, and Ada use the shared native

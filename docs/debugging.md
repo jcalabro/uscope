@@ -79,6 +79,37 @@ Watchpoints use the machine's limited hardware debug registers. The watched
 expression must resolve to an address and a supported size. A watchpoint stays
 at that address; if the variable later lives elsewhere, create a new one.
 
+## Stop at system calls
+
+A catchpoint stops the program when it makes a system call:
+
+```text
+catch syscall openat
+catch syscall entry connect
+catch syscall openat if $path == "config.toml"
+```
+
+With no call named, every call stops. `entry` or `exit` stops only as the
+call begins or as it returns; the default is both. At the stop, `$arg0` to
+`$arg5` hold the call's arguments, `$ret` what it returned, and `$path` the
+path it names:
+
+```text
+stopped at catchpoint c1 as the call began: openat(AT_FDCWD, "missing", O_RDONLY)
+(uscope) print $path
+(string) $path = "missing"
+(uscope) continue
+stopped at catchpoint c1 as the call returned: openat(AT_FDCWD, "missing", O_RDONLY) = -1 ENOENT (No such file or directory)
+(uscope) print $ret
+(integer) $ret = -2
+```
+
+`info catchpoints` lists catchpoints and `delete c1` removes one.
+
+While a catchpoint exists, every system call stops its thread briefly, even
+calls no catchpoint names, so the program runs slower. To watch calls without
+stopping the program, use [`uscope syscalls`](syscalls.md) instead.
+
 ## Step through code
 
 ```text

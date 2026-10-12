@@ -20,6 +20,7 @@ use crate::backend::sim_edge::signal_view;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{RAX, Registers};
 use crate::sim::kernel::perf::perf_registers;
+use crate::sim::kernel::ptrace::CallInfo;
 use crate::sim::kernel::{Kernel, Options, Tid, WaitStatus};
 
 /// The simulated debugger's process identifier.
@@ -86,6 +87,10 @@ pub(super) trait Tracee {
     fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>);
     /// The children `thread` forked that are not reaped.
     fn children(&self, thread: Tid) -> Vec<Tid>;
+    /// `PTRACE_SYSCALL`.
+    fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno>;
+    /// `PTRACE_GET_SYSCALL_INFO`.
+    fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno>;
 }
 
 impl Tracee for NativeTracee {
@@ -133,6 +138,12 @@ impl Tracee for NativeTracee {
     }
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno> {
         Self::resume(self, thread, signal, single_step)
+    }
+    fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        Self::resume_to_call(self, thread, signal)
+    }
+    fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno> {
+        Self::call_info(self, thread)
     }
     fn kill(&mut self) -> Result<(), Errno> {
         Self::kill(self, libc::SIGKILL)
@@ -321,6 +332,14 @@ impl Tracee for SimTracee {
     }
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno> {
         self.kernel.resume(thread, signal, single_step)
+    }
+    fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        let result = self.kernel.resume_to_call(thread, signal);
+        self.check_gap();
+        result
+    }
+    fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno> {
+        self.kernel.call_info(thread)
     }
     fn kill(&mut self) -> Result<(), Errno> {
         self.kernel.kill(self.pid, libc::SIGKILL)
@@ -740,6 +759,54 @@ impl Record<'_> {
         let result = self.tracee.resume(thread, signal, false);
         let name = self.name_of(thread);
         self.result(&format!("continue {name} with {signal:?}"), result);
+    }
+
+    /// `PTRACE_SYSCALL`.
+    pub(super) fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) {
+        let result = self.tracee.resume_to_call(thread, signal);
+        let name = self.name_of(thread);
+        self.result(
+            &format!("continue {name} to a call with {signal:?}"),
+            result,
+        );
+    }
+
+    /// What `PTRACE_GET_SYSCALL_INFO` reports of a stopped thread, with
+    /// arguments in the image described by where they point. Returns it.
+    pub(super) fn call(&mut self, thread: Tid) -> Option<CallInfo> {
+        let info = self.tracee.call_info(thread);
+        let image = &self.landmarks.image;
+        // A call that returns a thread names it.
+        let value = info.ok().map(|info| {
+            Tid::try_from(info.value)
+                .ok()
+                .filter(|tid| self.threads.contains(tid) || self.children.contains(tid))
+                .map_or_else(|| info.value.to_string(), |tid| self.name_of(tid))
+        });
+        let text = info.map(|info| {
+            let args = info
+                .args
+                .iter()
+                .map(|&arg| {
+                    if image.contains(&arg) {
+                        format!("image+{:#x}", arg - image.start)
+                    } else if arg < 0x1_0000 {
+                        arg.to_string()
+                    } else {
+                        "elsewhere".to_owned()
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "op {} number {} args {args:?} value {}",
+                info.op,
+                info.number,
+                value.clone().unwrap_or_default()
+            )
+        });
+        let name = self.name_of(thread);
+        self.note(format!("call info of {name}: {text:?}"));
+        info.ok()
     }
 
     pub(super) fn step(&mut self, thread: Tid) {

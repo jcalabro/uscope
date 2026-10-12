@@ -41,6 +41,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use nix::libc;
 
 use super::audit::Auditor;
+use super::catches;
 use super::choices::{Choices, Stream};
 use super::client::{Adopter, Client, Observation, Script, Shared};
 use super::corpus::{Corpus, Program, Run, Variant};
@@ -56,6 +57,7 @@ use super::samples::Sampler;
 use super::schedule::{Action, Scheduler, SessionId};
 use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
+use super::tracing::TraceModel;
 use super::views;
 use super::watches::{self, Intent};
 use crate::backend::sim_edge::{
@@ -145,6 +147,15 @@ pub enum Sabotage {
     HideSteppedCalls,
     /// Samples copy each return address a call pushed as the next address.
     SkewSampledReturnAddresses,
+    /// A thread resumed to stop at system calls makes a call a catchpoint
+    /// stops without stopping at its entry.
+    SkipCallStops,
+    /// `PTRACE_GET_SYSCALL_INFO` reports a call's second argument one
+    /// greater.
+    MisreportCallArguments,
+    /// The model of the tracepoint stream drops a call from a full ring
+    /// without counting it lost.
+    LoseTracedCalls,
 }
 
 impl Default for Settings {
@@ -326,8 +337,15 @@ struct World<'a> {
     watch_counts: BTreeMap<u64, u64>,
     /// The last stop watch accounting judged.
     judged_stop: Option<u64>,
+    /// Each thread's reason at a system call, with the catchpoints the
+    /// client knew of when it first saw it, which the reason answers to.
+    /// A reason outlives the stop it was made at when another stop, as a
+    /// jump's, publishes it again.
+    catch_reasons: catches::Reasons,
     /// The profiler's samples of running threads.
     sampler: Sampler,
+    /// The model of the BPF engine's tracepoint stream.
+    tracing: RefCell<TraceModel>,
     trace: Trace,
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
@@ -348,6 +366,12 @@ impl<'a> World<'a> {
         choices.fill(Stream::Program, &mut random);
         let scheduler = Scheduler::new(swarm.policy, &mut choices);
         let sampler = Sampler::new(&mut choices);
+        #[cfg_attr(not(test), expect(unused_mut, reason = "only sabotage changes it"))]
+        let mut tracing = TraceModel::new(&mut choices);
+        #[cfg(test)]
+        {
+            tracing.uncounted = settings.sabotage == Some(Sabotage::LoseTracedCalls);
+        }
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
         kernel.borrow_mut().debug_behavior = swarm.debug;
@@ -421,7 +445,9 @@ impl<'a> World<'a> {
             baselines: BTreeMap::new(),
             watch_counts: BTreeMap::new(),
             judged_stop: None,
+            catch_reasons: BTreeMap::new(),
             sampler,
+            tracing: RefCell::new(tracing),
             trace,
             #[cfg(debug_assertions)]
             capture,
@@ -514,6 +540,8 @@ impl<'a> World<'a> {
             // the kernel watches for unseen hits.
             self.machine.kernel.borrow_mut().user_breakpoints =
                 self.shared.addresses(self.variant.image.bias());
+            self.machine.kernel.borrow_mut().catching.rules =
+                self.shared.catches.borrow().values().cloned().collect();
             self.follow_watches();
             self.judge()?;
         }
@@ -1209,6 +1237,7 @@ impl<'a> World<'a> {
         if let Some(gap) = &self.machine.kernel.borrow().gap {
             return Err(Failure::model_gap(gap.0.clone()));
         }
+        self.trace_served()?;
         self.auditor.check(
             &self.machine.kernel.borrow(),
             &mut self.machine.marks.borrow_mut(),
@@ -1270,6 +1299,8 @@ impl<'a> World<'a> {
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+        catches::unseen(&kernel)
+            .map_err(|message| Failure::debugger("catch accounting", message))?;
         for (id, session) in self.sessions.iter().enumerate() {
             let Some(controller) = &session.controller else {
                 continue;
@@ -1293,6 +1324,16 @@ impl<'a> World<'a> {
                 .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
                 oracles::disabled_breakpoints(&kernel, &truth, &self.shared.disabled.borrow())
                     .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+                let known = catches::known(
+                    &mut self.catch_reasons,
+                    &truth,
+                    &self.shared.catches.borrow(),
+                );
+                let mut marks = self.machine.marks.borrow_mut();
+                catches::judge(&kernel, &truth, &known)
+                    .map_err(|message| Failure::debugger("catch stops", message))?
+                    .into_iter()
+                    .for_each(|mark| marks.hit(mark));
             }
         }
         oracles::output_so_far(&kernel, self.run)
@@ -1319,6 +1360,16 @@ impl<'a> World<'a> {
     }
 
     /// Ends a run in which nothing more can happen.
+    /// Feeds the calls the kernel served since the last action to the
+    /// model of the tracepoint stream.
+    fn trace_served(&self) -> Result<(), Failure> {
+        let served = std::mem::take(&mut self.machine.kernel.borrow_mut().served);
+        self.tracing
+            .borrow_mut()
+            .feed(served, &mut self.machine.marks.borrow_mut())
+            .map_err(|message| Failure::debugger("tracing", message))
+    }
+
     fn finish(&self) -> Result<Progress, Failure> {
         for (id, session) in self.sessions.iter().enumerate() {
             if session.client.is_some() {
@@ -1340,6 +1391,11 @@ impl<'a> World<'a> {
                 ));
             }
         }
+        self.trace_served()?;
+        self.tracing
+            .borrow_mut()
+            .finish(&mut self.machine.marks.borrow_mut())
+            .map_err(|message| Failure::debugger("tracing", message))?;
         let kernel = self.machine.kernel.borrow();
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;
         oracles::transparency(&kernel, self.run)
@@ -1499,6 +1555,7 @@ fn script(
         image: Arc::clone(&variant.image),
         attach,
         follow: swarm.follow,
+        catching: swarm.catching,
     }
 }
 

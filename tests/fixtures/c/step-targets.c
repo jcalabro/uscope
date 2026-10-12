@@ -17,6 +17,12 @@ __attribute__((noinline)) int add(int a, int b) {
 
 int (*volatile through)(int) = inc;
 
+volatile int ticks;
+
+__attribute__((noinline)) void tick(void) {
+    ticks++;
+}
+
 // Each activation calls itself before twice, so the step into twice runs
 // the deeper ones through the same return address first.
 __attribute__((noinline)) int fact(int n) {
@@ -27,6 +33,11 @@ int main(int argc, char **argv) {
     int total = add(twice(argc), inc(argc)); // targets: calls
     total += through(total) + (int)strlen(argv[0]); // targets: indirect
     total += fact(argc + 2); // targets: recursive
+    // A call the branch skips, before a line that begins with a call.
+    if (argc > 5 && add(argc, 1) > 0) { // targets: skipped
+        total += 1;
+    }
+    tick(); // targets: after skipped
     printf("%d\n", total); // targets: print
     return 0;
 }

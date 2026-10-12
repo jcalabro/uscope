@@ -86,6 +86,12 @@
         PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
+        # build.rs compiles the syscall tracer's BPF programs with clang
+        # itself, not its wrapper, which adds host flags that a BPF target
+        # rejects, against libbpf's BPF headers and the kernel's UAPI
+        # headers, whose syscall numbers also generate src/syscalls' tables.
+        USCOPE_BPF_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+        USCOPE_BPF_INCLUDE = "${pkgs.libbpf}/include:${pkgs.linuxHeaders}/include";
         packages = with pkgs; [
           rust
           cargo-fuzz
@@ -105,6 +111,8 @@
           # The memory cap tests run under asks the user's systemd for a scope.
           systemd
           git
+          # The syscall tracer's tests hold its output to strace's.
+          strace
           # Profilers for the `just profile-*` recipes.
           perf
           valgrind
@@ -138,6 +146,23 @@
             kdePackages.kcachegrind
           ]);
         });
+      };
+
+      # The privilege `uscope syscalls` needs for its BPF engine, and
+      # `just test-bpf` for its tests: a wrapper around env that raises
+      # CAP_BPF and CAP_PERFMON into the ambient set before it runs its
+      # command, so they reach uscope through nix develop, systemd-run, and
+      # nextest. Only root and the wheel group may run it. A host imports
+      # it into its own NixOS or system-manager configuration; neither the
+      # dev shell nor the nix store can make a binary with capabilities.
+      nixosModules.uscope-bpf = { pkgs, ... }: {
+        security.wrappers.uscope-bpf = {
+          source = "${pkgs.coreutils}/bin/env";
+          owner = "root";
+          group = "wheel";
+          permissions = "u+rx,g+x";
+          capabilities = "cap_bpf,cap_perfmon+ep";
+        };
       };
     };
 }

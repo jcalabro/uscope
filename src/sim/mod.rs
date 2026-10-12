@@ -18,6 +18,7 @@
 //! - [`report`]: traces, fingerprints, and failures.
 
 mod audit;
+mod catches;
 pub(crate) mod choices;
 mod client;
 #[cfg(test)]
@@ -41,6 +42,7 @@ mod semantics;
 pub(crate) mod swarm;
 #[cfg(test)]
 mod tests;
+mod tracing;
 mod views;
 mod watches;
 pub(crate) mod world;

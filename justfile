@@ -78,6 +78,22 @@ test *ARGS: cache-warm
     ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
+# Runs the BPF engine's tests, which need CAP_BPF and CAP_PERFMON, starting
+# uscope through LAUNCHER: the uscope-bpf wrapper nixosModules.uscope-bpf
+# installs (dev/syscalls.md). Nothing else in the suite runs with privilege.
+# Arguments go to nextest.
+[doc("Runs the BPF engine's tests through the uscope-bpf wrapper.")]
+[script]
+test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
+    if [[ ! -x "$1" ]]; then
+        echo "error: $1 is missing. The BPF engine's tests need CAP_BPF and CAP_PERFMON:" >&2
+        echo "  import uscope's nixosModules.uscope-bpf, rebuild, and run this again;" >&2
+        echo "  or pass a launcher that grants them: just test-bpf LAUNCHER" >&2
+        exit 1
+    fi
+    ulimit -c 0
+    USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
+
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit
 # leaves the old ones to eviction.
@@ -211,6 +227,16 @@ profile-overhead *ARGS: build-test-programs
     cargo build --quiet --release --features tools --bin uscope-tools
     ./scripts/contained.sh ./target/release/uscope-tools overhead "$@"
 
+# Times a getppid loop bare, under each syscall-tracing engine, and untraced
+# beside a BPF trace of another program, and prints what each adds a call.
+# The BPF setups start uscope through LAUNCHER. Compare with the recorded
+# baseline with `--compare bench/syscalls-overhead.json`, record one with
+# `--out`.
+syscall-overhead LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
+    cargo build --quiet --release --bin uscope
+    cargo build --quiet --release --features tools --bin uscope-tools
+    ./scripts/contained.sh ./target/release/uscope-tools syscall-overhead --launcher "$1" "${@:2}"
+
 # The seconds-long benchmark `just all` runs: it fails when loading the
 # small programs allocates more than bench/baseline.json records. Record a
 # deliberate change with `just bench-smoke --record bench/baseline.json`.
@@ -273,7 +299,8 @@ probe-cost COUNT="100000000": build-test-programs
 
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
-# dap-request, views, image, perf-records, capture, or profile-import.
+# dap-request, views, image, perf-records, capture, profile-import,
+# syscall-record, or syscall-filter.
 # Arguments go to libFuzzer.
 # iced-x86 builds its formatter tables once and never frees them, which
 # LeakSanitizer would report as a failure when the disassembly target exits.

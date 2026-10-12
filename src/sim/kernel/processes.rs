@@ -312,6 +312,8 @@ impl Kernel {
             let thread = self.threads.get_mut(&tid).expect("a traced thread");
             thread.tracing = Tracing::Untraced;
             thread.single_step = false;
+            // K-SYS-6: an untraced thread stops at no call.
+            thread.syscall_stops = false;
             thread.options = super::Options::default();
             thread.report = None;
             match thread.state {

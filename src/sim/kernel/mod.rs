@@ -10,13 +10,14 @@
 //! - [`signals`]: generation, delivery, and exits.
 //! - [`syscalls`]: the system calls the golden runtime makes.
 
+pub mod catching;
 pub mod debug_regs;
 pub mod perf;
 mod processes;
 pub mod ptrace;
 pub mod shadow;
 pub mod signals;
-mod syscalls;
+pub mod syscalls;
 pub mod watching;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +26,7 @@ use std::sync::Arc;
 
 use nix::libc;
 
+use self::catching::{Catching, UnseenCatch};
 use self::watching::Watching;
 use super::cpu::{self, Outcome, RAX, Registers};
 use super::loader::Image;
@@ -60,6 +62,9 @@ pub enum WaitStatus {
     /// A seized thread's group-stop: `PTRACE_EVENT_STOP` with the signal
     /// that stopped its process (K-STOP-2).
     GroupStop(Tid, i32),
+    /// A system-call-stop, as `PTRACE_O_TRACESYSGOOD` reports it:
+    /// `SIGTRAP | 0x80` (K-SYS-1).
+    Syscall(Tid),
 }
 
 impl WaitStatus {
@@ -70,7 +75,8 @@ impl WaitStatus {
             | Self::Signaled(tid, _, _)
             | Self::Stopped(tid, _)
             | Self::Event(tid, _)
-            | Self::GroupStop(tid, _) => tid,
+            | Self::GroupStop(tid, _)
+            | Self::Syscall(tid) => tid,
         }
     }
 }
@@ -94,6 +100,7 @@ impl fmt::Display for WaitStatus {
             Self::GroupStop(tid, signal) => {
                 write!(formatter, "{tid} group-stop {}", signals::name(signal))
             }
+            Self::Syscall(tid) => write!(formatter, "{tid} system-call-stop"),
         }
     }
 }
@@ -121,6 +128,15 @@ impl SigInfo {
             pid: tid,
             // `si_pid` and `si_uid` overlay `si_addr`.
             address: (UID as u64) << 32 | tid.cast_unsigned() as u64,
+        }
+    }
+
+    /// The siginfo of `tid`'s system-call-stop: SIGTRAP with `0x80` in the
+    /// code, sent by the thread itself (K-SYS-1).
+    const fn syscall(tid: Tid) -> Self {
+        Self {
+            code: SIGTRAP | 0x80,
+            ..Self::event(tid, 0)
         }
     }
 
@@ -176,6 +192,9 @@ pub enum StopKind {
     /// A seized thread's group-stop, for the signal that stopped its
     /// process (K-STOP-2).
     Group(i32),
+    /// A system-call-stop at a call's entry, or at its exit (K-SYS-1,
+    /// K-SYS-2).
+    Syscall { exit: bool },
 }
 
 /// Where a thread is in its life.
@@ -244,6 +263,10 @@ pub enum Tracing {
     Seized { tracer: i32, interrupted: bool },
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is one independent piece of a thread's kernel state"
+)]
 pub struct Thread {
     pub tid: Tid,
     pub tgid: Tid,
@@ -261,6 +284,15 @@ pub struct Thread {
     pub pending: Pending,
     /// Whether the thread stops after its next instruction.
     pub single_step: bool,
+    /// Whether the tracer resumed it with `PTRACE_SYSCALL`, to stop at
+    /// each system call's entry and exit (K-SYS-1).
+    pub syscall_stops: bool,
+    /// Whether the thread stopped at a system call's entry and makes the
+    /// call when it next runs (K-SYS-2).
+    pub entered: bool,
+    /// Whether its tracer has resumed it, as it has not a thread it seized
+    /// running, which makes calls before the tracer can catch them.
+    pub resumed: bool,
     /// The status a wait would report now, until one reaps it.
     pub report: Option<WaitStatus>,
     /// The address of the trap the thread executed, until it executes
@@ -375,6 +407,10 @@ impl Thread {
             },
             pending,
             single_step: false,
+            // K-SYS-3: a new thread does not inherit system-call-stops.
+            syscall_stops: false,
+            entered: false,
+            resumed: false,
             report: None,
             trapped_at: None,
             last_trap: None,
@@ -570,6 +606,10 @@ pub struct Kernel {
     pub tracking: Option<Tracking>,
     /// What the kernel follows of the client's watchpoints.
     pub watching: Watching,
+    /// What the kernel follows of the client's catchpoints.
+    pub catching: Catching,
+    /// The calls served since the world last took them.
+    pub served: Vec<syscalls::Served>,
     /// How the debug registers answer the tracer.
     pub debug_behavior: DebugBehavior,
     /// The execute breakpoint a probe armed to sample a process.
@@ -643,6 +683,11 @@ impl Kernel {
             unseen_hits: Vec::new(),
             tracking: None,
             watching: Watching::new(),
+            catching: Catching {
+                rules: Vec::new(),
+                unseen: Vec::new(),
+            },
+            served: Vec::new(),
             debug_behavior: DebugBehavior::Faithful,
             perf: None,
             next_activation: 1,
@@ -783,6 +828,9 @@ impl Kernel {
                 registers,
                 // The stop is at the end of `execve`.
                 orig_rax: syscalls::SYS_EXECVE,
+                syscall_stops: false,
+                entered: false,
+                resumed: false,
                 returning: None,
                 state: if traced {
                     State::Stopped {
@@ -889,7 +937,29 @@ impl Kernel {
                 if thread.single_step {
                     // K-TRAP-1: a step across `syscall` reports TRAP_BRKPT.
                     self.trap(tid, signals::TRAP_BRKPT);
+                    self.note_return(tid);
                     break;
+                }
+                if thread.syscall_stops {
+                    // K-SYS-3: the call stops at its exit as it returns.
+                    self.syscall_stop(tid, true);
+                    break;
+                }
+                self.note_return(tid);
+                continue;
+            }
+            if std::mem::take(&mut thread.entered) {
+                // K-SYS-2: the call the thread stopped at the entry of runs
+                // before anything else can happen to the thread.
+                let single_step = thread.single_step;
+                match self.serve_entered(tid, single_step) {
+                    Executed::Continue => continue,
+                    Executed::Stopped => break,
+                    Executed::Yielded => {
+                        ran.yielded = true;
+                        self.happenings.push(Happening::Yielded { tid });
+                        break;
+                    }
                 }
             }
             self.report_continued(tid);
@@ -1003,12 +1073,113 @@ impl Kernel {
             Outcome::Completed => self.complete(tid, single_step, watch_hits),
             Outcome::Syscall => {
                 thread.orig_rax = thread.registers.general[RAX];
-                self.serve_syscall(tid, single_step)
+                self.enter_syscall(tid, single_step, debugged)
             }
             Outcome::Breakpoint | Outcome::Fault(_) | Outcome::Unsupported(_) => {
                 self.take_exception(tid, address, outcome)
             }
         }
+    }
+
+    /// A thread executed `syscall`: it stops at the call's entry if its
+    /// tracer resumed it to (K-SYS-1), and otherwise makes the call, which
+    /// a catchpoint of the debugged process's may have had to stop.
+    fn enter_syscall(&mut self, tid: Tid, single_step: bool, debugged: bool) -> Executed {
+        let thread = self.threads.get_mut(&tid).expect("the calling thread");
+        let caught = debugged
+            && thread.resumed
+            && self
+                .catching
+                .stops(thread.orig_rax, &thread.registers, false);
+        #[cfg(test)]
+        let stops =
+            thread.syscall_stops && !(caught && self.sabotage == Some(Sabotage::SkipCallStops));
+        #[cfg(not(test))]
+        let stops = thread.syscall_stops;
+        if stops && thread.traced() {
+            thread.entered = true;
+            self.syscall_stop(tid, false);
+            return Executed::Stopped;
+        }
+        if caught {
+            self.catching.unseen.push(UnseenCatch {
+                tid,
+                call: thread.orig_rax,
+                exit: false,
+            });
+        }
+        let executed = self.serve_syscall(tid, single_step);
+        self.note_return(tid);
+        executed
+    }
+
+    /// Serves the call a thread stopped at the entry of, which stops at its
+    /// exit if the tracer resumed it with `PTRACE_SYSCALL` (K-SYS-2).
+    fn serve_entered(&mut self, tid: Tid, single_step: bool) -> Executed {
+        let executed = self.serve_syscall(tid, single_step);
+        if self
+            .threads
+            .get(&tid)
+            .is_some_and(|thread| thread.syscall_stops)
+        {
+            if executed == Executed::Stopped {
+                return executed;
+            }
+            self.syscall_stop(tid, true);
+            // A yield gave up the CPU before the exit stopped the thread.
+            return if executed == Executed::Yielded {
+                executed
+            } else {
+                Executed::Stopped
+            };
+        }
+        self.note_return(tid);
+        executed
+    }
+
+    /// Notes a call that returned with no system-call-stop at its exit, if
+    /// a catchpoint stops it there: the debugger could not see it. A call
+    /// still inside an event stop, or one that ended its thread, has not
+    /// returned.
+    fn note_return(&mut self, tid: Tid) {
+        let Some(thread) = self.threads.get(&tid) else {
+            return;
+        };
+        let inside = matches!(
+            thread.state,
+            State::Stopped {
+                kind: StopKind::Event(..) | StopKind::Syscall { .. },
+                ..
+            }
+        );
+        let returned = thread.returning.is_none() && !inside && !thread.state.exiting();
+        let debugged = thread.traced() && thread.resumed && self.debugged == Some(thread.tgid);
+        if returned
+            && debugged
+            && self
+                .catching
+                .stops(thread.orig_rax, &thread.registers, true)
+        {
+            self.catching.unseen.push(UnseenCatch {
+                tid,
+                call: thread.orig_rax,
+                exit: true,
+            });
+        }
+    }
+
+    /// Stops a thread at the entry or exit of the system call `orig_rax`
+    /// names. At its entry, `rax` holds `-ENOSYS` (K-SYS-1).
+    fn syscall_stop(&mut self, tid: Tid, exit: bool) {
+        let thread = self.threads.get_mut(&tid).expect("stopping thread exists");
+        if !exit {
+            thread.registers.general[RAX] = ENOSYS_RESULT;
+        }
+        thread.enter_stop(
+            StopKind::Syscall { exit },
+            SigInfo::syscall(tid),
+            WaitStatus::Syscall(tid),
+        );
     }
 
     /// Serves the system call a thread just entered.
@@ -1328,6 +1499,7 @@ fn step_under_trap(
 }
 
 /// What executing one instruction did to the thread's run.
+#[derive(PartialEq, Eq)]
 enum Executed {
     Continue,
     Stopped,

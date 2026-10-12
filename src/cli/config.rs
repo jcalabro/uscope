@@ -877,17 +877,14 @@ pub fn state_directory() -> Option<PathBuf> {
 }
 
 /// The project a directory belongs to: the nearest directory, from `start`
-/// upwards, holding `.uscope/`, then the nearest holding `.git`, then
-/// `start` itself.
+/// upwards, holding `.uscope/` or `.git`, else `start` itself. A
+/// repository's root ends the search, so a repository inside another
+/// project, as a git worktree often is, never takes the outer one's
+/// settings or saved state.
 pub fn project_root(start: &Path) -> PathBuf {
     start
         .ancestors()
-        .find(|directory| directory.join(".uscope").is_dir())
-        .or_else(|| {
-            start
-                .ancestors()
-                .find(|directory| directory.join(".git").exists())
-        })
+        .find(|directory| directory.join(".uscope").is_dir() || directory.join(".git").exists())
         .unwrap_or(start)
         .to_path_buf()
 }

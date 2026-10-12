@@ -369,6 +369,7 @@ Every change runs `just`. Add these checks according to scope:
 | Web behavior | `just web-e2e` |
 | Image loading or hot debug tables | `just bench-smoke` |
 | Recorder hot path | `just profile-overhead` |
+| BPF programs or their loader | `just test-bpf`, and `just syscall-overhead` for hot-path changes |
 | Fixture or golden program | `just build-test-programs`; record a manifest only when intentional |
 | Public docs | `just docs` plus executable-doc tests when affected |
 

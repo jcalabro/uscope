@@ -46,12 +46,17 @@ pub use self::adopter::Adopter;
 
 mod adopter;
 mod breakpoints;
+mod catches;
 mod stops;
 
 /// The most bytes one memory read asks for.
 const MAX_READ: u64 = 64;
 
 /// What the client knows about the program it debugs.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is one independent choice of the run's shape"
+)]
 pub struct Script {
     pub arguments: Vec<String>,
     pub stop_at_entry: bool,
@@ -87,6 +92,8 @@ pub struct Script {
     /// Whether the session holds the children the program forks, for
     /// sessions of their own.
     pub follow: bool,
+    /// Whether the client stops at system calls.
+    pub catching: bool,
 }
 
 /// What the client shares with the world.
@@ -121,6 +128,9 @@ pub struct Shared {
     /// The children the session held, which the world hands to sessions of
     /// their own.
     pub held: Rc<RefCell<Option<HeldChildren>>>,
+    /// The catchpoints the debugger said it made, and the client has not
+    /// asked to remove, by identifier, with what each stops.
+    pub catches: Rc<RefCell<BTreeMap<u64, super::kernel::catching::UserCatch>>>,
 }
 
 /// Something the client saw that an oracle judges against the simulation.
@@ -538,6 +548,15 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
+        if self.script.catching && self.control(4) == 0 {
+            if self.control(3) == 0 {
+                self.remove_catch().await?;
+            } else {
+                self.add_catch().await?;
+            }
+            self.mark(Mark::CatchEditWhileRunning);
+            return Ok(());
+        }
         if self.control(8) == 0 {
             if self.script.watching && self.control(2) == 0 {
                 self.toggle_watch(true).await?;
@@ -612,7 +631,17 @@ impl Client {
             }
             return Ok(());
         }
-        match self.draw(if self.script.watching { 21 } else { 16 }) {
+        let choices = if self.script.watching { 21 } else { 16 };
+        let choice = self.draw(choices + if self.script.catching { 3 } else { 0 });
+        if choice >= choices {
+            if choice == choices {
+                self.remove_catch().await?;
+            } else {
+                self.add_catch().await?;
+            }
+            return Ok(());
+        }
+        match choice {
             0 => {
                 self.note("resume");
                 match self.handle.resume().await {

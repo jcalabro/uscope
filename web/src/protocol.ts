@@ -72,6 +72,17 @@ export interface Results {
   profileCode: P.ProfileCode;
   recordProfile: P.RecordStarted;
   stopRecording: null;
+  syscallSummary: P.SyscallSummary;
+  syscallRate: P.SyscallRate;
+  syscallHeatmap: P.SyscallHeatmap;
+  syscallDetail: P.SyscallDetail;
+  syscallLog: P.SyscallLog;
+  syscallCall: P.SyscallCall;
+  syscallLanes: P.SyscallLanes;
+  syscallFiles: P.SyscallFiles;
+  syscallNetwork: P.SyscallNetwork;
+  syscallProcesses: P.SyscallProcesses;
+  syscallInFlight: P.SyscallInFlight;
 }
 
 // Fails to compile when a method has no entry in Results, or Results names

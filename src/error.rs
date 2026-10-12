@@ -273,6 +273,8 @@ pub enum Error {
 
     #[error("watchpoint {0} was not found")]
     WatchpointNotFound(u64),
+    #[error("catchpoint {0} was not found")]
+    CatchpointNotFound(u64),
     #[error("{0} watchpoints are unsupported by this target's debug hardware")]
     UnsupportedWatchAccess(crate::WatchAccess),
     #[error("cannot watch {byte_size} bytes at {address}: {reason}")]

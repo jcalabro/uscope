@@ -195,6 +195,9 @@ fn same_status(kernel: WaitStatus, reported: &crate::ExitStatus) -> bool {
         WaitStatus::Signaled(_, signal, core) => {
             same_exit(ExitStatus::Signal(signal, core), reported)
         }
-        WaitStatus::Stopped(..) | WaitStatus::Event(..) | WaitStatus::GroupStop(..) => false,
+        WaitStatus::Stopped(..)
+        | WaitStatus::Event(..)
+        | WaitStatus::GroupStop(..)
+        | WaitStatus::Syscall(_) => false,
     }
 }

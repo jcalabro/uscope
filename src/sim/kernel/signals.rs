@@ -268,11 +268,17 @@ impl Kernel {
             match thread.state {
                 State::Running | State::JobStopped => thread.state = State::Exiting(exit),
                 State::Stopped {
-                    kind: StopKind::Signal(_) | StopKind::Event(..) | StopKind::Group(_),
+                    kind:
+                        StopKind::Signal(_)
+                        | StopKind::Event(..)
+                        | StopKind::Group(_)
+                        | StopKind::Syscall { .. },
                     ..
                 } => {
                     thread.state = State::Exiting(exit);
                     thread.report = None;
+                    // K-SYS-5: a call stopped at its entry never runs.
+                    thread.entered = false;
                     // A system call the thread stopped inside returns on
                     // the way out.
                     if let Some(result) = thread.returning.take() {

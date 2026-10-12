@@ -4,6 +4,7 @@
 
 pub mod dump;
 pub mod overhead;
+pub mod syscall_overhead;
 
 use std::path::{Path, PathBuf};
 

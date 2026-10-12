@@ -341,6 +341,7 @@ mod tests {
                 hit_count: count,
                 enabled,
             }]),
+            catchpoints: Arc::from([]),
         }
     }
 

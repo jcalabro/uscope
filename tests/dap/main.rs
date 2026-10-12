@@ -7,6 +7,7 @@ mod dap;
 mod support;
 
 mod breakpoints;
+mod catchpoints;
 mod chaos;
 mod console;
 mod differential;
