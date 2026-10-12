@@ -801,7 +801,9 @@ fn delegating_bpffs() -> Option<std::path::PathBuf> {
         let (mount, rest) = line.split_once(" - ")?;
         let mut kind = rest.split(' ');
         let delegates = kind.next() == Some("bpf")
-            && kind.nth(1).is_some_and(|options| options.contains("delegate_cmds"));
+            && kind
+                .nth(1)
+                .is_some_and(|options| options.contains("delegate_cmds"));
         delegates.then(|| mount.split(' ').nth(4).map(std::path::PathBuf::from))?
     })
 }
@@ -2260,16 +2262,7 @@ mod tests {
                 "file_record",
                 [header, fd, mode, ino, magic, rdev, len, cloexec, pad]
             ),
-            layout!(
-                RawConfig,
-                "config",
-                [
-                    flags,
-                    elements,
-                    sample,
-                    rows
-                ]
-            ),
+            layout!(RawConfig, "config", [flags, elements, sample, rows]),
             layout!(
                 RawEntry,
                 "entry",

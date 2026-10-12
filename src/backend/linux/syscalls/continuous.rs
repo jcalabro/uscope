@@ -76,7 +76,9 @@ impl Continuous {
 
     /// Records `key` in every file written from now on.
     pub fn setting(&mut self, key: &str, value: &str) {
-        self.options.settings.push((key.to_owned(), value.to_owned()));
+        self.options
+            .settings
+            .push((key.to_owned(), value.to_owned()));
     }
 
     /// Whether the segment has run its span by `now`.

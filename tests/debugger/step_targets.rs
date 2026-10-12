@@ -349,7 +349,11 @@ async fn a_skipped_call_ends_the_step_at_the_next_line_on_a_declining_breakpoint
             },
             "{fixture}"
         );
-        assert_eq!(place(&scenario).await, ("main".to_owned(), next), "{fixture}");
+        assert_eq!(
+            place(&scenario).await,
+            ("main".to_owned(), next),
+            "{fixture}"
+        );
         scenario.shutdown().await;
     }
 }
