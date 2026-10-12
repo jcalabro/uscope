@@ -796,6 +796,21 @@ const REMEDY: &str = "  uscope uses eBPF so it never stops or slows the traced p
     - trace a program you launch with --engine ptrace, which stops the
       program at each chosen call";
 
+/// Where a BPF filesystem mounted with `delegate_cmds` is, as a container
+/// manager mounts one to hand out tokens.
+fn delegating_bpffs() -> Option<std::path::PathBuf> {
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    mounts.lines().find_map(|line| {
+        // The mount point is the fifth field; after " - " come the
+        // filesystem type, the source, and the superblock's options.
+        let (mount, rest) = line.split_once(" - ")?;
+        let mut kind = rest.split(' ');
+        let delegates = kind.next() == Some("bpf")
+            && kind.nth(1).is_some_and(|options| options.contains("delegate_cmds"));
+        delegates.then(|| mount.split(' ').nth(4).map(std::path::PathBuf::from))?
+    })
+}
+
 const CAP_SYS_ADMIN: u32 = 21;
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
@@ -812,6 +827,8 @@ pub struct Probe {
     pub capabilities: u64,
     /// The lockdown mode in force, when the kernel has one.
     pub lockdown: Option<String>,
+    /// A BPF filesystem that delegates commands, which offers a token.
+    pub token: Option<std::path::PathBuf>,
 }
 
 impl Probe {
@@ -843,6 +860,7 @@ impl Probe {
             btf: std::path::Path::new("/sys/kernel/btf/vmlinux").exists(),
             capabilities,
             lockdown,
+            token: delegating_bpffs(),
         }
     }
 
@@ -881,8 +899,15 @@ impl Probe {
             (true, false) => Some("lacks CAP_PERFMON"),
         };
         if let Some(missing) = missing {
+            let token = self.token.as_ref().map_or_else(String::new, |path| {
+                format!(
+                    "\n  {} offers a BPF token, which uscope cannot use: aya, which loads its \
+                     programs, has no way to pass one to the kernel.",
+                    path.display()
+                )
+            });
             return Err(BpfError::Unavailable(format!(
-                "uscope syscalls needs CAP_BPF and CAP_PERFMON, and this process {missing}.\n{REMEDY}"
+                "uscope syscalls needs CAP_BPF and CAP_PERFMON, and this process {missing}.\n{REMEDY}{token}"
             )));
         }
         if self.lockdown.as_deref() == Some("confidentiality") {
@@ -2466,10 +2491,21 @@ mod tests {
             btf: true,
             capabilities: 0,
             lockdown: None,
+            token: None,
         };
         let message = probe.check().expect_err("unprivileged").to_string();
         assert!(message.contains("has neither"), "{message}");
         assert!(message.contains("--engine ptrace"), "{message}");
+        // A token a container offers is named, and why it goes unused.
+        let offered = Probe {
+            token: Some("/sys/fs/bpf".into()),
+            ..probe.clone()
+        };
+        let message = offered.check().expect_err("unprivileged").to_string();
+        assert!(
+            message.contains("/sys/fs/bpf offers a BPF token, which uscope cannot use"),
+            "{message}"
+        );
         let able = Probe {
             capabilities: (1 << CAP_BPF) | (1 << CAP_PERFMON),
             ..probe
