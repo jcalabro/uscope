@@ -3,6 +3,7 @@
 
 pub mod bpf;
 pub mod capture;
+pub mod cgroup;
 pub mod info;
 pub mod launch;
 pub mod ptrace;

@@ -972,6 +972,11 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
 
 /// Reports every descriptor a process holds, as tracing begins.
 pub fn seed_descriptors(process: u32, sink: &mut dyn Sink) {
+    seed_descriptors_as(process, process, sink);
+}
+
+/// As [`seed_descriptors`], for a process whose id is shown as `shown`.
+pub fn seed_descriptors_as(process: u32, shown: u32, sink: &mut dyn Sink) {
     let Ok(entries) = std::fs::read_dir(format!("/proc/{process}/fd")) else {
         return;
     };
@@ -982,7 +987,10 @@ pub fn seed_descriptors(process: u32, sink: &mut dyn Sink) {
         .collect();
     fds.sort_unstable();
     for fd in std::iter::once(AT_FDCWD).chain(fds) {
-        if let Some(event) = descriptor(process, fd, time, false) {
+        if let Some(mut event) = descriptor(process, fd, time, false) {
+            if let TraceEvent::Descriptor { process, .. } = &mut event {
+                *process = shown;
+            }
             sink.event(event);
         }
     }

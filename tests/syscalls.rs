@@ -633,6 +633,40 @@ fn ndjson_carries_names_paths_errnos_and_stacks() {
     );
 }
 
+/// A cgroup below the test's own, removed when dropped.
+struct TestCgroup(PathBuf);
+
+impl TestCgroup {
+    fn new(name: &str) -> Self {
+        let own = std::fs::read_to_string("/proc/self/cgroup").expect("the test's cgroup");
+        let own = own
+            .lines()
+            .find_map(|line| line.strip_prefix("0::/"))
+            .expect("the unified hierarchy");
+        let path = Path::new("/sys/fs/cgroup")
+            .join(own)
+            .join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir(&path).expect("make a cgroup below the test's own");
+        Self(path)
+    }
+
+    /// Removes it once its processes have left, failing at the deadline.
+    fn remove(&self) {
+        let end = Instant::now() + DEADLINE;
+        // Polls for an emptiness the kernel reports only so.
+        while let Err(error) = std::fs::remove_dir(&self.0) {
+            assert!(Instant::now() < end, "the cgroup stayed: {error}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for TestCgroup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
 /// A uscope run killed and reaped when dropped, whose standard error the
 /// test reads line by line.
 struct Running {
@@ -803,6 +837,35 @@ fn the_bpf_engine_is_the_default_and_never_falls_back() {
         .expect("run uscope");
     assert!(text(&nothing.stderr).contains("never traces the whole host"));
     let _ = std::io::stdout().flush();
+}
+
+/// A cgroup target is checked before anything is loaded or run.
+#[test]
+fn a_cgroup_target_is_one_and_named_rightly() {
+    for (arguments, wanted) in [
+        (
+            &["--cgroup", "/tmp"][..],
+            "/tmp is not a cgroup below /sys/fs/cgroup",
+        ),
+        (&["--container", "abc"], "at least 12 hexadecimal digits"),
+        (
+            &["--cgroup", "/sys/fs/cgroup", "-p", "1"],
+            "give one target",
+        ),
+        (
+            &["--cgroup", "/sys/fs/cgroup", "--no-follow"],
+            "--no-follow cannot narrow",
+        ),
+        (
+            &["--cgroup", "/sys/fs/cgroup", "-k"],
+            "-k cannot unwind a cgroup",
+        ),
+    ] {
+        let output = uscope(arguments).output().expect("run uscope");
+        let message = text(&output.stderr);
+        assert!(!output.status.success(), "{arguments:?}: {message}");
+        assert!(message.contains(wanted), "{arguments:?}: {message}");
+    }
 }
 
 /// The BPF engine, held to the ptrace engine's output for the same
@@ -1199,6 +1262,63 @@ mod bpf {
                 (line.starts_with("read(0, \"\", 1)") && line.ends_with("= 0"))
                     || line.starts_with("--- lost ")
             }),
+            "{lines:?}"
+        );
+    }
+
+    /// A cgroup is traced as it is, with ids as its processes see them, and
+    /// the trace lasts as long as it does. Its process is alone in a pid
+    /// namespace, where it is 1 and its child 2; its parent, outside the
+    /// cgroup, is not traced.
+    #[test]
+    #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
+    fn a_cgroup_is_traced_as_its_processes_see_themselves() {
+        let mut fixture = Command::new(fixture())
+            .arg("namespaced")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the fixture");
+        let mut stdout = BufReader::new(fixture.stdout.take().expect("stdout"));
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("the child's pid");
+        let child = line
+            .trim()
+            .strip_prefix("child ")
+            .expect("a pid")
+            .to_owned();
+        let cgroup = TestCgroup::new("uscope-traced");
+        std::fs::write(cgroup.0.join("cgroup.procs"), &child).expect("move the child");
+
+        let path = cgroup.0.to_str().expect("a path").to_owned();
+        let mut running =
+            Running::spawn(&mut uscope(&["--cgroup", &path, "-e", "trace=read,getpid"]));
+        running.line(|line| line == format!("uscope: Tracing cgroup {path}"));
+        let mut input = fixture.stdin.take().expect("stdin");
+        input.write_all(b"x").expect("write a byte");
+        drop(input);
+        assert!(fixture.wait().expect("wait").success());
+        cgroup.remove();
+        let (code, lines) = running.finish();
+        assert_eq!(code, Some(0), "{lines:?}");
+
+        // Once there are two, each line names its process.
+        let named = Regex::new(r"^\[pid +(\d+)\] ").expect("regex");
+        let pids: BTreeSet<&str> = lines
+            .iter()
+            .filter_map(|line| Some(named.captures(line)?.get(1)?.as_str()))
+            .collect();
+        assert_eq!(pids, BTreeSet::from(["1", "2"]), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("[pid     2] getpid() ") && line.ends_with("= 2")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("read(0, \"x\", 1)")),
             "{lines:?}"
         );
     }

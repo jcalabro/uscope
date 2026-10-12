@@ -16,6 +16,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value, json};
 use uscope::syscall_engines::bpf::{self, AttachMode, Attachment, BpfOptions};
 use uscope::syscall_engines::capture::SyscallCapture;
+use uscope::syscall_engines::cgroup::{self, Cgroup};
 use uscope::syscall_engines::ptrace;
 use uscope::syscall_engines::stacks::{Frame, SharedStacks};
 use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
@@ -212,7 +213,7 @@ pub struct SyscallsArgs {
     #[arg(long, value_name = "PERCENT")]
     budget: Option<f64>,
     /// Trace every process of a cgroup.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "container")]
     cgroup: Option<PathBuf>,
     /// Trace every process of a container, by its id.
     #[arg(long, value_name = "ID")]
@@ -350,6 +351,55 @@ fn stacks(args: &SyscallsArgs) -> Result<Option<Stacks>> {
     }))
 }
 
+/// Whether the targets given can be traced as asked.
+fn check_targets(args: &SyscallsArgs, attached: &[u32]) -> Result<()> {
+    if args.engine == EngineArg::Ptrace {
+        for (given, flag) in [
+            (args.cgroup.is_some(), "--cgroup"),
+            (args.container.is_some(), "--container"),
+            (args.ring.is_some(), "--ring"),
+            (args.budget.is_some(), "--budget"),
+            (args.attach != AttachArg::Auto, "--attach"),
+        ] {
+            if given {
+                bail!("{flag} needs the BPF engine; the ptrace engine has no such choice");
+            }
+        }
+    }
+    let launching = !args.command.is_empty();
+    let cgroup = args.cgroup.is_some() || args.container.is_some();
+    if [launching, !attached.is_empty(), cgroup]
+        .iter()
+        .filter(|&&given| given)
+        .count()
+        > 1
+    {
+        bail!("give one target: a program after --, -p PID, --cgroup, or --container");
+    }
+    if cgroup && args.no_follow {
+        bail!("--no-follow cannot narrow a cgroup, whose every process is traced");
+    }
+    if !launching && attached.is_empty() && args.cgroup.is_none() && args.container.is_none() {
+        bail!(
+            "nothing to trace: give a program after --, or -p PID; uscope never traces the whole host"
+        );
+    }
+    if args.detach_on.is_some() && launching && args.engine == EngineArg::Ptrace {
+        bail!(
+            "-b execve cannot detach a launched program from the ptrace engine: its seccomp filter \
+             would then fail the traced calls with ENOSYS"
+        );
+    }
+    if args.engine == EngineArg::Ptrace && !attached.is_empty() && !args.stop_every_call {
+        bail!(
+            "attaching the ptrace engine stops the process at every system call it makes, \
+             a few microseconds each, because a running process cannot be given a filter. \
+             Pass --stop-every-call to accept that, or use --engine bpf"
+        );
+    }
+    Ok(())
+}
+
 fn plan(args: &SyscallsArgs) -> Result<Plan> {
     let mut expressions = args.expressions.clone();
     if args.successful_only {
@@ -388,42 +438,13 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
         bail!("-b takes only execve, not {call}");
     }
     let attached = pids(&args.pids)?;
-    if args.engine == EngineArg::Ptrace {
-        for (given, flag) in [
-            (args.cgroup.is_some(), "--cgroup"),
-            (args.container.is_some(), "--container"),
-            (args.ring.is_some(), "--ring"),
-            (args.budget.is_some(), "--budget"),
-            (args.attach != AttachArg::Auto, "--attach"),
-        ] {
-            if given {
-                bail!("{flag} needs the BPF engine; the ptrace engine has no such choice");
-            }
-        }
-    }
+    check_targets(args, &attached)?;
     let launching = !args.command.is_empty();
-    if launching && !attached.is_empty() {
-        bail!("give either a program after -- or -p PID, not both");
-    }
-    if !launching && attached.is_empty() && args.cgroup.is_none() && args.container.is_none() {
-        bail!(
-            "nothing to trace: give a program after --, or -p PID; uscope never traces the whole host"
-        );
-    }
-    if args.detach_on.is_some() && launching && args.engine == EngineArg::Ptrace {
-        bail!(
-            "-b execve cannot detach a launched program from the ptrace engine: its seccomp filter \
-             would then fail the traced calls with ENOSYS"
-        );
-    }
-    if args.engine == EngineArg::Ptrace && !attached.is_empty() && !args.stop_every_call {
-        bail!(
-            "attaching the ptrace engine stops the process at every system call it makes, \
-             a few microseconds each, because a running process cannot be given a filter. \
-             Pass --stop-every-call to accept that, or use --engine bpf"
-        );
-    }
+    let cgroup = args.cgroup.is_some() || args.container.is_some();
     let stacks = stacks(args)?;
+    if cgroup && stacks.is_some() {
+        bail!("-k cannot unwind a cgroup's stacks yet; trace a program or -p PID");
+    }
 
     let target = if launching {
         let mut command = Command::new(&args.command[0]);
@@ -471,8 +492,11 @@ fn bpf_options(args: &SyscallsArgs, plan: &Plan, ring: Option<u32>) -> BpfOption
 fn trace(args: &SyscallsArgs) -> Result<i32> {
     let mut plan = plan(args)?;
     let ring = args.ring.as_deref().map(ring_bytes).transpose()?;
-    let Some(target) = plan.target.take() else {
-        bail!("--cgroup and --container need the BPF engine");
+    let target = plan.target.take();
+    let cgroup = match (&args.cgroup, &args.container) {
+        (Some(path), _) => Some(Cgroup::open(path)?),
+        (None, Some(id)) => Some(Cgroup::container(id)?),
+        (None, None) => None,
     };
     let stop = Arc::new(AtomicBool::new(false));
     super::profile::handle_signals(Some(stop.clone()), Arc::new(AtomicBool::new(false)))?;
@@ -539,14 +563,16 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
     for &pid in &plan.attached {
         printer.processes.insert(pid);
     }
-    let finished = match args.engine {
-        EngineArg::Ptrace => {
+    let engine = bpf_options(args, &plan, ring);
+    let finished = match (target, cgroup) {
+        (Some(target), _) if args.engine == EngineArg::Ptrace => {
             ptrace::trace(target, &options, &stop, &mut printer).map_err(anyhow::Error::from)
         }
-        EngineArg::Bpf => {
-            let engine = bpf_options(args, &plan, ring);
+        (Some(target), _) => {
             bpf::trace(target, &options, engine, &stop, &mut printer).map_err(anyhow::Error::from)
         }
+        (None, Some(cgroup)) => trace_cgroup(cgroup, &options, engine, &stop, &mut printer),
+        (None, None) => bail!("nothing to trace"),
     };
     for &pid in &plan.attached {
         if printer.quiet == 0 && printer.processes.contains(&pid) && !printer.ended.contains(&pid) {
@@ -564,6 +590,32 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         Some(ProcessEnd::Killed { signal, .. }) => 128 + signal,
         None => 0,
     })
+}
+
+/// Traces every process in `cgroup`, with ids as its processes see them.
+fn trace_cgroup(
+    cgroup: Cgroup,
+    options: &TraceOptions,
+    engine: BpfOptions,
+    stop: &AtomicBool,
+    printer: &mut Printer,
+) -> Result<Finished> {
+    let namespace = match cgroup::pid_namespace(&cgroup.processes()) {
+        Ok(namespace) => namespace,
+        Err(reason) => {
+            if printer.quiet == 0 {
+                printer.message(&format!("Showing pids as the host sees them: {reason}"));
+            }
+            None
+        }
+    };
+    if let Some((_, capture)) = &mut printer.capture {
+        capture.setting("cgroup", &cgroup.path.to_string_lossy());
+    }
+    printer.cgroup = Some(cgroup.path.clone());
+    Ok(bpf::trace_cgroup(
+        cgroup, namespace, options, engine, stop, printer,
+    )?)
 }
 
 /// Where one process's lines go.
@@ -597,6 +649,8 @@ struct Printer {
     sample: u64,
     sampled: u64,
     in_flight: Option<u64>,
+    /// The cgroup traced, said once its programs are attached.
+    cgroup: Option<PathBuf>,
     columns: Vec<Column>,
     sort: Option<Column>,
     /// `CLOCK_REALTIME` minus `CLOCK_MONOTONIC`, and the local zone's
@@ -1036,6 +1090,7 @@ impl Printer {
             sample: plan.sample,
             sampled: 0,
             in_flight: plan.in_flight,
+            cgroup: None,
             columns: plan.columns.clone(),
             sort: plan.sort,
             realtime,
@@ -1861,6 +1916,11 @@ impl Sink for Printer {
                  functions instead and costs them nothing",
                 attachment.reason
             ));
+        }
+        if let Some(cgroup) = &self.cgroup
+            && self.quiet == 0
+        {
+            self.message(&format!("Tracing cgroup {}", cgroup.display()));
         }
     }
 

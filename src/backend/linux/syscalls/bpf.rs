@@ -25,8 +25,11 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use super::super::perf;
 use super::Sink;
+use super::cgroup::{self, Cgroup, PidNamespace};
 use super::launch::{self, Gate, GateOptions};
-use super::ptrace::{Finished, Target, TraceOptions, monotonic, seed_descriptors};
+use super::ptrace::{
+    Finished, Target, TraceOptions, monotonic, seed_descriptors, seed_descriptors_as,
+};
 use crate::syscalls::captures::{self, CopyKind};
 use crate::syscalls::specs::{self, Arg, Count, MemKind, Ret, Struct};
 use crate::syscalls::stats::{self, BUCKETS, Folded};
@@ -1028,7 +1031,12 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn load(options: &TraceOptions, engine: BpfOptions, launch: bool) -> Result<Self, BpfError> {
+    fn load(
+        options: &TraceOptions,
+        engine: BpfOptions,
+        launch: bool,
+        scope: Scope,
+    ) -> Result<Self, BpfError> {
         // Every slot when every call is chosen, numbers no table names
         // among them. Each chosen call has a row of statistics.
         let all = options.calls.is_all();
@@ -1094,10 +1102,10 @@ impl Loaded {
             let raw = RawConfig {
                 flags,
                 elements: u32::try_from(options.limits.elements).unwrap_or(u32::MAX),
-                cgroup_id: 0,
-                cgroup_level: 0,
-                ns_inum: 0,
-                ns_level: 0,
+                cgroup_id: scope.cgroup.map_or(0, |(id, _)| id),
+                cgroup_level: scope.cgroup.map_or(0, |(_, level)| level),
+                ns_inum: scope.namespace.map_or(0, |namespace| namespace.inum),
+                ns_level: scope.namespace.map_or(0, |namespace| namespace.level),
                 pad: 0,
             };
             let mut value = [0; CONFIG_BYTES];
@@ -1370,6 +1378,42 @@ enum Start {
     Launch(std::process::Command),
     Attach(Vec<u32>),
     Held(u32),
+    Cgroup(Cgroup, Option<PidNamespace>),
+}
+
+/// Which processes the kernel's programs trace beyond the target set, and
+/// the namespace they show ids in.
+#[derive(Debug, Clone, Copy, Default)]
+struct Scope {
+    /// A cgroup's id and level.
+    cgroup: Option<(u64, u32)>,
+    namespace: Option<PidNamespace>,
+}
+
+/// Traces every process in `cgroup` until `stop` is set or the cgroup is
+/// removed.
+///
+/// Processes that join it are traced as they do. Ids are shown as
+/// `namespace` sees them, when given, and as the host does otherwise.
+///
+/// # Errors
+///
+/// As [`trace`]'s.
+pub fn trace_cgroup(
+    cgroup: Cgroup,
+    namespace: Option<PidNamespace>,
+    options: &TraceOptions,
+    engine: BpfOptions,
+    stop: &AtomicBool,
+    sink: &mut dyn Sink,
+) -> Result<Finished, BpfError> {
+    run(
+        Start::Cgroup(cgroup, namespace),
+        options,
+        engine,
+        stop,
+        sink,
+    )
 }
 
 fn run(
@@ -1380,11 +1424,87 @@ fn run(
     sink: &mut dyn Sink,
 ) -> Result<Finished, BpfError> {
     Probe::read().check()?;
-    let mut loaded = Loaded::load(options, engine, !matches!(start, Start::Attach(_)))?;
+    let scope = match &start {
+        Start::Cgroup(cgroup, namespace) => Scope {
+            cgroup: Some((cgroup.id, cgroup.level)),
+            namespace: *namespace,
+        },
+        _ => Scope::default(),
+    };
+    let launch = matches!(start, Start::Launch(_) | Start::Held(_));
+    let mut loaded = Loaded::load(options, engine, launch, scope)?;
     sink.attached_by(&loaded.attachment);
+    let Begun {
+        first,
+        live,
+        mappings,
+        mut gate,
+        cgroup,
+    } = begin(start, &mut loaded, options, sink)?;
+    let mut reader = Reader {
+        sink,
+        // A cgroup's processes are known by the cgroup, and their ids may
+        // not be the host's.
+        follow: options.follow && cgroup.is_none(),
+        cgroup,
+        live,
+        first,
+        end: None,
+        entries: BTreeMap::new(),
+        stacks: options.stacks.clone(),
+        sampled: BTreeMap::new(),
+        mappings,
+        batch: Vec::new(),
+        perf: Vec::new(),
+        lost: 0,
+    };
+    let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
+    let ring_end = reader.end;
+    let Reader { sink, .. } = reader;
+    if engine.count_only {
+        sink.counted(loaded.counted(first));
+    }
+    drop(loaded);
+    let status = gate.as_mut().map(Gate::finish);
+    result?;
+    // The launched program's status is the one its parent reaped.
+    let end = match status {
+        Some(Ok(Some(status))) => {
+            use std::os::unix::process::ExitStatusExt as _;
+            Some(status.code().map_or_else(
+                || ProcessEnd::Killed {
+                    signal: status.signal().unwrap_or(0),
+                    core: status.core_dumped(),
+                },
+                ProcessEnd::Exited,
+            ))
+        }
+        Some(Err(error)) if ring_end.is_none() => return Err(BpfError::Spawn(error)),
+        _ => ring_end,
+    };
+    Ok(Finished { end })
+}
+
+/// The traced processes as tracing begins.
+struct Begun {
+    first: u32,
+    live: BTreeSet<u32>,
+    mappings: Vec<perf::Events>,
+    gate: Option<Gate>,
+    cgroup: Option<Cgroup>,
+}
+
+/// Starts or attaches to the target, once the programs are attached.
+fn begin(
+    start: Start,
+    loaded: &mut Loaded,
+    options: &TraceOptions,
+    sink: &mut dyn Sink,
+) -> Result<Begun, BpfError> {
     let mut gate: Option<Gate> = None;
     let mut live = BTreeSet::new();
     let mut mappings = Vec::new();
+    let mut cgroup = None;
     let first = match start {
         Start::Held(pid) => {
             loaded.target(pid)?;
@@ -1440,46 +1560,27 @@ fn run(
             }
             pids.first().copied().unwrap_or(0)
         }
-    };
-    let mut reader = Reader {
-        sink,
-        follow: options.follow,
-        live,
-        first,
-        end: None,
-        entries: BTreeMap::new(),
-        stacks: options.stacks.clone(),
-        sampled: BTreeMap::new(),
-        mappings,
-        batch: Vec::new(),
-        perf: Vec::new(),
-        lost: 0,
-    };
-    let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
-    let ring_end = reader.end;
-    let Reader { sink, .. } = reader;
-    if engine.count_only {
-        sink.counted(loaded.counted(first));
-    }
-    drop(loaded);
-    let status = gate.as_mut().map(Gate::finish);
-    result?;
-    // The launched program's status is the one its parent reaped.
-    let end = match status {
-        Some(Ok(Some(status))) => {
-            use std::os::unix::process::ExitStatusExt as _;
-            Some(status.code().map_or_else(
-                || ProcessEnd::Killed {
-                    signal: status.signal().unwrap_or(0),
-                    core: status.core_dumped(),
-                },
-                ProcessEnd::Exited,
-            ))
+        Start::Cgroup(traced, namespace) => {
+            // Its processes as they are now, with their ids as shown.
+            for process in traced.processes() {
+                let shown = namespace.map_or(Some(process), |namespace| {
+                    cgroup::id_in(process, namespace.level)
+                });
+                if let Some(shown) = shown {
+                    seed_descriptors_as(process, shown, sink);
+                }
+            }
+            cgroup = Some(traced);
+            0
         }
-        Some(Err(error)) if ring_end.is_none() => return Err(BpfError::Spawn(error)),
-        _ => ring_end,
     };
-    Ok(Finished { end })
+    Ok(Begun {
+        first,
+        live,
+        mappings,
+        gate,
+        cgroup,
+    })
 }
 
 /// Events that sample nothing and say what the traced processes map.
@@ -1497,6 +1598,8 @@ const MAPPING_EVENTS: usize = 65_536;
 struct Reader<'a> {
     sink: &'a mut dyn Sink,
     follow: bool,
+    /// The cgroup traced, which the trace lasts as long as.
+    cgroup: Option<Cgroup>,
     /// The traced processes still running.
     live: BTreeSet<u32>,
     first: u32,
@@ -1564,7 +1667,11 @@ impl Reader<'_> {
             if stopping && launched.is_some_and(|pid| !self.live.contains(&pid)) {
                 self.live.clear();
             }
-            if self.live.is_empty() {
+            let ended = match &self.cgroup {
+                Some(cgroup) => stopping || !cgroup.exists(),
+                None => self.live.is_empty(),
+            };
+            if ended {
                 self.drain(&mut ring);
                 // Whatever was lost since the last tick.
                 self.report_lost(loaded, monotonic());
@@ -1875,7 +1982,15 @@ mod tests {
             layout!(
                 RawConfig,
                 "config",
-                [flags, elements, cgroup_id, cgroup_level, ns_inum, ns_level, pad]
+                [
+                    flags,
+                    elements,
+                    cgroup_id,
+                    cgroup_level,
+                    ns_inum,
+                    ns_level,
+                    pad
+                ]
             ),
             layout!(
                 RawEntry,
@@ -1993,7 +2108,8 @@ mod tests {
 
         // A thread that ended inside exit_group, whose entry was not seen.
         let mut bytes = call_bytes(RECORD_CALL, 2 | CALL_PROCESS_EXITED, &[]);
-        bytes[std::mem::offset_of!(RawCallRecord, nr)..][..4].copy_from_slice(&231_u32.to_ne_bytes());
+        bytes[std::mem::offset_of!(RawCallRecord, nr)..][..4]
+            .copy_from_slice(&231_u32.to_ne_bytes());
         let Ok(Record::Call(call)) = decode(&bytes) else {
             panic!("a call");
         };
