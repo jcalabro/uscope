@@ -89,7 +89,7 @@ Each step lists how we know it worked.
 - [x] **1. Miri setup.** Flake extension, `just miri`, running the
   existing `timings::tests::allocator` tests. *Done when* `just miri`
   passes, and both its cold and warm times are recorded in section 6.
-- [ ] **2. Safe wrappers.** Add rustix with `process`, `param`, `event`
+- [x] **2. Safe wrappers.** Add rustix with `process`, `param`, `event`
   as needed. Replace `pidfd_open`, `pidfd_send_signal`, `waitpid` (raw
   status via `WaitStatus::as_raw`, so real-time signals still work),
   `waitid` with `__WALL` (`WaitIdOptions::from_bits_retain`), `read`,
@@ -187,3 +187,17 @@ Decisions, measurements, and surprises, newest last.
     allocations per load, so `bench/baseline.json` needs recording again.
 - `bench-smoke` cannot pass in a worktree at another path: fixtures embed
   their checkout's path, so their digests differ from the baseline's.
+- 2026-10-13, step 2: rustix's `waitpid(None, ..)` is `wait4(0, ..)`, the
+  caller's process group, not every child; `wait` is the -1. The waiter
+  takes every status through -1, so the wrong one would hang on any
+  tracee outside the debugger's group, and no test covered that: a new
+  attach test of a process leading its own group times out with it.
+  rustix runs `waitid`'s NOWAIT probe too, and `native_tracee` opens its
+  breakpoint events through `perf::sys::open`. 16 unsafe sites fewer.
+- `just sim 600` then failed liveness on a seed under PCT at depth 1. The
+  first session's controller never ran out of work: its preempted calls
+  kept reaping the stops of a thread spinning on `sched_yield`, so the
+  follower, the highest-priority actor's only rival, never handed a held
+  child to a session, and its parent waited for it forever. A simulator
+  bug, not the debugger's: PCT now runs an actor that has waited 10,000
+  steps, tested first in `schedule.rs`.

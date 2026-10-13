@@ -53,6 +53,48 @@ async fn attach_discovers_the_executable_and_detaches_without_harming_the_proces
     assert_eq!(exit_code(child), Some(23));
 }
 
+/// A process in a process group of its own, as a daemon or a shell's job
+/// is, reports its stops as any other: the debugger waits for every child,
+/// not only those in its own group.
+#[tokio::test]
+async fn a_process_in_another_process_group_is_attached_and_stops() {
+    use std::os::unix::process::CommandExt as _;
+    let fixture = Scenario::fixture("attach");
+    let mut child = support::ExternalProcess::spawn_command(
+        std::process::Command::new(&fixture).process_group(0),
+    );
+    let process = child.process_id();
+    assert_ne!(
+        nix::unistd::getpgid(Some(Pid::from_raw(
+            i32::try_from(process.get()).expect("PID fits i32")
+        )))
+        .expect("the fixture's group"),
+        nix::unistd::getpgrp(),
+        "the fixture leads a group of its own"
+    );
+
+    let debugger = timeout(Duration::from_secs(5), child.attach())
+        .await
+        .expect("the attach timed out");
+    let handle = debugger.handle();
+    handle
+        .add_breakpoint(uscope::BreakpointSpec::Function(
+            "attach_breakpoint".to_owned(),
+        ))
+        .await
+        .expect("set attached breakpoint");
+    child.release();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), handle.resume())
+            .await
+            .expect("attached resume timed out")
+            .expect("resume attached process"),
+        StopReason::Breakpoint { .. }
+    ));
+    debugger.shutdown().await.expect("detach debugger");
+    assert_eq!(exit_code(child), Some(23));
+}
+
 #[tokio::test]
 async fn attached_group_stops_are_classified_and_resumable() {
     let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach"));

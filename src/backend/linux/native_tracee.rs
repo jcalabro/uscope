@@ -34,23 +34,6 @@ pub struct NativeTracee {
     abandoned: bool,
 }
 
-/// The fields of `struct perf_event_attr` up to its second version, which
-/// a hardware breakpoint needs.
-#[repr(C)]
-struct PerfEventAttr {
-    kind: u32,
-    size: u32,
-    config: u64,
-    sample_period: u64,
-    sample_type: u64,
-    read_format: u64,
-    flags: u64,
-    wakeup_events: u32,
-    breakpoint_type: u32,
-    breakpoint_address: u64,
-    breakpoint_length: u64,
-}
-
 #[expect(
     clippy::unused_self,
     reason = "requests about a thread go through the tracee it belongs to"
@@ -170,22 +153,16 @@ impl NativeTracee {
     /// Whether `thread` has a status to report now, which is not reaped.
     #[must_use]
     pub fn has_report(&self, thread: Tid) -> bool {
-        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-        // SAFETY: `info` is a writable siginfo_t that outlives the call.
-        #[allow(unsafe_code, reason = "nix's waitid cannot pass __WALL")]
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                thread.cast_unsigned(),
-                info.as_mut_ptr(),
-                libc::WEXITED | libc::WSTOPPED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
-            )
-        };
-        assert_eq!(result, 0, "waitid for {thread} failed");
-        // SAFETY: waitid zeroes or fills the structure.
-        #[allow(unsafe_code, reason = "reading what waitid wrote")]
-        let pid = unsafe { info.assume_init().si_pid() };
-        pid != 0
+        use rustix::process::{WaitId, WaitIdOptions};
+        let thread = rustix::process::Pid::from_raw(thread).expect("a thread id");
+        let options = WaitIdOptions::EXITED
+            | WaitIdOptions::STOPPED
+            | WaitIdOptions::NOHANG
+            | WaitIdOptions::NOWAIT
+            | WaitIdOptions::from_bits_retain(libc::__WALL.cast_unsigned());
+        rustix::process::waitid(WaitId::Pid(thread), options)
+            .unwrap_or_else(|error| panic!("waitid for {thread} failed: {error}"))
+            .is_some()
     }
 
     pub fn registers(&self, thread: Tid) -> std::result::Result<Registers, Errno> {
@@ -462,51 +439,19 @@ impl NativeTracee {
     }
 
     pub fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64) {
-        const PERF_TYPE_BREAKPOINT: u32 = 5;
-        const HW_BREAKPOINT_W: u32 = 2;
-        const DISABLED: u64 = 1;
-        const EXCLUDE_KERNEL: u64 = 1 << 5;
-        const EXCLUDE_HYPERVISOR: u64 = 1 << 6;
-        let attributes = PerfEventAttr {
-            kind: PERF_TYPE_BREAKPOINT,
-            size: u32::try_from(std::mem::size_of::<PerfEventAttr>()).expect("small"),
-            config: 0,
-            sample_period: 0,
-            sample_type: 0,
-            read_format: 0,
-            flags: DISABLED | EXCLUDE_KERNEL | EXCLUDE_HYPERVISOR,
-            wakeup_events: 0,
-            breakpoint_type: HW_BREAKPOINT_W,
-            breakpoint_address: address,
-            breakpoint_length: 8,
+        use super::perf::sys;
+        let attributes = sys::Attr {
+            kind: sys::TYPE_BREAKPOINT,
+            size: u32::try_from(std::mem::size_of::<sys::Attr>()).expect("small"),
+            flags: sys::flag::DISABLED | sys::flag::EXCLUDE_KERNEL | sys::flag::EXCLUDE_HV,
+            bp_type: sys::BREAKPOINT_WRITE,
+            bp_addr: address,
+            bp_len: 8,
+            ..sys::Attr::default()
         };
         for _ in 0..count {
-            // SAFETY: `attributes` is a valid, initialized perf_event_attr
-            // of the size it declares, and outlives the call.
-            #[allow(unsafe_code, reason = "perf_event_open has no safe wrapper")]
-            let fd = unsafe {
-                libc::syscall(
-                    libc::SYS_perf_event_open,
-                    std::ptr::from_ref(&attributes),
-                    thread,
-                    -1_i32,
-                    -1_i32,
-                    0_u64,
-                )
-            };
-            assert!(
-                fd >= 0,
-                "perf_event_open failed: {}",
-                std::io::Error::last_os_error()
-            );
-            // SAFETY: the kernel just returned this descriptor, which
-            // nothing else owns.
-            #[allow(unsafe_code, reason = "taking ownership of a new descriptor")]
-            let fd = unsafe {
-                <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(
-                    i32::try_from(fd).expect("a descriptor fits i32"),
-                )
-            };
+            let fd = sys::open(&attributes, thread, -1)
+                .unwrap_or_else(|error| panic!("perf_event_open failed: {error}"));
             self.held.push(fd);
         }
     }

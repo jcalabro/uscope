@@ -44,6 +44,9 @@ pub const TYPE_BREAKPOINT: u32 = 5;
 pub const COUNT_SW_CPU_CLOCK: u64 = 0;
 /// An event that counts nothing, for the records of mappings and threads.
 pub const COUNT_SW_DUMMY: u64 = 9;
+/// A write breakpoint, which only the simulator's conformance tests set.
+#[cfg(test)]
+pub const BREAKPOINT_WRITE: u32 = 2;
 pub const BREAKPOINT_EXECUTE: u32 = 4;
 
 /// `perf_event_attr` flag bits.
@@ -89,14 +92,17 @@ pub const FORMAT_LOST: u64 = 1 << 4;
 /// it has lost: every sample it and they found no room for, whether or not
 /// a loss record has said so yet. The event reads [`FORMAT_LOST`].
 pub fn counts(fd: &OwnedFd) -> std::io::Result<(u64, u64)> {
-    let mut values = [0_u64; 2];
-    // SAFETY: the buffer holds the two words this read format reads, and
-    // outlives the call.
-    let read = unsafe { libc::read(fd.as_raw_fd(), values.as_mut_ptr().cast(), 16) };
-    if read != 16 {
-        return Err(std::io::Error::last_os_error());
+    let mut bytes = [0_u8; 16];
+    let read = rustix::io::read(fd, &mut bytes[..])?;
+    if read != bytes.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("a perf event's counts read {read} of 16 bytes"),
+        ));
     }
-    Ok(values.into())
+    let (count, lost) = bytes.split_at(8);
+    let word = |bytes: &[u8]| u64::from_ne_bytes(bytes.try_into().expect("eight bytes"));
+    Ok((word(count), word(lost)))
 }
 
 /// Opens an event for `pid` on `cpu`.
@@ -253,53 +259,39 @@ impl Drop for Ring {
 
 /// The system's page size.
 pub fn page_size() -> usize {
-    // SAFETY: sysconf reads a constant.
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    usize::try_from(size).unwrap_or(4096)
+    rustix::param::page_size()
 }
 
 /// Whether `fd` is readable now, as a process descriptor is once its
 /// process has exited.
 pub fn readable(fd: &OwnedFd) -> bool {
-    let mut poll = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    let mut fds = [PollFd::new(fd, PollFlags::IN)];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
     };
-    // SAFETY: one initialized entry, for a call that does not wait.
-    let result = unsafe { libc::poll(&raw mut poll, 1, 0) };
-    result > 0 && poll.revents & libc::POLLIN != 0
+    rustix::event::poll(&mut fds, Some(&now)).is_ok_and(|ready| ready > 0)
+        && fds[0].revents().contains(PollFlags::IN)
 }
 
 /// Waits until `fd` is readable, as a process's descriptor is once it
 /// has exited.
 pub fn wait_readable(fd: &OwnedFd) {
-    let mut poll = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one initialized entry, for a call that waits without end.
-    while unsafe { libc::poll(&raw mut poll, 1, -1) } < 0
-        && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-    {}
+    use rustix::event::{PollFd, PollFlags};
+    let mut fds = [PollFd::new(fd, PollFlags::IN)];
+    while rustix::event::poll(&mut fds, None) == Err(rustix::io::Errno::INTR) {}
 }
 
 /// Waits until one of `rings` has data past its watermark, or `timeout`.
 pub fn poll(rings: &[Ring], timeout: std::time::Duration) {
-    let mut fds: Vec<libc::pollfd> = rings
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    let mut fds: Vec<PollFd<'_>> = rings
         .iter()
-        .map(|ring| libc::pollfd {
-            fd: ring.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        })
+        .map(|ring| PollFd::new(&ring.fd, PollFlags::IN))
         .collect();
-    let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    // SAFETY: `fds` holds `fds.len()` initialized entries for the call.
-    unsafe {
-        libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout);
-    }
+    let timeout = Timespec::try_from(timeout).ok();
+    let _ = rustix::event::poll(&mut fds, timeout.as_ref());
 }
 
 /// The time-stamp counter.

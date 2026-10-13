@@ -893,41 +893,22 @@ pub(super) fn held_in_status(status: &str, stat: &str) -> bool {
     untraced && (stopping || stopped)
 }
 
-#[allow(
-    unsafe_code,
-    reason = "Linux exposes process file descriptors only through system calls"
-)]
 pub(super) fn pidfd_open(process: Pid) -> std::result::Result<std::os::fd::OwnedFd, Errno> {
-    use std::os::fd::FromRawFd as _;
-    // SAFETY: pidfd_open takes a process ID and flags, and reads no memory.
-    let result = unsafe { libc::syscall(libc::SYS_pidfd_open, process.as_raw(), 0) };
-    let descriptor = Errno::result(result)?;
-    let descriptor = i32::try_from(descriptor).map_err(|_| Errno::EBADF)?;
-    // SAFETY: the kernel returned a new descriptor that nothing else owns.
-    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) })
+    let process = rustix::process::Pid::from_raw(process.as_raw()).ok_or(Errno::EINVAL)?;
+    rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty()).map_err(errno)
 }
 
-#[allow(
-    unsafe_code,
-    reason = "Linux exposes process file descriptors only through system calls"
-)]
 pub(super) fn pidfd_send_signal(
     handle: &std::os::fd::OwnedFd,
     signal: Signal,
 ) -> std::result::Result<(), Errno> {
-    use std::os::fd::AsRawFd as _;
-    // SAFETY: a null siginfo asks for the one kill(2) would send, so the
-    // call reads no memory; the descriptor stays open throughout.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            handle.as_raw_fd(),
-            signal.number(),
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    };
-    Errno::result(result).map(drop)
+    let signal = rustix::process::Signal::from_named_raw(signal.number()).ok_or(Errno::EINVAL)?;
+    rustix::process::pidfd_send_signal(handle, signal).map_err(errno)
+}
+
+/// nix's view of an error rustix returned.
+pub(super) const fn errno(error: rustix::io::Errno) -> Errno {
+    Errno::from_raw(error.raw_os_error())
 }
 
 #[allow(
@@ -972,21 +953,25 @@ pub(super) const fn siginfo_has_fault_address(number: i32, code: i32) -> bool {
 
 /// Waits for a status change of `pid`, or of any child for -1, decoding
 /// every signal; `None` means `WNOHANG` found no change.
-#[allow(
-    unsafe_code,
-    reason = "nix's waitpid rejects statuses of real-time signals"
-)]
 pub(super) fn wait_for(
     pid: Pid,
     options: libc::c_int,
 ) -> std::result::Result<Option<WaitEvent>, Errno> {
-    let mut status = 0;
-    // SAFETY: `status` is a writable c_int that outlives the call.
-    let child = Errno::result(unsafe { libc::waitpid(pid.as_raw(), &raw mut status, options) });
-    let event = match child {
-        Ok(0) => return Ok(None),
-        Ok(child) => WaitEvent::decode(Pid::from_raw(child), status),
-        Err(error) => Err(error),
+    let options = rustix::process::WaitOptions::from_bits_retain(options.cast_unsigned());
+    // rustix's `waitpid` without a pid waits for the caller's process
+    // group; `wait` is waitpid's -1, any child.
+    let waited = match pid.as_raw() {
+        -1 => rustix::process::wait(options),
+        raw => rustix::process::Pid::from_raw(raw).map_or(Err(rustix::io::Errno::INVAL), |child| {
+            rustix::process::waitpid(Some(child), options)
+        }),
+    };
+    let event = match waited {
+        Ok(None) => return Ok(None),
+        Ok(Some((child, status))) => {
+            WaitEvent::decode(Pid::from_raw(child.as_raw_nonzero().get()), status.as_raw())
+        }
+        Err(error) => Err(errno(error)),
     };
     // Every status is recorded where it is consumed, whichever thread waits.
     #[cfg(debug_assertions)]

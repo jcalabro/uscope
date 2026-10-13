@@ -95,6 +95,8 @@ lzma-rs = "0.3"
 nix = { version = "0.31", features = ["feature", "fs", "personality", "poll", "ptrace", "process", "pthread", "resource", "sched", "signal", "term", "time", "uio"] }
 object = { version = "0.39", features = ["read"] }
 perf-event = "0.4"
+# Safe wrappers of the system calls nix does not make; clap brings it in.
+rustix = { version = "1.1", features = ["event", "param", "process"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 rustc-demangle = "0.1"
 

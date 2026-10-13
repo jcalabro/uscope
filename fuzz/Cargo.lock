@@ -1540,6 +1540,7 @@ dependencies = [
  "regex",
  "rustc-demangle",
  "rustc_apfloat",
+ "rustix",
  "rustyline",
  "serde",
  "serde_json",
