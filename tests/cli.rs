@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -5382,7 +5382,7 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
         signals += 1;
         let window = scratch.path().join(format!("phases-{signals}.usprof"));
         assert!(line().ends_with(&window.display().to_string()));
-        if assert_success(uscope(&["report", &window.to_string_lossy()])).contains("first") {
+        if every_function(&window).contains("first") {
             break;
         }
     }
@@ -5390,8 +5390,21 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
     stdin.write_all(b"x").expect("release the program");
     drop(stdin);
     assert!(recording.wait().expect("wait").success());
-    let last = assert_success(uscope(&["report", &profile.to_string_lossy()]));
+    let last = every_function(&profile);
     assert!(last.contains("second") && !last.contains("first"), "{last}");
+}
+
+/// A profile's whole call tree. The default report lists only the top
+/// functions, which unsymbolized vDSO addresses, a row each, can fill.
+fn every_function(profile: &Path) -> String {
+    let profile = profile.to_string_lossy();
+    assert_success(uscope(&[
+        "report",
+        "--tree",
+        "--min-percent",
+        "0",
+        &profile,
+    ]))
 }
 
 /// A continuous recording writes a segment file as each segment ends, or

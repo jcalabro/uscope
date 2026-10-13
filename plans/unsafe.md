@@ -220,7 +220,7 @@ Decisions, measurements, and surprises, newest last.
   instruction late. It now judges the site there. A clang build of
   `signal-steps` reproduces it natively: its caller signals itself as the
   last instruction of the line it returns into.
-- `just stress` then turned up five flakes, none caused by this work, each
+- `just stress` then turned up six flakes, none caused by this work, each
   now pinned by a test that failed first:
   - A capture rebuilt from chunks lost its tasks' labels, and inverted
     zones of equal span, which TSC conversion and clamping can make.
@@ -237,3 +237,7 @@ Decisions, measurements, and surprises, newest last.
   - The strace comparison replaced pipe inodes with `N` but kept the
     padding strace computed from their real width, so two runs whose
     inodes had different digit counts differed by a space.
+  - A recording-window test read `uscope report`'s top 20 functions,
+    which unsymbolized vDSO addresses, a row each, can fill, leaving the
+    phase it looked for out. It now reads the whole tree. Of 40
+    recordings, the top 20 left the phase out of 21.
