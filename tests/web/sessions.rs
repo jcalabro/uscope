@@ -128,6 +128,8 @@ async fn a_tab_that_joins_late_sees_the_recent_output_once() {
     let program = fixture("output-streams");
     let web = Web::start("late", &["--run", &program]);
     let mut early = web.control("early").await;
+    // Input reaches only a program that has been launched.
+    early.inferior("running").await;
     early.ok("input", json!({"text": "", "eof": true})).await;
     early.output_until("stdout", "burst done").await;
     early.inferior("exited").await;

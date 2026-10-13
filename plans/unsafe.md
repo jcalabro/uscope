@@ -220,7 +220,7 @@ Decisions, measurements, and surprises, newest last.
   instruction late. It now judges the site there. A clang build of
   `signal-steps` reproduces it natively: its caller signals itself as the
   last instruction of the line it returns into.
-- `just stress` then turned up six flakes, none caused by this work, each
+- `just stress` then turned up seven flakes, none caused by this work, each
   now pinned by a test that failed first:
   - A capture rebuilt from chunks lost its tasks' labels, and inverted
     zones of equal span, which TSC conversion and clamping can make.
@@ -241,6 +241,10 @@ Decisions, measurements, and surprises, newest last.
     which unsymbolized vDSO addresses, a row each, can fill, leaving the
     phase it looked for out. It now reads the whole tree. Of 40
     recordings, the top 20 left the phase out of 21.
+  - A web test sent the program's input before the server had launched
+    it, which the server refuses. It now waits until the program runs.
+    A 300 ms delay in the server's launch, removed afterward, made it
+    fail every time before and pass after.
 - `just sim 600` then found an attach bug that predates this work. The
   thread listing saw only the leader, which then created a thread and
   exited alone, too soon to be seized. With nothing seized, attach said
