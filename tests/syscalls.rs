@@ -44,23 +44,50 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// What differs between two runs of one program: addresses, ids, and
-/// random bytes. A loss is left out: the kernel counts runs it skipped on
+/// random bytes, and the padding before the result of a line that holds
+/// an address or id, whose width can differ. A loss is left out: the kernel counts runs it skipped on
 /// any process's behalf, so one can be reported while every call of the
 /// program's was seen, and a real loss leaves the traces differing anyway.
 fn normalized(trace: &str) -> String {
     let addresses = Regex::new(r"0x[0-9a-f]+").expect("regex");
     let ids = Regex::new(r"\b\d{4,}\b").expect("regex");
     let random = Regex::new(r#"getrandom\("[^"]*""#).expect("regex");
+    let padding = Regex::new(r"\) +=").expect("regex");
     trace
         .lines()
         .filter(|line| !line.starts_with("--- lost "))
         .map(|line| {
             let line = random.replace_all(line, "getrandom(\"\"");
+            let varied = addresses.is_match(&line) || ids.is_match(&line);
             let line = addresses.replace_all(&line, "0x?");
-            ids.replace_all(&line, "N").into_owned()
+            let line = ids.replace_all(&line, "N");
+            if varied {
+                padding.replace(&line, ") =").into_owned()
+            } else {
+                line.into_owned()
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// strace pads a call to its result's column from the call's real width,
+/// so ids and addresses of another width move the result; anything else
+/// that moves it is a difference.
+#[test]
+fn traces_that_differ_only_in_an_ids_width_normalize_alike() {
+    assert_eq!(
+        normalized("dup2(5<pipe:[999999]>, 9)          = 9<pipe:[999999]>"),
+        normalized("dup2(5<pipe:[1000000]>, 9)         = 9<pipe:[1000000]>"),
+    );
+    assert_eq!(
+        normalized("mmap(0x7f12, 4096)                      = 0x7f12"),
+        normalized("mmap(0x7f1234, 4096)                    = 0x7f1234"),
+    );
+    assert_ne!(
+        normalized("close(3)                                = 0"),
+        normalized("close(3)                               = 0"),
+    );
 }
 
 /// Fails at the first line where the traces differ, showing both.
