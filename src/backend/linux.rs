@@ -800,6 +800,16 @@ fn allocate_stop_id() -> StopId {
     )
 }
 
+/// A vforked child running in its parent's memory, from the parent's vfork
+/// event to its `VFORK_DONE`.
+#[derive(Debug, Clone, Copy)]
+struct VforkWindow {
+    /// The child that shares the memory until it execs or exits.
+    child: Pid,
+    /// Whether the vforking thread has been resumed to let the child run.
+    resumed: bool,
+}
+
 struct Inferior {
     origin: InferiorOrigin,
     tgid: Pid,
@@ -829,6 +839,12 @@ struct Inferior {
     /// Fork children killed, or found dying, as they were released, whose
     /// exits are still due: another process's exit may follow the leader's.
     killed_children: BTreeSet<Pid>,
+    /// Threads in a vfork that shares this memory, by the thread that
+    /// vforked. The traps are lifted while any window is open.
+    vfork_windows: BTreeMap<Pid, VforkWindow>,
+    /// Whether the traps are lifted from the memory every open vfork window
+    /// shares, and so must be reinstalled when the last window closes.
+    traps_lifted: bool,
     waiter: Option<Waiter>,
     active: Option<ActiveExecution>,
     repairs: VecDeque<RepairGroup>,
@@ -899,6 +915,8 @@ impl Inferior {
             former_sites: BTreeMap::new(),
             fork_children: BTreeMap::new(),
             killed_children: BTreeSet::new(),
+            vfork_windows: BTreeMap::new(),
+            traps_lifted: false,
             waiter,
             active: None,
             repairs: VecDeque::new(),

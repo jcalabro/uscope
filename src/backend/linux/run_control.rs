@@ -1556,6 +1556,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !ready {
             return Ok(());
         }
+        // A vfork child runs in the memory its parent's traps are in, so the
+        // stop waits until that child execs or exits.
+        if self.settle_vfork_windows()? {
+            return Ok(());
+        }
         // From the last thread stopping to the stop's publication.
         let _span = crate::span!("stop");
         if self.attach_reply.is_some() {

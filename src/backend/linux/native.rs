@@ -1089,8 +1089,13 @@ fn thread_has_exited(pid: Pid) -> bool {
 
 pub(super) fn trace_options(exit_kill: bool) -> Options {
     // Fork children are traced only long enough to remove inherited traps.
+    // A vfork child shares its parent's memory, so its parent's traps are
+    // lifted from that memory until the child execs or exits, which
+    // TRACEVFORKDONE reports to the parent.
     let common = Options::PTRACE_O_TRACECLONE
         | Options::PTRACE_O_TRACEFORK
+        | Options::PTRACE_O_TRACEVFORK
+        | Options::PTRACE_O_TRACEVFORKDONE
         | Options::PTRACE_O_TRACEEXEC
         | Options::PTRACE_O_TRACEEXIT
         | Options::PTRACE_O_TRACESYSGOOD;

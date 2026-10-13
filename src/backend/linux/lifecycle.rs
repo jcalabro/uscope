@@ -14,13 +14,13 @@ use crate::protocol::{
 };
 use crate::{Error, LoadedModule, Result, VirtualAddress};
 
-use super::breakpoints::install_logical_breakpoint;
+use super::breakpoints::{install_logical_breakpoint, lift_all_traps, reinstall_all_traps};
 use super::native::{LinuxTraceOps, SignalQueue, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop,
     HeldStop, Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, Orphans,
-    Start, StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id,
-    exception_info, is_superseded, process_id,
+    Start, StopBarrier, Terminating, TraceThread, VforkWindow, Waiter, backend_error,
+    debug_thread_id, exception_info, is_superseded, process_id,
 };
 
 /// How many times an attach may find threads it has not traced before it
@@ -580,6 +580,16 @@ impl<P: LinuxTraceOps> Controller<P> {
                 thread.inside_call = true;
                 self.handle_fork_event(pid)
             }
+            libc::PTRACE_EVENT_VFORK => {
+                thread.state = NativeThreadState::Stopped;
+                thread.inside_call = true;
+                self.handle_vfork_event(pid)
+            }
+            libc::PTRACE_EVENT_VFORK_DONE => {
+                thread.state = NativeThreadState::Stopped;
+                thread.inside_call = true;
+                self.handle_vfork_done(pid)
+            }
             libc::PTRACE_EVENT_EXEC => {
                 thread.state = NativeThreadState::Stopped;
                 thread.inside_call = true;
@@ -590,6 +600,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let alone = self.leader_exiting_alone(pid)?;
                 self.adopt_unannounced_fork_children(pid);
                 self.release_exiting_thread(pid)?;
+                self.end_vfork_window_of(pid)?;
                 if let Some(status) = alone {
                     let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
                     let awaited = inferior.thread(pid)?.awaiting_breakpoint.is_some();
@@ -1476,6 +1487,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_FORK => {
                 self.handle_fork_during_detach(pid)
             }
+            WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_VFORK => {
+                self.handle_vfork_during_detach(pid)
+            }
             WaitEvent::Stopped(pid, signal) => {
                 let classified = self.classify_stop(pid, signal);
                 // The program never sees the signal that ended its held stop.
@@ -1571,6 +1585,124 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
         let sites = inferior.inherited_sites();
         self.track_fork_child(child, sites);
+        Ok(())
+    }
+
+    /// Opens the vfork window of `parent`, whose child shares its memory
+    /// until it execs or exits. The window's barrier stops the other threads,
+    /// then lifts the traps and lets only `parent` run; see
+    /// [`Self::settle_vfork_windows`].
+    pub(super) fn handle_vfork_event(&mut self, parent: Pid) -> Result<()> {
+        let Some(child) = self.event_message_of(parent)? else {
+            return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
+        };
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior.vfork_windows.insert(
+            parent,
+            VforkWindow {
+                child,
+                resumed: false,
+            },
+        );
+        self.begin_internal_stop()?;
+        self.restart_after_internal(parent)
+    }
+
+    /// Closes the vfork window of `parent`, whose child has exec'd or
+    /// exited, and reinstalls the traps once no window remains open.
+    pub(super) fn handle_vfork_done(&mut self, parent: Pid) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // A parent that vforked before this session attached has no window.
+        if inferior.vfork_windows.remove(&parent).is_some() {
+            self.close_vfork_windows_if_empty()?;
+        }
+        if !self.barrier_active() {
+            self.begin_internal_stop()?;
+        }
+        self.restart_after_internal(parent)
+    }
+
+    /// Ends the vfork window of a thread that exits, since no `VFORK_DONE`
+    /// will come for it.
+    pub(super) fn end_vfork_window_of(&mut self, thread: Pid) -> Result<()> {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return Ok(());
+        };
+        if inferior.vfork_windows.remove(&thread).is_some() {
+            self.close_vfork_windows_if_empty()?;
+        }
+        Ok(())
+    }
+
+    /// Reinstalls the traps lifted for vfork windows, once none is open.
+    fn close_vfork_windows_if_empty(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        if inferior.vfork_windows.is_empty() && inferior.traps_lifted {
+            inferior.traps_lifted = false;
+            reinstall_all_traps(&self.ptrace, inferior)?;
+        }
+        Ok(())
+    }
+
+    /// Runs once every thread is stopped. While a vfork window is open it
+    /// lifts the traps, then resumes each vforking thread, and holds the stop
+    /// until the window closes. Returns whether a window holds the stop.
+    ///
+    /// The traps are lifted before any child is released into the memory they
+    /// share, so a child never runs a trap.
+    pub(super) fn settle_vfork_windows(&mut self) -> Result<bool> {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return Ok(false);
+        };
+        if inferior.vfork_windows.is_empty() {
+            return Ok(false);
+        }
+        if inferior.vfork_windows.values().all(|window| window.resumed) {
+            return Ok(true);
+        }
+        if !inferior.traps_lifted {
+            // A repair's lifted site is restored first, so that the lift sees
+            // every trap in place and the repair is not left to reinstall one.
+            self.restore_active_breakpoints()?;
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            lift_all_traps(&self.ptrace, inferior)?;
+            inferior.traps_lifted = true;
+        }
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let unresumed: Vec<(Pid, VforkWindow)> = inferior
+            .vfork_windows
+            .iter()
+            .filter(|(_, window)| !window.resumed)
+            .map(|(&parent, &window)| (parent, window))
+            .collect();
+        for (parent, window) in unresumed {
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            inferior.vfork_windows.insert(
+                parent,
+                VforkWindow {
+                    resumed: true,
+                    ..window
+                },
+            );
+            self.track_fork_child(window.child, Vec::new());
+            self.continue_thread(parent)?;
+        }
+        Ok(true)
+    }
+
+    /// Records a vfork child announced while detaching. The child shares the
+    /// parent's traps, which detaching removes only once every thread has
+    /// stopped, so they are lifted now.
+    fn handle_vfork_during_detach(&mut self, parent: Pid) -> Result<()> {
+        let event = self.event_message_of(parent)?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let Some(child) = event else {
+            inferior.thread_mut(parent)?.state = NativeThreadState::Running;
+            return Ok(());
+        };
+        inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
+        lift_all_traps(&self.ptrace, inferior)?;
+        self.track_fork_child(child, Vec::new());
         Ok(())
     }
 

@@ -1261,6 +1261,39 @@ pub(super) fn remove_logical_breakpoint(
     Ok(())
 }
 
+/// Restores the original byte of every installed trap, keeping each site and
+/// its owners. A vfork child shares this memory and must not run a trap
+/// while it execs, so the traps stay lifted until [`reinstall_all_traps`].
+pub(super) fn lift_all_traps(ptrace: &dyn LinuxTraceOps, inferior: &mut Inferior) -> Result<()> {
+    let pid = inferior.memory_thread();
+    let installed: Vec<_> = inferior
+        .breakpoints
+        .iter()
+        .filter_map(|(&address, site)| site.installed.then_some(address))
+        .collect();
+    for address in installed {
+        ptrace.remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
+    }
+    Ok(())
+}
+
+/// Writes back the trap of every site [`lift_all_traps`] lifted.
+pub(super) fn reinstall_all_traps(
+    ptrace: &dyn LinuxTraceOps,
+    inferior: &mut Inferior,
+) -> Result<()> {
+    let pid = inferior.memory_thread();
+    let lifted: Vec<_> = inferior
+        .breakpoints
+        .iter()
+        .filter_map(|(&address, site)| (!site.installed).then_some(address))
+        .collect();
+    for address in lifted {
+        ptrace.reinstall_breakpoint(pid, &mut inferior.breakpoints, address)?;
+    }
+    Ok(())
+}
+
 /// Forgets every repair of a site whose original instruction is restored,
 /// remembering the site for processes forked while it was installed.
 pub(super) fn forget_removed_site(
