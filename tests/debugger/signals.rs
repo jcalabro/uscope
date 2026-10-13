@@ -164,6 +164,78 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
     scenario.shutdown().await;
 }
 
+/// A step over the last line of a function returns into the middle of its
+/// caller's line and single-steps to its end. There it reaches the start
+/// of the next line, where a breakpoint declines its hit, with a signal
+/// pending: the handler runs, and the step ends at the start of that line,
+/// as it would have without the signal.
+#[tokio::test]
+async fn a_step_ends_at_a_declined_breakpoint_a_signal_reached_first() {
+    let path = "tests/fixtures/c/signal-steps.c";
+    let mut scenario = Scenario::launch("signal-steps-clang");
+    scenario
+        .operation(
+            "quiet SIGUSR2",
+            scenario.handle().set_signal_policy(code("SIGUSR2"), QUIET),
+        )
+        .await;
+    scenario
+        .add_source_breakpoint("signal-steps.c", source_line(path, "the returning line"))
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_all_breakpoints().await;
+    let before = handled(&scenario).await;
+    let line = source_line(path, "the line after the signal");
+    let declined = scenario
+        .operation(
+            "a declined breakpoint",
+            scenario.handle().add_breakpoint_with_hit_condition(
+                uscope::BreakpointSpec::Source {
+                    path: "signal-steps.c".into(),
+                    line: uscope::LineNumber::new(line).expect("a line"),
+                },
+                uscope::HitCondition::new(uscope::HitComparison::Equal, 100)
+                    .expect("a hit condition"),
+            ),
+        )
+        .await;
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    assert_eq!(handled(&scenario).await, before + 1, "the handler ran");
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(line),
+        "{location:?}"
+    );
+    assert!(
+        declined.locations.iter().any(|resolved| {
+            [
+                uscope::BreakpointLocation::Image(location.image.address),
+                uscope::BreakpointLocation::Virtual(location.address),
+            ]
+            .contains(&resolved.location)
+        }),
+        "the step stopped at {}, not where the line begins: {:?}",
+        location.address,
+        declined.locations
+    );
+    scenario.shutdown().await;
+}
+
 async fn handled(scenario: &Scenario) -> i128 {
     let variable = scenario
         .operation("handled", scenario.handle().variable("handled"))

@@ -2014,6 +2014,10 @@ build_fixture gcc "$c_fixtures_dir/signal-policy.c" "$output_dir/signal-policy" 
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/signal-steps.c" "$output_dir/signal-steps" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+# Clang marks a call's return address as no statement, so a step returning
+# there single-steps on.
+build_fixture clang "$c_fixtures_dir/signal-steps.c" "$output_dir/signal-steps-clang" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/signals.c" "$output_dir/signals" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/fatal-signal.c" "$output_dir/fatal-signal" \

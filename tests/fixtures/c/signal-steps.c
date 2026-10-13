@@ -33,6 +33,23 @@ __attribute__((noinline)) long sum_to(long count) {
     return total;
 }
 
+__attribute__((noinline)) long twice(long value) {
+    return value * 2; // the returning line
+}
+
+// Calls and then signals this thread on one line, so a step returning
+// into the line single-steps to its end and reaches the next line with the
+// signal still pending.
+__attribute__((noinline)) long twice_then_signal(long value) {
+    // The call has no output, so no store follows it on its line. Unoptimized
+    // code keeps nothing in rax across it.
+    // clang-format off
+    value = twice(value); __asm__ volatile("syscall" : : "a"((long)SYS_tgkill), "D"((long)process), "S"((long)thread), "d"((long)SIGUSR2) : "rcx", "r11", "memory"); // the calling line
+    // clang-format on
+    value += 1; // the line after the signal
+    return value;
+}
+
 int main(void) {
     struct sigaction action = {.sa_handler = handler};
     sigemptyset(&action.sa_mask);
@@ -44,5 +61,6 @@ int main(void) {
     long first = sum_to(5); // the stepped call
     long second = sum_to(5);
     long third = sum_to(5);
-    return first == 10 && second == 10 && third == 10 && handled == 3 ? 0 : 1;
+    long fourth = twice_then_signal(5);
+    return first == 10 && second == 10 && third == 10 && fourth == 11 && handled == 4 ? 0 : 1;
 }

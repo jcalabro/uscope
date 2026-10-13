@@ -1379,6 +1379,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .stopped_at_breakpoint
             .is_some();
         if trapped {
+            // A source step that reached a breakpoint's site judges it at the
+            // trap there, as a hit the breakpoint declines; the signal came
+            // first, so it judges the site now.
+            if !steps_instructions(kind)
+                && let Some(reason) = self.user_step_stop(pid, kind)?
+            {
+                self.begin_visible_stop(pid, reason)?;
+                return Ok(true);
+            }
             self.repair_when_alone(pid, address)?;
         } else if guard.call {
             // A passed call may return to where the line ends.

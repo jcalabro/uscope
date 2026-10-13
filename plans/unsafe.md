@@ -211,3 +211,12 @@ Decisions, measurements, and surprises, newest last.
   ptrace requests and tgkill moved there too. Outside `sys.rs`, the
   backend's unsafe code is now `signal_metadata` (step 6) and the SIGURG
   handler.
+- `just sim 600` then found a stepping bug that predates this work. A
+  step over that returned into the middle of its caller's line went on by
+  single steps, and reached the start of the next line, where a
+  breakpoint declined its hit. It deferred judging the site to the trap
+  there, but a signal arrived first. When the handler returned to the
+  site, the step stepped over the trap without judging it, and stopped an
+  instruction late. It now judges the site there. A clang build of
+  `signal-steps` reproduces it natively: its caller signals itself as the
+  last instruction of the line it returns into.
