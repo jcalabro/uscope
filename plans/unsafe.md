@@ -97,7 +97,7 @@ Each step lists how we know it worked.
   `perf::sys::open`. *Done when* the focused run-control, signal, and
   profiling tests pass, and the `wait_for` path still reports real-time
   signal stops (an existing test, or a new one first).
-- [ ] **3. One `linux/sys.rs`.** One `pre_exec` helper, taking the
+- [x] **3. One `linux/sys.rs`.** One `pre_exec` helper, taking the
   checks each caller needs (death signal, parent check, personality,
   TRACEME, the gate pipe, the seccomp filter), with safe rustix calls
   inside. The raw ptrace requests and tgkill move here. *Done when*
@@ -201,3 +201,13 @@ Decisions, measurements, and surprises, newest last.
   child to a session, and its parent waited for it forever. A simulator
   bug, not the debugger's: PCT now runs an actor that has waited 10,000
   steps, tested first in `schedule.rs`.
+- 2026-10-13, step 3: `sys::before_exec` is the one `pre_exec`. It takes
+  what each launch needs, in a fixed order: the death signal and parent
+  check, fixed addresses, the gate, the seccomp filter, then TRACEME.
+  Inside it, only adopting the gate's inherited descriptors and the
+  seccomp call are unsafe; the rest is rustix and nix. Mutating it showed
+  that no test noticed a child that kept its copy of the gate, or one
+  without the death signal. Two `launch` tests now fail on each. The raw
+  ptrace requests and tgkill moved there too. Outside `sys.rs`, the
+  backend's unsafe code is now `signal_metadata` (step 6) and the SIGURG
+  handler.

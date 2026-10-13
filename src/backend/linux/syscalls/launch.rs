@@ -115,24 +115,13 @@ pub fn launch(mut command: Command, options: GateOptions) -> std::io::Result<Gat
     })
 }
 
-#[allow(
-    unsafe_code,
-    reason = "pre_exec is the only way to hold the child between fork and exec"
-)]
 fn gate(
     command: &mut Command,
     [pid_write, go_read, go_write]: [&OwnedFd; 3],
     filter: Option<Vec<Instruction>>,
 ) {
-    use std::os::unix::process::CommandExt;
-    let (pid_write, go_read, go_write) = (
-        pid_write.as_raw_fd(),
-        go_read.as_raw_fd(),
-        go_write.as_raw_fd(),
-    );
-    let parent = std::process::id();
     // Built before the fork: the child may not allocate.
-    let filter: Option<Vec<libc::sock_filter>> = filter.map(|program| {
+    let filter = filter.map(|program| {
         program
             .into_iter()
             .map(|instruction| libc::sock_filter {
@@ -143,47 +132,94 @@ fn gate(
             })
             .collect()
     });
-    // SAFETY: between fork and exec the closure calls only async-signal-safe
-    // system calls on descriptors the child inherited and on the filter
-    // built before the fork, and builds errors from fixed numbers.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != i32::try_from(parent).unwrap_or(i32::MAX) {
-                return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
-            }
-            let pid = libc::getpid().to_le_bytes();
-            if libc::write(pid_write, pid.as_ptr().cast(), pid.len()) != 4 {
-                return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
-            }
-            libc::close(go_write);
-            let mut go = 0_u8;
-            if libc::read(go_read, std::ptr::from_mut(&mut go).cast(), 1) != 1 {
-                return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
-            }
-            if let Some(filter) = &filter {
-                // An unprivileged process may install a filter only once
-                // it can gain no privileges by executing.
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let program = libc::sock_fprog {
-                    len: u16::try_from(filter.len()).unwrap_or(u16::MAX),
-                    filter: filter.as_ptr().cast_mut(),
-                };
-                if libc::syscall(
-                    libc::SYS_seccomp,
-                    libc::SECCOMP_SET_MODE_FILTER,
-                    0,
-                    std::ptr::from_ref(&program),
-                ) == -1
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
+    super::super::sys::before_exec(
+        command,
+        super::super::sys::BeforeExec {
+            dies_with_parent: true,
+            gate: Some(super::super::sys::Gate {
+                pid: pid_write.as_raw_fd(),
+                go_read: go_read.as_raw_fd(),
+                go_write: go_write.as_raw_fd(),
+            }),
+            filter,
+            ..Default::default()
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A gate closed unopened ends its child before it executes, which
+    /// needs the child to have closed its own copy of the gate.
+    #[test]
+    fn a_gate_closed_unopened_ends_its_child_before_it_executes() {
+        let options = GateOptions {
+            filter: None,
+            reap: true,
+        };
+        let mut gate = launch(Command::new("true"), options).expect("a gated child");
+        let pid = gate.pid;
+        drop(gate.go.take());
+        let (finished, ended) = mpsc::channel();
+        std::thread::spawn(move || {
+            finished.send(gate.finish().map_err(|error| error.raw_os_error()))
         });
+        let ended = ended.recv_timeout(Duration::from_secs(10));
+        if ended.is_err() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid.cast_signed()),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert_eq!(
+            ended.expect("the child ends"),
+            Err(Some(libc::ECANCELED)),
+            "the child did not execute"
+        );
+    }
+
+    /// A launched program dies with the thread that spawned it, as it
+    /// would with the debugger, rather than running on unwatched.
+    #[test]
+    fn a_launched_program_dies_with_the_thread_that_spawned_it() {
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+
+        let options = GateOptions {
+            filter: None,
+            reap: false,
+        };
+        let mut command = Command::new("sleep");
+        command.arg("100");
+        let mut gate = launch(command, options).expect("a gated child");
+        let pid = nix::unistd::Pid::from_raw(gate.pid.cast_signed());
+        gate.open().expect("the gate opens");
+        // The spawning thread returns once the program executes.
+        gate.finish().expect("the program executes");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(WaitStatus::StillAlive) => {
+                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = waitpid(pid, None);
+                    panic!("the program outlived the thread that spawned it");
+                }
+                other => break other,
+            }
+        };
+        assert_eq!(
+            status,
+            Ok(WaitStatus::Signaled(
+                pid,
+                nix::sys::signal::Signal::SIGKILL,
+                false
+            ))
+        );
     }
 }

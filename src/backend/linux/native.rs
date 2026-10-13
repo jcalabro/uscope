@@ -4,7 +4,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::marker::PhantomData;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
@@ -595,15 +594,13 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn signal_mask(&self, pid: Pid) -> Result<u64> {
         self.assert_owner_thread();
-        let mut mask = 0_u64;
-        signal_mask_request(libc::PTRACE_GETSIGMASK, pid, &raw mut mask)?;
-        Ok(mask)
+        super::sys::signal_mask(pid).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()> {
         self.assert_owner_thread();
-        let mut mask = mask;
-        signal_mask_request(libc::PTRACE_SETSIGMASK, pid, &raw mut mask)
+        super::sys::set_signal_mask(pid, mask)
+            .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn queued_signal(&self, pid: Pid, signal: Signal, queue: SignalQueue) -> Result<bool> {
@@ -758,27 +755,16 @@ fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
     })
 }
 
-#[allow(
-    unsafe_code,
-    reason = "pre_exec is the only way to establish child-side ptrace and parent-death behavior"
-)]
 fn trace_child(command: &mut ProcessCommand) {
-    let expected_parent = std::process::id();
-
-    // SAFETY: after fork, this closure invokes only async-signal-safe syscalls and
-    // constructs fixed errno values before Command performs exec.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != i32::try_from(expected_parent).unwrap_or(i32::MAX) {
-                return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
-            }
-            disable_address_randomization();
-            ptrace::traceme().map_err(|error| std::io::Error::from_raw_os_error(error as i32))
-        });
-    }
+    super::sys::before_exec(
+        command,
+        super::sys::BeforeExec {
+            dies_with_parent: true,
+            fixed_addresses: true,
+            traced: true,
+            ..Default::default()
+        },
+    );
 }
 
 /// Runs the program this process executes next without address space
@@ -790,44 +776,9 @@ pub(super) fn disable_address_randomization() {
     }
 }
 
-#[allow(
-    unsafe_code,
-    reason = "nix does not wrap the ptrace requests for a thread's signal mask"
-)]
-fn signal_mask_request(request: libc::c_uint, pid: Pid, mask: *mut u64) -> Result<()> {
-    // SAFETY: the kernel's signal set is the eight bytes `mask` points to,
-    // which stay valid and exclusively borrowed throughout the call.
-    let result = unsafe {
-        libc::ptrace(
-            request,
-            pid.as_raw(),
-            std::mem::size_of::<u64>(),
-            mask.cast::<libc::c_void>(),
-        )
-    };
-    Errno::result(result)
-        .map(drop)
-        .map_err(|error| backend_error(LinuxError::System(error)))
-}
-
-#[allow(
-    unsafe_code,
-    reason = "Linux exposes thread-directed signals through tgkill"
-)]
 fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
-    // SAFETY: tgkill takes three integer values and does not dereference user memory.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_tgkill,
-            process.as_raw(),
-            thread.as_raw(),
-            signal.number(),
-        )
-    };
-    if result == -1 {
-        return Err(backend_error(LinuxError::System(Errno::last())));
-    }
-    Ok(())
+    super::sys::tgkill(process, thread, signal.number())
+        .map_err(|error| backend_error(LinuxError::System(error)))
 }
 
 /// Whether `process`, if it started at `start_time`, is still held: no
@@ -983,29 +934,12 @@ pub(super) fn wait_for(
 }
 
 /// Resumes or detaches a stopped tracee, delivering `signal` to it.
-#[allow(
-    unsafe_code,
-    reason = "nix's ptrace wrappers cannot deliver real-time signals"
-)]
 pub(super) fn ptrace_with_signal(
     request: libc::c_uint,
     pid: Pid,
     signal: Option<Signal>,
 ) -> std::result::Result<(), Errno> {
-    let data = signal.map_or(0, |signal| {
-        usize::try_from(signal.number()).expect("signal numbers are positive")
-    });
-    // SAFETY: continuing, single-stepping, and detaching ignore `addr` and
-    // read no memory; `data` carries only the signal number to deliver.
-    let result = unsafe {
-        libc::ptrace(
-            request,
-            pid.as_raw(),
-            std::ptr::null_mut::<libc::c_void>(),
-            std::ptr::without_provenance_mut::<libc::c_void>(data),
-        )
-    };
-    Errno::result(result).map(drop)
+    super::sys::ptrace_with_signal(request, pid, signal.map(Signal::number))
 }
 
 pub(super) fn thread_group_id(pid: Pid) -> Result<Pid> {

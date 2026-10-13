@@ -25,23 +25,8 @@ pub struct SyscallInfo {
     pub value: i64,
 }
 
-#[allow(
-    unsafe_code,
-    reason = "reading the info as bytes avoids the libc struct's union"
-)]
 pub fn syscall_info(pid: Pid) -> Result<SyscallInfo, Errno> {
-    let mut buffer = [0_u8; 88];
-    // SAFETY: the kernel writes at most `buffer.len()` bytes, the size the
-    // request passes, into the buffer, which outlives the call.
-    let written = unsafe {
-        libc::ptrace(
-            libc::PTRACE_GET_SYSCALL_INFO,
-            pid.as_raw(),
-            std::ptr::without_provenance_mut::<libc::c_void>(buffer.len()),
-            buffer.as_mut_ptr().cast::<libc::c_void>(),
-        )
-    };
-    Errno::result(written)?;
+    let buffer = super::super::sys::syscall_info(pid)?;
     let word = |at: usize| u64::from_le_bytes(buffer[at..at + 8].try_into().unwrap_or_default());
     let mut args = [0; 6];
     for (index, arg) in args.iter_mut().enumerate() {

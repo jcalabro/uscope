@@ -78,23 +78,8 @@ pub struct Finished {
     pub end: Option<ProcessEnd>,
 }
 
-#[allow(
-    unsafe_code,
-    reason = "reading the siginfo as bytes keeps every field the kernel wrote"
-)]
 fn siginfo(pid: Pid) -> Option<[u8; 128]> {
-    let mut buffer = [0_u8; 128];
-    // SAFETY: PTRACE_GETSIGINFO writes one siginfo_t, 128 bytes on every
-    // Linux architecture, into the buffer, which outlives the call.
-    let read = unsafe {
-        libc::ptrace(
-            libc::PTRACE_GETSIGINFO,
-            pid.as_raw(),
-            std::ptr::null_mut::<libc::c_void>(),
-            buffer.as_mut_ptr().cast::<libc::c_void>(),
-        )
-    };
-    Errno::result(read).ok().map(|_| buffer)
+    super::super::sys::siginfo(pid).ok()
 }
 
 /// `CLOCK_MONOTONIC` nanoseconds, the clock every engine's events use.

@@ -583,50 +583,24 @@ fn write_all(fd: &OwnedFd, buffer: &[u8]) -> std::io::Result<()> {
     std::io::Write::write_all(&mut file, buffer)
 }
 
-#[allow(
-    unsafe_code,
-    reason = "pre_exec is the only way to hold the child between fork and exec"
-)]
 fn gate(
     command: &mut Command,
     [pid_write, go_read, go_write]: [&OwnedFd; 3],
     launch: LaunchOptions,
 ) {
-    use std::os::unix::process::CommandExt;
-    let (pid_write, go_read, go_write) = (
-        pid_write.as_raw_fd(),
-        go_read.as_raw_fd(),
-        go_write.as_raw_fd(),
+    super::sys::before_exec(
+        command,
+        super::sys::BeforeExec {
+            dies_with_parent: true,
+            fixed_addresses: launch.no_address_randomization,
+            gate: Some(super::sys::Gate {
+                pid: pid_write.as_raw_fd(),
+                go_read: go_read.as_raw_fd(),
+                go_write: go_write.as_raw_fd(),
+            }),
+            ..Default::default()
+        },
     );
-    let parent = std::process::id();
-    // SAFETY: between fork and exec the closure calls only async-signal-safe
-    // system calls on descriptors the child inherited, and builds errors
-    // from fixed numbers.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != i32::try_from(parent).unwrap_or(i32::MAX) {
-                return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
-            }
-            if launch.no_address_randomization {
-                super::native::disable_address_randomization();
-            }
-            let pid = libc::getpid().to_le_bytes();
-            if libc::write(pid_write, pid.as_ptr().cast(), pid.len()) != 4 {
-                return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
-            }
-            // Only the parent may hold the gate open, so that closing it
-            // ends the wait.
-            libc::close(go_write);
-            let mut go = 0_u8;
-            if libc::read(go_read, std::ptr::from_mut(&mut go).cast(), 1) != 1 {
-                return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
-            }
-            Ok(())
-        });
-    }
 }
 
 /// The vDSO's image, read from this process's own memory, and the address

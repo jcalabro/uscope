@@ -74,19 +74,14 @@ impl NativeTracee {
             .args(arguments)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null());
-        #[allow(
-            unsafe_code,
-            reason = "pre_exec is the only way to ask for tracing from the child"
-        )]
-        // SAFETY: after fork, the closure makes only async-signal-safe system
-        // calls, and builds an error from a fixed errno, before Command execs.
-        unsafe {
-            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
-                super::native::disable_address_randomization();
-                nix::sys::ptrace::traceme()
-                    .map_err(|errno| std::io::Error::from_raw_os_error(errno as i32))
-            });
-        }
+        super::sys::before_exec(
+            &mut command,
+            super::sys::BeforeExec {
+                fixed_addresses: true,
+                traced: true,
+                ..Default::default()
+            },
+        );
         #[expect(
             clippy::zombie_processes,
             reason = "the tracee waits for its process with waitpid, and its drop reaps it"
