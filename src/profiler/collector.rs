@@ -58,7 +58,7 @@ pub struct Found {
 }
 
 /// What uscope knows of one ring.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Ring {
     /// The first position not yet read.
     tail: u64,
@@ -184,7 +184,7 @@ impl Collector {
         };
         instance.dropped = registry.0.dropped;
         for address in registry.1 {
-            if let Some(header) = self.header(address) {
+            if let Ok(Some(header)) = self.header(address) {
                 if header.state == abi::RING_RETIRED {
                     let _ =
                         perf::write_memory(self.pid, address + 12, &abi::RING_FREE.to_le_bytes());
@@ -249,10 +249,15 @@ impl Collector {
         Some((block, rings))
     }
 
-    fn header(&self, address: u64) -> Option<RingHeader> {
+    /// A ring's header, or `None` if it breaks the ABI; `Err` if the
+    /// process has gone.
+    fn header(&self, address: u64) -> Result<Option<RingHeader>, Gone> {
         let mut bytes = [0; abi::RING_HEADER];
-        let read = perf::read_memory(self.pid, address, &mut bytes).ok()?;
-        probes::ring_header(&bytes[..read]).ok()
+        match perf::read_memory(self.pid, address, &mut bytes) {
+            Ok(read) => Ok(probes::ring_header(&bytes[..read]).ok()),
+            Err(error) if gone(&error) => Err(Gone),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Reads every ring of one instance: whether the process could be read.
@@ -269,6 +274,9 @@ impl Collector {
             .count(AccountKind::ProbeNoRing as u32, dropped);
         for address in rings {
             self.read_ring(processor, index, address);
+            if self.gone {
+                return false;
+            }
         }
         if block.exiting {
             record!("probes: the program is exiting; every ring is read");
@@ -277,17 +285,15 @@ impl Collector {
         true
     }
 
-    /// Reads the records a ring has taken since it was last read.
+    /// Reads the records a ring has taken since it was last read. A ring
+    /// that cannot be read once the process has gone is not malformed.
     fn read_ring(&mut self, processor: &mut Processor, index: usize, address: u64) {
         let pid = self.pid;
-        let header = self.header(address);
-        let ring = self.instances[index].rings.entry(address).or_insert(Ring {
-            tail: 0,
-            thread: None,
-            interrupted: 0,
-            before: false,
-            broken: false,
-        });
+        let Ok(header) = self.header(address) else {
+            self.gone = true;
+            return;
+        };
+        let ring = self.instances[index].rings.entry(address).or_default();
         let Some(header) = header else {
             if !std::mem::replace(&mut ring.broken, true) {
                 processor
@@ -325,15 +331,21 @@ impl Collector {
         let base = address + abi::RING_HEADER as u64;
         for slots in probes::slots(&span, header.size) {
             let length = slots.len();
-            if length > 0
-                && perf::read_memory(
-                    pid,
-                    base + slots.start as u64,
-                    &mut records[copied..copied + length],
-                )
-                .is_ok_and(|read| read == length)
-            {
-                copied += length;
+            if length == 0 {
+                continue;
+            }
+            match perf::read_memory(
+                pid,
+                base + slots.start as u64,
+                &mut records[copied..copied + length],
+            ) {
+                Ok(read) if read == length => copied += length,
+                Err(error) if gone(&error) => {
+                    self.buffer = records;
+                    self.gone = true;
+                    return;
+                }
+                _ => {}
             }
         }
         // What the thread may have written over while it was copied.
@@ -414,9 +426,55 @@ impl Collector {
     }
 }
 
+/// The process has gone: its memory can no longer be read.
+struct Gone;
+
+fn gone(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32)
+}
+
 fn monotonic() -> u64 {
     nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_or(0, |time| {
         u64::try_from(time.tv_sec()).unwrap_or(0) * 1_000_000_000
             + u64::try_from(time.tv_nsec()).unwrap_or(0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::debug_info::DebugFileSearch;
+    use crate::profiler::record;
+
+    /// A process can exit between the reads of its registry and of its
+    /// rings, after its last records were read. Its rings are then gone,
+    /// not malformed.
+    #[test]
+    fn the_rings_of_a_process_that_has_gone_are_not_malformed() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("a process");
+        let pid = child.id();
+        child.wait().expect("its exit");
+        let mut processor = record::Processor::new(DebugFileSearch::default(), 64);
+        let mut collector =
+            Collector::new(pid, ProbeSelection::All, std::time::Duration::from_secs(1));
+        collector.instances.push(Instance {
+            control: 0x1000,
+            sites: HashMap::default(),
+            states: Vec::new(),
+            rings: BTreeMap::from([(0x2000, Ring::default()), (0x3000, Ring::default())]),
+            dropped: 0,
+        });
+        for ring in [0x2000, 0x3000] {
+            collector.read_ring(&mut processor, 0, ring);
+        }
+        assert!(collector.gone);
+        assert_eq!(
+            processor
+                .builder()
+                .account(AccountKind::ProbeMalformed as u32),
+            0
+        );
+    }
 }
