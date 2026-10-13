@@ -44,21 +44,24 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// What differs between two runs of one program: addresses, ids, and
-/// random bytes, and the padding before the result of a line that holds
-/// an address or id, whose width can differ. A loss is left out: the kernel counts runs it skipped on
-/// any process's behalf, so one can be reported while every call of the
-/// program's was seen, and a real loss leaves the traces differing anyway.
+/// random bytes, and the padding a pid or address of another width
+/// moves: after `-f`'s pid, and before the result. A loss is left out:
+/// the kernel counts runs it skipped on any process's behalf, so one can
+/// be reported while every call of the program's was seen, and a real
+/// loss leaves the traces differing anyway.
 fn normalized(trace: &str) -> String {
     let addresses = Regex::new(r"0x[0-9a-f]+").expect("regex");
     let ids = Regex::new(r"\b\d{4,}\b").expect("regex");
     let random = Regex::new(r#"getrandom\("[^"]*""#).expect("regex");
+    let pid = Regex::new(r"^\d{4,} +").expect("regex");
     let padding = Regex::new(r"\) +=").expect("regex");
     trace
         .lines()
         .filter(|line| !line.starts_with("--- lost "))
         .map(|line| {
             let line = random.replace_all(line, "getrandom(\"\"");
-            let varied = addresses.is_match(&line) || ids.is_match(&line);
+            let line = pid.replace(&line, "N ");
+            let varied = addresses.is_match(&line) || ids.is_match(&line) || line.starts_with("N ");
             let line = addresses.replace_all(&line, "0x?");
             let line = ids.replace_all(&line, "N");
             if varied {
@@ -83,6 +86,10 @@ fn traces_that_differ_only_in_an_ids_width_normalize_alike() {
     assert_eq!(
         normalized("mmap(0x7f12, 4096)                      = 0x7f12"),
         normalized("mmap(0x7f1234, 4096)                    = 0x7f1234"),
+    );
+    assert_eq!(
+        normalized("9999  write(1, \"child\\n\", 6) = 6"),
+        normalized("10000 write(1, \"child\\n\", 6) = 6"),
     );
     assert_ne!(
         normalized("close(3)                                = 0"),
