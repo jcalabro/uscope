@@ -216,7 +216,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Seizes every listed thread of the process `requested` names, and
     /// starts the waiter that reports them. Returns the process, the threads
     /// seized, those that had finished exiting, and the waiter.
-    fn seize_process(
+    pub(super) fn seize_process(
         &self,
         requested: ProcessId,
     ) -> Result<(Pid, BTreeSet<Pid>, BTreeSet<Pid>, Waiter)> {
@@ -256,19 +256,33 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Threads created while these are seized are found once every seized
     /// thread has stopped; see `seize_untraced_threads`. Listing again now
     /// could not find them all, and would find threads already traced
-    /// through their creator's clone event, which cannot be seized.
+    /// through their creator's clone event, which cannot be seized. Only
+    /// while no thread is seized, so none is traced, does it list again.
     fn seize_listed_threads(&self, tgid: Pid) -> Result<(BTreeSet<Pid>, BTreeSet<Pid>)> {
         let mut seized = BTreeSet::new();
         let mut unseized = BTreeSet::new();
         let result = (|| -> Result<()> {
-            for tid in self.ptrace.process_threads(tgid)? {
-                if self.ptrace.seize(tid, false)? {
-                    seized.insert(tid);
-                } else {
-                    unseized.insert(tid);
+            // An unseized thread, such as a leader that exited alone, may
+            // have created another the listing missed, in which the process
+            // lives on. List again until a thread is seized or the listing
+            // names none that was not tried.
+            loop {
+                let mut tried = false;
+                for tid in self.ptrace.process_threads(tgid)? {
+                    if seized.contains(&tid) || unseized.contains(&tid) {
+                        continue;
+                    }
+                    tried = true;
+                    if self.ptrace.seize(tid, false)? {
+                        seized.insert(tid);
+                    } else {
+                        unseized.insert(tid);
+                    }
+                }
+                if !seized.is_empty() || !tried {
+                    return Ok(());
                 }
             }
-            Ok(())
         })();
         if let Err(error) = result {
             self.rollback_seized(&seized);

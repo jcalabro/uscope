@@ -920,6 +920,10 @@ struct FakeTrace {
     clone: RefCell<Option<(Pid, Pid)>>,
     /// The process's thread list.
     listed_threads: RefCell<Vec<Pid>>,
+    /// The thread list after the next listing.
+    next_listing: RefCell<Option<Vec<Pid>>>,
+    /// Threads that cannot be seized, as an exited leader cannot.
+    unseizable: RefCell<BTreeSet<Pid>>,
     /// The fork children the tracer still traces.
     traced_children: RefCell<Vec<Pid>>,
     /// Memory words by address; others read as zero.
@@ -1104,11 +1108,15 @@ impl LinuxTraceOps for FakeTrace {
         self.traced_children.borrow().clone()
     }
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
-        Ok(self.listed_threads.borrow().clone())
+        let listed = self.listed_threads.borrow().clone();
+        if let Some(next) = self.next_listing.take() {
+            self.listed_threads.replace(next);
+        }
+        Ok(listed)
     }
     fn seize(&self, pid: Pid, _exit_kill: bool) -> Result<bool> {
         self.record(format!("seize {pid}"));
-        Ok(true)
+        Ok(!self.unseizable.borrow().contains(&pid))
     }
     fn interrupt(&self, pid: Pid) -> Result<bool> {
         self.record(format!("interrupt {pid}"));
@@ -1205,8 +1213,9 @@ impl LinuxTraceOps for FakeTrace {
             })
             .collect()
     }
-    fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
-        Ok(self.clone.borrow().expect("a clone is pending").1)
+    /// A pending clone's process, or else the thread's own, a leader's.
+    fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
+        Ok(self.clone.borrow().map_or(pid, |(_, tgid)| tgid))
     }
     fn load_bias(
         &self,
@@ -2475,6 +2484,30 @@ fn an_attach_traces_threads_created_while_their_creators_were_seized() {
     assert_eq!(
         inferior.threads.keys().copied().collect::<Vec<_>>(),
         [leader, untraced]
+    );
+}
+
+#[test]
+fn an_attach_seizes_the_thread_a_leader_left_after_the_listing() {
+    let harness = watch_harness(1);
+    let leader = harness.threads[0];
+    let survivor = Pid::from_raw(5100);
+    // The listing saw only the leader, which then created a thread and
+    // exited, too soon to be seized. The process lives on in the thread.
+    harness.trace().listed_threads.replace(vec![leader]);
+    harness
+        .trace()
+        .next_listing
+        .replace(Some(vec![leader, survivor]));
+    harness.trace().unseizable.borrow_mut().insert(leader);
+
+    let (tgid, seized, unseized, _) = harness
+        .controller
+        .seize_process(process_id(leader))
+        .expect("the process lives on");
+    assert_eq!(
+        (tgid, seized, unseized),
+        (leader, BTreeSet::from([survivor]), BTreeSet::from([leader]))
     );
 }
 

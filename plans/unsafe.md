@@ -241,3 +241,10 @@ Decisions, measurements, and surprises, newest last.
     which unsymbolized vDSO addresses, a row each, can fill, leaving the
     phase it looked for out. It now reads the whole tree. Of 40
     recordings, the top 20 left the phase out of 21.
+- `just sim 600` then found an attach bug that predates this work. The
+  thread listing saw only the leader, which then created a thread and
+  exited alone, too soon to be seized. With nothing seized, attach said
+  the inferior had not been launched, though the process lived on in the
+  new thread. While nothing is seized, attach now lists again until it
+  seizes a thread or finds none it has not tried. A controller test
+  pins it.
