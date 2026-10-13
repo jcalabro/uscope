@@ -1434,6 +1434,34 @@ fn plt_stubs_are_named_after_their_targets() {
     );
 }
 
+/// mold and lld describe no PLT stub with call-frame information. A stub
+/// pushes nothing before its jump through the GOT, or a slot index on a
+/// lazy path, so the backtrace counts what the stub pushed before the stop,
+/// at its first instruction and past it.
+#[test]
+fn backtraces_cross_plt_stubs_without_call_frame_information() {
+    let output = batch(
+        &["build/test-programs/disassembly-gcc-mold"],
+        &["break printf@plt", "run", "bt", "stepi", "bt"],
+    );
+    assert_in_order(
+        &output,
+        &[
+            "stopped at breakpoint 1 (hit 1) in printf@plt at 0x",
+            "#0  0x",
+            " in printf@plt from disassembly-gcc-mold\n#1  0x",
+            " in main at tests/fixtures/c/disassembly/main.c:",
+            " in _start+0x",
+            "unwind stopped: the outermost frame has no caller",
+            "stopped after instruction step in printf@plt+0x6 at 0x",
+            " in printf@plt+0x6 from disassembly-gcc-mold\n#1  0x",
+            " in main at tests/fixtures/c/disassembly/main.c:",
+            " in _start+0x",
+            "unwind stopped: the outermost frame has no caller",
+        ],
+    );
+}
+
 /// glibc defines `timer_create` twice, the old one as
 /// `timer_create@GLIBC_2.2.5`, whose version names it apart. A breakpoint
 /// on the plain name takes both, and one on the versioned name the old.

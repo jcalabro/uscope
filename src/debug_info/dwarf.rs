@@ -1724,6 +1724,15 @@ fn load_unwind_info(
         fde_index(&sections.debug_frame(), &sections.bases),
     );
     (unwind.eh_frame_index, unwind.debug_frame_index) = indexes;
+    unwind.stub_frames = super::elf::plt_frames(object, |address| {
+        [&unwind.eh_frame_index, &unwind.debug_frame_index]
+            .iter()
+            .all(|index| {
+                crate::image::index::containing(&index.entries, address)
+                    .next()
+                    .is_none()
+            })
+    });
     Ok(unwind)
 }
 
@@ -1929,6 +1938,9 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
+        if let Some(pushed) = view.stub_pushes(address) {
+            return stub_cfa(pushed, registers);
+        }
         self.go()
             .and_then(|go| go.cfa(address.get(), registers))
             .unwrap_or(result)
@@ -1964,6 +1976,12 @@ impl UnwindInfo for DwarfUnwindInfo {
             )
         } else {
             result
+        };
+        let result = match (result, view.stub_pushes(address)) {
+            (Err(UnwindTermination::NoUnwindInfo { .. }), Some(pushed)) => {
+                unwind_stub(pushed, registers, clobbered, memory)
+            }
+            (result, _) => result,
         };
         let Some(go) = self.go() else {
             return result;
@@ -2106,6 +2124,51 @@ where
         registers: caller,
         cfa,
         signal_frame: fde.cie().is_signal_trampoline(),
+    })
+}
+
+/// The canonical frame address of a PLT stub that has pushed `pushed`
+/// words since its call, which pushed the return address.
+fn stub_cfa(
+    pushed: u32,
+    registers: &RegisterFile,
+) -> std::result::Result<VirtualAddress, UnwindTermination> {
+    let stack = registers
+        .get(crate::unwind::RSP)
+        .ok_or_else(|| register_unavailable(crate::unwind::RSP))?;
+    let cfa = (u64::from(pushed) + 1)
+        .checked_mul(8)
+        .and_then(|bytes| stack.checked_add(bytes))
+        .ok_or_else(|| UnwindTermination::InvalidCaller {
+            description: "a PLT stub's frame ends past the address space".into(),
+        })?;
+    Ok(VirtualAddress::new(cfa))
+}
+
+/// The caller of a PLT stub that has pushed `pushed` words since its call.
+/// The stub changes no register its caller keeps, but the call may change
+/// any it does not.
+fn unwind_stub(
+    pushed: u32,
+    registers: &RegisterFile,
+    clobbered: &[u16],
+    memory: &mut dyn MemoryReader,
+) -> std::result::Result<UnwindStep, UnwindTermination> {
+    let cfa = stub_cfa(pushed, registers)?;
+    let slot = VirtualAddress::new(cfa.get() - 8);
+    let return_address = memory
+        .read_u64(slot)
+        .ok_or(UnwindTermination::MemoryReadFailed { address: slot })?;
+    let mut caller = registers.clone();
+    for &register in clobbered {
+        caller.remove(register);
+    }
+    caller.set(crate::unwind::RETURN_ADDRESS, return_address);
+    caller.set(crate::unwind::RSP, cfa.get());
+    Ok(UnwindStep {
+        registers: caller,
+        cfa,
+        signal_frame: false,
     })
 }
 
@@ -4266,6 +4329,91 @@ mod tests {
                     "{fixture} walks its units apart with {jobs} workers"
                 );
             }
+        }
+    }
+
+    /// mold and lld describe no PLT stub with call-frame information. A
+    /// stub's caller is where its call left the return address, past the
+    /// words the stub pushed, at its first instruction and past it. The
+    /// `.plt` header has no frame of its own: what is pushed when it runs
+    /// depends on the stub that jumped to it.
+    #[test]
+    fn plt_stubs_unwind_to_their_callers_without_call_frame_information() {
+        // `printf@plt` is `mov $0, %r11d` (6 bytes), then the jump through
+        // the GOT; `memcpy@plt`, in `.plt.got`, is the jump alone, where the
+        // tokio suite once caught a thread.
+        for (fixture, stub, offsets) in [
+            ("disassembly-gcc-mold", "printf@plt", &[0, 6][..]),
+            ("tokio-steps-o0", "memcpy@plt", &[0]),
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("build/test-programs")
+                .join(fixture);
+            let data = fs::read(&path).expect("run `just build-test-programs`");
+            let (info, _) = load_debug_info(
+                &path,
+                &data,
+                crate::ModuleImageId::new(0),
+                &super::super::DebugFileSearch::default(),
+                LoadLimits::default(),
+                None,
+            )
+            .expect("the fixture loads");
+            let start = info
+                .image
+                .symbols_named(stub)
+                .next()
+                .unwrap_or_else(|| panic!("{fixture}'s {stub}"))
+                .address()
+                .get();
+            let stack = 0x7fff_0000;
+            let mut memory = TestMemory {
+                values: std::iter::once((VirtualAddress::new(stack), 0x1234)).collect(),
+            };
+            for offset in offsets {
+                let address = ImageAddress::new(start + offset);
+                let registers = RegisterFile::new([
+                    (crate::unwind::RSP, stack),
+                    (crate::unwind::RETURN_ADDRESS, address.get()),
+                    (3, 0xb),
+                    (0, 0xa),
+                ]);
+                let step = info
+                    .unwind
+                    .unwind(address, &registers, &mut memory)
+                    .unwrap_or_else(|end| panic!("{fixture}: {stub}+{offset}: {end}"));
+                assert_eq!(step.cfa, VirtualAddress::new(stack + 8), "{stub}+{offset}");
+                assert_eq!(
+                    info.unwind.cfa(address, &registers, &mut memory),
+                    Ok(step.cfa)
+                );
+                assert_eq!(
+                    step.registers.get(crate::unwind::RETURN_ADDRESS),
+                    Some(0x1234)
+                );
+                assert_eq!(step.registers.get(crate::unwind::RSP), Some(stack + 8));
+                assert_eq!(step.registers.get(3), Some(0xb), "rbx survives a call");
+                assert_eq!(step.registers.get(0), None, "rax need not");
+            }
+            let header = info
+                .image
+                .sections()
+                .iter()
+                .find(|section| &*section.name == ".plt")
+                .expect("a .plt")
+                .range
+                .start;
+            let registers = RegisterFile::new([
+                (crate::unwind::RSP, stack),
+                (crate::unwind::RETURN_ADDRESS, header.get()),
+            ]);
+            assert!(
+                matches!(
+                    info.unwind.unwind(header, &registers, &mut memory),
+                    Err(UnwindTermination::NoUnwindInfo { .. })
+                ),
+                "{fixture}'s .plt header"
+            );
         }
     }
 

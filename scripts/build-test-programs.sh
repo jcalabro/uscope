@@ -1630,6 +1630,9 @@ build_disassembly_fixture gcc "$output_dir/disassembly-gcc-o0" \
     -O0 -fno-omit-frame-pointer -fPIE -pie
 build_disassembly_fixture clang "$output_dir/disassembly-clang-o2-nopie" \
     -O2 -fomit-frame-pointer -no-pie
+# mold describes no PLT stub with call-frame information, as lld does not.
+build_disassembly_fixture gcc "$output_dir/disassembly-gcc-mold" \
+    -O0 -fno-omit-frame-pointer -fPIE -pie -fuse-ld=mold
 build_fixture gcc "$c_fixtures_dir/null-call.c" "$output_dir/null-call" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \

@@ -761,6 +761,7 @@ pub(super) const SCHEMA: &[TableSchema] = &[
             ("ends", 57, 1),
         ],
     },
+    intervals(TableKind::StubFrames),
 ];
 
 const fn keyed(kind: TableKind) -> TableSchema {

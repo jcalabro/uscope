@@ -552,6 +552,7 @@ fn the_schema_is_the_records_layout() {
         TableKind::EhFrameIndex,
         TableKind::DebugFrameIndex,
         TableKind::GoCode,
+        TableKind::StubFrames,
     ] {
         assert_eq!(schema::record(kind), "Interval");
     }
@@ -564,7 +565,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x9d76_e612_8220_067d,
+        0x38bd_5a6a_51fd_9797,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1368,6 +1369,19 @@ fn unwinding_tables_read_back_as_their_lookups() {
             "{address:#x}"
         );
     }
+    for (address, pushed) in [
+        (0x33ff, None),
+        (0x3400, Some(0)),
+        (0x340a, Some(0)),
+        (0x340b, Some(1)),
+        (0x3410, None),
+    ] {
+        assert_eq!(
+            view.stub_pushes(ImageAddress::new(address)),
+            pushed,
+            "{address:#x}"
+        );
+    }
     let go = sample.go.unwrap();
     let (bytes, facts) = view.go().unwrap();
     assert_eq!((bytes, facts), (&*go.bytes, go.facts));
@@ -1433,6 +1447,11 @@ fn validation_rejects_unwinding_tables_that_disagree() {
         (
             "a Go range's wrong reach",
             interval(TableKind::GoCode, |i| i[1].prefix_max_end = 0x3100.into()),
+            "unwinding index is malformed",
+        ),
+        (
+            "a stub that pushes more than any does",
+            interval(TableKind::StubFrames, |i| i[2].value = 3.into()),
             "unwinding index is malformed",
         ),
         (

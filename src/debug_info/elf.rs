@@ -739,6 +739,123 @@ fn collect_plt(
     }
 }
 
+/// How many words each PLT stub's instructions find pushed since its call,
+/// for the stubs whose start `uncovered` says no call-frame information
+/// describes, as mold and lld leave them: an interval per instruction,
+/// valued by the words pushed before it. A stub runs straight from its
+/// start: a jump through its GOT slot either leaves it or, before lazy
+/// binding, falls through to the next instruction. A direct jump leaves
+/// it, and an instruction a stub has no reason to run ends what is known
+/// of it. The `.plt` header is left out: what is pushed when it runs
+/// depends on the stub that jumped to it.
+pub fn plt_frames(
+    object: &object::File<'_>,
+    uncovered: impl Fn(ImageAddress) -> bool,
+) -> Vec<(AddressRange<ImageAddress>, u32)> {
+    /// The most instructions a stub of 16 bytes or fewer runs.
+    const MOST_STUB_INSTRUCTIONS: usize = 4;
+    let object::File::Elf64(elf) = object else {
+        return Vec::new();
+    };
+    let endian = elf.endian();
+    let sections = || {
+        elf.sections().filter_map(move |section| {
+            let name @ (b".plt" | b".plt.sec" | b".plt.got") = section.name_bytes().ok()? else {
+                return None;
+            };
+            let code = section.data().ok()?;
+            let declared = section.elf_section_header().sh_entsize(endian);
+            let entry_size: usize = match declared {
+                8 | 16 => declared.try_into().ok()?,
+                _ if name == b".plt.got" => 8,
+                _ => 16,
+            };
+            let header = usize::from(name == b".plt");
+            Some((section.address(), code, entry_size, header))
+        })
+    };
+    let entries = sections()
+        .map(|(_, code, size, _)| code.len() / size)
+        .sum::<usize>();
+    let mut frames = Vec::new();
+    for (start, code, entry_size, header) in sections() {
+        for (index, entry) in code.chunks_exact(entry_size).enumerate().skip(header) {
+            let address = start + (index * entry_size) as u64;
+            if !uncovered(ImageAddress::new(address)) {
+                continue;
+            }
+            if frames.capacity() == 0 {
+                frames.reserve_exact(entries * MOST_STUB_INSTRUCTIONS);
+            }
+            stub_frames(entry, address, &mut frames);
+        }
+    }
+    frames
+}
+
+/// Adds the frames of the stub whose code is `code`, at `address`.
+fn stub_frames(code: &[u8], address: u64, frames: &mut Vec<(AddressRange<ImageAddress>, u32)>) {
+    use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic, OpKind, Register};
+    let mut decoder = Decoder::with_ip(64, code, address, DecoderOptions::NONE);
+    let mut pushed = 0;
+    let first = frames.len();
+    let mut jumps = false;
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        let range = AddressRange {
+            start: ImageAddress::new(instruction.ip()),
+            end: ImageAddress::new(instruction.next_ip()),
+        };
+        let words = match instruction.mnemonic() {
+            _ if instruction.is_invalid() => break,
+            Mnemonic::Endbr64 | Mnemonic::Nop => 0,
+            Mnemonic::Mov
+                if instruction.op0_kind() == OpKind::Register
+                    && instruction.op0_register().full_register() != Register::RSP
+                    && matches!(
+                        instruction.op1_kind(),
+                        OpKind::Immediate8
+                            | OpKind::Immediate16
+                            | OpKind::Immediate32
+                            | OpKind::Immediate64
+                            | OpKind::Immediate32to64
+                    ) =>
+            {
+                0
+            }
+            Mnemonic::Push
+                if matches!(
+                    instruction.op0_kind(),
+                    OpKind::Immediate8to64 | OpKind::Immediate32to64
+                ) || instruction.is_ip_rel_memory_operand() =>
+            {
+                1
+            }
+            Mnemonic::Jmp if instruction.is_ip_rel_memory_operand() => {
+                frames.push((range, pushed));
+                jumps = true;
+                continue;
+            }
+            Mnemonic::Jmp if instruction.flow_control() == FlowControl::UnconditionalBranch => {
+                frames.push((range, pushed));
+                jumps = true;
+                break;
+            }
+            _ => break,
+        };
+        frames.push((range, pushed));
+        pushed += words;
+        if pushed > crate::image::unwind::MOST_STUB_PUSHES {
+            jumps = false;
+            break;
+        }
+    }
+    // A stub leaves by a jump; code that reaches none is no stub.
+    if !jumps {
+        frames.truncate(first);
+    }
+}
+
 /// The GOT slot a PLT stub's `jmp *slot(%rip)` reads, past any `endbr64`
 /// or other instructions before it.
 fn got_slot(code: &[u8], address: u64) -> Option<u64> {
@@ -1546,6 +1663,63 @@ mod tests {
             decompress(&xz(&large), large.len() - 1)
                 .expect_err("over the limit")
                 .contains("exceeds")
+        );
+    }
+
+    /// Each instruction of a PLT stub finds pushed what the stub pushed
+    /// before it, whichever linker wrote it; code no stub runs is no stub.
+    #[test]
+    fn plt_stubs_count_the_words_they_push() {
+        let frames = |code: &[u8]| {
+            let mut frames = Vec::new();
+            stub_frames(code, 0x1000, &mut frames);
+            frames
+                .into_iter()
+                .map(|(range, pushed)| {
+                    (range.start.get() - 0x1000, range.end.get() - 0x1000, pushed)
+                })
+                .collect::<Vec<_>>()
+        };
+        let jump_through_got = [0xff, 0x25, 0, 0, 0, 0];
+        let push_index = [0x68, 1, 0, 0, 0];
+        let jump_to_header = [0xe9, 0, 0, 0, 0];
+        let endbr64 = [0xf3, 0x0f, 0x1e, 0xfa];
+        // GNU ld and lld: through the GOT, or before binding on to the
+        // header with the stub's index pushed.
+        assert_eq!(
+            frames(&[&jump_through_got[..], &push_index, &jump_to_header].concat()),
+            [(0, 6, 0), (6, 11, 0), (11, 16, 1)]
+        );
+        // GNU ld's lazy half of an IBT stub, and its `.plt.sec` half.
+        assert_eq!(
+            frames(&[&endbr64[..], &push_index, &[0xf2], &jump_to_header].concat()),
+            [(0, 4, 0), (4, 9, 0), (9, 15, 1)]
+        );
+        assert_eq!(
+            frames(&[&endbr64[..], &[0xf2], &jump_through_got, &[0x66, 0x90]].concat()),
+            [(0, 4, 0), (4, 11, 0), (11, 13, 0)]
+        );
+        // mold: the index in r11, and padding no stub runs.
+        assert_eq!(
+            frames(&[&[0x41, 0xbb, 1, 0, 0, 0][..], &jump_through_got, &[0xcc; 4]].concat()),
+            [(0, 6, 0), (6, 12, 0)]
+        );
+        // `.plt.got`.
+        assert_eq!(
+            frames(&[&jump_through_got[..], &[0x66, 0x90]].concat()),
+            [(0, 6, 0), (6, 8, 0)]
+        );
+        // What moves the stack otherwise, or never jumps, is no stub.
+        assert_eq!(
+            frames(&[&[0x48, 0x83, 0xec, 0x08][..], &jump_through_got].concat()),
+            []
+        );
+        assert_eq!(frames(&[&[0x41, 0x53][..], &jump_through_got].concat()), []);
+        assert_eq!(frames(&[&endbr64[..], &[0xcc; 12]].concat()), []);
+        assert_eq!(
+            frames(&[&push_index[..], &push_index, &push_index, &jump_to_header].concat()),
+            [],
+            "more pushes than any stub makes"
         );
     }
 }

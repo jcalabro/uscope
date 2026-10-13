@@ -57,6 +57,9 @@ pub mod unwind_flags {
     pub const ALL: u8 = (1 << 7) - 1;
 }
 
+/// The most words a PLT stub is known to push before it jumps.
+pub const MOST_STUB_PUSHES: u32 = 2;
+
 /// The error offset of a section that could not be enumerated at all.
 pub const WHOLE_SECTION: u64 = u64::MAX;
 
@@ -133,6 +136,9 @@ pub struct Unwind {
     /// Code the Go toolchain compiled.
     pub go_code: Vec<AddressRange<ImageAddress>>,
     pub go: Option<GoTableData>,
+    /// Each PLT stub instruction, by how many words the stub has pushed
+    /// before it.
+    pub stub_frames: Vec<(AddressRange<ImageAddress>, u32)>,
 }
 
 /// Why unwinding information could not be encoded.
@@ -216,7 +222,11 @@ pub fn add_to<'a>(
             TableKind::DebugFrameIndex,
             &unwind.debug_frame_index.entries,
         )
-        .owned_shared(TableKind::GoCode, go_code);
+        .owned_shared(TableKind::GoCode, go_code)
+        .owned_shared(
+            TableKind::StubFrames,
+            index::intervals(unwind.stub_frames.iter().copied()),
+        );
     if let Some(go) = go {
         let saves = go
             .frame_saves
@@ -377,6 +387,12 @@ impl<'a> UnwindView<'a> {
             .is_some()
     }
 
+    /// How many words the PLT stub running `address` has pushed since
+    /// its call, when `address` is one of a stub's instructions.
+    pub fn stub_pushes(self, address: ImageAddress) -> Option<u32> {
+        index::containing(self.image.shared(TableKind::StubFrames), address).next()
+    }
+
     /// Go's table, when the image has it.
     pub fn go(self) -> Option<(&'a [u8], GoTableFacts)> {
         let record = self.record?;
@@ -471,6 +487,10 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     if !index::valid_intervals(image.shared(TableKind::EhFrameIndex), eh_frame)
         || !index::valid_intervals(image.shared(TableKind::DebugFrameIndex), debug_frame)
         || !index::valid_intervals(image.shared(TableKind::GoCode), 1)
+        || !index::valid_intervals(
+            image.shared(TableKind::StubFrames),
+            MOST_STUB_PUSHES as usize + 1,
+        )
     {
         return Err("an unwinding index is malformed".into());
     }

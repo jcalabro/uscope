@@ -342,6 +342,11 @@ pub(super) fn sample_unwind() -> unwind::Unwind {
             },
             frame_saves: vec![Some(0x3004..0x30f0), None],
         }),
+        stub_frames: vec![
+            (range(0x3400, 0x3406), 0),
+            (range(0x3406, 0x340b), 0),
+            (range(0x340b, 0x3410), 1),
+        ],
     }
 }
 
@@ -1311,6 +1316,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     }
     read += (view.eh_frame().len() + view.debug_frame().len()) as u64;
     read += u64::from(view.is_go_code(ImageAddress::new(0x3000)));
+    read += u64::from(view.stub_pushes(ImageAddress::new(0x340b)).unwrap_or(0));
     read += view.frame_saves().flatten().count() as u64;
     if let Some((bytes, _)) = view.go() {
         read += bytes.len() as u64;

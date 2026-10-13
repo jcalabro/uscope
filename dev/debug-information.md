@@ -222,7 +222,8 @@ must not prevent symbols, types, disassembly, or unwinding from loading.
 The generic loop in `src/unwind` operates on `FrameContext`, register files,
 memory reads, and a `CallerProvider`. The DWARF provider uses gimli to
 interpret CFI. Go stack transitions and signal frames add explicit transition
-rules at their edges.
+rules at their edges. PLT stubs, which mold and lld leave without CFI, get a
+rule decoded at load: how many words each stub instruction finds pushed.
 
 Each step yields a caller or a typed termination. Terminations include normal
 stack ends as well as missing memory, missing registers, unsupported rules,

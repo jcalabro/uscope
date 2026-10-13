@@ -265,11 +265,14 @@ pub enum TableKind {
     EmbeddedViews = 94,
     /// Array types' dimensions bounded at run time.
     RuntimeDimensions = 95,
+    /// How many words each PLT stub instruction finds pushed, for lookups
+    /// by address.
+    StubFrames = 96,
 }
 
 impl TableKind {
     /// Every kind, in the order tables are laid out.
-    pub const ALL: [Self; 95] = [
+    pub const ALL: [Self; 96] = [
         Self::Strings,
         Self::Files,
         Self::LineAddresses,
@@ -365,6 +368,7 @@ impl TableKind {
         Self::Producers,
         Self::EmbeddedViews,
         Self::RuntimeDimensions,
+        Self::StubFrames,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

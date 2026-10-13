@@ -169,3 +169,21 @@ Decisions, measurements, and surprises, newest last.
   the process's totals as bounds, and passes 32 seeds.
 - Code under `cfg(miri)` gets rustc's lints when Miri builds it, but not
   Clippy's.
+- 2026-10-13: `just all` found three flakes, each fixed with a test that
+  fails without the fix:
+  - The allocator totals test (above): it now starts a thread that
+    allocates inside its window, which fails the old exact totals natively
+    and under Miri.
+  - `task_snapshots_find_each_goroutine_where_it_waits_or_runs` expected
+    every `main.spin` sample to name the spinner, but a sample of Go's
+    preemption signal handler on its thread names no task by design. The
+    assertion moved to `spinner_of`, tested on the samples the failure
+    recorded.
+  - The tokio steps invariant stopped a thread in `memcpy@plt`, which mold
+    describes with no CFI, so its backtrace ended there. Stubs without CFI
+    now get frames decoded at load (`elf::plt_frames`, the image's
+    `StubFrames` table), tested on mold-linked fixtures and a new
+    `disassembly-gcc-mold` build. It costs a mold-linked image a few
+    allocations per load, so `bench/baseline.json` needs recording again.
+- `bench-smoke` cannot pass in a worktree at another path: fixtures embed
+  their checkout's path, so their digests differ from the baseline's.
