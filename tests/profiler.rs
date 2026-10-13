@@ -1369,7 +1369,11 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
     }
 
     // The spinner spins from before the first snapshot that found every
-    // receiver until after the last.
+    // receiver until after the last. A sample of its own code names it.
+    // The runtime runs on its thread too: Go preempts a goroutine that has
+    // run for 10 ms with a signal, whose handler, like the scheduler, runs
+    // on a goroutine of its own or in assembly that keeps none. A sample of
+    // that names no task, never another.
     let found = receiving(profile);
     let (first, last) = (found[0], found[found.len() - 1]);
     let spun: Vec<SampledStack> = profile
@@ -1384,12 +1388,7 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
                     .any(|function| function == "main.spin")
         })
         .collect();
-    assert!(!spun.is_empty());
-    let spinner = spun[0].task.expect("the spinner's task");
-    assert!(
-        spun.iter().all(|stack| stack.task == Some(spinner)),
-        "{spun:?}"
-    );
+    let (spinner, running) = spinner_of(&spun);
     let receivers: Vec<u64> = profile.task_waits().iter().map(|wait| wait.task).collect();
     assert!(!receivers.contains(&spinner), "{spinner} {receivers:?}");
     let task = profile
@@ -1398,7 +1397,73 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
         .find(|task| task.number == spinner)
         .expect("the spinner's row");
     assert_eq!(task.labels, [("phase".to_owned(), "spin".to_owned())]);
-    assert!(profile.task_samples() >= spun.len() as u64);
+    assert!(profile.task_samples() >= running as u64);
+}
+
+/// The spinner's task, which every sample of its own code names, and how
+/// many those are. A sample of the runtime working on its thread may name
+/// no task, but never another.
+fn spinner_of(spun: &[SampledStack]) -> (u64, usize) {
+    let own_code = |stack: &&SampledStack| {
+        stack
+            .functions
+            .iter()
+            .take_while(|function| *function != "main.spin")
+            .all(|function| !function.starts_with("runtime."))
+    };
+    let running: Vec<&SampledStack> = spun.iter().filter(own_code).collect();
+    assert!(!running.is_empty(), "{spun:?}");
+    let spinner = running[0].task.expect("the spinner's task");
+    assert!(
+        running.iter().all(|stack| stack.task == Some(spinner)),
+        "{running:?}"
+    );
+    assert!(
+        spun.iter()
+            .all(|stack| stack.task.is_none_or(|task| task == spinner)),
+        "{spun:?}"
+    );
+    (spinner, running.len())
+}
+
+/// The samples of the spinner a stress run once caught, one of them as Go's
+/// preemption signal entered its handler on the spinner's thread: they name
+/// the spinner, and that one names no task.
+#[test]
+fn samples_of_the_runtime_on_a_goroutines_thread_name_no_task() {
+    let sample = |time, preempted: bool, task| SampledStack {
+        pid: 1,
+        tid: 2,
+        time,
+        weight: 1_001_001,
+        functions: [
+            &["runtime.sigtramp", "runtime.sigreturn__sigaction"][..usize::from(preempted) * 2],
+            &[
+                "sync/atomic.(*Bool).Load",
+                "main.spin",
+                "main.main.gowrap2",
+                "runtime.goexit",
+            ],
+        ]
+        .concat()
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        ending: StackEnding::Complete,
+        task,
+    };
+    let mut spun: Vec<SampledStack> = (0..9).map(|time| sample(time, false, Some(22))).collect();
+    spun.insert(3, sample(3, true, None));
+    assert_eq!(spinner_of(&spun), (22, 9));
+
+    // A sample that names another task, or a sample of the spinner's own
+    // code that names none, is still wrong.
+    let mut other = spun.clone();
+    other[3].task = Some(7);
+    assert!(std::panic::catch_unwind(|| spinner_of(&other)).is_err());
+    let mut unnamed = spun.clone();
+    unnamed[4].task = None;
+    assert!(std::panic::catch_unwind(|| spinner_of(&unnamed)).is_err());
 }
 
 /// Each goroutine waiting in `main.receive` waits on its channel, from

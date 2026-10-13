@@ -107,6 +107,13 @@ Snapshots connect sampled native activity with task identities and record
 where parked tasks wait. They do not rewrite the native sample. Analysis can
 choose a logical task stack or the original native stack.
 
+A sample names a task only when its innermost frame is code that keeps the
+runtime's current task, as Go's compiled code keeps `g` in R14. The runtime
+also runs on a goroutine's thread: Go preempts a goroutine that has run for
+10 ms with a signal, and the handler and scheduler run on goroutines of their
+own or in assembly. Samples there name no task, so a test may not expect every
+sample of a busy goroutine to name it.
+
 Bound snapshot frequency, task count, reads, bytes, and time. A program with a
 million tasks must degrade explicitly rather than exhaust the recorder.
 
