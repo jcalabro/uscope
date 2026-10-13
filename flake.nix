@@ -14,7 +14,7 @@
         overlays = [ rust-overlay.overlays.default ];
       };
       rust = pkgs.rust-bin.nightly."2026-07-11".default.override {
-        extensions = [ "clippy" "rust-src" "rustfmt" ];
+        extensions = [ "clippy" "miri" "rust-src" "rustfmt" ];
       };
       goStable = pkgs.go.overrideAttrs (_final: previous: {
         version = "1.27.1";

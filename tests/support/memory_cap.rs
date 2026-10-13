@@ -6,9 +6,12 @@
 //! test measures totals, so a test can measure work that runs on threads of
 //! its own. Blocks come from mimalloc, as they do in uscope itself, which
 //! reads debug information far faster with it than with the C library's
-//! allocator.
+//! allocator. Under Miri, which cannot run mimalloc's C code, a process keeps
+//! Rust's default allocator, which Miri serves itself and so checks every
+//! block's layout as it is freed.
 
 #![allow(unsafe_code, reason = "a global allocator is an unsafe trait")]
+#![cfg_attr(miri, allow(dead_code, reason = "Miri keeps its own allocator"))]
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::io::Write as _;
@@ -118,6 +121,7 @@ unsafe impl GlobalAlloc for CappedAllocator {
     }
 }
 
+#[cfg(not(miri))]
 #[global_allocator]
 static ALLOCATOR: CappedAllocator = CappedAllocator {
     live: AtomicUsize::new(0),

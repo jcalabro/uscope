@@ -137,24 +137,67 @@ fn a_report_says_whether_it_counted_instructions() {
 mod allocator {
     #![allow(unsafe_code, reason = "these tests drive an allocator directly")]
 
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::alloc::{GlobalAlloc, Layout};
+    use std::sync::atomic::{AtomicPtr, Ordering};
 
-    use crate::timings::alloc::{Counting, PEAK_GRANULARITY, start_totals, stop_totals, totals};
+    use crate::timings::alloc::{
+        Allocated, Counting, PEAK_GRANULARITY, start_totals, stop_totals, thread_counts, totals,
+    };
 
-    /// Allocates from the system, but refuses to grow any block.
+    /// Where the tests' blocks come from: the system's allocator, because
+    /// the test process's own counts what it allocates too; under Miri,
+    /// Rust's, which Miri serves itself and so checks that every block is
+    /// freed with the layout it was allocated with.
+    #[cfg(not(miri))]
+    type Blocks = std::alloc::System;
+    #[cfg(miri)]
+    type Blocks = Rust;
+
+    /// Rust's global allocator.
+    #[cfg(miri)]
+    struct Rust;
+
+    // SAFETY: every method forwards to the global allocator with the
+    // caller's arguments.
+    #[cfg(miri)]
+    unsafe impl GlobalAlloc for Rust {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's layout is valid for `alloc`.
+            unsafe { std::alloc::alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's layout is valid for `alloc_zeroed`.
+            unsafe { std::alloc::alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+            // SAFETY: the caller passes a block the global allocator
+            // returned, with its layout.
+            unsafe { std::alloc::dealloc(block, layout) }
+        }
+
+        unsafe fn realloc(&self, block: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: the caller passes a block the global allocator
+            // returned, its layout, and a valid new size.
+            unsafe { std::alloc::realloc(block, layout, new_size) }
+        }
+    }
+
+    /// Allocates from [`Blocks`], but refuses to grow any block.
     struct NoGrowth;
 
-    // SAFETY: allocation forwards to `System`; refusing a reallocation by
+    // SAFETY: allocation forwards to `Blocks`; refusing a reallocation by
     // returning null is allowed and leaves the block valid.
     unsafe impl GlobalAlloc for NoGrowth {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             // SAFETY: the caller's layout is valid for `alloc`.
-            unsafe { System.alloc(layout) }
+            unsafe { Blocks {}.alloc(layout) }
         }
 
         unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-            // SAFETY: the caller passes a block `System` returned.
-            unsafe { System.dealloc(block, layout) }
+            // SAFETY: the caller passes a block `Blocks` returned.
+            unsafe { Blocks {}.dealloc(block, layout) }
         }
 
         unsafe fn realloc(&self, _: *mut u8, _: Layout, _: usize) -> *mut u8 {
@@ -162,59 +205,131 @@ mod allocator {
         }
     }
 
+    /// This thread's counts, from its slot. Other threads of a test
+    /// process, such as the harness's, may allocate while a test measures,
+    /// and their counts can reach it late, so tests read their own threads'
+    /// counts exactly and the process's totals only as bounds.
+    fn own() -> (Allocated, i64) {
+        thread_counts().expect("a slot of the thread's own")
+    }
+
     #[test]
     fn totals_follow_blocks_across_threads_and_failed_growth() {
         let allocator = Counting::new(NoGrowth);
-        // A block that moves the peak, which threads report in steps.
-        let size = usize::try_from(PEAK_GRANULARITY).expect("a small size");
+        // A block that moves the peak by more than a thread's step, so the
+        // harness's own allocations cannot hide it.
+        let size = 2 * usize::try_from(PEAK_GRANULARITY).expect("a small size");
+        let bytes = u64::try_from(size).expect("a small size");
         let layout = Layout::from_size_align(size, 8).expect("a layout");
         start_totals();
         let before = totals();
+        // Another thread allocates while this one measures the process's
+        // totals, as the test harness's own threads may.
+        let other_layout = Layout::from_size_align(48, 8).expect("a layout");
+        let other = std::thread::scope(|scope| {
+            scope
+                // SAFETY: the layout is non-zero; the block is freed below.
+                .spawn(|| AtomicPtr::new(unsafe { allocator.alloc(other_layout) }))
+                .join()
+                .expect("the other thread")
+        });
+        let (allocated, live) = own();
         // SAFETY: the layout is non-zero; the block is freed below.
         let block = unsafe { allocator.alloc(layout) };
         assert!(!block.is_null());
-        let grown = totals().since(&before);
-        assert_eq!(grown.allocated.blocks, 1);
-        assert_eq!(grown.allocated.bytes, PEAK_GRANULARITY.unsigned_abs());
+        let (grown, grown_live) = own();
+        assert_eq!(grown.since(&allocated), Allocated { blocks: 1, bytes });
+        assert_eq!(grown_live - live, 2 * PEAK_GRANULARITY);
+        let total = totals().since(&before).allocated;
+        assert!(
+            total.blocks >= 2 && total.bytes >= bytes + 48,
+            "the process's totals miss a block: {total:?}"
+        );
 
         // SAFETY: the block came from `allocator` with `layout`.
         let refused = unsafe { allocator.realloc(block, layout, 2 * size) };
         assert!(refused.is_null());
         assert_eq!(
-            totals().since(&before).allocated,
-            grown.allocated,
+            own(),
+            (grown, grown_live),
             "a failed growth allocates nothing"
         );
 
         // Another thread frees the block, and the heap shrinks all the
-        // same. Barriers keep every other allocation outside the window
-        // measured, and waiting on one allocates nothing.
-        let address = block as usize;
-        let barrier = std::sync::Barrier::new(2);
-        let (mid, after) = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                barrier.wait();
-                barrier.wait();
-                // SAFETY: the block came from `allocator` with `layout` and
-                // is freed once.
-                unsafe { allocator.dealloc(address as *mut u8, layout) };
-                barrier.wait();
-                // The thread frees its own blocks as it ends.
-                barrier.wait();
-            });
-            barrier.wait();
-            let mid = totals();
-            barrier.wait();
-            barrier.wait();
-            let after = totals();
-            barrier.wait();
-            (mid, after)
+        // same.
+        let block = AtomicPtr::new(block);
+        let (start, end) = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let start = own();
+                    // SAFETY: the block came from `allocator` with `layout`
+                    // and is freed once.
+                    unsafe { allocator.dealloc(block.load(Ordering::Relaxed), layout) };
+                    (start, own())
+                })
+                .join()
+                .expect("the freeing thread")
         });
+        let after = totals();
         stop_totals();
-        assert_eq!(after.live_bytes - mid.live_bytes, -PEAK_GRANULARITY);
+        assert_eq!(end.0, start.0, "freeing allocates nothing");
+        assert_eq!(end.1 - start.1, -2 * PEAK_GRANULARITY);
         assert!(
             after.since(&before).peak_bytes >= PEAK_GRANULARITY,
             "{after:?}"
         );
+        // SAFETY: the other thread's block came from `allocator` with
+        // `other_layout` and is freed once.
+        unsafe { allocator.dealloc(other.load(Ordering::Relaxed), other_layout) };
+    }
+
+    #[test]
+    fn blocks_keep_their_contents_and_counts_as_they_grow_and_shrink() {
+        let allocator = Counting::new(Blocks {});
+        let pattern: [u8; 16] = *b"0123456789abcdef";
+        let layout = |size| Layout::from_size_align(size, 8).expect("a layout");
+        let start = own();
+        // SAFETY: the layout is non-zero; the block is freed below.
+        let block = unsafe { allocator.alloc_zeroed(layout(16)) };
+        assert!(!block.is_null());
+        let zeroed = own();
+        // SAFETY: the block holds 16 initialized bytes that nothing else
+        // refers to.
+        let contents = unsafe { std::slice::from_raw_parts_mut(block, 16) };
+        assert_eq!(contents, [0; 16]);
+        contents.copy_from_slice(&pattern);
+
+        // SAFETY: the block came from `allocator` with this layout.
+        let block = unsafe { allocator.realloc(block, layout(16), 64) };
+        assert!(!block.is_null());
+        let grown = own();
+        // SAFETY: growth kept the block's first 16 bytes, which nothing
+        // else refers to.
+        let contents = unsafe { std::slice::from_raw_parts(block, 16) };
+        assert_eq!(contents, pattern);
+
+        // SAFETY: the block came from `allocator` with this layout.
+        let block = unsafe { allocator.realloc(block, layout(64), 8) };
+        assert!(!block.is_null());
+        let shrunk = own();
+        // SAFETY: shrinking kept the block's first 8 bytes.
+        let contents = unsafe { std::slice::from_raw_parts(block, 8) };
+        assert_eq!(contents, &pattern[..8]);
+
+        // SAFETY: the block came from `allocator` with this layout.
+        unsafe { allocator.dealloc(block, layout(8)) };
+        let freed = own();
+
+        let counted =
+            |(allocated, live): (Allocated, i64)| (allocated.since(&start.0), live - start.1);
+        let allocated = |blocks, bytes| Allocated { blocks, bytes };
+        assert_eq!(counted(zeroed), (allocated(1, 16), 16));
+        assert_eq!(
+            counted(grown),
+            (allocated(2, 64), 64),
+            "a growth counts as a block of what it added"
+        );
+        assert_eq!(counted(shrunk), (allocated(2, 64), 8));
+        assert_eq!(counted(freed), (allocated(2, 64), 0));
     }
 }

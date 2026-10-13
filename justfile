@@ -18,7 +18,7 @@ default: check
 check: lint test web-test docs
 
 # Runs everything to check before committing.
-all: check web-e2e stress sim bench-smoke
+all: check miri web-e2e stress sim bench-smoke
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
@@ -93,6 +93,17 @@ test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
     fi
     ulimit -c 0
     USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
+
+# The tests that run under Miri: those of uscope's unsafe code that need no
+# process of their own, which Miri cannot start.
+miri_tests := "timings::tests::allocator"
+
+# Runs the tests of uscope's unsafe code under Miri, which stops at undefined
+# behavior: an access out of bounds, misaligned, or after a free, a block freed
+# with the wrong layout, a data race, a pointer made from an integer. Its
+# sysroot builds under target/. Arguments go to the test harness.
+miri *ARGS:
+    export MIRI_SYSROOT="$PWD/target/miri/sysroot"; cargo miri setup >/dev/null && MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --lib -- {{miri_tests}} "$@"
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit

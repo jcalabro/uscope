@@ -161,6 +161,26 @@ pub fn totals() -> Totals {
     totals
 }
 
+/// What this thread has allocated, and its net growth of the heap, as its
+/// slot holds them for [`totals`]: zero before its first count, and `None`
+/// once it shares the last slot with later threads.
+#[cfg(test)]
+pub(super) fn thread_counts() -> Option<(Allocated, i64)> {
+    let slot = THREAD.try_with(|counts| counts.get().slot).ok()?;
+    match slot {
+        0 => Some((Allocated::default(), 0)),
+        SLOTS.. => None,
+        _ => {
+            let slot = &COUNTS[slot - 1];
+            let allocated = Allocated {
+                blocks: slot.blocks.load(Ordering::Relaxed),
+                bytes: slot.bytes.load(Ordering::Relaxed),
+            };
+            Some((allocated, slot.live.load(Ordering::Relaxed)))
+        }
+    }
+}
+
 /// Resets the peak to the heap's current growth, so that a measurement
 /// sees only its own peak.
 pub fn reset_peak() {

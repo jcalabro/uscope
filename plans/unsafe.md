@@ -86,7 +86,7 @@ Plus the probe SDK, the WASM view SDK, and test support.
 
 Each step lists how we know it worked.
 
-- [ ] **1. Miri setup.** Flake extension, `just miri`, running the
+- [x] **1. Miri setup.** Flake extension, `just miri`, running the
   existing `timings::tests::allocator` tests. *Done when* `just miri`
   passes, and both its cold and warm times are recorded in section 6.
 - [ ] **2. Safe wrappers.** Add rustix with `process`, `param`, `event`
@@ -151,3 +151,21 @@ Decisions, measurements, and surprises, newest last.
 
 - 2026-10-13: Plan written. `_rdtsc` is still unsafe on the pinned
   nightly. rustix 1.1.5 is already a transitive dependency.
+- 2026-10-13, step 1: `just miri` takes 33 s cold and 15 s warm. Nearly
+  all of it is Miri's runner checking the whole crate again before it
+  runs; a filter that matches no test takes as long. It joins `just all`,
+  not `just`.
+- Under Miri the test process keeps Rust's default allocator. Installing
+  the capped, counting allocator over `System` instead hid every layout
+  check: Miri checks a freed block's layout only on its own allocator,
+  and `System` frees through libc's `free`, which takes no size. The
+  allocator tests' blocks come from Rust's allocator under Miri, so a
+  wrong layout in `Counting` is caught (checked by mutation).
+- Miri's weak-memory emulation broke the allocator test's exact process
+  totals: the harness's main thread allocates as the test starts, and its
+  relaxed counts reached the test late, a block count stale and a byte
+  count fresh. Natively the same race was only unlikely. The test now
+  reads its own threads' slots exactly (`thread_counts`, test-only) and
+  the process's totals as bounds, and passes 32 seeds.
+- Code under `cfg(miri)` gets rustc's lints when Miri builds it, but not
+  Clippy's.

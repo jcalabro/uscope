@@ -363,6 +363,20 @@ corpora and artifact growth bounded. A discovered crash becomes the smallest
 deterministic regression test at the owning layer; do not rely on a large fuzz
 artifact forever.
 
+## Miri
+
+`just miri` runs the tests of uscope's unsafe code under Miri, which stops at
+undefined behavior: an access out of bounds, misaligned, or after a free, a
+block freed with the wrong layout, a data race, or a pointer made from an
+integer. Miri cannot start processes or call most C code, so the recipe runs
+only the tests that `miri_tests` in the justfile names. When you add or change
+unsafe code that Miri can reach, add its test there.
+
+Under Miri the test process keeps Rust's default allocator. Miri cannot run
+mimalloc, and it checks a freed block's layout only on its own allocator. Most
+of the recipe's 15 seconds go to Miri checking the crate again before it runs
+anything.
+
 ## Choosing the final gate
 
 Every change runs `just`. Add these checks according to scope:
@@ -377,6 +391,7 @@ Every change runs `just`. Add these checks according to scope:
 | BPF programs or their loader | `just test-bpf`, and `just syscall-overhead` for hot-path changes |
 | Fixture or golden program | `just build-test-programs`; record a manifest only when intentional |
 | Public docs | `just docs` plus executable-doc tests when affected |
+| Unsafe code | `just miri` |
 
 `just all` includes the repository's broad pre-commit checks. Run specialized
 long measurements only when the table calls for them; repeating them after
