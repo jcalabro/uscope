@@ -511,11 +511,13 @@ impl CaptureBuilder {
         task
     }
 
-    /// Sets a task's root frame and labels.
+    /// Sets a task's root frame and labels, each unless `NONE`.
     pub fn describe_task(&mut self, task: u32, root: u32, labels: Option<&str>) {
         let labels = self.optional(labels);
         let record = &mut self.tasks[task as usize];
-        record.root = root.into();
+        if root != NONE {
+            record.root = root.into();
+        }
         if labels != NONE {
             record.labels = labels.into();
         }
@@ -875,10 +877,13 @@ impl CaptureBuilder {
             let runtime = capture.string(task.runtime.get());
             let new = self.task(runtime, task.number.get(), task.first_seen.get());
             self.task(runtime, task.number.get(), task.last_seen.get());
-            if task.root.get() != NONE {
-                let labels = (task.labels.get() != NONE).then(|| capture.string(task.labels.get()));
-                self.describe_task(new, map.frames[task.root.get() as usize], labels);
-            }
+            // Snapshots find a task's labels with no root frame.
+            let root = match task.root.get() {
+                NONE => NONE,
+                root => map.frames[root as usize],
+            };
+            let labels = (task.labels.get() != NONE).then(|| capture.string(task.labels.get()));
+            self.describe_task(new, root, labels);
             map.tasks.push(new);
         }
     }
@@ -900,7 +905,9 @@ impl CaptureBuilder {
         for account in &capture.accounting {
             self.count(account.kind.get(), account.value.get());
         }
-        for range in &capture.zone_ranges {
+        // Deepest first, so that of two zones of one span, the one that
+        // holds the other comes later, as when it was recorded.
+        for range in capture.zone_ranges.iter().rev() {
             let thread = map.threads[range.thread.get() as usize];
             let start = range.start.get() as usize;
             for zone in &capture.zones[start..start + range.count.get() as usize] {

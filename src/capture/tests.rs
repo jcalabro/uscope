@@ -158,6 +158,72 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
     assert_eq!((read.chunks, read.truncated), (1, true));
 }
 
+/// Two zones of one span nest as they were recorded: the one recorded
+/// later, which ended last, holds the other. A capture rebuilt from
+/// another, as symbolizing or merging a file's chunks rebuilds it, keeps
+/// that nesting.
+#[test]
+fn zones_of_one_span_keep_their_nesting_when_a_capture_is_rebuilt() {
+    let mut builder = CaptureBuilder::new();
+    let thread = builder.thread(1, 1, 0);
+    let site = |builder: &mut CaptureBuilder, name: &str| builder.site(name, "f.rs", 1, NONE, 0);
+    let (inner, outer) = (site(&mut builder, "leaf"), site(&mut builder, "b"));
+    for site in [inner, outer] {
+        builder.zone(
+            thread,
+            Zone {
+                start: 5.into(),
+                end: 9.into(),
+                site: site.into(),
+                flags: 0.into(),
+                value: NONE.into(),
+                reserved: 0.into(),
+            },
+        );
+    }
+    let depths = |capture: &Capture| {
+        capture
+            .zone_ranges
+            .iter()
+            .flat_map(|range| {
+                let start = range.start.get() as usize;
+                capture.zones[start..start + range.count.get() as usize]
+                    .iter()
+                    .map(move |zone| (zone.site.get(), range.depth.get()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let recorded = builder.finish();
+    assert_eq!(depths(&recorded), [(outer, 0), (inner, 1)]);
+
+    let mut rebuilt = CaptureBuilder::new();
+    rebuilt.absorb(&recorded);
+    assert_eq!(depths(&rebuilt.finish()), [(outer, 0), (inner, 1)]);
+}
+
+/// A task's labels, which snapshots find without a root frame, survive a
+/// capture rebuilt from another, as symbolizing or merging a file's chunks
+/// rebuilds it.
+#[test]
+fn merged_chunks_keep_each_tasks_labels() {
+    let mut first = CaptureBuilder::new();
+    let task = first.task("goroutine", 1, 0);
+    first.describe_task(task, NONE, Some("phase=spin"));
+    let first = first.finish();
+    let mut second = CaptureBuilder::new();
+    second.task("goroutine", 1, 10);
+    let second = second.finish();
+
+    let mut merged = CaptureBuilder::new();
+    merged.absorb(&first);
+    merged.absorb(&second);
+    let merged = merged.finish();
+    assert_eq!(merged.validate(), Ok(()));
+    assert_eq!(merged.tasks.len(), 1);
+    assert_ne!(merged.tasks[0].labels.get(), NONE, "the labels were lost");
+    assert_eq!(merged.string(merged.tasks[0].labels.get()), "phase=spin");
+}
+
 /// Forgetting what came before a moment keeps every row from it on, cuts
 /// the spans that cross it there, and keeps what rows refer to.
 #[test]
