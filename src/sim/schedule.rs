@@ -14,6 +14,10 @@
 //!
 //! A thread that yields the CPU drops below every other actor under PCT
 //! too, or a thread spinning on a lock would starve the thread holding it.
+//! And an actor enabled for [`PATIENCE`] steps runs next, as a machine's
+//! scheduler runs every thread eventually: a controller whose calls keep
+//! reaping the stops of a thread spinning on `sched_yield` never runs out of
+//! work, and would otherwise keep the client from adopting a child forever.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -113,10 +117,15 @@ pub struct Scheduler {
     change_points: Vec<u64>,
     /// The priority the next actor to drop gets, below every other.
     floor: i64,
+    /// The step since which each enabled actor has waited to run.
+    waiting: BTreeMap<Actor, u64>,
 }
 
 /// Where PCT's initial priorities start, above every dropped actor's.
 const HIGH: i64 = 1 << 32;
+
+/// The most steps an enabled actor waits under PCT before it runs.
+const PATIENCE: u64 = 10_000;
 
 impl Scheduler {
     pub fn new(policy: Policy, choices: &mut Choices) -> Self {
@@ -132,6 +141,7 @@ impl Scheduler {
             priorities: BTreeMap::new(),
             change_points,
             floor: 0,
+            waiting: BTreeMap::new(),
         }
     }
 
@@ -147,10 +157,22 @@ impl Scheduler {
                             .expect("a priority fits")
                     });
                 }
-                let action = *enabled
+                self.waiting
+                    .retain(|actor, _| enabled.iter().any(|action| action.actor() == *actor));
+                for action in enabled {
+                    self.waiting.entry(action.actor()).or_insert(step);
+                }
+                let starved = enabled
                     .iter()
-                    .max_by_key(|action| (self.priorities[&action.actor()], action.actor()))
-                    .expect("an action is enabled");
+                    .filter(|action| step - self.waiting[&action.actor()] >= PATIENCE)
+                    .min_by_key(|action| (self.waiting[&action.actor()], action.actor()));
+                let action = *starved.unwrap_or_else(|| {
+                    enabled
+                        .iter()
+                        .max_by_key(|action| (self.priorities[&action.actor()], action.actor()))
+                        .expect("an action is enabled")
+                });
+                self.waiting.remove(&action.actor());
                 if self.change_points.first() == Some(&step) {
                     self.change_points.remove(0);
                     self.drop_actor(action.actor());
@@ -233,5 +255,36 @@ mod tests {
         // Once the third yields too, the earliest to drop is highest again.
         scheduler.yielded(tid);
         assert_eq!(scheduler.choose(&enabled, change + 3, &mut choices), first);
+    }
+
+    /// An actor that never runs out of work, as a controller whose calls
+    /// keep reaping new stops, does not keep another enabled actor waiting
+    /// forever: a machine's scheduler runs every thread eventually.
+    #[test]
+    fn pct_runs_an_actor_that_waited_too_long() {
+        let mut choices = Choices::new(5);
+        let mut scheduler = Scheduler::new(
+            Policy::Pct {
+                depth: 1,
+                horizon: 10,
+            },
+            &mut choices,
+        );
+        let enabled = [Action::Deliver(0), Action::Follow];
+        let first = scheduler.choose(&enabled, 1, &mut choices);
+        let other = if first == Action::Follow {
+            Action::Deliver(0)
+        } else {
+            Action::Follow
+        };
+        let ran = (2..=2 * PATIENCE)
+            .position(|step| scheduler.choose(&enabled, step, &mut choices) == other)
+            .expect("the waiting actor runs");
+        assert_eq!(u64::try_from(ran).expect("a step") + 2, PATIENCE + 1);
+        assert_eq!(
+            scheduler.choose(&enabled, PATIENCE + 2, &mut choices),
+            first,
+            "priorities hold again once it ran"
+        );
     }
 }
