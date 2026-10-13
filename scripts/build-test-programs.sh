@@ -1864,6 +1864,8 @@ build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/exec" "$output_dir/exec-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/strings" "$output_dir/strings-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/globals" "$output_dir/globals-go-o0" \
@@ -2018,6 +2020,14 @@ build_fixture gcc "$c_fixtures_dir/interrupt.c" "$output_dir/interrupt" \
 build_fixture gcc "$c_fixtures_dir/memfd-exec.c" "$output_dir/memfd-exec" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/fork.c" "$output_dir/fork" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/vfork.c" "$output_dir/vfork" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/vfork-threads.c" "$output_dir/vfork-threads" \
+    -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/signal-altstack.c" "$output_dir/signal-altstack" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/program-trap.c" "$output_dir/program-trap" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/job-control.c" "$output_dir/job-control" \
     -O0 -g3 -fPIE -pie

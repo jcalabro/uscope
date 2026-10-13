@@ -11,6 +11,7 @@ mod cgo;
 mod cores;
 mod corrupted;
 mod defers;
+mod exec;
 mod failing;
 mod gofmt;
 mod hosted;

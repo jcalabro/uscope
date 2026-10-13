@@ -578,6 +578,51 @@ async fn backtraces_unwind_through_a_signal_handler() {
     scenario.shutdown().await;
 }
 
+/// A handler on an alternate signal stack returns through the same trampoline
+/// as one on the interrupted stack, but the frames it unwinds to are not
+/// adjacent on the stack. The walk must still reach the interrupted frames
+/// and the program's first frame.
+#[tokio::test]
+async fn backtraces_unwind_through_a_handler_on_an_alternate_stack() {
+    let mut scenario = Scenario::launch("signal-altstack");
+    scenario.add_breakpoint("handle_usr1").await;
+    let mut reason = scenario.run_to_stop().await;
+    while let StopReason::Exception(_) = reason {
+        reason = scenario.resume_to_stop().await;
+    }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .map(|frame| frame.symbol.as_ref().map(|symbol| symbol.name.to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(names[0].as_deref(), Some("handle_usr1"), "{trace:#?}");
+    assert_eq!(names[1].as_deref(), Some("__restore_rt"), "{trace:#?}");
+    assert_eq!(
+        trace.frames[1].kind,
+        uscope::FrameKind::Signal,
+        "{trace:#?}"
+    );
+    let raise = names
+        .iter()
+        .position(|name| name.as_deref() == Some("raise"))
+        .unwrap_or_else(|| panic!("no raise in {trace:#?}"));
+    assert_eq!(
+        names[raise + 1..raise + 3],
+        [Some("deliver".to_owned()), Some("main".to_owned())],
+        "{trace:#?}"
+    );
+    assert_eq!(names.last().cloned().flatten().as_deref(), Some("_start"));
+    assert_eq!(trace.termination, UnwindTermination::Complete, "{trace:#?}");
+    scenario.shutdown().await;
+}
+
 /// GCC describes a function that realigns its stack through a register
 /// holding the incoming stack pointer with call-frame expressions: its
 /// CFA is read through the saved pointer, and its caller's frame pointer

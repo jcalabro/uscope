@@ -302,3 +302,19 @@ async fn go_preemption_signals_never_stop_the_program() {
     assert!(preemptions >= 8, "only {preemptions} preemption signals");
     scenario.shutdown().await;
 }
+
+/// A breakpoint instruction the program executes itself is the program's
+/// stop, not one of the debugger's, and the program resumes after it.
+#[tokio::test]
+async fn a_program_trap_stops_as_the_programs_and_resumes_after_it() {
+    let mut scenario = Scenario::launch("program-trap");
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::ProgramBreakpoint { .. }
+    ));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
