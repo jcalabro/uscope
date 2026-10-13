@@ -52,6 +52,11 @@ given a filter, so attaching stops at every call, and the CLI refuses unless
 This engine has its own tracer thread and does not use the debugger's
 controller.
 
+A new thread or child can stop, or even run and exit, before the tracer
+sees the fork or clone event that made it. Until that event arrives, the
+tracee is held stopped (and its end, if it ends, is kept), so the trace
+always announces a tracee before anything it does.
+
 ## The BPF engine
 
 The kernel programs are C in `src/backend/linux/syscalls/bpf/`. `build.rs`

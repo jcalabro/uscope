@@ -66,6 +66,28 @@ static void family(void) {
     pthread_join(thread, NULL);
 }
 
+// Threads, then children, one after another, each gone at once: each one's
+// first stop races the event of the call that made it.
+static void churn(int count) {
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &blocked, NULL);
+    for (int made = 0; made < count; made++) {
+        pthread_t thread;
+        pthread_create(&thread, NULL, thread_main, NULL);
+        pthread_join(thread, NULL);
+    }
+    for (int made = 0; made < count; made++) {
+        pid_t child = fork();
+        if (child == 0) {
+            _exit(4);
+        }
+        int status;
+        waitpid(child, &status, 0);
+    }
+}
+
 static void block(void) {
     // The test sees this line, then the read blocked in flight, then
     // closes standard input.
@@ -184,6 +206,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "family") == 0) {
         family();
+        return 0;
+    }
+    if (strcmp(mode, "churn") == 0 && argc > 2) {
+        churn(atoi(argv[2]));
         return 0;
     }
     if (strcmp(mode, "block") == 0) {

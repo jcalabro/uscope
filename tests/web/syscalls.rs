@@ -7,14 +7,15 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 use crate::profiles::listed;
-use crate::support::{Scenario, ScratchDir};
+use crate::support::{Scenario, ScratchDir, flight_recordings};
 use crate::web::{Client, Web};
 
 /// The syscalls fixture's trace in `mode`, by the ptrace engine with
 /// stacks, written in `directory`, where the program runs.
 fn trace(directory: &Path, mode: &str) -> PathBuf {
     let path = directory.join(format!("{mode}.usprof"));
-    let status = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+    command
         .args(["syscalls", "--engine", "ptrace", "-f", "-k", "-o"])
         .arg(&path)
         .arg("--")
@@ -22,9 +23,13 @@ fn trace(directory: &Path, mode: &str) -> PathBuf {
         .arg(mode)
         .current_dir(directory)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .expect("run uscope syscalls");
+        .stdout(Stdio::null());
+    // A failing test keeps the tracer's recording beside the server's.
+    let recording = flight_recordings::watch_adapter(&mut command);
+    let status = command.status().expect("run uscope syscalls");
+    if let Some(recording) = &recording {
+        flight_recordings::adapter_finished(recording);
+    }
     assert!(status.code().is_some(), "{status}");
     path
 }

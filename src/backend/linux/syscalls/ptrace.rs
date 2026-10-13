@@ -101,6 +101,29 @@ impl Memory for ProcessMemory {
 }
 
 /// A process's thread group, from `/proc`.
+/// A thread's process, and the process that made it: the same process for
+/// a thread other than the leader.
+fn lineage(tid: u32) -> (Option<u32>, Option<u32>) {
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{tid}/status")) else {
+        return (None, None);
+    };
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))?
+            .trim()
+            .parse::<u32>()
+            .ok()
+    };
+    let process = field("Tgid:");
+    let parent = if process == Some(tid) {
+        field("PPid:")
+    } else {
+        process
+    };
+    (process, parent)
+}
+
 fn tgid_of(tid: u32) -> Option<u32> {
     let status = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
     status
@@ -213,6 +236,19 @@ struct Thread {
     pending: Option<Entry>,
 }
 
+/// A new tracee that stopped, or ended, before the event of the call that
+/// made it, which announces it: it waits stopped for that event, so that
+/// the trace announces it before anything it does.
+#[derive(Debug)]
+struct Unannounced {
+    /// Its process, read while it waited.
+    process: Option<u32>,
+    /// The process that made it, read while it waited.
+    parent: Option<u32>,
+    /// How it ended, if it did before it was announced.
+    ended: Option<ProcessEnd>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// Chosen calls stop at a seccomp stop.
@@ -225,6 +261,10 @@ struct Tracer<'a> {
     mode: Mode,
     options: &'a TraceOptions,
     threads: BTreeMap<u32, Thread>,
+    /// The threads traced from the start; every other tracee is made by
+    /// one traced.
+    initial: BTreeSet<u32>,
+    unannounced: BTreeMap<u32, Unannounced>,
     /// Processes whose calls are reported.
     reported: BTreeSet<u32>,
     first: u32,
@@ -534,7 +574,12 @@ impl Tracer<'_> {
                 let parent = self.thread(tid).process;
                 if let Ok(child) = ptrace::getevent(pid) {
                     let child = u32::try_from(child).unwrap_or(0);
-                    let process = tgid_of(child).unwrap_or(child);
+                    let early = self.unannounced.remove(&child);
+                    let process = early
+                        .as_ref()
+                        .and_then(|early| early.process)
+                        .or_else(|| tgid_of(child))
+                        .unwrap_or(child);
                     let thread = process == parent;
                     self.threads.entry(child).or_insert(Thread {
                         process,
@@ -551,6 +596,13 @@ impl Tracer<'_> {
                             thread,
                             time: monotonic(),
                         });
+                    }
+                    match early {
+                        Some(Unannounced {
+                            ended: Some(end), ..
+                        }) => self.ended(child, end),
+                        Some(_) => self.resume(child, None)?,
+                        None => {}
                     }
                 }
                 self.resume(tid, None)
@@ -585,6 +637,24 @@ impl Tracer<'_> {
                 self.resume(tid, None)
             }
             libc::PTRACE_EVENT_STOP => {
+                if !self.detaching
+                    && !self.threads.contains_key(&tid)
+                    && !self.initial.contains(&tid)
+                {
+                    let (process, parent) = lineage(tid);
+                    record!(
+                        "syscalls ptrace: {tid} of {process:?} waits for {parent:?} to announce it"
+                    );
+                    self.unannounced.insert(
+                        tid,
+                        Unannounced {
+                            process,
+                            parent,
+                            ended: None,
+                        },
+                    );
+                    return Ok(());
+                }
                 self.thread(tid);
                 if is_stopping(signal) && !self.detaching {
                     // A group-stop: the thread stays stopped, as it would
@@ -632,6 +702,17 @@ impl Tracer<'_> {
 
     fn ended(&mut self, tid: u32, end: ProcessEnd) {
         let Some(thread) = self.threads.remove(&tid) else {
+            // A new tracee killed before it was announced ends once it is.
+            if !self.initial.contains(&tid) {
+                self.unannounced
+                    .entry(tid)
+                    .or_insert(Unannounced {
+                        process: None,
+                        parent: None,
+                        ended: None,
+                    })
+                    .ended = Some(end);
+            }
             return;
         };
         let process = thread.process;
@@ -662,6 +743,19 @@ impl Tracer<'_> {
         }
         if process == self.first {
             self.end = Some(end);
+        }
+        // A process killed in the call that made a tracee never announces
+        // it: it goes on unannounced.
+        let orphans: Vec<u32> = self
+            .unannounced
+            .iter()
+            .filter(|(_, early)| early.parent == Some(process) && early.ended.is_none())
+            .map(|(&tid, _)| tid)
+            .collect();
+        for orphan in orphans {
+            self.unannounced.remove(&orphan);
+            self.thread(orphan);
+            let _ = self.resume(orphan, None);
         }
         if self.reports(process) {
             self.emit(TraceEvent::Exit {
@@ -701,6 +795,16 @@ impl Tracer<'_> {
     /// detached at its next stop.
     fn begin_detach(&mut self) {
         self.detaching = true;
+        let waiting: Vec<u32> = self
+            .unannounced
+            .iter()
+            .filter(|(_, early)| early.ended.is_none())
+            .map(|(&tid, _)| tid)
+            .collect();
+        for tid in waiting {
+            self.unannounced.remove(&tid);
+            let _ = self.detach(tid, None);
+        }
         let threads: Vec<u32> = self.threads.keys().copied().collect();
         for tid in threads {
             record!("syscalls ptrace: interrupt {tid} to detach");
@@ -779,6 +883,7 @@ pub fn trace(
     sink: &mut dyn Sink,
 ) -> Result<Finished, TraceError> {
     let mut gate: Option<Gate> = None;
+    let mut initial = BTreeSet::new();
     let (mode, first) = match target {
         Target::Launch(command) => {
             let filter = seccomp::filter(&options.calls);
@@ -799,12 +904,12 @@ pub fn trace(
             .map_err(|errno| TraceError::Attach { pid, errno })?;
             launched.open().map_err(TraceError::Spawn)?;
             gate = Some(launched);
+            initial.insert(pid);
             (Mode::Filtered, pid)
         }
         Target::Attach(pids) => {
-            let mut seized = BTreeSet::new();
             for &pid in &pids {
-                seize_process(pid, trace_options(false, options.follow), &mut seized)?;
+                seize_process(pid, trace_options(false, options.follow), &mut initial)?;
                 sink.attached(pid);
             }
             (Mode::EveryCall, pids.first().copied().unwrap_or(0))
@@ -814,6 +919,8 @@ pub fn trace(
         mode,
         options,
         threads: BTreeMap::new(),
+        initial,
+        unannounced: BTreeMap::new(),
         reported: BTreeSet::from([first]),
         first,
         end: None,

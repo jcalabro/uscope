@@ -1633,3 +1633,67 @@ mod bpf {
         target.reaped();
     }
 }
+
+/// Each thread and child is announced, as what it is, before anything it
+/// did: its first stop can reach the tracer before the event of the call
+/// that made it, and a short life can end before that event is handled.
+#[test]
+fn threads_and_children_are_announced_before_what_they_do() {
+    use uscope::syscalls::TraceEvent;
+
+    let scratch = ScratchDir::new("syscalls-churn");
+    let count = 300;
+    let output = uscope(&["--engine", "ptrace", "-f", "-o", "churn.usprof", "--"])
+        .arg(fixture())
+        .args(["churn", &count.to_string()])
+        .current_dir(scratch.path())
+        .output()
+        .expect("run uscope");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let read = uscope::profiler::Profile::read(&scratch.path().join("churn.usprof"))
+        .expect("read the trace");
+    let events = read.profile.syscalls().events;
+    let mut announced = BTreeMap::new();
+    let mut problems = Vec::new();
+    for recorded in &events {
+        match &recorded.event {
+            TraceEvent::Spawn { child, thread, .. } => {
+                if announced.insert(*child, *thread).is_some() {
+                    problems.push(format!("{child} announced twice"));
+                }
+            }
+            TraceEvent::Exit { process, .. }
+                if *process != events_first(&events) && !announced.contains_key(process) =>
+            {
+                problems.push(format!("{process} exited before it was announced"));
+            }
+            TraceEvent::Call(call)
+                if call.thread != call.process && announced.get(&call.thread) != Some(&true) =>
+            {
+                problems.push(format!(
+                    "thread {} called before it was announced",
+                    call.thread
+                ));
+            }
+            _ => {}
+        }
+    }
+    let threads = announced.values().filter(|thread| **thread).count();
+    assert_eq!(
+        (threads, announced.len() - threads),
+        (count, count),
+        "{problems:?}"
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// The first process the trace saw: the one launched.
+fn events_first(events: &[uscope::profiler::RecordedEvent]) -> u32 {
+    events
+        .iter()
+        .find_map(|recorded| match &recorded.event {
+            uscope::syscalls::TraceEvent::Call(call) => Some(call.process),
+            _ => None,
+        })
+        .expect("a call")
+}
