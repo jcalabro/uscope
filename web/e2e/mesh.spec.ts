@@ -204,13 +204,13 @@ test("a live 2-D renderer draws a skeleton, names its joints, and opens a bone",
   const caption = board.locator(".drawing-caption");
   await expect(caption).toHaveText("7 bones · zoom 1.00");
 
-  // The hips are in the middle.
+  // The hips are in the middle. The canvas may be taller than its pane
+  // shows, so the hover scrolls the middle into view first.
   const box = await canvas.boundingBox();
   if (box === null) {
     throw new Error("the canvas is not shown");
   }
-  const middle: [number, number] = [box.x + box.width / 2, box.y + box.height / 2];
-  await page.mouse.move(...middle);
+  await canvas.hover({ position: { x: box.width / 2, y: box.height / 2 } });
   await expect(board.getByRole("tooltip")).toHaveText("hips: (0, 0)");
   await page.mouse.down();
   await page.mouse.up();

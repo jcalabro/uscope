@@ -220,7 +220,7 @@ Decisions, measurements, and surprises, newest last.
   instruction late. It now judges the site there. A clang build of
   `signal-steps` reproduces it natively: its caller signals itself as the
   last instruction of the line it returns into.
-- `just stress` then turned up nine flakes, none caused by this work, each
+- `just stress` then turned up ten flakes, none caused by this work, each
   now pinned by a test that failed first:
   - A capture rebuilt from chunks lost its tasks' labels, and inverted
     zones of equal span, which TSC conversion and clamping can make.
@@ -256,6 +256,12 @@ Decisions, measurements, and surprises, newest last.
   - The same strace comparison kept the padding after `-f`'s pid,
     which strace and uscope left-justify to five columns, so a 4-digit
     pid in one run and a 5-digit pid in the other differed by a space.
+  - A browser test hovered the middle of a live canvas by its measured
+    box. The canvas is taller than its pane shows, and scrolling it into
+    view only partly, depending on when it reached its full height, left
+    the middle under the output panel. It now hovers through the canvas
+    itself, which scrolls that point into view. Scrolling the pane first
+    made it fail every time before and pass after.
 - `just sim 600` then found an attach bug that predates this work. The
   thread listing saw only the leader, which then created a thread and
   exited alone, too soon to be seized. With nothing seized, attach said
