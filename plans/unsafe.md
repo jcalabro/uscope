@@ -1,0 +1,153 @@
+# Less Unsafe Code, Checked by Miri
+
+uscope denies unsafe code, but about seventeen files opt out. Most of
+them do so to make a system call that a safe wrapper could make, and the
+rest have no test that would notice undefined behavior. This plan does
+two things:
+
+1. Remove every unsafe call site that a safe wrapper or a small redesign
+   can replace, without new bugs or measurable slowdowns. What remains
+   lives in a few modules, each guarding one boundary.
+2. Run what remains under Miri, through `just miri`, in a loop that
+   takes seconds to a minute.
+
+Work happens on the `unsafe` branch, in the `../uscope-unsafe` worktree.
+
+## 1. Rules
+
+- **A safe wrapper beats our own unsafe block.** rustix 1.1.5 is already
+  in the graph (clap's `terminal_size` brings it), so a direct dependency
+  costs no compile time. nix stays where it already works.
+- **No redesign only to lower a count.** A site whose removal changes how
+  run control waits or stops stays, and says why.
+- **Each step is one commit**, so a regression bisects to it.
+- **Behavior first.** A step that could change what a debuggee or user
+  sees starts with a test that fails if it does.
+- **Measure hot paths.** The probe emit path and `Ring::drain` are
+  benchmarked before and after their steps.
+- Lifecycle and launch changes (steps 3, 4, 6) pass `just stress` and
+  `just sim 600` before merging.
+
+## 2. Inventory
+
+Counts are lines that open an unsafe block, impl, fn, or allow.
+
+| File | Sites | What | Plan |
+|---|---|---|---|
+| `src/backend/linux/tls/thread_db.rs` | 30 | libthread_db FFI and its callbacks | Keep. Miri tests for the callbacks (step 8). |
+| `sdk/rust-probes/src/probes.rs` | 17 | Ring allocation, raw record writes, `&*ring`, section walk, libc externs | Shrink to allocation and the section walk (step 7). |
+| `src/backend/linux/perf/sys.rs` | 16 | `perf_event_open`, ioctl, mmap, read, poll, sysconf, rdtsc | Safe read, poll, page size (step 2). Keep the rest. Miri test for `drain` (step 5). |
+| `src/timings/alloc.rs` | 12 | `GlobalAlloc`, mimalloc option | Keep. Miri runs its tests (step 1). |
+| `src/timings/tests.rs` | 10 | Tests driving the allocator | Keep; they are the Miri tests. |
+| `tests/support/memory_cap.rs` | 10 | Test allocator over mimalloc | Keep. Miri cannot run mimalloc. |
+| `src/backend/linux/native.rs` | 10 | `pre_exec`, sigmask ptrace, tgkill, pidfd, siginfo unions, waitpid, ptrace with a signal | pidfd and waitpid to rustix (step 2), `pre_exec` shared (step 3), siginfo from bytes (step 6), raw ptrace moved (step 3). |
+| `src/backend/linux/native_tracee.rs` | 9 | `pre_exec`, waitid, `perf_event_open` | rustix waitid (step 2), shared `pre_exec` (step 3), `perf::sys::open` (step 2). |
+| `sdk/rust/src/lib.rs` | 5 | WASM host imports | Keep. |
+| `src/main.rs` | 4 | `remove_var` for the flight recorder, global allocator | `env_remove` at spawn (step 4). |
+| `src/cli/config.rs` | 3 | `remove_var` for `USCOPE_CONFIG` | `env_remove` at spawn (step 4). |
+| `src/cli/syscalls.rs` | 2 | `localtime_r` | Keep. The alternatives are worse. |
+| `tests/support/mod.rs` | 2 | tgkill | Keep. Neither nix nor rustix wraps it. |
+| `src/backend/linux/syscalls/ptrace.rs` | 2 | `PTRACE_GETSIGINFO` as bytes, SIGURG handler | Move the request (step 3). Keep the handler (section 5). |
+| `src/backend/linux/syscalls/launch.rs` | 1 | `pre_exec` | Shared `pre_exec` (step 3). |
+| `src/backend/linux/syscalls/info.rs` | 1 | `PTRACE_GET_SYSCALL_INFO` as bytes | Move the request (step 3). |
+| `src/backend/linux/perf/mod.rs` | 1 | `pre_exec` | Shared `pre_exec` (step 3). |
+
+Afterwards, the unsafe code in uscope itself lives in:
+
+- `linux/sys.rs` (new): the one `pre_exec`, tgkill, and the raw ptrace
+  requests nix cannot make (real-time signals, signal masks, siginfo and
+  syscall info as bytes).
+- `linux/tls/thread_db.rs`: libthread_db.
+- `linux/perf/sys.rs`: `perf_event_open`, its ioctls, the ring mapping, rdtsc.
+- `timings/alloc.rs`: the counting allocator and mimalloc's option.
+- `cli/syscalls.rs`: `localtime_r`.
+- `syscalls/ptrace.rs`: the SIGURG handler.
+
+Plus the probe SDK, the WASM view SDK, and test support.
+
+## 3. Miri
+
+- Add `"miri"` to the toolchain's extensions in `flake.nix`. The nightly
+  is already pinned.
+- `just miri` runs an allowlist, never the suite: most tests launch
+  processes, and Miri runs 50–100× slower. The recipe names the uscope
+  test paths it runs, then the probe SDK's tests with `enabled`.
+- Concurrency tests get `-Zmiri-many-seeds`. Others run with one seed.
+- Miri's sysroot builds under `target/`, inside the hermetic shell, not
+  in the home directory.
+- Measure the cold and warm cost of each half. The SDK should take
+  seconds. If the uscope half takes minutes, `just miri` stays out of
+  `just` and runs before merging changes to the files above, as
+  `just stress` does.
+- Miri tests are small: one unsafe operation each (a wrap, a retire and
+  reuse, a callback), with few iterations.
+
+## 4. Steps
+
+Each step lists how we know it worked.
+
+- [ ] **1. Miri setup.** Flake extension, `just miri`, running the
+  existing `timings::tests::allocator` tests. *Done when* `just miri`
+  passes, and both its cold and warm times are recorded in section 6.
+- [ ] **2. Safe wrappers.** Add rustix with `process`, `param`, `event`
+  as needed. Replace `pidfd_open`, `pidfd_send_signal`, `waitpid` (raw
+  status via `WaitStatus::as_raw`, so real-time signals still work),
+  `waitid` with `__WALL` (`WaitIdOptions::from_bits_retain`), `read`,
+  `poll`, `sysconf`. `native_tracee` opens perf events through
+  `perf::sys::open`. *Done when* the focused run-control, signal, and
+  profiling tests pass, and the `wait_for` path still reports real-time
+  signal stops (an existing test, or a new one first).
+- [ ] **3. One `linux/sys.rs`.** One `pre_exec` helper, taking the
+  checks each caller needs (death signal, parent check, personality,
+  TRACEME, the gate pipe, the seccomp filter), with safe rustix calls
+  inside. The raw ptrace requests and tgkill move here. *Done when*
+  launch, attach, profiling launch, and syscall-trace launch tests pass,
+  and `just stress` passes.
+- [ ] **4. Environment.** First a test: the debuggee sees neither
+  `USCOPE_CONFIG` nor `USCOPE_FLIGHT_RECORDING`, under each way of
+  launching (debugger, profiler, syscall tracer). Then remove the
+  `remove_var` calls, and `env_remove` at each spawn. *Done when* that
+  test passes, and the flight recorder's stack-layout reason still holds
+  (the debuggee's environment matches a release build's).
+- [ ] **5. `Ring::drain` under Miri.** Let a ring be built over a heap
+  buffer as well as a mapping. Miri tests act as the kernel: records that
+  wrap, a full ring, an empty one. *Done when* `just miri` covers them, and
+  the profiler benchmark shows no change.
+- [ ] **6. siginfo from bytes.** `signal_metadata` decodes the sender
+  and fault address from the 128 bytes `PTRACE_GETSIGINFO` returns, as
+  `syscalls/ptrace.rs` already does, with no union reads. *Done when* the
+  signal and crash tests pass, including a fault address and a sender pid.
+- [ ] **7. Probe SDK.** Each thread keeps a `&'static` ring; reuse goes
+  through a safe in-process registry beside the ABI's `AtomicPtr` one;
+  records are written with relaxed atomic stores. Unsafe remains for
+  allocating a header with its records and for walking the sites section.
+  `cfg(miri)` stubs stand in for the section bounds, `pthread_atfork`, and
+  `atexit`. Miri tests: threads that emit, exit, and reuse rings, with
+  many seeds. *Done when* the probe recording tests pass, `just
+  probe-cost` shows no regression, and `just miri` covers the SDK.
+- [ ] **8. libthread_db callbacks under Miri.** Call `ps_pdread`,
+  `ps_pglobal_lookup`, and `ps_getpid` directly, with a boxed handle and a
+  fake `ProcessServices`. Check that no `&mut` path to the boxed handle
+  is live while a callback runs. *Done when* `just miri` covers them.
+- [ ] **9. Keep it there.** A lint step that fails when
+  `allow(unsafe_code)` appears outside the files listed in section 2.
+  `dev/` says where unsafe code may live and that `just miri` covers it.
+  *Done when* `just` passes and the check fails on a planted site.
+
+## 5. Not doing
+
+- **The SIGURG handler.** It breaks a blocking `waitpid`. Replacing it
+  changes how that thread waits; worth its own plan if ever.
+- **`localtime_r`.** Parsing TZif ourselves or printing UTC would replace
+  one well-understood call with more risk.
+- **The mimalloc option.** One line; any other route is unsafe too.
+- **Fuzz corpora under Miri.** Slow, and the parsers' crates run Miri
+  upstream.
+- **Debuggee fixtures.** Their unsafe code is what they test.
+
+## 6. Log
+
+Decisions, measurements, and surprises, newest last.
+
+- 2026-10-13: Plan written. `_rdtsc` is still unsafe on the pinned
+  nightly. rustix 1.1.5 is already a transitive dependency.
