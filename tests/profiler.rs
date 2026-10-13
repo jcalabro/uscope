@@ -201,6 +201,10 @@ fn fixture_chain(functions: &[String]) -> Option<bool> {
         "_start",
     ];
     let worker = ["worker", "start_thread", "__GI___clone3"];
+    // A sample in the worker itself, around its call of outer.
+    if names.first() == Some(&"worker") {
+        return Some(worker.starts_with(&names));
+    }
     let mut rest = &names[..];
     for prefix in ["leaf", "middle"] {
         if rest.first() == Some(&prefix) {
@@ -219,6 +223,41 @@ fn fixture_chain(functions: &[String]) -> Option<bool> {
     }
     let descents = rest.iter().take_while(|name| **name == "descend").count();
     Some(descents <= 5 && main.starts_with(&rest[descents..]))
+}
+
+/// A sample can land in the worker's own instructions, around its call of
+/// outer, as one can in main's. A stress run recorded this one.
+#[test]
+fn a_sample_in_the_worker_itself_is_one_of_the_fixtures_chains() {
+    let chain = |names: &[&str]| {
+        fixture_chain(
+            &names
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        chain(&["worker", "start_thread", "__GI___clone3"]),
+        Some(true)
+    );
+    assert_eq!(
+        chain(&[
+            "leaf",
+            "middle",
+            "outer",
+            "worker",
+            "start_thread",
+            "__GI___clone3"
+        ]),
+        Some(true)
+    );
+    // The worker calls only outer.
+    assert_eq!(
+        chain(&["leaf", "worker", "start_thread", "__GI___clone3"]),
+        Some(false)
+    );
+    assert_eq!(chain(&["worker", "main"]), Some(false));
 }
 
 #[test]
