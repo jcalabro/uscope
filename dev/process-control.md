@@ -62,6 +62,13 @@ Memory reads shown to users must contain the program byte, not the installed
 trap byte. When several threads meet one site, repair them one at a time while
 their siblings remain stopped.
 
+A vfork child, and anything `system` or `posix_spawn` starts, shares the
+parent's memory until it execs or exits. Every installed trap is lifted for
+that window, from the parent's `VFORK` event to its `VFORK_DONE`, and the
+parent's siblings stay stopped meanwhile. The child is released only after the
+traps are lifted. A pause requested during the window completes once the child
+execs or exits, since the vforking thread cannot stop until then.
+
 ## Testing control changes
 
 Cover deterministic reducers or classifiers directly when they contain real
