@@ -773,6 +773,18 @@ impl Processor {
         std::mem::replace(&mut self.triggered, false)
     }
 
+    /// Says that process `pid` has exited, once every record of it has
+    /// been processed. Each of its threads came back to its CPU to exit,
+    /// so one still off it came back in records a full ring dropped, at a
+    /// time no interval can say.
+    pub fn exited(&mut self, pid: u32) {
+        if let Some(process) = self.processes.get(&pid) {
+            for tid in &process.threads {
+                self.switched_out.remove(tid);
+            }
+        }
+    }
+
     /// Records that every event was off from `start` to `end`, and why. A
     /// thread that left its CPU before a gap may have come back unseen in
     /// it, so its interval ends where the gap begins.
@@ -1163,4 +1175,78 @@ pub fn thread_cpu() -> std::time::Duration {
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A full ring drops whatever does not fit, so a thread can come back
+    /// to its CPU and exit unseen. Once its process has exited, the thread
+    /// must have, at a time nothing recorded: no interval says when. A
+    /// thread of a process that lives on is still off its CPU at the end.
+    #[test]
+    fn a_thread_whose_return_was_dropped_has_no_interval() {
+        let mut processor = Processor::new(DebugFileSearch::default(), 64);
+        let (exited, napper, living, sleeper) = (100, 101, 200, 201);
+        for record in [
+            decode::Record::Fork {
+                pid: exited,
+                ppid: 1,
+                tid: exited,
+                time: 1_000,
+            },
+            decode::Record::Fork {
+                pid: exited,
+                ppid: exited,
+                tid: napper,
+                time: 2_000,
+            },
+            decode::Record::Fork {
+                pid: living,
+                ppid: 1,
+                tid: living,
+                time: 2_000,
+            },
+            decode::Record::Fork {
+                pid: living,
+                ppid: living,
+                tid: sleeper,
+                time: 2_000,
+            },
+            decode::Record::Switch {
+                pid: exited,
+                tid: napper,
+                out: true,
+                preempted: false,
+                time: 3_000,
+            },
+            decode::Record::Switch {
+                pid: living,
+                tid: sleeper,
+                out: true,
+                preempted: false,
+                time: 4_000,
+            },
+            // The napper's return and exit were dropped; the leader's
+            // exit was not.
+            decode::Record::Exit {
+                pid: exited,
+                tid: exited,
+                time: 9_000,
+            },
+        ] {
+            processor.process(record);
+        }
+        processor.exited(exited);
+        let profile = super::super::Profile {
+            capture: processor.finish(),
+        };
+        let intervals: Vec<_> = profile
+            .off_cpu()
+            .iter()
+            .map(|interval| (interval.tid, interval.time, interval.duration))
+            .collect();
+        assert_eq!(intervals, [(sleeper, 4_000, 5_000)]);
+    }
 }

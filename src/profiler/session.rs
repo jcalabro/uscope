@@ -143,6 +143,7 @@ pub fn record_watched(
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
         .map_err(RecordError::Start)?;
     record!("record: the program ended: {status}");
+    processor.exited(pid);
     let mut capture = processor.finish();
     if let Some(syscalls) = syscalls {
         capture = syscalls.merge(&capture).map_err(RecordError::Syscalls)?;
@@ -207,6 +208,9 @@ pub fn record_attached(
         },
     );
     record!("record: detached from {pid}, stopped {stopped}");
+    if !stopped {
+        processor.exited(pid);
+    }
     Ok(Attachment {
         profile: Profile {
             capture: processor.finish(),

@@ -533,9 +533,17 @@ fn a_threads_time_off_its_cpu_is_each_sleep_and_each_preemption() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let recording = record(command, &RecordOptions::default()).expect("record");
+    // Small samples, so that a ring holds the whole run though uscope,
+    // under load, reads none of it: a full ring drops the switches that
+    // say when a thread came back.
+    let options = RecordOptions {
+        stack: StackCopy::Bytes(SMALL_STACK_COPY),
+        ..RecordOptions::default()
+    };
+    let recording = record(command, &options).expect("record");
     assert!(recording.status.success(), "{}", recording.status);
     let profile = &recording.profile;
+    assert_eq!(profile.lost_samples(), 0);
     let named = |name: &str| -> Vec<u32> {
         profile
             .threads()

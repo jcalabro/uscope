@@ -220,7 +220,7 @@ Decisions, measurements, and surprises, newest last.
   instruction late. It now judges the site there. A clang build of
   `signal-steps` reproduces it natively: its caller signals itself as the
   last instruction of the line it returns into.
-- `just stress` then turned up seven flakes, none caused by this work, each
+- `just stress` then turned up eight flakes, none caused by this work, each
   now pinned by a test that failed first:
   - A capture rebuilt from chunks lost its tasks' labels, and inverted
     zones of equal span, which TSC conversion and clamping can make.
@@ -245,6 +245,14 @@ Decisions, measurements, and surprises, newest last.
     it, which the server refuses. It now waits until the program runs.
     A 300 ms delay in the server's launch, removed afterward, made it
     fail every time before and pass after.
+  - An off-CPU test found 4 of its sleeper's 5 naps. A full perf ring
+    drops whatever does not fit: usually the large samples, but when
+    packed tight, also the switches and exits at the end of the run. The
+    recorder then ran each thread's last interval to the recording's
+    end. Once a recorded program has exited, a thread still off its CPU
+    came back unseen, so its interval is now dropped, not invented; a
+    processor test pins that. The test copies small stacks, so a ring
+    holds its whole run unread, and requires that nothing was lost.
 - `just sim 600` then found an attach bug that predates this work. The
   thread listing saw only the leader, which then created a thread and
   exited alone, too soon to be seized. With nothing seized, attach said
