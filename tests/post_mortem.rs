@@ -1249,6 +1249,32 @@ async fn go_rust_and_zig_cores_present_frames_and_locals() {
     }
 }
 
+/// lld packs a small program's segments so that its code shares the
+/// header's first file page, and each is mapped from file offset zero. The
+/// mappings are still one image, loaded once at the address of the first.
+#[tokio::test]
+async fn an_image_mapped_from_offset_zero_more_than_once_is_one_module() {
+    let core_name = "crash-rust-o0.core";
+    let scenario = open_core(core_name);
+    let executable = Scenario::fixture("crash-rust-o0");
+    let info = core_info(&scenario);
+    let recorded = file_images(&info)
+        .filter(|module| *module.recorded_path == executable)
+        .collect::<Vec<_>>();
+    let [module] = recorded[..] else {
+        panic!("{core_name}: {:#?}", info.modules);
+    };
+    assert!(
+        matches!(
+            &module.state,
+            CoreModuleState::Loaded { module: loaded, identity }
+                if identity.is_verified() && loaded.module.load_bias == module.start.get()
+        ),
+        "{core_name}: {module:#?}"
+    );
+    scenario.shutdown().await;
+}
+
 #[tokio::test]
 async fn core_sessions_coexist_with_each_other_and_a_live_session() {
     let first = open_core("crash-gcc-o0-segv.core");

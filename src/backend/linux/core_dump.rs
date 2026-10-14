@@ -665,6 +665,7 @@ impl ImageMappings {
 /// Groups `NT_FILE` mappings into image instances. A mapping at file offset
 /// zero starts an instance; later mappings of the same path join the nearest
 /// instance below them. Mappings with no such instance are not images.
+/// Verification against a file can join instances that its extent covers.
 pub(super) fn image_mappings(files: &[CoreFileMapping]) -> Vec<ImageMappings> {
     let mut sorted = files.to_vec();
     sorted.sort_by_key(|mapping| mapping.start);
@@ -809,6 +810,8 @@ pub(super) enum ImageEvidence {
 pub(super) enum ImageVerification {
     /// The file's segments are placed at the dumped image by `load_bias`.
     Placed {
+        /// The recorded image with every mapping the file's extent covers.
+        image: ImageMappings,
         load_bias: u64,
         evidence: ImageEvidence,
         /// Dump-time addresses of the file's read-only, file-backed bytes.
@@ -830,7 +833,10 @@ struct FileSegment {
 
 /// Places `file` at the dumped image and checks that it is the same image.
 ///
-/// Placement must agree with every recorded mapping. Identity is then proven
+/// The image grows to every later mapping of its file within the file's
+/// extent: lld packs a small file's segments into its first page, so several
+/// of them map from file offset zero. Placement must agree with every
+/// recorded mapping. Identity is then proven
 /// by the build-id note when the dump saved it, and otherwise by comparing
 /// every saved byte of the file's read-only segments. Writable segments are
 /// never compared because the process legitimately modified them.
@@ -888,8 +894,10 @@ pub(super) fn verify_image(
             "no loadable segment of the file is placed at the dumped image".to_owned(),
         ));
     };
+    let image = &whole_image(core, image, &segments, load_bias);
     let verified = |evidence| {
         Ok(ImageVerification::Placed {
+            image: image.clone(),
             load_bias,
             evidence,
             read_only: read_only_ranges(&segments, load_bias),
@@ -918,6 +926,43 @@ pub(super) fn verify_image(
         Ok(compared) => ImageEvidence::SavedContent { compared },
     };
     verified(evidence)
+}
+
+/// `image` and the later mappings of its path that lie within the extent of
+/// the file's segments at `load_bias`.
+fn whole_image(
+    core: &CoreDump,
+    image: &ImageMappings,
+    segments: &[FileSegment],
+    load_bias: u64,
+) -> ImageMappings {
+    let extent_end = segments
+        .iter()
+        .filter_map(|segment| {
+            load_bias
+                .checked_add(segment.address)?
+                .checked_add(segment.memory_size)?
+                .checked_next_multiple_of(PAGE_SIZE)
+        })
+        .max()
+        .unwrap_or(0);
+    let mut mappings = image.mappings.clone();
+    mappings.extend(
+        core.files
+            .iter()
+            .filter(|mapping| {
+                image.start() < mapping.start
+                    && mapping.end <= extent_end
+                    && strip_deleted(&mapping.path) == image.path
+                    && !image.mappings.contains(mapping)
+            })
+            .cloned(),
+    );
+    mappings.sort_by_key(|mapping| mapping.start);
+    ImageMappings {
+        path: image.path.clone(),
+        mappings,
+    }
 }
 
 /// Writable segments are excluded: the process may have modified them, and a
@@ -1220,8 +1265,11 @@ pub(super) fn fuzz(data: &[u8]) {
     for image in &images {
         let _ = saved_header(&core, image);
         let _ = recorded_build_id(&core, image);
-        if let Ok(ImageVerification::Placed { read_only, .. }) = verify_image(&core, image, &data) {
-            backings.extend(FileBacking::for_image(image, &data, &read_only));
+        if let Ok(ImageVerification::Placed {
+            image, read_only, ..
+        }) = verify_image(&core, image, &data)
+        {
+            backings.extend(FileBacking::for_image(&image, &data, &read_only));
         }
     }
     let addresses = core
