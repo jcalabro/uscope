@@ -1,9 +1,11 @@
-//! What the simulated kernel refuses to guess: requests and system calls
-//! no conformance probe pins fail the run as a model gap.
+//! Direct checks of the simulated kernel: what it refuses to guess, as
+//! requests and system calls no conformance probe pins fail the run as a
+//! model gap, and contracts the rest of the simulation relies on.
 
 use std::sync::Arc;
 
-use super::{Kernel, Tgid, Tid};
+use super::signals::SIGTRAP;
+use super::{Kernel, State, StopKind, Tgid, Tid};
 use crate::sim::corpus::Corpus;
 use crate::sim::cpu::{RDI, RSI};
 
@@ -115,4 +117,39 @@ fn a_wait_that_cannot_store_the_status_is_a_gap() {
     assert!(!run_until_report(&mut kernel, leader));
     let gap = kernel.gap.expect("a gap").0;
     assert!(gap.contains("wait4 storing"), "{gap}");
+}
+
+/// A thread that executed a trap is in the kernel, not its program, until
+/// it takes the SIGTRAP the trap queued, which it does before it runs
+/// another instruction (K-TRAP-2). A sample taken between the two would
+/// see a place Linux never samples.
+#[test]
+fn a_thread_that_raised_a_trap_is_not_in_user_code() {
+    let (mut kernel, leader) = launch("straight", &["1"]);
+    let (registers, _) = kernel
+        .get_registers_and_call(leader)
+        .expect("registers at the first stop");
+    let entry = registers.rip;
+    let word = kernel.peek(leader, entry).expect("read code");
+    kernel
+        .poke(leader, entry, (word & !0xff) | 0xcc)
+        .expect("plant a trap");
+    kernel.resume(leader, None, false).expect("resume");
+    assert!(kernel.threads[&leader].in_user_code());
+    kernel.run(leader, 16);
+    let thread = &kernel.threads[&leader];
+    assert_eq!(thread.state, State::Running);
+    assert!(thread.pending.contains(SIGTRAP));
+    assert!(!thread.in_user_code());
+
+    kernel.run(leader, 16);
+    let thread = &kernel.threads[&leader];
+    assert!(matches!(
+        thread.state,
+        State::Stopped {
+            kind: StopKind::Signal(SIGTRAP),
+            ..
+        }
+    ));
+    assert_eq!(thread.registers.rip, entry + 1);
 }

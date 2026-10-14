@@ -1585,9 +1585,7 @@ fn seized_at_second_fork(record: &mut Record<'_>) -> Tid {
 /// child it reports is let go, and the leader reaps it and exits.
 fn finish_second_fork(record: &mut Record<'_>, leader: Tid) {
     let second = record.forked(leader);
-    record.wait(second);
-    record.signal(second);
-    record.detach(second, None);
+    release_second_child(record, second);
     record.resume(leader, None);
     record.wait(leader);
     record.signal(leader);
@@ -1596,4 +1594,101 @@ fn finish_second_fork(record: &mut Record<'_>, leader: Tid) {
     record.event_message(leader);
     record.resume(leader, None);
     record.wait(leader);
+}
+
+/// Takes the child a seized leader of `fork` made in its second fork out
+/// of its first stop, and lets it go.
+fn release_second_child(record: &mut Record<'_>, second: Tid) {
+    record.wait(second);
+    record.signal(second);
+    record.detach(second, None);
+}
+
+/// K-TRAP-2 and K-INT-1: a single step from a fork event with an interrupt
+/// pending stops first for the interrupt, the call returned, and the
+/// step's `TRAP_BRKPT` waits queued. Resumed, even by another single step,
+/// the thread takes the trap before it runs an instruction, and the next
+/// step traps after one. Detached at the interrupt's stop instead, the
+/// thread takes the trap untraced, and it kills the program.
+#[test]
+fn k_trap_2_an_interrupt_stops_a_thread_ahead_of_its_trap() {
+    for detach in [false, true] {
+        dual_run_then_exit("fork", &["2", "0"], |record| {
+            let leader = seized_at_second_fork(record);
+            record.resume(leader, None);
+            let second = record.forked(leader);
+            record.interrupt(leader);
+            record.step(leader);
+            record.wait(leader);
+            record.stop(leader);
+            let returned = record
+                .tracee
+                .registers(leader)
+                .map(|(registers, _)| registers.general[RAX] == u64::from(second.cast_unsigned()));
+            record.note(format!("fork returned child 2: {returned:?}"));
+            if !detach {
+                for _ in 0..2 {
+                    record.step(leader);
+                    record.wait(leader);
+                    record.stop(leader);
+                }
+            }
+
+            release_second_child(record, second);
+            record.detach(leader, None);
+        });
+    }
+}
+
+/// K-TRAP-2 and K-SYS-7: a single step from a fork's entry with an
+/// interrupt pending makes the fork fail to restart; the interrupt stops
+/// the thread ahead of the step's trap, which it takes when continued,
+/// and then it makes the call again.
+#[test]
+fn k_trap_2_a_step_into_a_restarting_fork_meets_the_interrupt_first() {
+    dual_run("fork", &["2", "0"], |record| {
+        let leader = seized_at_second_fork(record);
+        record.interrupt(leader);
+        record.step(leader);
+        record.wait(leader);
+        record.stop(leader);
+        record.system_call(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.system_call(leader);
+        record.resume(leader, None);
+        finish_second_fork(record, leader);
+    });
+}
+
+/// K-TRAP-2: a trap goes before a SIGSTOP already pending. A single step
+/// from a fork event with the tracer's SIGSTOP queued stops for the step's
+/// `TRAP_BRKPT`, and then for SIGSTOP.
+#[test]
+fn k_trap_2_a_trap_goes_before_a_pending_stop() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        let result = record.tracee.request_stop(leader);
+        record.result("tgkill SIGSTOP", result);
+        record.step(leader);
+        record.wait(leader);
+        record.stop(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.detach(child, None);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
 }

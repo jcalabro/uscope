@@ -291,6 +291,9 @@ marks! {
     /// again.
     CallRestarted,
 
+    /// An interrupt stopped a thread ahead of the trap it raised.
+    InterruptAheadOfTrap,
+
     /// A thread or process a seized thread created started in an
     /// interrupt's stop.
     SeizedChildStarted,

@@ -61,6 +61,13 @@ impl Pending {
         }
     }
 
+    /// Whether a signal an instruction raised is pending: only a trap or
+    /// fault queues a synchronous one (K-TRAP-2).
+    #[must_use]
+    pub fn raised(&self) -> bool {
+        SYNCHRONOUS.iter().any(|&signal| self.contains(signal))
+    }
+
     /// Whether no signal is pending.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -371,7 +378,11 @@ impl Kernel {
                 return false;
             };
 
-            if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal) {
+            // Synchronous signals are only ever those an instruction raised
+            // (K-TRAP-2).
+            if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal)
+                && !SYNCHRONOUS.contains(&info.signal)
+            {
                 self.gap(format!("delivering pending {}", name(info.signal)));
                 return true;
             }

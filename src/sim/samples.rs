@@ -11,7 +11,7 @@
 use super::choices::{Choices, Stream};
 use super::corpus::Variant;
 use super::kernel::shadow::Shadow;
-use super::kernel::{Kernel, State, Tid};
+use super::kernel::{Kernel, Tid};
 use super::marks::{Mark, Marks};
 use super::report::Failure;
 use crate::backend::perf::decode;
@@ -74,9 +74,9 @@ impl Sampler {
             return Ok(None);
         };
 
-        // A thread inside a system call is in the kernel, which the
-        // events exclude.
-        if thread.state != State::Running || thread.returning.is_some() || self.rate == 0 {
+        // A thread inside a system call, or on its way to take a signal it
+        // raised, is in the kernel, which the events exclude.
+        if !thread.in_user_code() || self.rate == 0 {
             return Ok(None);
         }
 

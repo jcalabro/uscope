@@ -106,6 +106,10 @@ impl Machine {
 
                     lines.push(format!("{tid} was taken out of its stop"));
                 }
+                Happening::InterruptAheadOfTrap { tid } => {
+                    self.marks.borrow_mut().hit(Mark::InterruptAheadOfTrap);
+                    lines.push(format!("an interrupt stops {tid} ahead of its trap"));
+                }
                 Happening::Restarting { tid } => {
                     self.marks.borrow_mut().hit(Mark::CallRestarted);
                     lines.push(format!("{tid}'s call fails, to be made again"));

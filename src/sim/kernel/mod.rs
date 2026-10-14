@@ -508,6 +508,19 @@ impl Thread {
         }
     }
 
+    /// Whether a running thread is in its program's code, rather than in
+    /// the kernel: inside a system call, returning from one to restart it
+    /// (K-SYS-7), or on its way to take a signal its last instruction
+    /// raised (K-TRAP-2).
+    #[must_use]
+    pub fn in_user_code(&self) -> bool {
+        self.state == State::Running
+            && self.returning.is_none()
+            && !self.entered
+            && !self.restarting
+            && !self.pending.raised()
+    }
+
     /// Whether running the thread can change anything.
     #[must_use]
     pub const fn can_run(&self) -> bool {
@@ -630,6 +643,10 @@ pub enum Happening {
     /// A thread's fork or clone failed for a signal pending, to be made
     /// again (K-SYS-7).
     Restarting { tid: Tid },
+
+    /// An interrupt stopped a thread whose trap or fault is still queued
+    /// (K-TRAP-2).
+    InterruptAheadOfTrap { tid: Tid },
 
     /// A group leader exited while other threads ran on.
     LeaderExitedAlone { tid: Tid },
@@ -1433,8 +1450,8 @@ impl Kernel {
         }
     }
 
-    /// Stops a thread for the exception the instruction at `address`
-    /// raised.
+    /// Raises the signal for the exception the instruction at `address`
+    /// raised (K-TRAP-2).
     fn take_exception(&mut self, tid: Tid, address: u64, outcome: Outcome) -> Executed {
         match outcome {
             Outcome::Breakpoint => {
@@ -1451,7 +1468,7 @@ impl Kernel {
                     ..SigInfo::default()
                 };
 
-                self.signal_stop(tid, info);
+                self.raise(tid, info);
             }
             Outcome::Fault(fault) => {
                 let info = SigInfo {
@@ -1461,7 +1478,7 @@ impl Kernel {
                     address: fault.address.unwrap_or(0),
                 };
 
-                self.signal_stop(tid, info);
+                self.raise(tid, info);
             }
             Outcome::Unsupported(instruction) => {
                 self.gap(format!("instruction {instruction}"));
@@ -1601,10 +1618,10 @@ impl Kernel {
         }
     }
 
-    /// Stops a thread for `SIGTRAP` with `code` at its current `rip`.
+    /// Raises `SIGTRAP` with `code` at a thread's current `rip`.
     fn trap(&mut self, tid: Tid, code: i32) {
         let rip = self.threads[&tid].registers.rip;
-        self.signal_stop(
+        self.raise(
             tid,
             SigInfo {
                 signal: SIGTRAP,
@@ -1613,6 +1630,19 @@ impl Kernel {
                 address: rip,
             },
         );
+    }
+
+    /// Queues the signal a trap or fault raised for the thread that raised
+    /// it, which takes it as it takes any pending signal, before it runs
+    /// another instruction: after an interrupt waiting for it, and ahead
+    /// of any signal that is not synchronous (K-TRAP-2). The thread runs no
+    /// further in this burst.
+    fn raise(&mut self, tid: Tid, info: SigInfo) {
+        self.threads
+            .get_mut(&tid)
+            .expect("the raising thread exists")
+            .pending
+            .insert(info);
     }
 
     /// Enters a signal-delivery-stop for `info`, or, for an untraced
@@ -1691,7 +1721,8 @@ impl Kernel {
     }
 
     /// Stops a running thread for the interrupt waiting for it, with
-    /// `PTRACE_EVENT_STOP`, before it takes a signal or runs (K-INT-1).
+    /// `PTRACE_EVENT_STOP`, before it takes a signal, one a trap raised
+    /// included, or runs (K-INT-1, K-TRAP-2).
     /// Returns whether it stopped.
     fn stop_for_interrupt(&mut self, tid: Tid) -> bool {
         let thread = self.threads.get_mut(&tid).expect("running thread exists");
@@ -1705,11 +1736,17 @@ impl Kernel {
             return false;
         }
 
+        let ahead = thread.pending.raised();
         thread.enter_stop(
             StopKind::Event(libc::PTRACE_EVENT_STOP, 0),
             SigInfo::event(tid, libc::PTRACE_EVENT_STOP),
             WaitStatus::Event(tid, libc::PTRACE_EVENT_STOP),
         );
+        if ahead {
+            self.happenings
+                .push(Happening::InterruptAheadOfTrap { tid });
+        }
+
         true
     }
 
