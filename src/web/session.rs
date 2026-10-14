@@ -1833,7 +1833,7 @@ mod tests {
             &writes,
             &settings,
         );
-        let published = receiver.borrow();
+        let published = State::clone(&receiver.borrow());
         assert_eq!(published.revision, 2, "the pump's state is published");
         assert_eq!((published.writes, published.settings), (2, 2));
     }
