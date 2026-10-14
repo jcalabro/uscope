@@ -17,6 +17,8 @@ use crate::FloatValue;
 
 /// The widest integer type the language names.
 pub const MAX_WIDTH: u8 = 128;
+// A mask shifts a `u128` by its bits less the width.
+const _: () = assert!(MAX_WIDTH as u32 <= u128::BITS);
 
 /// Why an operation on numbers has no result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

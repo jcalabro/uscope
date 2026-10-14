@@ -103,6 +103,52 @@ impl CallTree {
     pub const fn is_empty(&self) -> bool {
         self.key.is_empty()
     }
+
+    /// Panics if the tree is not laid out depth first, each node's subtree
+    /// ending inside its caller's, with each total its own weight and its
+    /// children's.
+    fn check_invariants(&self) {
+        let mut children = vec![0_u64; self.len()];
+        let mut roots = 0_u64;
+        for position in 0..self.len() {
+            let (parent, end) = (self.parent[position], self.end[position] as usize);
+            debug_assert!(
+                position < end && end <= self.len(),
+                "node {position} ends at {end}, outside the {} nodes",
+                self.len()
+            );
+            if parent == NONE {
+                debug_assert_eq!(self.depth[position], 0, "root {position} is not at depth 0");
+                roots += self.total[position];
+                continue;
+            }
+            let caller = parent as usize;
+            debug_assert!(
+                caller < position && end <= self.end[caller] as usize,
+                "node {position}, ending at {end}, lies outside its caller {caller}'s subtree"
+            );
+            debug_assert_eq!(
+                self.depth[position],
+                self.depth[caller] + 1,
+                "node {position} is not one deeper than its caller {caller}"
+            );
+            children[caller] += self.total[position];
+        }
+        for (position, ((&total, &own), &children)) in
+            self.total.iter().zip(&self.own).zip(&children).enumerate()
+        {
+            debug_assert_eq!(
+                total,
+                own + children,
+                "node {position}'s total is not its own weight and its children's"
+            );
+        }
+        debug_assert!(
+            roots <= self.weight,
+            "the roots total {roots}, more than the {} the query kept",
+            self.weight
+        );
+    }
 }
 
 /// What one key costs under a query.
@@ -532,6 +578,9 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
             *caller_end = (*caller_end).max(end);
         }
     }
+    if cfg!(debug_assertions) {
+        tree.check_invariants();
+    }
     tree
 }
 
@@ -581,6 +630,15 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
             total: total[key],
         })
         .collect();
+    for cost in &costs {
+        debug_assert!(
+            cost.own <= cost.total && cost.total <= kept,
+            "key {} costs {} own and {} total, of {kept} kept",
+            cost.key,
+            cost.own,
+            cost.total
+        );
+    }
     costs.sort_by(|a, b| (b.own, b.total, a.key).cmp(&(a.own, a.total, b.key)));
     Costs {
         rows: costs,

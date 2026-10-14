@@ -182,6 +182,7 @@ pub fn collect_frames<P: CallerProvider, F>(
     mut make_frame: impl FnMut(u32, &FrameContext, &P) -> F,
     max_frames: usize,
 ) -> (Vec<F>, UnwindTermination) {
+    debug_assert!(max_frames > 0, "a stack limited to no frames");
     let mut frames = Vec::new();
     let mut visited = HashSet::new();
     let mut current = initial;
@@ -201,6 +202,14 @@ pub fn collect_frames<P: CallerProvider, F>(
             CallerResult::Finished(termination) => break termination,
         }
     };
+    // No frame state repeats in a stack.
+    debug_assert_eq!(
+        visited.len(),
+        frames.len(),
+        "{} frames came from {} distinct frame states",
+        frames.len(),
+        visited.len()
+    );
     (frames, termination)
 }
 

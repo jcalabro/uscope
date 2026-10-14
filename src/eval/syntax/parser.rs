@@ -14,6 +14,10 @@ pub const MAX_DEPTH: usize = 64;
 
 /// The most nodes one reading may hold.
 pub const MAX_NODES: usize = 1024;
+// A node's identifier is a `u32`.
+const _: () = assert!(MAX_NODES < u32::MAX as usize);
+// The casts a reading chooses are a bitmask over its ambiguities.
+const _: () = assert!(MAX_AMBIGUITIES < usize::BITS as usize);
 
 /// Words that are never names unless quoted.
 pub const RESERVED: [&str; 8] = [

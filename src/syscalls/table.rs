@@ -12,6 +12,50 @@ mod entries {
     include!("entries.gen.rs");
 }
 
+// Every table is searched by number, which needs each in ascending order.
+const _: () = {
+    assert!(
+        ascending(generated::X86_64),
+        "the x86-64 call table is out of order"
+    );
+    assert!(
+        ascending(generated::X86_32),
+        "the x86-32 call table is out of order"
+    );
+    assert!(
+        ascending(generated::X32),
+        "the x32 call table is out of order"
+    );
+    assert!(
+        ascending(entries::X86_64),
+        "the x86-64 entry table is out of order"
+    );
+    assert!(
+        ascending(entries::X32),
+        "the x32 entry table is out of order"
+    );
+    let mut index = 1;
+    while index < entries::X86_32.len() {
+        assert!(
+            entries::X86_32[index - 1].0 < entries::X86_32[index].0,
+            "the x86-32 entry table is out of order"
+        );
+        index += 1;
+    }
+};
+
+/// Whether a table's numbers strictly ascend.
+const fn ascending(table: &[(u32, &str)]) -> bool {
+    let mut index = 1;
+    while index < table.len() {
+        if table[index - 1].0 >= table[index].0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// The kernel function `id` enters through, with its ABI's prefix.
 pub(super) fn kernel_function(id: SyscallId) -> Option<String> {
     let find = |table: &[(u32, &'static str)]| {

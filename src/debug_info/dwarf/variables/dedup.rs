@@ -275,6 +275,13 @@ impl BuiltTypes {
             .collect::<Vec<_>>();
         self.entries = Vec::with_capacity(remap.retained);
         self.entries.extend(entries.into_iter().flatten());
+        // Identifiers past the types begin at the retained count.
+        debug_assert_eq!(
+            self.entries.len(),
+            remap.retained,
+            "deduplication keeps one type per class, of {} classes",
+            remap.retained
+        );
         self.dynamic_record_layouts = std::mem::take(&mut self.dynamic_record_layouts)
             .into_iter()
             .map(|(mut key, layout)| {
@@ -518,6 +525,12 @@ impl Members {
     /// Records the members that moved.
     fn split(&mut self, class: usize, groups: &[u32], classes: &mut [u32], moved: &mut Vec<u32>) {
         let range = self.ranges[class].clone();
+        // The members are zipped with their groups below.
+        debug_assert_eq!(
+            groups.len(),
+            range.len(),
+            "class {class} splits into groups for a different number of members"
+        );
         let count = groups
             .iter()
             .copied()

@@ -1386,6 +1386,7 @@ fn bind_clause<S: Scope>(
     clause: &Clause,
     scope: &mut ViewScope<'_, S>,
 ) -> Result<BoundClause<S::Step>, Rejection> {
+    let before = scope.variables.len();
     let (generator, ty) = match &clause.generator {
         Generator::Range(length) => (
             BoundGenerator::Range(bind_integer(length, scope)?),
@@ -1459,7 +1460,14 @@ fn bind_clause<S: Scope>(
             }
         });
     }
-    Ok(BoundClause { generator, items })
+    let clause = BoundClause { generator, items };
+    // The scanner steps between clauses' values by this width.
+    debug_assert_eq!(
+        scope.variables.len() - before,
+        clause.width(),
+        "a clause puts other than its width of variables in scope"
+    );
+    Ok(clause)
 }
 
 /// A linked structure's first node: a pointer, whose type every node has.

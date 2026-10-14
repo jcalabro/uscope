@@ -482,7 +482,14 @@ pub(super) fn load_variable_info<'data>(
         .enumerate()
         .map(|(index, entry)| {
             let description = match entry {
-                TypeEntry::Resolved(info) => return TypeNode::Resolved(info),
+                TypeEntry::Resolved(info) => {
+                    debug_assert_eq!(
+                        info.reference.id.index(),
+                        index,
+                        "the type at {index} names another position as its own"
+                    );
+                    return TypeNode::Resolved(info);
+                }
                 TypeEntry::Malformed(description) => description,
                 TypeEntry::Building => "type graph did not finish building".into(),
             };

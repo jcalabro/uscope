@@ -173,6 +173,7 @@ impl Marks {
     }
 
     pub(super) fn split(&self) -> Self {
+        debug_assert!(self.own.is_empty(), "only a frozen set splits");
         Self {
             base: Arc::clone(&self.base),
             own: Bits::default(),

@@ -1218,6 +1218,23 @@ fn load_image(
         runtime_function_table = unusable_table(&error);
         go_table = None;
     }
+    // Function and code instance identifiers index their tables.
+    for (index, function) in function_metadata.functions.iter().enumerate() {
+        debug_assert_eq!(
+            function.id.index(),
+            index,
+            "function {:?} is not at its identifier's position",
+            function.id
+        );
+    }
+    for (index, instance) in function_metadata.code_instances.iter().enumerate() {
+        debug_assert_eq!(
+            instance.id.index(),
+            index,
+            "code instance {:?} is not at its identifier's position",
+            instance.id
+        );
+    }
 
     drop(phase);
     let phase = crate::span!("prologues");
