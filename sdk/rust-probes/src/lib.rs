@@ -220,7 +220,10 @@ macro_rules! frame {
         $crate::frame!("frame")
     };
     ($name:literal) => {
-        $crate::__event($crate::__site!($crate::abi::SITE_FRAME, $name), $crate::abi::FRAME)
+        $crate::__event(
+            $crate::__site!($crate::abi::SITE_FRAME, $name),
+            $crate::abi::FRAME,
+        )
     };
 }
 
@@ -310,7 +313,10 @@ macro_rules! label {
 #[macro_export]
 macro_rules! trigger {
     ($why:literal) => {
-        $crate::__event($crate::__site!($crate::abi::SITE_TRIGGER, $why), $crate::abi::TRIGGER)
+        $crate::__event(
+            $crate::__site!($crate::abi::SITE_TRIGGER, $why),
+            $crate::abi::TRIGGER,
+        )
     };
 }
 

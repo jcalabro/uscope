@@ -373,10 +373,15 @@ in their own target, `tests/miri.rs`, and reach the code through
 `uscope::unsafe_parts`. When you add or change unsafe code that Miri can
 reach, test it there. The same tests run natively with the rest of the suite.
 
+`just miri` also runs the Rust probe SDK's own tests, in
+`sdk/rust-probes/src/probes/tests.rs`. They play uscope's part: they read the
+rings that threads write and free the rings that exiting threads leave.
+
 A test of their own keeps the loop short: Miri checks only that file, not the
-whole crate, so a warm run takes about two seconds. Tests whose names contain
-`concurrent` run again under several seeds, each a different schedule and
-weak-memory outcome; `just miri_seeds=0..256 miri` tries more.
+whole crate, so a warm run takes about four seconds. Tests whose names contain
+`concurrent` run under several seeds, each a different schedule and
+weak-memory outcome; `just miri_seeds=0..256 miri` tries more. Some ordering
+bugs show up only at a few dozen seeds, so try more after changing atomics.
 
 Under Miri the test process keeps Rust's default allocator. Miri cannot run
 mimalloc, and it checks a freed block's layout only on its own allocator.

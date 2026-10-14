@@ -139,6 +139,11 @@ killed, and when a reader falls behind. The timeout turns instrumentation off
 after reader loss. Changes to record layout require coordinated SDK, decoder,
 fixture, and format tests.
 
+The Rust SDK writes records as atomic words and never frees a ring, so its
+unsafe code is limited to making a ring and walking the site table. Its tests
+run natively and under `just miri`. `just probe-cost` measures what a zone
+costs.
+
 Probe names and prefix selection are configuration. Capture records use dense
 site IDs after validation. Zone analysis pairs begin and end records without
 assuming well-nested input unless the SDK contract proves it.

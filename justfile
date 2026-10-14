@@ -58,12 +58,15 @@ run *ARGS: build
 
 # Checks formatting and runs Clippy on development and release builds, which
 # differ in what the flight recorder compiles. Incremental checking halves the
-# release lint after an edit and leaves release builds as they are.
+# release lint after an edit and leaves release builds as they are. The Rust
+# probe SDK is its own crate, with its own target directory.
 lint:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
     CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings
     cargo check --quiet --manifest-path fuzz/Cargo.toml
+    cargo fmt --check --manifest-path sdk/rust-probes/Cargo.toml
+    CARGO_TARGET_DIR="$PWD/target/sdk-probes" cargo clippy --quiet --manifest-path sdk/rust-probes/Cargo.toml --all-targets --features enabled -- -D warnings
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and
@@ -76,7 +79,7 @@ lint:
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: cache-warm
     ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
-    if (( $# == 0 )); then cargo test --doc; fi
+    if (( $# == 0 )); then cargo test --doc; CARGO_TARGET_DIR="$PWD/target/sdk-probes" cargo test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled; fi
 
 # Runs the BPF engine's tests, which need CAP_BPF and CAP_PERFMON, starting
 # uscope through LAUNCHER: the uscope-bpf wrapper nixosModules.uscope-bpf
@@ -98,17 +101,24 @@ test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
 # as run at once. Try more with `just miri_seeds=0..256 miri`.
 miri_seeds := "0..8"
 
-# Runs tests/miri.rs, the tests of uscope's unsafe code, under Miri, which
-# stops at undefined behavior: an access out of bounds, misaligned, or after a
-# free, a block freed with the wrong layout, a data race, a pointer made from
-# an integer. Tests named `concurrent` run again under many seeds, each a
-# different schedule and weak-memory outcome; seeds run at once, so only a
-# failure's panic and seed, on stderr, are shown. Its sysroot builds under
-# target/. Arguments go to the test harness.
+# Runs tests/miri.rs, the tests of uscope's unsafe code, and the Rust probe
+# SDK's tests under Miri, which stops at undefined behavior: an access out of
+# bounds, misaligned, or after a free, a block freed with the wrong layout, a
+# data race, a pointer made from an integer. Tests named `concurrent` run
+# under many seeds, each a different schedule and weak-memory outcome; seeds
+# run at once, so only a failure's panic and seed, on stderr, are shown. Its
+# sysroot builds under target/. Arguments go to the test harnesses.
+[script]
 miri *ARGS:
-    MIRI_SYSROOT="$PWD/target/miri/sysroot" cargo miri setup >/dev/null
-    MIRI_SYSROOT="$PWD/target/miri/sysroot" MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri -- "$@"
-    MIRI_SYSROOT="$PWD/target/miri/sysroot" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet --test miri -- concurrent "$@" 2>&1 >/dev/null | { grep -v '^Trying seed: ' || true; }
+    export MIRI_SYSROOT="$PWD/target/miri/sysroot"
+    cargo miri setup >/dev/null
+    seeds() { grep -v '^Trying seed: ' || true; }
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri -- --skip concurrent "$@"
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet --test miri -- concurrent "$@" 2>&1 >/dev/null | seeds
+    probes=(--manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib)
+    export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet "${probes[@]}" -- --skip concurrent "$@"
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet "${probes[@]}" -- concurrent "$@" 2>&1 >/dev/null | seeds
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit

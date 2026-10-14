@@ -117,7 +117,7 @@ Each step lists how we know it worked.
   and fault address from the 128 bytes `PTRACE_GETSIGINFO` returns, as
   `syscalls/ptrace.rs` already does, with no union reads. *Done when* the
   signal and crash tests pass, including a fault address and a sender pid.
-- [ ] **7. Probe SDK.** Each thread keeps a `&'static` ring; reuse goes
+- [x] **7. Probe SDK.** Each thread keeps a `&'static` ring; reuse goes
   through a safe in-process registry beside the ABI's `AtomicPtr` one;
   records are written with relaxed atomic stores. Unsafe remains for
   allocating a header with its records and for walking the sites section.
@@ -300,4 +300,24 @@ Decisions, measurements, and surprises, newest last.
   offset fails the DAP crash test, and a code from the wrong offset fails
   the signal tests. Outside `sys.rs`, the backend's only unsafe code is
   the SIGURG handler.
-
+- 2026-10-13, step 7: a ring is a `Ring { header, records: [Record] }`
+  made once and leaked, so each thread holds a `&'static Ring` and writes
+  each record as two relaxed `u64` stores. Reuse walks a safe registry
+  of `OnceLock<&'static Ring>` beside the ABI's. A forked child cleared the
+  ABI registry to keep its parent's rings; a private fork generation in
+  the header's padding now does that, since the safe registry cannot be
+  cleared. The unsafe left is making a ring, the section walk, and
+  `_rdtsc`; the externs are `safe fn`. Under Miri, `atexit`,
+  `pthread_atfork`, and the section walk are stubs.
+- The SDK's tests play uscope: they read active rings as threads write
+  them, and free retired ones as threads come and go. Five mutations each
+  fail: retiring with relaxed ordering and claiming without a CAS (both
+  around seed 50, so above the default 8), publishing the head before
+  the records (seed 51, once the reader also read active rings), a
+  record at the wrong index, and no fork generation. An early version
+  checked that a lane's messages came in order across threads, which a
+  reader that sweeps two retired rings breaks; only a thread's own order
+  is promised. The unmutated code passes 256 seeds. `just probe-cost`,
+  A/B on the same day: 13.43–13.49 ns a zone before, 13.43–13.51 after.
+  `lint` now formats and lints the SDK, `test` runs its tests, and a
+  warm `just miri` takes about 4 s.

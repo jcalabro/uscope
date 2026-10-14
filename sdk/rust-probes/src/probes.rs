@@ -6,9 +6,9 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{
-    AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering, compiler_fence,
+    AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, compiler_fence,
 };
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use crate::abi;
 
@@ -64,7 +64,10 @@ pub struct Header {
     thread: AtomicU32,
     state: AtomicU32,
     signal_drops: AtomicU64,
-    line_0: [u8; 40],
+    /// The forks the process had made when the ring was made, which the
+    /// ABI leaves out: a forked child takes none of its parent's rings.
+    generation: AtomicU32,
+    line_0: [u8; 36],
     head: AtomicU64,
     /// Whether the thread is writing a record, which a signal handler that
     /// interrupts it must not.
@@ -75,11 +78,32 @@ pub struct Header {
 const _: () = assert!(core::mem::size_of::<Header>() == abi::RING_HEADER);
 const _: () = assert!(core::mem::offset_of!(Header, head) == 64);
 
-/// A thread whose events no ring takes: it has exited, or none was left.
-const NO_RING: *mut Header = ptr::dangling_mut();
+/// A record, written as two words, which uscope reads as its 16 bytes.
+#[repr(C)]
+struct Record([AtomicU64; 2]);
+
+const _: () = assert!(core::mem::size_of::<Record>() == abi::RECORD);
+
+/// A ring: its header, then its records, a power of two of them. A ring,
+/// once made, is never freed.
+#[repr(C)]
+struct Ring {
+    header: Header,
+    records: [Record],
+}
+
+/// The ring a thread writes to.
+#[derive(Clone, Copy)]
+enum Slot {
+    /// None yet: the thread's first event takes one.
+    Unset,
+    /// None: the thread is exiting, or none was left.
+    Nothing,
+    Ring(&'static Ring),
+}
 
 thread_local! {
-    static RING: Cell<*mut Header> = const { Cell::new(ptr::null_mut()) };
+    static RING: Cell<Slot> = const { Cell::new(Slot::Unset) };
     static RETIRE: Retire = const { Retire };
 }
 
@@ -88,15 +112,23 @@ struct Retire;
 
 impl Drop for Retire {
     fn drop(&mut self) {
-        let ring = RING.with(|ring| ring.replace(NO_RING));
-        if ring != NO_RING && !ring.is_null() {
-            // SAFETY: a ring, once allocated, is never freed.
-            unsafe { &*ring }
+        if let Slot::Ring(ring) = RING.with(|slot| slot.replace(Slot::Nothing)) {
+            ring.header
                 .state
                 .store(abi::RING_RETIRED, Ordering::Release);
         }
     }
 }
+
+/// Every ring this process made, so that a thread can take one another
+/// left: the ABI's registry holds their addresses for uscope, and this
+/// the rings themselves.
+static MADE: [OnceLock<&'static Ring>; abi::MOST_RINGS] =
+    [const { OnceLock::new() }; abi::MOST_RINGS];
+static MADE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// The forks the process has made, by [`Header::generation`].
+static FORKS: AtomicU32 = AtomicU32::new(0);
 
 /// Whether uscope is recording the program's instrumentation: every site
 /// it chose is on.
@@ -216,7 +248,11 @@ impl fmt::Write for Cut {
         }
         self.bytes[self.length..self.length + take].copy_from_slice(&text.as_bytes()[..take]);
         self.length += take;
-        if take < text.len() { Err(fmt::Error) } else { Ok(()) }
+        if take < text.len() {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -225,17 +261,15 @@ impl fmt::Write for Cut {
 /// Whether the ring took it.
 #[inline(always)]
 fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool {
-    let mut ring = RING.with(Cell::get);
-    if ring.is_null() {
-        ring = acquire();
+    let mut slot = RING.with(Cell::get);
+    if let Slot::Unset = slot {
+        slot = acquire();
     }
-    if ring == NO_RING {
+    let Slot::Ring(ring) = slot else {
         CONTROL.dropped.fetch_add(1, Ordering::Relaxed);
         return false;
-    }
-    // SAFETY: a ring, once allocated, is never freed, and only its thread
-    // writes its records.
-    let header = unsafe { &*ring };
+    };
+    let header = &ring.header;
     if header.writing.load(Ordering::Relaxed) != 0 {
         header.signal_drops.fetch_add(1, Ordering::Relaxed);
         return false;
@@ -244,19 +278,12 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
     compiler_fence(Ordering::SeqCst);
     let time = now(header.clock.load(Ordering::Relaxed));
     let head = header.head.load(Ordering::Relaxed);
-    let mask = (1_u64 << header.size) - 1;
-    // SAFETY: the records follow the header, `mask + 1` of them.
-    let records = unsafe { ring.add(1) }.cast::<[u8; abi::RECORD]>();
     let site = site(state);
     let mut record = [0; abi::RECORD];
     record[..8].copy_from_slice(&time.to_le_bytes());
     record[8..12].copy_from_slice(&site.to_le_bytes());
     record[12..].copy_from_slice(&(u32::from(kind) | argument << 8).to_le_bytes());
-    #[expect(clippy::cast_possible_truncation, reason = "a position is masked to the ring")]
-    // SAFETY: the position is masked to the ring.
-    unsafe {
-        records.add((head & mask) as usize).write(record);
-    }
+    ring.put(head, &record);
     let mut position = head + 1;
     for chunk in more.chunks(15) {
         let mut record = [0; abi::RECORD];
@@ -264,11 +291,7 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
         record[..low.len()].copy_from_slice(low);
         record[12] = abi::CONTINUED;
         record[13..13 + high.len()].copy_from_slice(high);
-        #[expect(clippy::cast_possible_truncation, reason = "a position is masked to the ring")]
-        // SAFETY: the position is masked to the ring.
-        unsafe {
-            records.add((position & mask) as usize).write(record);
-        }
+        ring.put(position, &record);
         position += 1;
     }
     header.head.store(position, Ordering::Release);
@@ -281,11 +304,29 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
     true
 }
 
+impl Ring {
+    /// Writes `record` at `position`, as the ring wraps.
+    #[inline(always)]
+    fn put(&self, position: u64, record: &[u8; abi::RECORD]) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a position is masked to the ring"
+        )]
+        let index = position as usize & (self.records.len() - 1);
+        let (low, high) = record.split_at(8);
+        let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap_or_default());
+        let slot = &self.records[index].0;
+        slot[0].store(word(low), Ordering::Relaxed);
+        slot[1].store(word(high), Ordering::Relaxed);
+    }
+}
+
 /// A site's key: its state byte's offset from the control block.
 #[inline(always)]
 fn site(state: &'static AtomicU8) -> u32 {
     #[expect(clippy::cast_possible_truncation, reason = "a module is under 2 GiB")]
-    let offset = (ptr::from_ref(state).addr() as i64 - ptr::from_ref(&CONTROL).addr() as i64) as i32;
+    let offset =
+        (ptr::from_ref(state).addr() as i64 - ptr::from_ref(&CONTROL).addr() as i64) as i32;
     offset.cast_unsigned()
 }
 
@@ -307,15 +348,34 @@ struct Timespec {
     nanoseconds: i64,
 }
 
+// SAFETY: each declaration matches its C function's. `clock_gettime`
+// writes only through its pointer, which a `&mut` makes valid, and the
+// handlers are functions, which live for the program.
 unsafe extern "C" {
-    fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
-    fn gettid() -> i32;
-    fn atexit(handler: extern "C" fn()) -> i32;
-    fn pthread_atfork(
+    safe fn clock_gettime(clock: i32, time: &mut Timespec) -> i32;
+    safe fn gettid() -> i32;
+    #[cfg(not(miri))]
+    safe fn atexit(handler: extern "C" fn()) -> i32;
+    #[cfg(not(miri))]
+    safe fn pthread_atfork(
         prepare: Option<extern "C" fn()>,
         parent: Option<extern "C" fn()>,
         child: Option<extern "C" fn()>,
     ) -> i32;
+}
+
+/// Miri runs neither, and its tests never fork or exit.
+#[cfg(miri)]
+fn atexit(_: extern "C" fn()) -> i32 {
+    0
+}
+#[cfg(miri)]
+fn pthread_atfork(
+    _: Option<extern "C" fn()>,
+    _: Option<extern "C" fn()>,
+    _: Option<extern "C" fn()>,
+) -> i32 {
+    0
 }
 
 /// Nanoseconds of `CLOCK_MONOTONIC`.
@@ -325,8 +385,7 @@ fn monotonic() -> u64 {
         seconds: 0,
         nanoseconds: 0,
     };
-    // SAFETY: the time is a valid timespec to write.
-    unsafe { clock_gettime(CLOCK_MONOTONIC, &raw mut time) };
+    clock_gettime(CLOCK_MONOTONIC, &mut time);
     (time.seconds.cast_unsigned())
         .wrapping_mul(1_000_000_000)
         .wrapping_add(time.nanoseconds.cast_unsigned())
@@ -347,6 +406,7 @@ fn check_heartbeat() {
     }
 }
 
+#[cfg(not(miri))]
 unsafe extern "C" {
     static __start_uscope_sites: [u8; 0];
     static __stop_uscope_sites: [u8; 0];
@@ -358,6 +418,16 @@ static SITE: &AtomicU8 = crate::__site!(crate::abi::SITE_NONE, "uscope_probes");
 /// Switches every site off.
 fn disable() {
     CONTROL.enable.store(0, Ordering::Relaxed);
+    switch_sites_off();
+    let _ = SITE;
+}
+
+/// Writes zero to every site's state byte. Miri has no section to walk.
+#[cfg(miri)]
+fn switch_sites_off() {}
+
+#[cfg(not(miri))]
+fn switch_sites_off() {
     let start = (&raw const __start_uscope_sites).cast::<u8>();
     let stop = (&raw const __stop_uscope_sites).cast::<u8>();
     let mut site = start;
@@ -372,7 +442,6 @@ fn disable() {
             site = site.add(abi::SITE_SIZE);
         }
     }
-    let _ = SITE;
 }
 
 static ATFORK: Once = Once::new();
@@ -381,11 +450,12 @@ static ATFORK: Once = Once::new();
 /// its parent's rings.
 extern "C" fn forked() {
     disable();
+    FORKS.fetch_add(1, Ordering::Relaxed);
     for ring in &CONTROL.registry {
         ring.store(ptr::null_mut(), Ordering::Relaxed);
     }
     CONTROL.rings.store(0, Ordering::Relaxed);
-    let _ = RING.try_with(|ring| ring.set(ptr::null_mut()));
+    let _ = RING.try_with(|slot| slot.set(Slot::Unset));
 }
 
 /// A program that exits while uscope reads it waits a moment for uscope to
@@ -410,49 +480,53 @@ extern "C" fn exiting() {
 /// one, or none.
 #[cold]
 #[inline(never)]
-fn acquire() -> *mut Header {
+fn acquire() -> Slot {
     if CONTROL.enable.load(Ordering::Acquire) == 0 {
-        return NO_RING;
+        return Slot::Nothing;
     }
     ATFORK.call_once(|| {
-        // SAFETY: the handlers touch only atomics, the thread's own slot,
-        // and the clock.
-        unsafe {
-            pthread_atfork(None, None, Some(forked));
-            atexit(exiting);
-        }
+        // The handlers touch only atomics, the thread's own slot, and the
+        // clock.
+        pthread_atfork(None, None, Some(forked));
+        atexit(exiting);
     });
     // A thread that is exiting keeps no ring.
     if RETIRE.try_with(|_| ()).is_err() {
-        return NO_RING;
+        return Slot::Nothing;
     }
-    let ring = reuse().unwrap_or_else(allocate);
-    if !ring.is_null() && ring != NO_RING {
-        // SAFETY: the thread claimed the ring, which is never freed.
-        let header = unsafe { &*ring };
-        // SAFETY: gettid always succeeds.
-        header.thread.store(unsafe { gettid() }.cast_unsigned(), Ordering::Relaxed);
-        #[expect(clippy::cast_possible_truncation, reason = "a clock is a small number")]
-        header
-            .clock
-            .store(CONTROL.clock.load(Ordering::Relaxed) as u8, Ordering::Relaxed);
-        header.state.store(abi::RING_ACTIVE, Ordering::Release);
-    }
-    let ring = if ring.is_null() { NO_RING } else { ring };
-    RING.with(|slot| slot.set(ring));
-    ring
+    let slot = match reuse().or_else(allocate) {
+        Some(ring) => {
+            let header = &ring.header;
+            header
+                .thread
+                .store(gettid().cast_unsigned(), Ordering::Relaxed);
+            #[expect(clippy::cast_possible_truncation, reason = "a clock is a small number")]
+            header.clock.store(
+                CONTROL.clock.load(Ordering::Relaxed) as u8,
+                Ordering::Relaxed,
+            );
+            header.state.store(abi::RING_ACTIVE, Ordering::Release);
+            Slot::Ring(ring)
+        }
+        None => Slot::Nothing,
+    };
+    RING.with(|cell| cell.set(slot));
+    slot
 }
 
-/// A ring a thread that exited left, which uscope has read.
-fn reuse() -> Option<*mut Header> {
-    let rings = CONTROL.rings.load(Ordering::Acquire) as usize;
-    CONTROL.registry[..rings.min(abi::MOST_RINGS)]
+/// A ring of this process that a thread that exited left, which uscope
+/// has read.
+fn reuse() -> Option<&'static Ring> {
+    let generation = FORKS.load(Ordering::Relaxed);
+    let made = MADE_COUNT.load(Ordering::Acquire).min(abi::MOST_RINGS);
+    MADE[..made]
         .iter()
-        .map(|slot| slot.load(Ordering::Acquire))
-        .find(|&ring| {
-            !ring.is_null()
-                // SAFETY: a ring, once allocated, is never freed.
-                && unsafe { &*ring }
+        .filter_map(OnceLock::get)
+        .copied()
+        .find(|ring| {
+            ring.header.generation.load(Ordering::Relaxed) == generation
+                && ring
+                    .header
                     .state
                     .compare_exchange(
                         abi::RING_FREE,
@@ -464,12 +538,12 @@ fn reuse() -> Option<*mut Header> {
         })
 }
 
-/// A new ring of the size uscope chose, in the registry, or null.
-fn allocate() -> *mut Header {
+/// A new ring of the size uscope chose, in both registries, or none.
+fn allocate() -> Option<&'static Ring> {
     let mut index = CONTROL.rings.load(Ordering::Relaxed);
     loop {
         if index as usize >= abi::MOST_RINGS {
-            return ptr::null_mut();
+            return None;
         }
         match CONTROL.rings.compare_exchange_weak(
             index,
@@ -485,26 +559,51 @@ fn allocate() -> *mut Header {
         .ring_size
         .load(Ordering::Relaxed)
         .clamp(abi::LEAST_RING_SIZE, abi::MOST_RING_SIZE);
-    let Ok(layout) = std::alloc::Layout::from_size_align(
-        abi::RING_HEADER + (abi::RECORD << size),
-        abi::RING_HEADER,
-    ) else {
-        return ptr::null_mut();
-    };
-    // SAFETY: the layout has a size.
-    let ring = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<Header>();
-    if ring.is_null() {
-        return ring;
+    let ring = make_ring(size)?;
+    let made = MADE_COUNT.fetch_add(1, Ordering::AcqRel);
+    if let Some(slot) = MADE.get(made) {
+        let _ = slot.set(ring);
     }
-    // SAFETY: the allocation is the ring's, zeroed, and no other thread
-    // sees it before the registry holds it.
-    unsafe {
-        (&raw mut (*ring).magic).write(abi::RING_MAGIC);
-        (&raw mut (*ring).version).write(abi::RING_VERSION);
-        #[expect(clippy::cast_possible_truncation, reason = "a size is clamped")]
-        (&raw mut (*ring).size).write(size as u8);
-        (*ring).state.store(abi::RING_CLAIMED, Ordering::Relaxed);
-    }
-    CONTROL.registry[index as usize].store(ring, Ordering::Release);
-    ring
+    CONTROL.registry[index as usize]
+        .store(ptr::from_ref(&ring.header).cast_mut(), Ordering::Release);
+    Some(ring)
 }
+
+/// A ring of `2^size` records, claimed, which lives for the program.
+fn make_ring(size: u32) -> Option<&'static Ring> {
+    let records = 1_usize << size;
+    let layout = std::alloc::Layout::from_size_align(
+        abi::RING_HEADER + abi::RECORD * records,
+        abi::RING_HEADER,
+    )
+    .ok()?;
+    // SAFETY: the layout has a size.
+    let block = unsafe { std::alloc::alloc_zeroed(layout) };
+    if block.is_null() {
+        return None;
+    }
+    // A ring's records are its slice, so a pointer to one carries their
+    // count as its metadata.
+    let ring = ptr::slice_from_raw_parts_mut(block, records) as *mut Ring;
+    // SAFETY: the block is the layout of a ring of `records` records,
+    // zeroed, which is a valid ring, and no other thread sees it before
+    // the registries hold it. Its header's plain fields are written before
+    // a shared reference to it exists, and it is never freed.
+    unsafe {
+        (&raw mut (*ring).header.magic).write(abi::RING_MAGIC);
+        (&raw mut (*ring).header.version).write(abi::RING_VERSION);
+        #[expect(clippy::cast_possible_truncation, reason = "a size is clamped")]
+        (&raw mut (*ring).header.size).write(size as u8);
+        let ring = &*ring;
+        ring.header
+            .generation
+            .store(FORKS.load(Ordering::Relaxed), Ordering::Relaxed);
+        ring.header
+            .state
+            .store(abi::RING_CLAIMED, Ordering::Relaxed);
+        Some(ring)
+    }
+}
+
+#[cfg(test)]
+mod tests;
