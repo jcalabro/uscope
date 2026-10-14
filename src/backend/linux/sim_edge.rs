@@ -34,7 +34,9 @@ use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
 use super::tls::TlsModule;
 use super::{Controller, LinuxError, SessionLease, SignalMetadata, Waiter, backend_error};
-use crate::backend::{ControllerChannels, ControllerMessage, ExecutableSource, FileIdentity};
+use crate::backend::{
+    ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity,
+};
 use crate::debug_info::DebugInfo;
 use crate::protocol::{DebuggerEvent, LaunchOptions, Request, StopId};
 use crate::sim::cpu::Registers;
@@ -822,6 +824,10 @@ pub struct SimController {
 pub struct ClientChannels {
     pub requests: mpsc::Sender<ControllerMessage>,
     pub events: broadcast::Sender<DebuggerEvent>,
+
+    /// Every event the controller publishes, which no reader falls behind
+    /// on, unlike the clients' subscriptions to `events`.
+    pub audit: mpsc::UnboundedReceiver<DebuggerEvent>,
 }
 
 /// A message taken from the controller's queue, to be handled.
@@ -863,6 +869,7 @@ impl SimController {
     pub fn new(parts: SimParts) -> (Self, ClientChannels) {
         let (sender, receiver) = mpsc::channel(parts.queue_capacity);
         let (events, _) = broadcast::channel(parts.event_capacity);
+        let (tap, audit) = mpsc::unbounded_channel();
         let trace = SimTrace {
             tracer: parts.tracer,
             kernel: parts.kernel,
@@ -892,7 +899,7 @@ impl SimController {
             ControllerChannels {
                 sender: sender.clone(),
                 receiver,
-                events: events.clone().into(),
+                events: EventSender::tapped(events.clone(), tap),
             },
             trace,
         );
@@ -901,6 +908,7 @@ impl SimController {
             ClientChannels {
                 requests: sender,
                 events,
+                audit,
             },
         )
     }

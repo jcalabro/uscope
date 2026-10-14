@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use nix::libc;
+use tokio::sync::mpsc;
 
 use super::audit::Auditor;
 use super::catches;
@@ -64,7 +65,7 @@ use crate::backend::sim_edge::{
     Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
 };
 
-use crate::{DebuggerHandle, HeldChild, HeldProcess, ProcessId};
+use crate::{DebuggerEvent, DebuggerHandle, HeldChild, HeldProcess, ProcessId};
 
 /// The process identifier of the first session's debugger, which launches
 /// programs. Each session adopting a held child traces as the next.
@@ -497,9 +498,9 @@ impl<'a> World<'a> {
             #[cfg(test)]
             sabotage: settings.sabotage,
         });
-        let (controller, handle) =
+        let (controller, handle, events) =
             start_controller(&machine, variant, &swarm, random, TRACER, None);
-        let auditor = Auditor::new(handle.subscribe(), Rc::clone(&shared.published));
+        let auditor = Auditor::new(events, Rc::clone(&shared.published));
         let client = Client {
             handle,
             choices,
@@ -818,7 +819,7 @@ impl<'a> World<'a> {
 
         let id = self.sessions.len();
         let tracer = TRACER + i32::try_from(id).expect("few sessions");
-        let (controller, handle) = start_controller(
+        let (controller, handle, _) = start_controller(
             &self.machine,
             self.variant,
             &self.swarm,
@@ -1751,6 +1752,7 @@ impl<'a> World<'a> {
             .finish()
             .map_err(|message| Failure::debugger("tracing", message))?;
         let kernel = self.machine.kernel.borrow();
+        self.auditor.finish(&kernel)?;
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;
         oracles::transparency(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
@@ -1818,7 +1820,8 @@ impl<'a> World<'a> {
 
 /// Starts a controller tracing as `tracer`, with a waiter of its own, which
 /// checks the start time of a process it attaches to against `start_time`.
-/// Returns it with the handle a client drives it through.
+/// Returns it with the handle a client drives it through, and every event
+/// it publishes, for an auditor.
 fn start_controller(
     machine: &Rc<Machine>,
     variant: &Variant,
@@ -1826,7 +1829,11 @@ fn start_controller(
     random: [u8; 16],
     tracer: i32,
     start_time: Option<u64>,
-) -> (SimController, DebuggerHandle) {
+) -> (
+    SimController,
+    DebuggerHandle,
+    mpsc::UnboundedReceiver<DebuggerEvent>,
+) {
     let waiter = Rc::new(RefCell::new(SimWaiter::new(tracer)));
     machine.waiters.borrow_mut().push(Rc::clone(&waiter));
     let debug_info = variant.debug_info();
@@ -1859,7 +1866,7 @@ fn start_controller(
         events: channels.events,
     };
 
-    (controller, handle)
+    (controller, handle, channels.audit)
 }
 
 /// The simulated thread a process identifier names.

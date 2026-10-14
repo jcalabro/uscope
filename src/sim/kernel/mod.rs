@@ -600,6 +600,17 @@ impl fmt::Display for Parent {
     }
 }
 
+/// A thread a tracer's `waitpid` reaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reaped {
+    pub tgid: Tgid,
+    pub status: WaitStatus,
+
+    /// Whether its process was exiting as a whole, by `exit_group` or a
+    /// fatal signal.
+    pub group_exit: bool,
+}
+
 /// How a process ended, and who reaped it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
@@ -726,8 +737,8 @@ pub struct Kernel {
     /// wrote to standard output and error, in order, by launched process.
     pub outputs: BTreeMap<Tid, Vec<u8>>,
 
-    /// The status each reaped thread reported.
-    pub reaped: BTreeMap<Tid, WaitStatus>,
+    /// Each thread a tracer reaped, with the status it reported.
+    pub reaped: BTreeMap<Tid, Reaped>,
 
     /// The code each group leader passed to `exit`: its own status, which
     /// the process's replaces when it is reaped (K-EXIT-6).
@@ -1084,7 +1095,14 @@ impl Kernel {
             // K-EXIT-6: a group exit decides every status reaped after it.
             let exit = process.group_exit.unwrap_or(own);
             status = exit.wait_status(tid);
-            self.reaped.insert(tid, status);
+            self.reaped.insert(
+                tid,
+                Reaped {
+                    tgid: group,
+                    status,
+                    group_exit: process.group_exit.is_some(),
+                },
+            );
             if leader {
                 self.end_process(group, exit);
             } else {

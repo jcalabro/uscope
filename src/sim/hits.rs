@@ -91,10 +91,6 @@ pub struct Published {
     /// reason, so the hits of a stop the client saw no snapshot of are
     /// unknown.
     pub stops: BTreeSet<u64>,
-
-    /// How many times the reader of these events fell behind, after which
-    /// the counts are incomplete.
-    pub gaps: u64,
 }
 
 /// What the client saw at the last stop of a process.
@@ -166,14 +162,13 @@ pub fn judge(
 ) -> Result<Found, String> {
     // Every stop since the last stop of any process was heard of and seen,
     // so a breakpoint one of them deleted is known.
-    let seen_all = published.gaps == baseline.map_or(0, |baseline| baseline.published.gaps)
-        && published.stops.iter().all(|&stop| {
-            snapshot.stop_id.is_some_and(|seen| seen.get() == stop)
-                || baseline.is_some_and(|baseline| baseline.published.stops.contains(&stop))
-        });
+    let seen_all = published.stops.iter().all(|&stop| {
+        snapshot.stop_id.is_some_and(|seen| seen.get() == stop)
+            || baseline.is_some_and(|baseline| baseline.published.stops.contains(&stop))
+    });
     let baseline = baseline.filter(|baseline| baseline.process == process);
     let stopping = stopping_hits(snapshot);
-    let complete = baseline.is_some_and(|baseline| baseline.published.gaps == published.gaps);
+    let complete = baseline.is_some();
     let mut found = Found::default();
     let count_before = |id| {
         baseline
@@ -577,8 +572,7 @@ mod tests {
         assert!(judge_with(false, gone(&[2])).is_err());
 
         // A stop the client heard of but saw no snapshot of, as when it
-        // killed the process first, may have deleted it, as may one whose
-        // event it missed.
+        // killed the process first, may have deleted it.
         let unseen = Published {
             stops: BTreeSet::from([2]),
             ..published(0)
@@ -586,14 +580,7 @@ mod tests {
 
         let found = judge_after(true, gone(&[]), &unseen).expect("an unseen stop");
         assert!(!found.temporary_stopped);
-        let missed = Published {
-            gaps: 1,
-            ..published(0)
-        };
-
-        let found = judge_after(true, gone(&[]), &missed).expect("a stop may have been missed");
-        assert!(!found.temporary_stopped);
-        assert!(judge_after(false, gone(&[]), &missed).is_err());
+        assert!(judge_after(false, gone(&[]), &unseen).is_err());
 
         // A hit judged at an earlier stop deleted nothing at this one.
         assert!(judge_with(true, gone(&[1])).is_err());

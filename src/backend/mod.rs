@@ -204,7 +204,14 @@ pub struct ControllerChannels {
 
 /// Publishes debugger events to every subscribed client, recording each in
 /// the flight recorder of a development build.
-pub struct EventSender(broadcast::Sender<DebuggerEvent>);
+pub struct EventSender {
+    sender: broadcast::Sender<DebuggerEvent>,
+
+    /// A simulated session's copy of every event, for its auditor, which
+    /// must never fall behind as a subscriber can.
+    #[cfg(any(test, feature = "sim"))]
+    tap: Option<mpsc::UnboundedSender<DebuggerEvent>>,
+}
 
 impl EventSender {
     pub fn send(
@@ -212,13 +219,37 @@ impl EventSender {
         event: DebuggerEvent,
     ) -> std::result::Result<usize, broadcast::error::SendError<DebuggerEvent>> {
         record!("event {event:?}");
-        self.0.send(event)
+
+        // An auditor that has gone takes nothing.
+        #[cfg(any(test, feature = "sim"))]
+        if let Some(tap) = &self.tap {
+            let _ = tap.send(event.clone());
+        }
+
+        self.sender.send(event)
+    }
+
+    /// Publishes to `sender`'s subscribers, and copies every event into
+    /// `tap`.
+    #[cfg(any(test, feature = "sim"))]
+    pub const fn tapped(
+        sender: broadcast::Sender<DebuggerEvent>,
+        tap: mpsc::UnboundedSender<DebuggerEvent>,
+    ) -> Self {
+        Self {
+            sender,
+            tap: Some(tap),
+        }
     }
 }
 
 impl From<broadcast::Sender<DebuggerEvent>> for EventSender {
     fn from(sender: broadcast::Sender<DebuggerEvent>) -> Self {
-        Self(sender)
+        Self {
+            sender,
+            #[cfg(any(test, feature = "sim"))]
+            tap: None,
+        }
     }
 }
 
