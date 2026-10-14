@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -55,7 +56,8 @@ struct Entry {
 
 struct Recorder {
     stop: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<()>,
+    /// Its thread, once started.
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Profiles {
@@ -177,8 +179,8 @@ impl Profiles {
         for recorder in recordings.values() {
             recorder.stop.store(true, Ordering::Relaxed);
         }
-        for (_, recorder) in recordings {
-            let _ = recorder.thread.join();
+        for thread in recordings.into_values().filter_map(|recorder| recorder.thread) {
+            let _ = thread.join();
         }
     }
 
@@ -271,33 +273,31 @@ impl Profiles {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" ");
-        let thread = std::thread::Builder::new()
-            .name("uscope-web-record".into())
-            .spawn({
-                let (id, stop) = (id.clone(), Arc::clone(&stop));
-                move || match traced {
-                    Some(traced) => {
-                        let publisher = super::live::Publisher {
-                            profiles: &profiles,
-                            id: &id,
-                            name: &name,
-                            started: Some(started),
-                        };
-                        super::live::record(publisher, command, &program, &traced, &stop);
-                        profiles
-                            .recordings
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .remove(&id);
-                    }
-                    None => profiles.run_recording(&id, &name, command, &options, &stop, started),
+        let run = {
+            let (id, stop) = (id.clone(), Arc::clone(&stop));
+            move || match traced {
+                Some(traced) => {
+                    let publisher = super::live::Publisher {
+                        profiles: &profiles,
+                        id: &id,
+                        name: &name,
+                        started: Some(started),
+                    };
+                    super::live::record(publisher, command, &program, &traced, &stop);
                 }
+                None => profiles.run_recording(&id, &name, command, &options, &stop, started),
+            }
+        };
+        let unlisted = self
+            .start_recorder(&id, stop, run, |run| {
+                std::thread::Builder::new()
+                    .name("uscope-web-record".into())
+                    .spawn(run)
             })
             .map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
-        self.recordings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.clone(), Recorder { stop, thread });
+        if let Some(thread) = unlisted {
+            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+        }
         match starting.await {
             Ok(Ok(())) => Ok(id),
             Ok(Err(message)) => Err(Failure::new(ErrorKind::Failed, message)),
@@ -365,10 +365,49 @@ impl Profiles {
                 }
             }
         }
+    }
+
+    /// Runs `run` as the recording `id` on the thread `spawn` starts, and
+    /// lists it until `run` returns. Returns the thread when it is no
+    /// longer listed, having ended or been stopped by a shutdown, for the
+    /// caller to join.
+    fn start_recorder(
+        self: &Arc<Self>,
+        id: &str,
+        stop: Arc<AtomicBool>,
+        run: impl FnOnce() + Send + 'static,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> std::io::Result<Option<JoinHandle<()>>> {
+        // Listed before it starts, so that it is unlisted only once it ends.
         self.recordings
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(id);
+            .insert(id.to_owned(), Recorder { stop, thread: None });
+        let profiles = Arc::clone(self);
+        let listed = id.to_owned();
+        let started = spawn(Box::new(move || {
+            run();
+            profiles
+                .recordings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&listed);
+        }));
+        let mut recordings = self.recordings.lock().unwrap_or_else(PoisonError::into_inner);
+        let thread = match started {
+            Ok(thread) => thread,
+            Err(error) => {
+                recordings.remove(id);
+                return Err(error);
+            }
+        };
+        Ok(match recordings.get_mut(id) {
+            Some(recorder) => {
+                recorder.thread = Some(thread);
+                None
+            }
+            None => Some(thread),
+        })
     }
 
     fn entry(&self, id: &str) -> Result<Arc<Entry>, Failure> {
@@ -1276,4 +1315,45 @@ fn json(value: &impl serde::Serialize) -> (Value, Vec<u8>) {
 
 fn to_value(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or_else(|error| json!({ "error": error.to_string() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recording can end before the thread that started it lists it, as
+    /// one whose program fails to start does. It is not listed after.
+    #[test]
+    fn a_recording_that_ends_at_once_is_not_left_listed() {
+        let profiles = Profiles::new(PathBuf::from("/"));
+        let (ended, end) = std::sync::mpsc::channel();
+        let unlisted = profiles
+            .start_recorder(
+                "quick",
+                Arc::new(AtomicBool::new(false)),
+                || {},
+                |run| {
+                    let thread = std::thread::spawn(move || {
+                        run();
+                        let _ = ended.send(());
+                    });
+                    end.recv_timeout(Duration::from_secs(10))
+                        .expect("the recording ends");
+                    Ok(thread)
+                },
+            )
+            .expect("the recording starts");
+        if let Some(thread) = unlisted {
+            thread.join().expect("the recording's thread ends");
+        }
+        assert!(
+            profiles
+                .recordings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty(),
+            "an ended recording is not listed"
+        );
+        profiles.shutdown();
+    }
 }
