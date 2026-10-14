@@ -13,6 +13,7 @@ will change:
 - [Profiling](profiling.md)
 - [System call tracing](syscalls.md)
 - [Testing](testing.md)
+- [Coding style](style.md)
 - [Assertions](assertions.md)
 - [Diagnosing failures](debugging-failures.md)
 - [Simulator](simulator.md)
