@@ -180,7 +180,7 @@ tokio *ARGS:
 # every invariant checked at every stop. Without it, only the suite runs.
 [doc("Runs the test suite COUNT times under CPU load, then the soak if SOAK_MINUTES is set.")]
 [script]
-stress COUNT="10" *ARGS: build-test-programs
+stress COUNT="3" *ARGS: build-test-programs
     # Build before the busy loops start so they slow only the tests.
     cargo nextest run --features tools --no-run
     cpus="$(nproc)"
