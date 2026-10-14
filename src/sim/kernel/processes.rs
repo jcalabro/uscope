@@ -135,8 +135,12 @@ impl Kernel {
                     .processes
                     .get_mut(&group)
                     .expect("the caller's process");
+
+                // Linux reaps the child before it stores the status, and
+                // then fails with EFAULT; no probe pins that.
                 if process.space.write(status, &word.to_ne_bytes()).is_err() {
-                    return failure(Errno::EFAULT);
+                    self.gap("wait4 storing a status where it cannot");
+                    return failure(Errno::ENOSYS);
                 }
             }
 

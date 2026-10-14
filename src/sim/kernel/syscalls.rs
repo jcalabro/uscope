@@ -176,10 +176,13 @@ pub(super) const fn failure(errno: Errno) -> u64 {
 }
 
 /// `write(fd, buffer, count)` to standard output or error, which the
-/// simulation captures. Returns the result as the register holds it.
+/// simulation captures. Returns the result as the register holds it. The
+/// other descriptors a process may have open are not modeled, so a write
+/// to one is a gap.
 fn write(kernel: &mut Kernel, tid: Tid, fd: u64, buffer: u64, count: u64) -> u64 {
     if fd != 1 && fd != 2 {
-        return failure(Errno::EBADF);
+        kernel.gap(format!("write to descriptor {}", fd.cast_signed()));
+        return ENOSYS_RESULT;
     }
 
     let group = kernel.threads[&tid].tgid;

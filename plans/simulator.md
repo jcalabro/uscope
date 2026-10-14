@@ -298,10 +298,11 @@ address (K-DR-4).
 
 **Requests and system calls.** `kernel/ptrace.rs` has one function per
 `LinuxTraceOps` request, each answering in terms of the rules above. The
-system calls are those the golden runtime makes: `write` (captured as the
-program's output), `exit`, `exit_group`, `clone` with the flags of a thread,
-`sched_yield`, `fork`, `getpid`, `getppid`, and `wait4` for one child with
-`WNOHANG`. Thread stacks are static, so `mmap` is not needed, and the
+system calls are those the golden runtime makes: `write` to standard
+output or error (captured as the program's output), `exit`, `exit_group`,
+`clone` with the flags of a thread, `sched_yield`, `fork`, `getpid`,
+`getppid`, and `wait4` for one child with `WNOHANG` and a status it can
+store. Thread stacks are static, so `mmap` is not needed, and the
 runtime polls `wait4`, so no program needs SIGCHLD delivered. Any other
 request, system call, or form of one is a model gap, never a plausible
 default.

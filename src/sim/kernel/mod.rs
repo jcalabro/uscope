@@ -18,6 +18,8 @@ pub mod ptrace;
 pub mod shadow;
 pub mod signals;
 pub mod syscalls;
+#[cfg(test)]
+mod tests;
 pub mod watching;
 
 use std::collections::{BTreeMap, BTreeSet};
