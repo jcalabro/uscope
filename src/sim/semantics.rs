@@ -1147,6 +1147,63 @@ fn judge_entry_values(
     Ok(marks)
 }
 
+/// In unoptimized code, which inlines nothing, each frame's line and
+/// function are what binutils give for its instruction or, in a caller,
+/// for the call before its return address.
+pub fn frame_lines(
+    facts: &Facts,
+    bias: u64,
+    source: &str,
+    backtrace: &Backtrace,
+) -> Result<(), String> {
+    if facts.optimized {
+        return Ok(());
+    }
+
+    for frame in backtrace.frames.iter() {
+        let Some(address) = frame.instruction.map(VirtualAddress::get) else {
+            continue;
+        };
+
+        let at = if frame.level == 0 {
+            address
+        } else {
+            address - 1
+        };
+        let Some(image) = at.checked_sub(bias) else {
+            continue;
+        };
+
+        let shown = frame.source.as_ref().map(|source| source.line.get());
+        let line = facts
+            .range(image)
+            .and_then(|range| range.line)
+            .filter(|line| facts.file(*line) == source);
+        if let Some(line) = line
+            && shown != Some(line.line)
+        {
+            return Err(format!(
+                "frame {} at {address:#x} shows line {shown:?}, but {at:#x} is line {}",
+                frame.level, line.line
+            ));
+        }
+
+        // Code the source's line table describes is in a function its
+        // debug information describes.
+        let named = frame.function.as_ref().map(|function| &*function.name);
+        if let Some(function) = facts.function(image)
+            && named.map_or_else(|| line.is_some(), |named| named != function.name)
+        {
+            return Err(format!(
+                "frame {} at {address:#x} shows function {named:?}, but {at:#x} is in {}",
+                frame.level, function.name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// The simulated CPU's general registers, in its order.
 const GENERAL_REGISTERS: [&str; 16] = [
     "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
@@ -1292,6 +1349,52 @@ mod tests {
             termination,
             unfollowed: Arc::from([]),
         }
+    }
+
+    /// In unoptimized code a frame shows the line binutils give for its
+    /// instruction, or a caller's for its call, in a function the debug
+    /// information names.
+    #[test]
+    fn frames_show_binutils_lines() {
+        let row = |start, end, line| facts::Range {
+            start,
+            end,
+            line: Some(facts::Line { file: 0, line }),
+            statement: true,
+        };
+        let mut facts = Facts {
+            files: vec!["a.c".into()],
+            ranges: vec![row(0x10, 0x18, 3), row(0x18, 0x30, 4)],
+            ..Facts::default()
+        };
+        let backtrace = |lines: [Option<u64>; 2]| {
+            let mut backtrace = backtrace_of(1, &[0x1018, 0x1019], UnwindTermination::Complete);
+            let frames = Arc::get_mut(&mut backtrace.frames).expect("one owner");
+            for (frame, line) in frames.iter_mut().zip(lines) {
+                frame.source = line.map(|line| crate::SourceLocation {
+                    file: crate::SourceFileId::new(0),
+                    line: crate::LineNumber::new(line).expect("a line"),
+                    column: None,
+                });
+            }
+            backtrace
+        };
+
+        // The caller returns to 0x19, after a call at line 4.
+        assert_eq!(
+            frame_lines(&facts, 0x1000, "a.c", &backtrace([Some(4), Some(4)])),
+            Ok(())
+        );
+        assert!(frame_lines(&facts, 0x1000, "a.c", &backtrace([Some(3), Some(4)])).is_err());
+        assert!(frame_lines(&facts, 0x1000, "a.c", &backtrace([Some(4), None])).is_err());
+
+        // Code with lines is in a function, which a frame must name.
+        facts.functions = vec![facts::Function {
+            name: "f".into(),
+            start: 0x10,
+            end: 0x30,
+        }];
+        assert!(frame_lines(&facts, 0x1000, "a.c", &backtrace([Some(4), Some(4)])).is_err());
     }
 
     /// A function a backtrace shows as having left by a tail call must be

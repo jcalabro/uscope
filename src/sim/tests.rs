@@ -91,6 +91,13 @@ fn shifted_mappings_fail_the_modules_check() {
     ));
 }
 
+/// A debugger that misplaces the program reads the lines of other code
+/// than its frames are in, which the frames oracle catches.
+#[test]
+fn shifted_mappings_fail_the_frames_oracle() {
+    assert!(fails_with(Sabotage::ShiftMappings, "frames", "shows line"));
+}
+
 /// A watch on an object by name, when the debugger misplaces the program,
 /// watches other memory than the symbol table says the object is in.
 #[test]

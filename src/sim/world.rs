@@ -966,6 +966,19 @@ impl<'a> World<'a> {
             backtrace,
         )
         .map_err(|message| Failure::debugger("tail calls", message))?;
+        let source = self
+            .program
+            .source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        semantics::frame_lines(
+            &self.variant.facts,
+            self.variant.image.bias(),
+            source,
+            backtrace,
+        )
+        .map_err(|message| Failure::debugger("frames", message))?;
         let mut marks = self.machine.marks.borrow_mut();
         if tails > 0 {
             marks.hit(Mark::TailCallFrames);
@@ -1006,6 +1019,9 @@ impl<'a> World<'a> {
                     backtrace,
                     evaluations,
                 } if self.still_at(stop) => {
+                    // The variables are judged only where the frame shows
+                    // the line binutils give, so its line is judged first.
+                    self.judge_backtrace(&backtrace)?;
                     let source = self
                         .program
                         .source
