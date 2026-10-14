@@ -36,10 +36,10 @@ use super::watches::Intent;
 use crate::backend::ControllerMessage;
 use crate::protocol::Request;
 use crate::{
-    Backtrace, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition, ExecutionContext,
-    ExecutionId, FramePresentation, HeldChildren, InferiorState, LaunchOptions,
-    MemoryReadCompletion, ModuleId, ProcessId, ResumeScope, StateSnapshot, StepKind, StopId,
-    StopReason, ThreadId, ThreadState, VariableSnapshot, VirtualAddress,
+    Backtrace, BreakpointSpec, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition,
+    ExecutionContext, ExecutionId, FramePresentation, HeldChildren, InferiorState, LaunchOptions,
+    MemoryReadCompletion, ModuleId, ProcessId, ResumeScope, StackFrameId, StateSnapshot, StepKind,
+    StopContext, StopId, StopReason, ThreadId, ThreadState, VariableSnapshot, VirtualAddress,
 };
 
 pub use self::adopter::Adopter;
@@ -820,7 +820,7 @@ impl Client {
             20 => self.amend_watch().await?,
             _ => {
                 if let Some(stale) = stale {
-                    self.continue_stale(stale, scope).await?;
+                    self.refuse_stale(stale, snapshot.selected, scope).await?;
                 }
             }
         }
@@ -1003,31 +1003,94 @@ impl Client {
         Ok(())
     }
 
-    /// Continuing from a stop that is no longer current must be refused,
-    /// and must change nothing.
-    async fn continue_stale(&self, stale: StopId, scope: ResumeScope) -> Result<(), Failure> {
+    /// Makes a request scoped to a stop the program has left, which must be
+    /// refused as stale and change nothing: a resume, a step, a jump, a
+    /// memory read or write, or an inspection.
+    async fn refuse_stale(
+        &self,
+        stale: StopId,
+        context: Option<ExecutionContext>,
+        scope: ResumeScope,
+    ) -> Result<(), Failure> {
         let before = self.snapshot().await?;
-        match self
-            .handle
-            .continue_execution(stale, scope, ExceptionDisposition::Pass)
-            .await
-        {
-            Err(Error::StaleStop) => {}
-            other => {
-                return Err(protocol(format!(
-                    "continuing from stale stop {stale} returned {other:?}"
-                )));
-            }
+        let (address, page) = self
+            .script
+            .image
+            .code()
+            .next()
+            .ok_or_else(|| protocol("the program has no code"))?;
+        let address = VirtualAddress::new(address);
+        let view = |context| {
+            self.handle.at(StopContext {
+                stop: stale,
+                execution: context,
+                frame: StackFrameId::INNERMOST,
+            })
+        };
+
+        let (request, result) = match (context, self.draw(7)) {
+            (Some(context), 1) => (
+                "step",
+                self.handle
+                    .start_step(
+                        stale,
+                        context,
+                        StackFrameId::INNERMOST,
+                        StepKind::Instruction,
+                        scope,
+                        ExceptionDisposition::Pass,
+                    )
+                    .await
+                    .map(drop),
+            ),
+            (Some(context), 2) => (
+                "jump",
+                self.handle
+                    .start_jump(stale, context, BreakpointSpec::Address(address))
+                    .await
+                    .map(drop),
+            ),
+            (_, 3) => (
+                "memory read",
+                self.handle
+                    .read_memory_at(stale, address, 1)
+                    .await
+                    .map(drop),
+            ),
+            // The program's own byte, so that a write wrongly made changes
+            // nothing the oracles would blame on something else.
+            (_, 4) => (
+                "memory write",
+                self.handle
+                    .write_memory_at(stale, address, &page[..1])
+                    .await
+                    .map(drop),
+            ),
+            (Some(context), 5) => ("registers", view(context).registers().await.map(drop)),
+            (Some(context), 6) => ("variables", view(context).variables().await.map(drop)),
+            _ => (
+                "continue",
+                self.handle
+                    .continue_execution(stale, scope, ExceptionDisposition::Pass)
+                    .await
+                    .map(drop),
+            ),
+        };
+
+        if !matches!(result, Err(Error::StaleStop)) {
+            return Err(protocol(format!(
+                "a {request} at stale stop {stale} returned {result:?}"
+            )));
         }
 
         let after = self.snapshot().await?;
         if after != before {
             return Err(protocol(format!(
-                "a refused request changed the state from {before:?} to {after:?}"
+                "a refused {request} changed the state from {before:?} to {after:?}"
             )));
         }
 
-        self.note(format!("stale stop {stale} refused"));
+        self.note(format!("{request} at stale stop {stale} refused"));
         self.mark(Mark::StaleStopRefused);
         Ok(())
     }
