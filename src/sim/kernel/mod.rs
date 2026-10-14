@@ -1196,11 +1196,12 @@ impl Kernel {
         #[cfg(test)]
         let skipped = trap
             && debugged
-            && match self.sabotage {
-                Some(Sabotage::SkipTraps) => user_breakpoint,
-                Some(Sabotage::SkipTemporaryTraps) => self.temporary_breakpoints.contains(&address),
-                _ => false,
-            };
+            && skips_trap(
+                self.sabotage,
+                &self.temporary_breakpoints,
+                address,
+                user_breakpoint,
+            );
         #[cfg(not(test))]
         let skipped = false;
         if user_breakpoint && thread.trapped_at != Some(address) && (!trap || skipped) {
@@ -1242,21 +1243,13 @@ impl Kernel {
         };
 
         #[cfg(test)]
-        let watch_hits = if self.sabotage == Some(Sabotage::MissWatchTraps)
-            && tid != thread.tgid.leader()
-        {
-            0
-        } else if self.sabotage == Some(Sabotage::RepeatWatchTraps) && outcome == Outcome::Completed
-        {
-            let repeated = self.repeat_watch.remove(&tid).unwrap_or(0);
-            if watch_hits != 0 {
-                self.repeat_watch.insert(tid, watch_hits);
-            }
-
-            watch_hits | repeated
-        } else {
-            watch_hits
-        };
+        let watch_hits = sabotaged_watch_hits(
+            self.sabotage,
+            &mut self.repeat_watch,
+            (tid, thread.tgid.leader()),
+            &outcome,
+            watch_hits,
+        );
 
         if thread.debug.breaks_on_execution() {
             self.gap("debug registers breaking on execution");
@@ -1812,6 +1805,47 @@ impl Kernel {
         self.threads
             .values()
             .filter(move |thread| thread.tgid == group)
+    }
+}
+
+/// The debug exceptions an instruction of `tid`, in the process `leader`
+/// leads, raises under `sabotage` when its slots raise `hits`.
+#[cfg(test)]
+fn sabotaged_watch_hits(
+    sabotage: Option<Sabotage>,
+    repeat_watch: &mut BTreeMap<Tid, u64>,
+    (tid, leader): (Tid, Tid),
+    outcome: &Outcome,
+    hits: u64,
+) -> u64 {
+    match sabotage {
+        Some(Sabotage::MissWatchTraps) if tid != leader => 0,
+        Some(Sabotage::RepeatWatchTraps) if *outcome == Outcome::Completed => {
+            let repeated = repeat_watch.remove(&tid).unwrap_or(0);
+            if hits != 0 {
+                repeat_watch.insert(tid, hits);
+            }
+
+            hits | repeated
+        }
+        _ => hits,
+    }
+}
+
+/// Whether `sabotage` makes the CPU skip the trap at `address`, which is a
+/// user breakpoint's or not, with `temporaries` those only temporary
+/// breakpoints own.
+#[cfg(test)]
+fn skips_trap(
+    sabotage: Option<Sabotage>,
+    temporaries: &BTreeSet<u64>,
+    address: u64,
+    user_breakpoint: bool,
+) -> bool {
+    match sabotage {
+        Some(Sabotage::SkipTraps) => user_breakpoint,
+        Some(Sabotage::SkipTemporaryTraps) => temporaries.contains(&address),
+        _ => false,
     }
 }
 
