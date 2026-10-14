@@ -458,7 +458,7 @@ async fn breakpoints_and_the_vdso_module_follow_the_vdso_as_it_moves_and_goes() 
                 _ => None,
             })
             .filter(|(_, module)| module.path.as_os_str() == support::VDSO)
-            .map(|(loaded, module)| (loaded, module.module.load_bias))
+            .map(|(loaded, module)| (loaded, module.module.load_bias.get()))
             .collect::<Vec<_>>()
     };
     let first = support::vdso_mapping(process_id).start;
@@ -482,7 +482,7 @@ async fn breakpoints_and_the_vdso_module_follow_the_vdso_as_it_moves_and_goes() 
         .operation("modules", scenario.handle().loaded_modules())
         .await;
     let moved = support::vdso_mapping(process_id).start;
-    assert_eq!(support::vdso_module(&modules).module.load_bias, moved);
+    assert_eq!(support::vdso_module(&modules).module.load_bias.get(), moved);
     let target = scenario
         .operation("address", scenario.handle().variable("address"))
         .await;
@@ -554,6 +554,7 @@ async fn function_breakpoints_follow_library_code_as_it_moves() {
             .expect("the library is loaded")
             .module
             .load_bias
+            .get()
     };
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())

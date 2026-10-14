@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::table;
+pub use crate::model::{Pid, Tid};
 
 /// The calling convention a system call was made with. One process may make
 /// calls under several, as a 64-bit process may through `int 0x80`.
@@ -242,9 +243,9 @@ impl CallStack {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyscallEvent {
     /// The thread, by its id in the traced process's pid namespace.
-    pub thread: u32,
+    pub thread: Tid,
     /// Its process.
-    pub process: u32,
+    pub process: Pid,
     pub call: SyscallId,
     /// The six argument registers, always, however many the call takes.
     pub args: [u64; 6],
@@ -293,14 +294,14 @@ pub enum TraceEvent {
     Call(SyscallEvent),
     /// A signal was delivered to a thread.
     Signal {
-        thread: u32,
-        process: u32,
+        thread: Tid,
+        process: Pid,
         time: u64,
         signal: i32,
         /// `si_code`, when the engine saw it.
         code: Option<i32>,
         /// The sending process, for signals one sent.
-        sender: Option<u32>,
+        sender: Option<Pid>,
         /// The whole `siginfo_t`, when the engine read it.
         info: Option<Arc<[u8]>>,
         /// The thread's stack where the signal found it, when stacks were
@@ -309,31 +310,32 @@ pub enum TraceEvent {
     },
     /// A thread created a process or a thread.
     Spawn {
-        parent_thread: u32,
-        parent: u32,
-        child: u32,
+        parent_thread: Tid,
+        parent: Pid,
+        /// The child's first thread, which leads it when it is a process.
+        child: Tid,
         /// Whether the child is a thread of the parent's process.
         thread: bool,
         time: u64,
     },
     /// A process replaced its image.
     Exec {
-        thread: u32,
-        process: u32,
+        thread: Tid,
+        process: Pid,
         time: u64,
         path: Arc<str>,
     },
     /// A process ended.
     Exit {
-        process: u32,
+        process: Pid,
         time: u64,
         end: ProcessEnd,
     },
     /// A thread other than its process's leader ended, which only the
     /// ptrace engine reports.
     ThreadExit {
-        thread: u32,
-        process: u32,
+        thread: Tid,
+        process: Pid,
         time: u64,
         end: ProcessEnd,
     },
@@ -348,7 +350,7 @@ pub enum TraceEvent {
     /// (`/proc/PID/fd/N`): when tracing began, or right after a call made
     /// the descriptor.
     Descriptor {
-        process: u32,
+        process: Pid,
         /// The descriptor, or `AT_FDCWD` (-100) for the working directory.
         fd: i64,
         time: u64,
@@ -393,8 +395,8 @@ impl TraceEvent {
 /// return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InFlight {
-    pub thread: u32,
-    pub process: u32,
+    pub thread: Tid,
+    pub process: Pid,
     pub call: SyscallId,
     pub args: [u64; 6],
     /// `CLOCK_MONOTONIC` nanoseconds at entry.

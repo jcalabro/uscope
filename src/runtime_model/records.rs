@@ -277,7 +277,11 @@ impl Sum {
     }
 
     /// The variant the value at `address` holds, or why it cannot be read.
-    pub fn active(&self, stop: &dyn RuntimeStop, address: u64) -> Result<&SumVariant, Missing> {
+    pub fn active(
+        &self,
+        stop: &dyn RuntimeStop,
+        address: VirtualAddress,
+    ) -> Result<&SumVariant, Missing> {
         let (offset, size) = self.tag;
         let tag = read(stop, address.wrapping_add(offset), size)
             .ok_or_else(|| format!("the {} at {address:#x} is unreadable", self.name))?;
@@ -304,15 +308,23 @@ impl Sum {
 }
 
 /// An unsigned little-endian integer of `size` bytes, at most eight.
-pub fn read(stop: &dyn RuntimeStop, address: u64, size: usize) -> Option<u64> {
+pub fn read(stop: &dyn RuntimeStop, address: VirtualAddress, size: usize) -> Option<u64> {
     let mut bytes = [0; 8];
-    stop.read(VirtualAddress::new(address), bytes.get_mut(..size)?)
+    stop.read(address, bytes.get_mut(..size)?)
         .then(|| u64::from_le_bytes(bytes))
 }
 
+/// The address a null pointer holds.
+pub const NULL: VirtualAddress = VirtualAddress::new(0);
+
 /// A word at `address`.
-pub fn word(stop: &dyn RuntimeStop, address: u64) -> Option<u64> {
+pub fn word(stop: &dyn RuntimeStop, address: VirtualAddress) -> Option<u64> {
     read(stop, address, 8)
+}
+
+/// The address a pointer at `address` holds.
+pub fn pointer(stop: &dyn RuntimeStop, address: VirtualAddress) -> Option<VirtualAddress> {
+    word(stop, address).map(VirtualAddress::new)
 }
 
 #[cfg(test)]

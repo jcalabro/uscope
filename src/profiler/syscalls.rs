@@ -9,7 +9,8 @@ use crate::capture::records::{
 };
 use crate::syscalls::stats::{Folded, SyscallStats};
 use crate::syscalls::{
-    Abi, Device, Errno, EventFlags, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent,
+    Abi, Device, Errno, EventFlags, Outcome, Pid, ProcessEnd, SyscallEvent, SyscallId, Tid,
+    TraceEvent,
 };
 
 /// One event of a recorded trace, with the stack it was recorded with.
@@ -108,16 +109,19 @@ impl Profile {
     pub fn syscalls(&self) -> RecordedSyscalls {
         let capture = &self.capture;
         let ids = |thread: u32| {
-            capture.threads.get(thread as usize).map_or((0, 0), |row| {
-                let pid = capture.processes[row.process.get() as usize].pid.get();
-                (row.tid.get(), pid)
-            })
+            capture
+                .threads
+                .get(thread as usize)
+                .map_or((Tid::new(0), Pid::new(0)), |row| {
+                    let pid = capture.processes[row.process.get() as usize].pid.get();
+                    (Tid::new(row.tid.get()), Pid::new(pid))
+                })
         };
         let pid = |process: u32| {
             capture
                 .processes
                 .get(process as usize)
-                .map_or(0, |row| row.pid.get())
+                .map_or(Pid::new(0), |row| Pid::new(row.pid.get()))
         };
         let blob = |start: u32, len: u32| -> &[u8] {
             if start == NONE {
@@ -175,7 +179,7 @@ impl Profile {
     }
 
     /// The statistics the kernel counted, per process and call.
-    fn kernel_counted(&self, pid: &impl Fn(u32) -> u32) -> Folded {
+    fn kernel_counted(&self, pid: &impl Fn(u32) -> Pid) -> Folded {
         let capture = &self.capture;
         let mut counted = Folded::default();
         for row in &capture.syscall_stats {
@@ -216,8 +220,8 @@ impl Profile {
     fn note<'a>(
         &self,
         note: &records::SyscallNote,
-        ids: &impl Fn(u32) -> (u32, u32),
-        pid: &impl Fn(u32) -> u32,
+        ids: &impl Fn(u32) -> (Tid, Pid),
+        pid: &impl Fn(u32) -> Pid,
         blob: &impl Fn(u32, u32) -> &'a [u8],
     ) -> RecordedEvent {
         let capture = &self.capture;
@@ -246,7 +250,7 @@ impl Profile {
                     code: (note.flags & flags::SIGNAL_CODE != 0)
                         .then_some((extra as u32).cast_signed()),
                     sender: (note.flags & flags::SIGNAL_SENDER != 0)
-                        .then(|| u32::try_from(extra >> 32).unwrap_or(0)),
+                        .then(|| Pid::new(u32::try_from(extra >> 32).unwrap_or(0))),
                     info: (!bytes.is_empty()).then(|| bytes.into()),
                     stack: None,
                 }
@@ -254,7 +258,7 @@ impl Profile {
             Some(NoteKind::Spawn) => TraceEvent::Spawn {
                 parent_thread: thread,
                 parent: process,
-                child: u32::try_from(value).unwrap_or(0),
+                child: Tid::new(u32::try_from(value).unwrap_or(0)),
                 thread: note.flags & flags::SPAWN_THREAD != 0,
                 time,
             },
@@ -353,8 +357,8 @@ mod tests {
 
     fn call(thread: u32, number: u32, outcome: Outcome, at: u64) -> TraceEvent {
         TraceEvent::Call(SyscallEvent {
-            thread,
-            process: 10,
+            thread: Tid::new(thread),
+            process: Pid::new(10),
             call: SyscallId {
                 abi: Abi::X86_32,
                 number,
@@ -387,13 +391,13 @@ mod tests {
     fn trace() -> Vec<TraceEvent> {
         vec![
             TraceEvent::Exec {
-                thread: 10,
-                process: 10,
+                thread: Tid::new(10),
+                process: Pid::new(10),
                 time: 100,
                 path: "/bin/app".into(),
             },
             TraceEvent::Descriptor {
-                process: 10,
+                process: Pid::new(10),
                 fd: 3,
                 time: 300,
                 text: "/etc/passwd".into(),
@@ -407,20 +411,20 @@ mod tests {
             },
             call(10, 257, Outcome::Returned(3), 200),
             TraceEvent::Spawn {
-                parent_thread: 10,
-                parent: 10,
-                child: 11,
+                parent_thread: Tid::new(10),
+                parent: Pid::new(10),
+                child: Tid::new(11),
                 thread: true,
                 time: 210,
             },
             call(11, 0, Outcome::Failed(Errno(4)), 220),
             TraceEvent::Signal {
-                thread: 11,
-                process: 10,
+                thread: Tid::new(11),
+                process: Pid::new(10),
                 time: 230,
                 signal: 10,
                 code: Some(-6),
-                sender: Some(10),
+                sender: Some(Pid::new(10)),
                 info: Some([7; 128].as_slice().into()),
                 stack: None,
             },
@@ -429,14 +433,14 @@ mod tests {
                 count: 3,
             },
             TraceEvent::ThreadExit {
-                thread: 11,
-                process: 10,
+                thread: Tid::new(11),
+                process: Pid::new(10),
                 time: 250,
                 end: ProcessEnd::Exited(0),
             },
             call(10, 231, Outcome::ProcessExited, 260),
             TraceEvent::Exit {
-                process: 10,
+                process: Pid::new(10),
                 time: 270,
                 end: ProcessEnd::Killed {
                     signal: 9,
@@ -495,10 +499,10 @@ mod tests {
     fn samples_and_calls_of_one_thread_merge_into_its_one_row() {
         let mut samples = crate::capture::builder::CaptureBuilder::new();
         for (tid, start) in [(10, 50), (11, 205)] {
-            let thread = samples.thread(10, tid, start);
+            let thread = samples.thread(Pid::new(10), Tid::new(tid), start);
             samples.sample(thread, start + 1, 1, NONE, NONE);
         }
-        samples.process_exit(10, 400);
+        samples.process_exit(Pid::new(10), 400);
         let mut recorder = SyscallCapture::new(None);
         for event in trace() {
             recorder.event(&event);

@@ -11,7 +11,7 @@ use zerocopy::little_endian::{I64, U32, U64};
 use crate::profiler::Profile;
 use crate::syscalls::stats::Folded;
 use crate::syscalls::{
-    CallStack, CaptureState, InFlight, Outcome, ProcessEnd, ReadAt, SyscallEvent, TraceEvent,
+    CallStack, CaptureState, InFlight, Outcome, Pid, ProcessEnd, ReadAt, SyscallEvent, TraceEvent,
 };
 
 use super::Sink;
@@ -97,7 +97,7 @@ impl SyscallCapture {
         }
     }
 
-    fn stack(&mut self, process: u32, stack: Option<&CallStack>) -> u32 {
+    fn stack(&mut self, process: Pid, stack: Option<&CallStack>) -> u32 {
         match (stack, &self.stacks) {
             (Some(stack), Some(stacks)) => stacks.lock().map_or(NONE, |mut stacks| {
                 stacks.capture(process, stack, &mut self.builder)
@@ -136,7 +136,7 @@ impl SyscallCapture {
                 });
                 let sender = sender.map_or(0, |sender| {
                     note.flags |= flags::SIGNAL_SENDER;
-                    u64::from(sender)
+                    u64::from(sender.get())
                 });
                 note.extra = (code | sender << 32).into();
                 bytes = info.as_deref().unwrap_or_default();
@@ -188,16 +188,17 @@ impl SyscallCapture {
                 note.kind = NoteKind::Spawn as u8;
                 note.thread = self.builder.thread(*parent, *parent_thread, at).into();
                 note.process = self.builder.process(*parent, at).into();
-                note.value = i64::from(*child).into();
+                note.value = i64::from(child.get()).into();
                 if *thread {
                     note.flags = flags::SPAWN_THREAD;
                     self.builder.thread(*parent, *child, at);
                 } else {
-                    self.builder.thread(*child, *child, at);
+                    let process = Pid::led_by(*child);
+                    self.builder.thread(process, *child, at);
                     if let Some(stacks) = &self.stacks
                         && let Ok(mut stacks) = stacks.lock()
                     {
-                        stacks.forked(*parent, *child);
+                        stacks.forked(*parent, process);
                     }
                 }
             }

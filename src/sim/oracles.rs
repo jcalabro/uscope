@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::corpus::Run;
-use super::kernel::{ExitStatus, Kernel, Parent, State, Tid, signals};
+use super::kernel::{ExitStatus, Kernel, Parent, State, Tgid, Tid, signals};
 use super::loader::Image;
 use crate::backend::sim_edge::Truth;
 
@@ -118,7 +118,7 @@ pub fn site_ownership(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
 /// Whether `tgid` is ending as a whole: killed, by the debugger or from
 /// outside, or exiting its group. Its threads then leave their stops
 /// whatever the debugger publishes, until it hears of the exit.
-pub(super) fn ending(kernel: &Kernel, tgid: Tid) -> bool {
+pub(super) fn ending(kernel: &Kernel, tgid: Tgid) -> bool {
     kernel
         .processes
         .get(&tgid)
@@ -348,8 +348,8 @@ pub fn output_so_far(kernel: &Kernel, run: &Run) -> Result<(), String> {
 /// or about to stop for the SIGSTOP the debugger queued before it released
 /// it, holds no byte the debugger planted, and has run no instruction, until
 /// a session seizes it. Returns whether it is still held.
-pub fn held(kernel: &Kernel, tgid: Tid) -> Result<bool, String> {
-    let Some(thread) = kernel.threads.get(&tgid) else {
+pub fn held(kernel: &Kernel, tgid: Tgid) -> Result<bool, String> {
+    let Some(thread) = kernel.threads.get(&tgid.leader()) else {
         return Err(format!("held child {tgid} is gone"));
     };
     if thread.traced() {
@@ -474,7 +474,7 @@ mod tests {
             .expect("plant a trap");
         let truth = |sites: Vec<(u64, Site)>| Truth {
             sites: sites.into_iter().collect(),
-            inferior: Some(tgid),
+            inferior: Some(Tgid::led_by(tgid)),
             ..Truth::default()
         };
 
@@ -561,7 +561,7 @@ mod tests {
         let ended = |status, output: &str| {
             let mut kernel = Kernel::new(100);
             kernel.ended.insert(
-                1000,
+                Tgid::new(1000),
                 Ended {
                     status,
                     root: 1000,
@@ -598,7 +598,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            inferior: Some(1000),
+            inferior: Some(Tgid::new(1000)),
             ..Truth::default()
         }
     }
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(hit_counts(&before, &before, None, false), Ok(()));
         assert!(hit_counts(&before, &with_hits([5, 0, 7]), None, false).is_err());
         let relaunched = |hits| Truth {
-            inferior: Some(1002),
+            inferior: Some(Tgid::new(1002)),
             ..with_hits(hits)
         };
         assert_eq!(
@@ -675,7 +675,7 @@ mod tests {
         let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
         let truth = |threads: Vec<Tid>| Truth {
             public_stop: Some(1),
-            inferior: Some(tgid),
+            inferior: Some(Tgid::led_by(tgid)),
             threads: threads.into_iter().collect(),
             ..Truth::default()
         };
@@ -722,7 +722,7 @@ mod tests {
         let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
         let truth = Truth {
             public_stop: Some(1),
-            inferior: Some(tgid),
+            inferior: Some(Tgid::led_by(tgid)),
             ..with_hits([0, 0, 0])
         };
         let intent = |entries: Vec<(u64, u64)>| {
@@ -749,7 +749,7 @@ mod tests {
         let mut kernel = Kernel::new(100);
         let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
         let truth = Truth {
-            inferior: Some(tgid),
+            inferior: Some(Tgid::led_by(tgid)),
             ..with_hits([0, 0, 0])
         };
         assert_eq!(

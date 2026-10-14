@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::hits::Published;
-use super::kernel::{ExitStatus, Kernel, Tid, WaitStatus};
+use super::kernel::{ExitStatus, Kernel, Tgid, Tid, WaitStatus};
 use super::marks::{Mark, Marks};
 use super::report::Failure;
 use crate::{ConditionOwner, DebuggerEvent};
@@ -122,7 +122,8 @@ impl Auditor {
                 DebuggerEvent::InferiorExited {
                     process_id, status, ..
                 } => {
-                    let tgid = Tid::try_from(process_id.get()).expect("a simulated pid fits");
+                    let tgid =
+                        Tgid::new(Tid::try_from(process_id.get()).expect("a simulated pid fits"));
                     let Some(truth) = kernel.ended.get(&tgid).map(|ended| &ended.status) else {
                         return Err(failure(format!(
                             "process {tgid} reported {status:?} before it ended"

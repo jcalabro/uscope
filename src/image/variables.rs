@@ -12,11 +12,11 @@ use std::sync::Arc;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::functions::{LocationRecord, language_code, language_of, span, valid_language};
+use super::functions::{LocationRecord, language_code, language_of, valid_language};
 use super::locations::LocationListId;
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::types::Item;
-use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
+use super::{Builder, Image, NONE, Record, SharedRecord, Span, TableKind};
 use crate::{
     AddressRange, CodeInstanceId, ImageAddress, SourceLanguage, SourceLocation, TypeId,
     VariableKind,
@@ -235,8 +235,7 @@ pub struct GlobalEntry<'a> {
     Debug, Clone, Copy, PartialEq, Eq, Hash, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
 )]
 pub struct ScopeRecord {
-    pub ranges: U32,
-    pub range_count: U32,
+    pub ranges: Span<CodeRange>,
     /// The inline instance owning the scope, or [`NONE`].
     pub instance: U32,
     /// The code instance a Go local's declaration is in, or [`NONE`].
@@ -324,16 +323,13 @@ pub mod constant_kinds {
     Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
 )]
 pub struct VariableFunctionRecord {
-    pub ranges: U32,
-    pub range_count: U32,
-    pub objects: U32,
-    pub object_count: U32,
+    pub ranges: Span<CodeRange>,
+    pub objects: Span<Item>,
     /// The name a Go function value shows, or [`NONE`].
     pub name: U32,
     /// The first capture, or with [`function_flags::CAPTURES_MALFORMED`]
     /// why they are unknown.
-    pub captures: U32,
-    pub capture_count: U32,
+    pub captures: Span<CaptureRecord>,
     pub returned_name: U32,
     /// The returned type, or with [`function_flags::RETURNED_MALFORMED`]
     /// why it is unknown.
@@ -474,19 +470,22 @@ struct Encoder {
 
 impl Encoder {
     /// The first of `ranges`, pooled once.
-    fn ranges(&mut self, ranges: &[AddressRange<ImageAddress>]) -> Result<(U32, U32), TooMany> {
-        let count = number(ranges.len())?.into();
+    fn ranges(
+        &mut self,
+        ranges: &[AddressRange<ImageAddress>],
+    ) -> Result<Span<CodeRange>, TooMany> {
+        let count = number(ranges.len())?;
         if let Some(first) = self.pooled_ranges.get(ranges) {
-            return Ok((*first, count));
+            return Ok(Span::new(first.get(), count));
         }
-        let first = number(self.ranges.len())?.into();
+        let first = number(self.ranges.len())?;
         self.ranges.extend(ranges.iter().map(|range| CodeRange {
             start: range.start.get().into(),
             end: range.end.get().into(),
         }));
         number(self.ranges.len())?;
-        self.pooled_ranges.insert(ranges.into(), first);
-        Ok((first, count))
+        self.pooled_ranges.insert(ranges.into(), first.into());
+        Ok(Span::new(first, count))
     }
 
     fn scope(&mut self, scope: ScopeRecord) -> Result<U32, TooMany> {
@@ -700,7 +699,7 @@ fn encode_function(
     lists: &mut FunctionLists,
     function: &Function,
 ) -> Result<VariableFunctionRecord, TooMany> {
-    let (ranges, range_count) = encoder.ranges(&function.ranges)?;
+    let ranges = encoder.ranges(&function.ranges)?;
     let first = number(lists.objects.len())?;
     lists
         .objects
@@ -708,7 +707,8 @@ fn encode_function(
             value: (*object).into(),
         }));
     let mut flags = 0;
-    let (first_capture, capture_count) = match &function.captures {
+    // A malformed list begins at the string that says why, and is empty.
+    let captures = match &function.captures {
         Ok(list) => {
             let first = number(lists.captures.len())?;
             for capture in list {
@@ -720,24 +720,21 @@ fn encode_function(
                     malformed: u8::from(malformed),
                 });
             }
-            (first.into(), number(list.len())?.into())
+            Span::new(first, number(list.len())?)
         }
         Err(why) => {
             flags |= function_flags::CAPTURES_MALFORMED;
-            (text(strings, why)?, 0.into())
+            Span::new(text(strings, why)?.get(), 0)
         }
     };
     let mut record = VariableFunctionRecord {
         ranges,
-        range_count,
-        objects: first.into(),
-        object_count: number(function.objects.len())?.into(),
+        objects: Span::new(first, number(function.objects.len())?),
         name: match &function.name {
             Some(name) => text(strings, name)?,
             None => NONE.into(),
         },
-        captures: first_capture,
-        capture_count,
+        captures,
         returned_name: NONE.into(),
         returned_type: NONE.into(),
         other_language: 0.into(),
@@ -877,7 +874,7 @@ fn encode_object(
     strings: &mut StringsBuilder,
     object: &DataObject,
 ) -> Result<ObjectRecord, TooMany> {
-    let (ranges, range_count) = encoder.ranges(&object.ranges)?;
+    let ranges = encoder.ranges(&object.ranges)?;
     let (frame_base_kind, frame_base) = location(strings, &object.frame_base)?;
     let mut flags = 0;
     if let Some(declared) = &object.go_declaration {
@@ -894,7 +891,6 @@ fn encode_object(
         .and_then(|declared| declared.instance.map(CodeInstanceId::get));
     let scope = encoder.scope(ScopeRecord {
         ranges,
-        range_count,
         instance: optional(object.instance.map(CodeInstanceId::get)),
         go_instance: optional(go_instance),
         lexical_depth: object.lexical_depth.into(),
@@ -1091,9 +1087,8 @@ impl<'a> VariableView<'a> {
         }
     }
 
-    fn ranges(self, first: U32, count: U32) -> &'a [CodeRange] {
-        let first = first.get() as usize;
-        &self.ranges[first..first + count.get() as usize]
+    fn ranges(self, ranges: Span<CodeRange>) -> &'a [CodeRange] {
+        ranges.rows(self.ranges)
     }
 }
 
@@ -1126,7 +1121,7 @@ impl<'a> Object<'a> {
     /// The code of its scope.
     pub fn ranges(self) -> impl ExactSizeIterator<Item = AddressRange<ImageAddress>> + 'a {
         self.view
-            .ranges(self.scope.ranges, self.scope.range_count)
+            .ranges(self.scope.ranges)
             .iter()
             .map(CodeRange::get)
     }
@@ -1234,16 +1229,17 @@ impl<'a> VariableFunction<'a> {
     /// Whether its code contains `address`.
     pub fn contains(self, address: ImageAddress) -> bool {
         self.view
-            .ranges(self.record.ranges, self.record.range_count)
+            .ranges(self.record.ranges)
             .iter()
             .any(|range| range.get().contains(address))
     }
 
     /// Its objects, in the order a frame shows them.
     pub fn objects(self) -> impl ExactSizeIterator<Item = Object<'a>> + 'a {
-        let first = self.record.objects.get() as usize;
         let view = self.view;
-        self.view.function_objects[first..first + self.record.object_count.get() as usize]
+        self.record
+            .objects
+            .rows(self.view.function_objects)
             .iter()
             .map(move |item| view.object(ObjectId(item.value.get())))
     }
@@ -1257,19 +1253,19 @@ impl<'a> VariableFunction<'a> {
     /// cannot be known.
     pub fn captures(self) -> Result<Vec<Capture>, Arc<str>> {
         if self.record.flags & function_flags::CAPTURES_MALFORMED != 0 {
-            return Err(self.view.text(self.record.captures));
+            return Err(self.view.text(self.record.captures.first().into()));
         }
-        let first = self.record.captures.get() as usize;
-        Ok(
-            self.view.captures[first..first + self.record.capture_count.get() as usize]
-                .iter()
-                .map(|capture| Capture {
-                    name: self.view.text(capture.name),
-                    offset: capture.offset.get(),
-                    type_info: self.view.resolution(capture.ty, capture.malformed != 0),
-                })
-                .collect(),
-        )
+        Ok(self
+            .record
+            .captures
+            .rows(self.view.captures)
+            .iter()
+            .map(|capture| Capture {
+                name: self.view.text(capture.name),
+                offset: capture.offset.get(),
+                type_info: self.view.resolution(capture.ty, capture.malformed != 0),
+            })
+            .collect())
     }
 
     /// How the function returns its values, when that is known.
@@ -1390,7 +1386,7 @@ fn validate_objects(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
         return Err("a scope's code is empty".into());
     }
     if !view.scopes.iter().all(|scope| {
-        span(scope.ranges, scope.range_count, view.ranges.len())
+        scope.ranges.within(view.ranges.len())
             && bounds.optional_instance(scope.instance)
             && bounds.optional_instance(scope.go_instance)
             && scope.frame_base_kind != value_kinds::CONSTANT
@@ -1454,22 +1450,14 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
         return Err("a global is malformed".into());
     }
     if !view.functions.iter().all(|function| {
-        span(function.ranges, function.range_count, view.ranges.len())
-            && span(
-                function.objects,
-                function.object_count,
-                view.function_objects.len(),
-            )
+        function.ranges.within(view.ranges.len())
+            && function.objects.within(view.function_objects.len())
             && bounds.optional_string(function.name)
             && function.flags & !function_flags::ALL == 0
             && if function.flags & function_flags::CAPTURES_MALFORMED == 0 {
-                span(
-                    function.captures,
-                    function.capture_count,
-                    view.captures.len(),
-                )
+                function.captures.within(view.captures.len())
             } else {
-                bounds.string(function.captures) && function.capture_count.get() == 0
+                bounds.string(function.captures.first().into()) && function.captures.count() == 0
             }
             && match function.returns {
                 returns::UNKNOWN | returns::GO_REGISTERS => {

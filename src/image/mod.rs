@@ -37,6 +37,10 @@ pub mod sample;
 #[cfg(test)]
 mod tests;
 
+use std::marker::PhantomData;
+use std::ops::Range;
+
+use zerocopy::little_endian::U32;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub use backing::AlignedBytes;
@@ -50,6 +54,95 @@ use container::{Format, TableBytes, Tables};
 
 /// The index that stands for no row in any table's reference column.
 pub const NONE: u32 = u32::MAX;
+
+/// The `count` rows of one table from row `first`, which a record owns.
+/// `T` is what the rows are, so a span reads only its own table.
+#[repr(C)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+pub struct Span<T> {
+    first: U32,
+    count: U32,
+    rows: PhantomData<T>,
+}
+
+impl<T> Span<T> {
+    pub const EMPTY: Self = Self::new(0, 0);
+
+    #[must_use]
+    pub const fn new(first: u32, count: u32) -> Self {
+        Self {
+            first: U32::new(first),
+            count: U32::new(count),
+            rows: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub const fn first(self) -> u32 {
+        self.first.get()
+    }
+
+    #[must_use]
+    pub const fn count(self) -> u32 {
+        self.count.get()
+    }
+
+    /// The rows' indexes.
+    #[must_use]
+    pub const fn range(self) -> Range<usize> {
+        let first = self.first.get() as usize;
+        first..first + self.count.get() as usize
+    }
+
+    /// Whether the rows lie within a table of `length` rows.
+    #[must_use]
+    pub fn within(self, length: usize) -> bool {
+        (self.first.get() as usize)
+            .checked_add(self.count.get() as usize)
+            .is_some_and(|end| end <= length)
+    }
+
+    /// The same rows, as `U`s: for a span whose table its record's kind
+    /// says.
+    #[must_use]
+    pub const fn cast<U>(self) -> Span<U> {
+        Span::new(self.first.get(), self.count.get())
+    }
+
+    /// The span's rows of `table`, which validation checked hold them.
+    #[must_use]
+    pub fn rows(self, table: &[T]) -> &[T] {
+        &table[self.range()]
+    }
+}
+
+impl<T> Clone for Span<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Span<T> {}
+
+impl<T> PartialEq for Span<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.first, self.count) == (other.first, other.count)
+    }
+}
+
+impl<T> Eq for Span<T> {}
+
+impl<T> std::hash::Hash for Span<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.first, self.count).hash(state);
+    }
+}
+
+impl<T> std::fmt::Debug for Span<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Span({}+{})", self.first.get(), self.count.get())
+    }
+}
 
 /// The most rows one table may hold: every index but [`NONE`].
 pub const MAX_ROWS: u64 = NONE as u64;

@@ -27,7 +27,7 @@ use super::{
     RuntimeSignals, RuntimeStop, StartedTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
     TaskPage, TaskRef, TaskStarter, ThreadActivity,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress};
 
 /// What tokio calls its tasks.
@@ -42,9 +42,6 @@ const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
 /// The task state's bits (`runtime/task/state.rs`), which tokio keeps in
 /// constants its debug information does not describe.
 const RUNNING: u64 = 0b1;
-/// The registers a function's first and second arguments are passed in.
-const RDI: u16 = 5;
-const RSI: u16 = 4;
 const COMPLETE: u64 = 0b10;
 const NOTIFIED: u64 = 0b100;
 const CANCELLED: u64 = 0b10_0000;
@@ -126,7 +123,7 @@ struct TokioRuntime {
     /// checked against, or one the program does not name.
     caveat: Option<Arc<str>>,
     /// Whether each vtable, by image address, is a task's.
-    vtables: Mutex<BTreeMap<u64, Option<Arc<str>>>>,
+    vtables: Mutex<BTreeMap<ImageAddress, Option<Arc<str>>>>,
     /// Where the future is in the cells of each poll function.
     futures: Mutex<BTreeMap<ImageAddress, Result<future::FutureLayout, Arc<str>>>>,
     /// Where the function that runs each coroutine type begins.
@@ -141,7 +138,7 @@ struct TokioRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Instance {
     flavor: Flavor,
-    handle: u64,
+    handle: VirtualAddress,
 }
 
 /// What one thread's `CONTEXT` says.
@@ -158,7 +155,7 @@ struct ThreadContext {
     /// The task the thread polls.
     task: Option<u64>,
     /// The `LocalSet` the thread runs, by its `Shared`.
-    local: Option<u64>,
+    local: Option<VirtualAddress>,
 }
 
 /// The runtimes at one stop and what each thread does for them.
@@ -175,7 +172,7 @@ struct Census {
 #[derive(Debug, Clone, Copy)]
 struct List {
     id: u64,
-    shards: u64,
+    shards: VirtualAddress,
     length: u64,
     count: u64,
     counted: bool,
@@ -187,7 +184,7 @@ struct List {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cursor {
     Start,
-    Node(u64),
+    Node(VirtualAddress),
     Blocking(u64),
 }
 
@@ -198,14 +195,14 @@ impl Cursor {
         } else if position & 1 == 1 {
             Self::Blocking(position >> 1)
         } else {
-            Self::Node(position)
+            Self::Node(VirtualAddress::new(position))
         }
     }
 
     const fn encode(self) -> u64 {
         match self {
             Self::Start => 0,
-            Self::Node(header) => header,
+            Self::Node(header) => header.get(),
             Self::Blocking(index) => (index << 1) | 1,
         }
     }
@@ -305,7 +302,8 @@ impl TokioRuntime {
             }
         }
         let running = census.threads.iter().filter_map(|thread| thread.local);
-        for set in running.chain(stop.task_sets()) {
+        let sets = stop.task_sets().into_iter().map(VirtualAddress::new);
+        for set in running.chain(sets) {
             let set = Instance {
                 flavor: Flavor::Local,
                 handle: set,
@@ -318,8 +316,12 @@ impl TokioRuntime {
     }
 
     /// The `Shared` of the set whose `Rc<Context>` points to `context`.
-    fn set_shared(stop: &dyn RuntimeStop, locals: &Locals, context: u64) -> Result<u64, Arc<str>> {
-        let shared = records::word(
+    fn set_shared(
+        stop: &dyn RuntimeStop,
+        locals: &Locals,
+        context: VirtualAddress,
+    ) -> Result<VirtualAddress, Arc<str>> {
+        let shared = records::pointer(
             stop,
             context
                 .wrapping_add(locals.value)
@@ -334,7 +336,7 @@ impl TokioRuntime {
         stop: &dyn RuntimeStop,
         locals: &Locals,
         thread: ThreadId,
-    ) -> Result<Option<u64>, Arc<str>> {
+    ) -> Result<Option<VirtualAddress>, Arc<str>> {
         let base = thread_local(stop, &locals.tls, thread)?;
         let unreadable =
             || Arc::<str>::from(format!("the local set context at {base:#x} is unreadable"));
@@ -343,10 +345,12 @@ impl TokioRuntime {
         if state != locals.alive {
             return Ok(None);
         }
-        match records::word(stop, base.wrapping_add(locals.context)).ok_or_else(unreadable)? {
-            0 => Ok(None),
-            context => Self::set_shared(stop, locals, context).map(Some),
+        let context =
+            records::pointer(stop, base.wrapping_add(locals.context)).ok_or_else(unreadable)?;
+        if context == records::NULL {
+            return Ok(None);
         }
+        Self::set_shared(stop, locals, context).map(Some)
     }
 
     /// What a thread's `CONTEXT` says, or `None` when the thread never
@@ -374,7 +378,7 @@ impl TokioRuntime {
                 .find(|(_, name, _)| *name == flavor.name)
                 .ok_or_else(|| format!("the runtime's flavor {} is unknown", flavor.name))?;
             let arc =
-                records::word(stop, handle.wrapping_add(layout.arc)).ok_or_else(unreadable)?;
+                records::pointer(stop, handle.wrapping_add(layout.arc)).ok_or_else(unreadable)?;
             Some(Instance {
                 flavor: *flavor,
                 handle: arc.wrapping_add(layout.data),
@@ -444,7 +448,7 @@ impl TokioRuntime {
             |offset: u64| records::word(stop, at.wrapping_add(offset)).ok_or_else(unreadable);
         let list = List {
             id: word(owned.id)?,
-            shards: word(owned.shards)?,
+            shards: VirtualAddress::new(word(owned.shards)?),
             length: word(owned.shards + 8)?,
             count: word(owned.count)?,
             counted: true,
@@ -467,18 +471,22 @@ impl TokioRuntime {
     /// Whether the vtable at `vtable` is a task's: its poll function is
     /// tokio's `raw::poll`. The answer for each vtable is kept, as code
     /// does not change.
-    fn checked_vtable(&self, stop: &dyn RuntimeStop, vtable: u64) -> Result<(), Arc<str>> {
+    fn checked_vtable(
+        &self,
+        stop: &dyn RuntimeStop,
+        vtable: VirtualAddress,
+    ) -> Result<(), Arc<str>> {
         let tasks = self.task_layout()?;
-        let poll = records::word(stop, vtable.wrapping_add(tasks.poll))
+        let poll = records::pointer(stop, vtable.wrapping_add(tasks.poll))
             .ok_or_else(|| format!("the vtable at {vtable:#x} is unreadable"))?;
-        let image = poll.wrapping_sub(stop.load_bias());
+        let image = stop.load_bias().wrapping_unload(poll);
         let verdict = self
             .vtables
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(image)
             .or_insert_with(|| {
-                let name = self.image.symbol_at(ImageAddress::new(image));
+                let name = self.image.symbol_at(image);
                 match name {
                     Some(name)
                         if name
@@ -495,14 +503,14 @@ impl TokioRuntime {
     }
 
     /// Whether a task polls the blocking closure a worker runs on.
-    fn is_launch(&self, stop: &dyn RuntimeStop, vtable: u64) -> bool {
+    fn is_launch(&self, stop: &dyn RuntimeStop, vtable: VirtualAddress) -> bool {
         let Ok(tasks) = self.task_layout() else {
             return false;
         };
-        let Some(poll) = records::word(stop, vtable.wrapping_add(tasks.poll)) else {
+        let Some(poll) = records::pointer(stop, vtable.wrapping_add(tasks.poll)) else {
             return false;
         };
-        let poll = ImageAddress::new(poll.wrapping_sub(stop.load_bias()));
+        let poll = stop.load_bias().wrapping_unload(poll);
         // A legacy symbol names no generic arguments, while the debug
         // information names them under either mangling.
         [self.image.symbol_at(poll), self.image.function_name(poll)]
@@ -517,20 +525,20 @@ fn thread_local(
     stop: &dyn RuntimeStop,
     tls: &ThreadLocal,
     thread: ThreadId,
-) -> Result<u64, Arc<str>> {
+) -> Result<VirtualAddress, Arc<str>> {
     let pointer = stop
         .thread_pointer(thread)
         .ok_or("the thread's thread pointer is unreadable")?;
     let offset = match *tls {
         ThreadLocal::Offset(offset) => offset,
         ThreadLocal::Slot(slot) => {
-            let slot = slot.get().wrapping_add(stop.load_bias());
+            let slot = stop.load_bias().wrapping_load(slot);
             records::word(stop, slot)
                 .map(u64::cast_signed)
                 .ok_or("the slot of tokio's context is unreadable")?
         }
     };
-    Ok(pointer.wrapping_add_signed(offset))
+    Ok(VirtualAddress::new(pointer.wrapping_add_signed(offset)))
 }
 
 impl RuntimeModel for TokioRuntime {
@@ -561,7 +569,7 @@ impl RuntimeModel for TokioRuntime {
         // A running blocking closure's task is known only by its number,
         // with no header to read where it was spawned from.
         for task in page.value.tasks.iter_mut().filter(|task| task.locator != 0) {
-            task.spawned = self.spawned_at(stop, task.locator);
+            task.spawned = self.spawned_at(stop, VirtualAddress::new(task.locator));
         }
         page
     }
@@ -602,7 +610,7 @@ impl RuntimeModel for TokioRuntime {
             }
             (TaskState::Unknown(reason), _) => Err(reason),
             _ => {
-                let (future, ty) = self.future(stop, found.locator)?;
+                let (future, ty) = self.future(stop, VirtualAddress::new(found.locator))?;
                 Ok(Some(TaskContext::Suspended { future, ty }))
             }
         }
@@ -703,6 +711,7 @@ impl RuntimeModel for TokioRuntime {
             .ok_or("tokio starts no task there")?;
         let header = registers
             .get(RSI)
+            .map(VirtualAddress::new)
             .ok_or("the task being started is unavailable")?;
         self.started(stop, header, schedules)
     }
@@ -722,7 +731,7 @@ impl RuntimeModel for TokioRuntime {
         let locals = self.locals().ok().flatten()?;
         let info = self.image.type_info(ty)?;
         let set = match local_type(info)? {
-            "LocalSet" => future.get(),
+            "LocalSet" => future,
             "RunUntil" => {
                 let crate::TypeKind::Record { members, .. } = &info.kind else {
                     return None;
@@ -733,12 +742,14 @@ impl RuntimeModel for TokioRuntime {
                 let crate::RecordMemberLayout::ByteOffset(offset) = member.layout else {
                     return None;
                 };
-                records::word(stop, future.get().wrapping_add(offset))?
+                records::pointer(stop, future.wrapping_add(offset))?
             }
             _ => return None,
         };
-        let context = records::word(stop, set.wrapping_add(locals.set))?;
-        Self::set_shared(stop, locals, context).ok()
+        let context = records::pointer(stop, set.wrapping_add(locals.set))?;
+        Self::set_shared(stop, locals, context)
+            .ok()
+            .map(VirtualAddress::get)
     }
 
     fn may_run_task_set(&self, ty: crate::TypeReference) -> bool {
@@ -755,17 +766,15 @@ impl RuntimeModel for TokioRuntime {
         let Some(found) = self.find(stop, &census, task)? else {
             return Ok(None);
         };
-        let header = found.locator;
-        if header == 0 {
+        let header = VirtualAddress::new(found.locator);
+        if header == records::NULL {
             return Ok(None);
         }
         let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.number));
         let vtable =
-            records::word(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
+            records::pointer(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
         let entry = |offset: u64| {
-            records::word(stop, vtable.wrapping_add(offset))
-                .map(VirtualAddress::new)
-                .ok_or_else(unreadable)
+            records::pointer(stop, vtable.wrapping_add(offset)).ok_or_else(unreadable)
         };
         let (poll, shutdown) = (entry(tasks.poll)?, entry(tasks.shutdown)?);
         // The task's cell is freed as the box that holds it is dropped,
@@ -773,7 +782,7 @@ impl RuntimeModel for TokioRuntime {
         // `S`, as its poll function's name spells them.
         let frees = self
             .image
-            .function_name(ImageAddress::new(poll.get().wrapping_sub(stop.load_bias())))
+            .function_name(stop.load_bias().wrapping_unload(poll))
             .and_then(|name| {
                 let arguments = name.strip_prefix("poll")?.to_owned();
                 Some(self.image.function_entries(&format!(
@@ -785,12 +794,12 @@ impl RuntimeModel for TokioRuntime {
         Ok(Some(TaskEntries {
             task: TaskRef {
                 number: task.number,
-                locator: Some(header),
+                locator: Some(header.get()),
             },
             runs: vec![poll, shutdown],
             frees: frees
                 .into_iter()
-                .map(|entry| VirtualAddress::new(entry.get().wrapping_add(stop.load_bias())))
+                .map(|entry| stop.load_bias().wrapping_load(entry))
                 .collect(),
         }))
     }
@@ -808,7 +817,7 @@ impl RuntimeModel for TokioRuntime {
         // The functions that run the task are passed its header; the glue
         // that frees it, the box that holds it.
         if task.frees.contains(&entry) {
-            records::word(stop, argument) == Some(header)
+            records::word(stop, VirtualAddress::new(argument)) == Some(header)
         } else {
             argument == header
         }
@@ -820,11 +829,15 @@ impl RuntimeModel for TokioRuntime {
         task: &TaskEntries,
     ) -> Result<Option<TaskEnd>, Arc<str>> {
         let tasks = self.task_layout()?;
-        let header = task.task.locator.ok_or("the task is not located")?;
+        let header = task
+            .task
+            .locator
+            .map(VirtualAddress::new)
+            .ok_or("the task is not located")?;
         let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.task.number));
-        let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
+        let word = |address: VirtualAddress| records::word(stop, address).ok_or_else(unreadable);
         // A freed task's place may hold another task, or nothing.
-        let vtable = word(header.wrapping_add(tasks.vtable))?;
+        let vtable = VirtualAddress::new(word(header.wrapping_add(tasks.vtable))?);
         let id = word(header.wrapping_add(word(vtable.wrapping_add(tasks.id_offset))?))?;
         if task.runs.first().map(|poll| poll.get()) != Some(word(vtable.wrapping_add(tasks.poll))?)
             || id != task.task.number

@@ -307,8 +307,8 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         let bias = record.module.load_bias;
         module["addressRange"] = format!(
             "{:#x}-{:#x}",
-            range.start.get().wrapping_add(bias),
-            range.end.get().wrapping_add(bias)
+            bias.wrapping_load(range.start),
+            bias.wrapping_load(range.end)
         )
         .into();
     }

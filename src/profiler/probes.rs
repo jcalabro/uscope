@@ -18,6 +18,7 @@ use crate::capture::CaptureBuilder;
 use crate::capture::records::{
     MarkerKind, NONE, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED, Zone,
 };
+use crate::model::Tid;
 
 /// A module's instrumentation: where its control block links, and its
 /// sites.
@@ -165,7 +166,8 @@ pub struct RingHeader {
     /// Its size, as a power of two of records.
     pub size: u8,
     pub clock: u16,
-    pub thread: u32,
+    /// The thread that took it.
+    pub thread: Tid,
     pub state: u32,
     pub interrupted: u64,
     pub head: u64,
@@ -199,10 +201,19 @@ pub fn ring_header(bytes: &[u8]) -> Result<RingHeader, &'static str> {
     if state > abi::RING_CLAIMED {
         return Err("a ring has an unknown state");
     }
+    // A thread sets its ring's clock as it takes the ring, so only a ring
+    // whose records are read has one.
+    let clock = u16::from(bytes[6]);
+    if matches!(state, abi::RING_ACTIVE | abi::RING_RETIRED)
+        && clock != abi::CLOCK_MONOTONIC
+        && clock != abi::CLOCK_TSC
+    {
+        return Err("a ring has an unknown clock");
+    }
     Ok(RingHeader {
         size,
-        clock: u16::from(bytes[6]),
-        thread: word(8),
+        clock,
+        thread: Tid::new(word(8)),
         state,
         interrupted: long(16),
         head: long(64),
@@ -683,7 +694,7 @@ mod tests {
                 for _ in 0..before.min(1 << 20) {
                     writer.step();
                 }
-                let header = RingHeader { size, clock: 0, thread: 0, state: abi::RING_ACTIVE, interrupted: 0, head: writer.head };
+                let header = RingHeader { size, clock: 0, thread: Tid::new(0), state: abi::RING_ACTIVE, interrupted: 0, head: writer.head };
                 let (span, mut lost) = copy_span(tail, header);
                 let mut copied = Vec::new();
                 for position in span.clone() {
@@ -748,7 +759,7 @@ mod tests {
                 events.swap(at, at + 1);
             }
             let mut builder = CaptureBuilder::new();
-            let thread = builder.thread(1, 1, 0);
+            let thread = builder.thread(crate::model::Pid::new(1), Tid::new(1), 0);
             let sites: Vec<u32> = (0..4).map(|site| builder.site(&site.to_string(), "", 0, NONE, abi::SITE_ZONE)).collect();
             let mut stacks = Stacks::default();
             let mut read = 0;
@@ -815,5 +826,32 @@ mod tests {
             anchors.monotonic(1_000 + 6 * ANCHOR_SPACING),
             5_000_000_000 + 2 * ANCHOR_SPACING
         );
+    }
+
+    /// A ring whose records are on a clock the ABI does not name breaks it,
+    /// as a ring of an unknown size or state does: its times are not read
+    /// as some other clock's. A ring no thread has taken has no clock yet.
+    #[test]
+    fn a_ring_on_an_unknown_clock_breaks_the_abi() {
+        let header = |state: u32, clock: u8| {
+            let mut bytes = [0; abi::RING_HEADER];
+            bytes[..4].copy_from_slice(&abi::RING_MAGIC.to_le_bytes());
+            bytes[4] = abi::RING_VERSION;
+            bytes[5] = abi::LEAST_RING_SIZE as u8;
+            bytes[6] = clock;
+            bytes[12..16].copy_from_slice(&state.to_le_bytes());
+            ring_header(&bytes).map(|header| header.clock)
+        };
+        for state in [abi::RING_ACTIVE, abi::RING_RETIRED] {
+            for clock in [abi::CLOCK_MONOTONIC, abi::CLOCK_TSC] {
+                assert_eq!(header(state, clock as u8), Ok(clock));
+            }
+            for clock in [0, 3, u8::MAX] {
+                assert_eq!(header(state, clock), Err("a ring has an unknown clock"));
+            }
+        }
+        for state in [abi::RING_FREE, abi::RING_CLAIMED] {
+            assert_eq!(header(state, 0), Ok(0));
+        }
     }
 }

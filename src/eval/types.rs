@@ -327,10 +327,19 @@ fn int_name(int: IntType) -> String {
 /// The image that types the language itself defines claim.
 pub const LANGUAGE_IMAGE: ModuleImageId = ModuleImageId::new(u32::MAX);
 
-/// A stable identity for a language type within [`LANGUAGE_IMAGE`].
-fn language_type_id(ty: &Ty) -> u32 {
-    match ty {
-        Ty::Program(reference) => reference.id.get(),
+/// The image ids at and above this one belong to the language: no loaded
+/// image has one. Pointers to a program type claim those below
+/// [`LANGUAGE_IMAGE`], one per pointee image and pointer depth.
+const LANGUAGE_IMAGES: u32 = 1 << 31;
+
+/// How deep a pointer to a program type may be and keep its own identity,
+/// past the casts and `&`s an expression can nest.
+const POINTER_DEPTHS: u32 = 512;
+
+/// A stable identity within [`LANGUAGE_IMAGE`] for a type the language
+/// defines, `depth` pointers to `leaf`. Each pointer level adds `1 << 20`.
+fn language_type_id(leaf: &Ty, depth: u32) -> u32 {
+    let leaf = match leaf {
         Ty::Exact => 0,
         Ty::Bool => 1,
         Ty::Null => 2,
@@ -344,19 +353,44 @@ fn language_type_id(ty: &Ty) -> u32 {
         Ty::Float(FloatFormat::Binary128) => 10,
         Ty::Int(int) => 16 + u32::from(int.width()) * 2 + u32::from(int.is_signed()),
         Ty::C(c) => 512 + *c as u32,
-        Ty::Pointer(pointee) => (1_u32 << 20).wrapping_add(language_type_id(pointee)),
-    }
+        Ty::Program(_) | Ty::Pointer(_) => unreachable!("{leaf:?} is not a language leaf"),
+    };
+    (depth << 20) + leaf
 }
 
 /// The reference a type is identified by: its own for a program type.
 pub fn type_reference(ty: &Ty) -> TypeReference {
-    match ty {
-        Ty::Program(reference) => *reference,
-        other => TypeReference {
-            image: LANGUAGE_IMAGE,
-            id: TypeId::new(language_type_id(other)),
-        },
+    let mut depth = 0_u32;
+    let mut leaf = ty;
+    while let Ty::Pointer(pointee) = leaf {
+        depth += 1;
+        leaf = pointee;
     }
+    debug_assert!(depth < POINTER_DEPTHS, "a pointer {depth} deep");
+    let Ty::Program(reference) = leaf else {
+        return TypeReference {
+            image: LANGUAGE_IMAGE,
+            id: TypeId::new(language_type_id(leaf, depth)),
+        };
+    };
+    if depth == 0 {
+        return *reference;
+    }
+    let image = u64::from(reference.image.get()) * u64::from(POINTER_DEPTHS) + u64::from(depth);
+    // Too many images to give each its own: claim an identity no language
+    // or program type has.
+    let unidentified = TypeReference {
+        image: LANGUAGE_IMAGE,
+        id: TypeId::new(u32::MAX),
+    };
+    u32::try_from(image)
+        .ok()
+        .and_then(|image| LANGUAGE_IMAGE.get().checked_sub(image))
+        .filter(|&image| image >= LANGUAGE_IMAGES)
+        .map_or(unidentified, |image| TypeReference {
+            image: ModuleImageId::new(image),
+            id: reference.id,
+        })
 }
 
 /// Metadata describing a type, as results carry it.
@@ -475,4 +509,45 @@ pub fn builtin(name: &str, pointer_size: u8) -> Option<Ty> {
         .ok()
         .and_then(|width| IntType::new(width, signed))
         .map(Ty::Int)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{Ty, type_reference};
+    use crate::eval::number::FloatFormat;
+    use crate::{ModuleImageId, TypeId, TypeReference};
+
+    fn pointer(ty: Ty) -> Ty {
+        Ty::Pointer(Arc::new(ty))
+    }
+
+    fn program(image: u32, id: u32) -> Ty {
+        Ty::Program(TypeReference {
+            image: ModuleImageId::new(image),
+            id: TypeId::new(id),
+        })
+    }
+
+    #[test]
+    fn a_pointer_to_a_program_type_has_its_own_identity() {
+        let pointers = [
+            pointer(program(0, 5)),
+            pointer(program(1, 5)),
+            pointer(pointer(program(0, 5))),
+            pointer(Ty::Float(FloatFormat::Binary32)),
+            pointer(pointer(Ty::Float(FloatFormat::Binary32))),
+            program(0, 5),
+        ];
+        for (index, left) in pointers.iter().enumerate() {
+            for right in &pointers[index + 1..] {
+                assert_ne!(
+                    type_reference(left),
+                    type_reference(right),
+                    "{left:?} and {right:?}"
+                );
+            }
+        }
+    }
 }

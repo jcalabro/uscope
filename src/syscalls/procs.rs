@@ -4,16 +4,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::model::{ProcessEnd, TraceEvent};
+use super::model::{Pid, ProcessEnd, Tid, TraceEvent};
 
 /// One traced process.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Process {
-    pub pid: u32,
-    pub parent: Option<u32>,
+    pub pid: Pid,
+    pub parent: Option<Pid>,
     /// Images it ran, in order, with when each exec happened.
     pub images: Vec<(u64, Arc<str>)>,
-    pub threads: Vec<u32>,
+    pub threads: Vec<Tid>,
     /// When the trace first saw it.
     pub started: u64,
     pub ended: Option<(u64, ProcessEnd)>,
@@ -22,25 +22,25 @@ pub struct Process {
 /// Every process a trace saw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessTree {
-    processes: BTreeMap<u32, Process>,
+    processes: BTreeMap<Pid, Process>,
     /// Each thread's process.
-    threads: BTreeMap<u32, u32>,
+    threads: BTreeMap<Tid, Pid>,
 }
 
 impl ProcessTree {
     /// Records a process the trace began with, as a launched program or an
     /// attached process.
-    pub fn root(&mut self, pid: u32, time: u64, image: Option<Arc<str>>) {
+    pub fn root(&mut self, pid: Pid, time: u64, image: Option<Arc<str>>) {
         let process = self.processes.entry(pid).or_insert_with(|| Process {
             pid,
             started: time,
-            threads: vec![pid],
+            threads: vec![pid.leader()],
             ..Process::default()
         });
         if let Some(image) = image {
             process.images.push((time, image));
         }
-        self.threads.insert(pid, pid);
+        self.threads.insert(pid.leader(), pid);
     }
 
     pub fn apply(&mut self, event: &TraceEvent) {
@@ -63,6 +63,7 @@ impl ProcessTree {
                         process.threads.push(child);
                     }
                 } else {
+                    let pid = Pid::led_by(child);
                     let images = self
                         .processes
                         .get(&parent)
@@ -70,9 +71,9 @@ impl ProcessTree {
                         .into_iter()
                         .collect();
                     self.processes.insert(
-                        child,
+                        pid,
                         Process {
-                            pid: child,
+                            pid,
                             parent: Some(parent),
                             images,
                             threads: vec![child],
@@ -80,7 +81,7 @@ impl ProcessTree {
                             ended: None,
                         },
                     );
-                    self.threads.insert(child, child);
+                    self.threads.insert(child, pid);
                 }
             }
             TraceEvent::Exec {
@@ -92,12 +93,12 @@ impl ProcessTree {
                 let entry = self.processes.entry(process).or_insert_with(|| Process {
                     pid: process,
                     started: time,
-                    threads: vec![process],
+                    threads: vec![process.leader()],
                     ..Process::default()
                 });
                 entry.images.push((time, path.clone()));
                 // Every other thread is gone after an exec.
-                entry.threads.retain(|&thread| thread == process);
+                entry.threads.retain(|&thread| thread == process.leader());
             }
             TraceEvent::Exit { process, time, end } => {
                 if let Some(entry) = self.processes.get_mut(&process) {
@@ -114,12 +115,12 @@ impl ProcessTree {
 
     /// The process a thread belongs to, when the trace knows.
     #[must_use]
-    pub fn process_of(&self, thread: u32) -> Option<u32> {
+    pub fn process_of(&self, thread: Tid) -> Option<Pid> {
         self.threads.get(&thread).copied()
     }
 
     #[must_use]
-    pub fn get(&self, pid: u32) -> Option<&Process> {
+    pub fn get(&self, pid: Pid) -> Option<&Process> {
         self.processes.get(&pid)
     }
 
@@ -128,7 +129,7 @@ impl ProcessTree {
     }
 
     /// Processes that have not ended.
-    pub fn live(&self) -> impl Iterator<Item = u32> + '_ {
+    pub fn live(&self) -> impl Iterator<Item = Pid> + '_ {
         self.processes
             .values()
             .filter(|process| process.ended.is_none())
@@ -153,34 +154,34 @@ mod tests {
     #[test]
     fn forks_execs_and_exits_build_the_tree() {
         let mut tree = ProcessTree::default();
-        tree.root(10, 0, Some("/bin/sh".into()));
+        tree.root(Pid::new(10), 0, Some("/bin/sh".into()));
         tree.apply(&TraceEvent::Spawn {
-            parent_thread: 10,
-            parent: 10,
-            child: 11,
+            parent_thread: Tid::new(10),
+            parent: Pid::new(10),
+            child: Tid::new(11),
             thread: false,
             time: 1,
         });
         tree.apply(&TraceEvent::Spawn {
-            parent_thread: 10,
-            parent: 10,
-            child: 12,
+            parent_thread: Tid::new(10),
+            parent: Pid::new(10),
+            child: Tid::new(12),
             thread: true,
             time: 2,
         });
         tree.apply(&TraceEvent::Exec {
-            thread: 11,
-            process: 11,
+            thread: Tid::new(11),
+            process: Pid::new(11),
             time: 3,
             path: "/bin/ls".into(),
         });
         tree.apply(&TraceEvent::Exit {
-            process: 11,
+            process: Pid::new(11),
             time: 4,
             end: ProcessEnd::Exited(0),
         });
-        let child = tree.get(11).expect("child");
-        assert_eq!(child.parent, Some(10));
+        let child = tree.get(Pid::new(11)).expect("child");
+        assert_eq!(child.parent, Some(Pid::new(10)));
         assert_eq!(
             child
                 .images
@@ -190,7 +191,7 @@ mod tests {
             ["/bin/sh", "/bin/ls"]
         );
         assert_eq!(child.ended, Some((4, ProcessEnd::Exited(0))));
-        assert_eq!(tree.process_of(12), Some(10));
-        assert_eq!(tree.live().collect::<Vec<_>>(), [10]);
+        assert_eq!(tree.process_of(Tid::new(12)), Some(Pid::new(10)));
+        assert_eq!(tree.live().collect::<Vec<_>>(), [Pid::new(10)]);
     }
 }

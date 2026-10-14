@@ -10,10 +10,9 @@ use std::sync::Arc;
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::functions::span;
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::variables::CodeRange;
-use super::{Builder, Image, NONE, Record, TableKind};
+use super::{Builder, Image, NONE, Record, Span, TableKind};
 use crate::{AddressRange, CodeInstanceId, ImageAddress, ResumePoint, ResumePoints};
 
 /// Where a code instance that runs a coroutine goes for each state, or why
@@ -44,10 +43,8 @@ pub struct Resumes {
 )]
 pub struct ResumeRecord {
     pub instance: U32,
-    pub dispatch: U32,
-    pub dispatch_count: U32,
-    pub points: U32,
-    pub point_count: U32,
+    pub dispatch: Span<CodeRange>,
+    pub points: Span<ResumePointRecord>,
     /// Why the points are unknown, or [`NONE`].
     pub malformed: U32,
 }
@@ -63,8 +60,7 @@ impl Record for ResumeRecord {
 pub struct ResumePointRecord {
     pub state: U64,
     pub address: U64,
-    pub resumption: U32,
-    pub resumption_count: U32,
+    pub resumption: Span<CodeRange>,
 }
 
 impl Record for ResumePointRecord {
@@ -78,8 +74,7 @@ impl Record for ResumePointRecord {
 pub struct HeldRecord {
     pub offset: U64,
     pub state: U64,
-    pub ranges: U32,
-    pub range_count: U32,
+    pub ranges: Span<CodeRange>,
 }
 
 impl Record for HeldRecord {
@@ -98,18 +93,18 @@ fn number(count: usize) -> Result<u32, TooMany> {
         .ok_or(TooMany)
 }
 
-/// Adds `ranges` to `pool`, returning where they begin and how many.
+/// Adds `ranges` to `pool`, returning their span.
 fn pooled(
     pool: &mut Vec<CodeRange>,
     ranges: &[AddressRange<ImageAddress>],
-) -> Result<(U32, U32), TooMany> {
+) -> Result<Span<CodeRange>, TooMany> {
     let first = number(pool.len())?;
     pool.extend(ranges.iter().map(|range| CodeRange {
         start: range.start.get().into(),
         end: range.end.get().into(),
     }));
     number(pool.len())?;
-    Ok((first.into(), number(ranges.len())?.into()))
+    Ok(Span::new(first, number(ranges.len())?))
 }
 
 /// Adds the resume points and held ranges to `builder`, pooling reasons in
@@ -127,24 +122,19 @@ pub fn add_to(
     for (instance, decoded) in sorted {
         let mut record = ResumeRecord {
             instance: instance.get().into(),
-            dispatch: 0.into(),
-            dispatch_count: 0.into(),
-            points: 0.into(),
-            point_count: 0.into(),
+            dispatch: Span::EMPTY,
+            points: Span::EMPTY,
             malformed: NONE.into(),
         };
         match decoded {
             Ok(decoded) => {
-                (record.dispatch, record.dispatch_count) = pooled(&mut ranges, &decoded.dispatch)?;
-                record.points = number(points.len())?.into();
-                record.point_count = number(decoded.points.len())?.into();
+                record.dispatch = pooled(&mut ranges, &decoded.dispatch)?;
+                record.points = Span::new(number(points.len())?, number(decoded.points.len())?);
                 for point in decoded.points.iter() {
-                    let (resumption, resumption_count) = pooled(&mut ranges, &point.resumption)?;
                     points.push(ResumePointRecord {
                         state: point.state.into(),
                         address: point.address.get().into(),
-                        resumption,
-                        resumption_count,
+                        resumption: pooled(&mut ranges, &point.resumption)?,
                     });
                 }
             }
@@ -158,12 +148,10 @@ pub fn add_to(
     let held = held
         .into_iter()
         .map(|((offset, state), code)| {
-            let (first, count) = pooled(&mut ranges, code)?;
             Ok(HeldRecord {
                 offset: (*offset).into(),
                 state: (*state).into(),
-                ranges: first,
-                range_count: count,
+                ranges: pooled(&mut ranges, code)?,
             })
         })
         .collect::<Result<Vec<_>, TooMany>>()?;
@@ -198,13 +186,9 @@ impl<'a> ResumeView<'a> {
 
     fn ranges(
         self,
-        first: U32,
-        count: U32,
+        ranges: Span<CodeRange>,
     ) -> impl ExactSizeIterator<Item = AddressRange<ImageAddress>> + 'a {
-        let first = first.get() as usize;
-        self.ranges[first..first + count.get() as usize]
-            .iter()
-            .map(CodeRange::get)
+        ranges.rows(self.ranges).iter().map(CodeRange::get)
     }
 
     /// Where the code instance `instance`, which runs a coroutine, goes
@@ -219,19 +203,16 @@ impl<'a> ResumeView<'a> {
         if record.malformed.get() != NONE {
             return Some(Err(self.strings.get(StrId(record.malformed.get())).into()));
         }
-        let first = record.points.get() as usize;
         Some(Ok(ResumePoints {
-            dispatch: self
-                .ranges(record.dispatch, record.dispatch_count)
-                .collect(),
-            points: self.points[first..first + record.point_count.get() as usize]
+            dispatch: self.ranges(record.dispatch).collect(),
+            points: record
+                .points
+                .rows(self.points)
                 .iter()
                 .map(|point| ResumePoint {
                     state: point.state.get(),
                     address: ImageAddress::new(point.address.get()),
-                    resumption: self
-                        .ranges(point.resumption, point.resumption_count)
-                        .collect(),
+                    resumption: self.ranges(point.resumption).collect(),
                 })
                 .collect(),
         }))
@@ -245,17 +226,16 @@ impl<'a> ResumeView<'a> {
     ) -> impl Iterator<Item = (AddressRange<ImageAddress>, CodeInstanceId)> + 'a {
         self.records.iter().flat_map(move |record| {
             let instance = CodeInstanceId::new(record.instance.get());
-            let first = record.points.get() as usize;
             let points = if record.malformed.get() == NONE {
-                &self.points[first..first + record.point_count.get() as usize]
+                record.points.rows(self.points)
             } else {
                 &[]
             };
-            self.ranges(record.dispatch, record.dispatch_count)
+            self.ranges(record.dispatch)
                 .chain(
-                    points.iter().flat_map(move |point| {
-                        self.ranges(point.resumption, point.resumption_count)
-                    }),
+                    points
+                        .iter()
+                        .flat_map(move |point| self.ranges(point.resumption)),
                 )
                 .filter(|range| range.start < range.end)
                 .map(move |range| (range, instance))
@@ -277,7 +257,7 @@ impl<'a> ResumeView<'a> {
             })
             .ok()?;
         let held = &self.held[found];
-        Some(self.ranges(held.ranges, held.range_count))
+        Some(self.ranges(held.ranges))
     }
 }
 
@@ -289,18 +269,11 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     if !view.records.iter().all(|record| {
         (record.instance.get() as usize) < instances
             && if record.malformed.get() == NONE {
-                span(record.dispatch, record.dispatch_count, ranges)
-                    && span(record.points, record.point_count, view.points.len())
+                record.dispatch.within(ranges) && record.points.within(view.points.len())
             } else {
                 view.strings.contains(StrId(record.malformed.get()))
-                    && [
-                        record.dispatch,
-                        record.dispatch_count,
-                        record.points,
-                        record.point_count,
-                    ]
-                    .iter()
-                    .all(|value| value.get() == 0)
+                    && record.dispatch == Span::EMPTY
+                    && record.points == Span::EMPTY
             }
     }) || !view
         .records
@@ -311,14 +284,11 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     if !view
         .points
         .iter()
-        .all(|point| span(point.resumption, point.resumption_count, ranges))
+        .all(|point| point.resumption.within(ranges))
     {
         return Err("a resume point is malformed".into());
     }
-    if !view
-        .held
-        .iter()
-        .all(|held| span(held.ranges, held.range_count, ranges))
+    if !view.held.iter().all(|held| held.ranges.within(ranges))
         || !view.held.is_sorted_by(|earlier, later| {
             (earlier.offset.get(), earlier.state.get()) < (later.offset.get(), later.state.get())
         })

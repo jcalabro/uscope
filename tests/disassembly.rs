@@ -178,7 +178,7 @@ impl Modules {
             .symbols()
             .find(|symbol| symbol.name() == name)
             .unwrap_or_else(|| panic!("{file_name} has no symbol {name}"));
-        record.module.load_bias + symbol.address().get()
+        record.module.load_bias.get() + symbol.address().get()
     }
 }
 
@@ -193,7 +193,7 @@ async fn assert_module_matches_objdump(
     context: &str,
 ) -> usize {
     let (record, image) = modules.named(file_name);
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     let oracle = Objdump::read(file_name);
     let mut compared = 0;
     for section in image.sections().iter().filter(|section| section.executable) {
@@ -338,7 +338,7 @@ async fn faulted_with_breakpoints(fixture: &str) -> (Scenario, Modules) {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     for address in starts.iter().step_by(starts.len().div_ceil(24).max(1)) {
         scenario
             .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(bias + address)))
@@ -450,7 +450,7 @@ async fn functions_cover_every_debug_information_range() {
     ] {
         let (scenario, modules) = faulted_with_breakpoints(fixture).await;
         let (record, image) = modules.named(fixture);
-        let bias = record.module.load_bias;
+        let bias = record.module.load_bias.get();
         let oracle = Objdump::read(fixture);
         let mut split = 0;
         let mut names = Vec::new();
@@ -550,7 +550,7 @@ async fn functions_known_only_by_symbols_use_their_extents() {
     let modules = Modules::load(&scenario).await;
     let library = "libelf-symbols-gcc.so";
     let (record, image) = modules.named(library);
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     let oracle = Objdump::read(library);
     let mut origins = BTreeSet::new();
     for symbol in image.symbols() {
@@ -626,7 +626,7 @@ async fn context_before_an_address_is_proven_from_known_starts() {
     let (scenario, modules) = faulted_with_breakpoints("crash-gcc-o0").await;
     let oracle = Objdump::read("crash-gcc-o0");
     let (record, _) = modules.named("crash-gcc-o0");
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     let location = scenario
         .operation("location", scenario.handle().current_location())
         .await;
@@ -1429,7 +1429,7 @@ async fn indirect_branch_sites(
     skipped: &[&str],
 ) -> BTreeSet<VirtualAddress> {
     let (record, image) = modules.named(file_name);
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     let skipped = image
         .symbols()
         .filter(|symbol| skipped.contains(&symbol.name()))
@@ -1492,7 +1492,7 @@ async fn assert_executed_targets(
     let mut sites = indirect_branch_sites(&scenario, &modules, fixture, &layout).await;
     for library in ["libc.so.6", "ld-linux-x86-64.so.2"] {
         let (record, _) = modules.named(library);
-        let bias = record.module.load_bias;
+        let bias = record.module.load_bias.get();
         if !library_sites.contains_key(&record.path) {
             let found = indirect_branch_sites(&scenario, &modules, library, &[]).await;
             let found = found.into_iter().map(|site| site.get() - bias).collect();
@@ -1613,7 +1613,7 @@ async fn linkage_jumps(
 ) -> BTreeMap<String, DisassembledInstruction> {
     let slots = dynamic_slots(file_name);
     let (record, image) = modules.named(file_name);
-    let bias = record.module.load_bias;
+    let bias = record.module.load_bias.get();
     let mut jumps = BTreeMap::new();
     for section in image
         .sections()
@@ -1718,7 +1718,7 @@ async fn a_register_that_a_restarted_system_call_replaces_is_never_used() {
         .expect("the jump is labeled");
     assert_eq!(
         location.address.get(),
-        executable.module.load_bias + jump.address().get()
+        executable.module.load_bias.get() + jump.address().get()
     );
 
     // The kernel will restart the call, which replaces rax, so the jump

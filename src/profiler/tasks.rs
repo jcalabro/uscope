@@ -532,7 +532,7 @@ fn threads(pid: u32) -> Vec<crate::ThreadId> {
 /// snapshots learned.
 struct LiveStop {
     pid: u32,
-    bias: u64,
+    bias: crate::LoadBias,
     threads: Vec<crate::ThreadId>,
     pointers: BTreeMap<u32, u64>,
     /// Whether a model asked for a thread pointer not learned.
@@ -559,7 +559,7 @@ impl RuntimeStop for LiveStop {
         None
     }
 
-    fn load_bias(&self) -> u64 {
+    fn load_bias(&self) -> crate::LoadBias {
         self.bias
     }
 
@@ -728,7 +728,7 @@ impl LiveRuntime<'_> {
             start: registers.get(crate::unwind::RSP)?,
             pages: BTreeMap::new(),
         };
-        let registers: Vec<(u16, u64)> = registers.iter().collect();
+        let registers: Vec<_> = registers.iter().collect();
         let (unwound, end) =
             crate::unwind::sample::unwind_memory(self.modules, &registers, &mut pages, LIVE_FRAMES);
         let mut frames: Vec<WaitFrame> = unwound
@@ -766,7 +766,7 @@ impl LiveRuntime<'_> {
                         crate::backend::resume_address(self.image, &functions, *state)
                     {
                         frames.push(WaitFrame::Code {
-                            address: address.get().wrapping_add(bias),
+                            address: bias.wrapping_load(address).get(),
                             role: role_number(role),
                         });
                     }

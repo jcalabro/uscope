@@ -1732,12 +1732,14 @@ fn threads_and_children_are_announced_before_what_they_do() {
                 }
             }
             TraceEvent::Exit { process, .. }
-                if *process != events_first(&events) && !announced.contains_key(process) =>
+                if *process != events_first(&events)
+                    && !announced.contains_key(&process.leader()) =>
             {
                 problems.push(format!("{process} exited before it was announced"));
             }
             TraceEvent::Call(call)
-                if call.thread != call.process && announced.get(&call.thread) != Some(&true) =>
+                if call.thread != call.process.leader()
+                    && announced.get(&call.thread) != Some(&true) =>
             {
                 problems.push(format!(
                     "thread {} called before it was announced",
@@ -1757,7 +1759,7 @@ fn threads_and_children_are_announced_before_what_they_do() {
 }
 
 /// The first process the trace saw: the one launched.
-fn events_first(events: &[uscope::profiler::RecordedEvent]) -> u32 {
+fn events_first(events: &[uscope::profiler::RecordedEvent]) -> uscope::syscalls::Pid {
     events
         .iter()
         .find_map(|recorded| match &recorded.event {

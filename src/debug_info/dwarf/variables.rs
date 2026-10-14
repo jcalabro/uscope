@@ -2066,7 +2066,7 @@ pub(super) fn fuzz_expression(data: &[u8]) {
     impl VariableRuntime for FuzzRuntime {
         fn register(
             &mut self,
-            register: u16,
+            register: crate::unwind::DwarfRegister,
         ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError>
         {
             Err(VariableRuntimeError::Unavailable(

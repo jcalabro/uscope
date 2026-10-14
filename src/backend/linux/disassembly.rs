@@ -6,7 +6,7 @@ use nix::unistd::Pid;
 
 use crate::disassembly::{CodeRead, CodeSource, Engine, decoder_for};
 use crate::protocol::StopId;
-use crate::unwind::RegisterFile;
+use crate::unwind::{FS_BASE, GS_BASE, RAX, RegisterFile};
 use crate::{
     AddressDescription, AddressRange, BoundaryEvidence, DisassembledFunction, Disassembly,
     DisassemblyQuery, DisassemblyRange, DisassemblyView, Error, FunctionOrigin, MAX_WINDOW_AFTER,
@@ -152,15 +152,15 @@ fn next_instruction_registers(native: &nix::libc::user_regs_struct) -> RegisterF
     const ERESTARTNOHAND: i64 = 514;
     const ERESTART_RESTARTBLOCK: i64 = 516;
     let mut registers = x86_64_registers(native);
-    registers.set(58, native.fs_base);
-    registers.set(59, native.gs_base);
+    registers.set(FS_BASE, native.fs_base);
+    registers.set(GS_BASE, native.gs_base);
     let in_system_call = native.orig_rax.cast_signed() >= 0;
     let restarting = matches!(
         native.rax.cast_signed().checked_neg(),
         Some(ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK)
     );
     if in_system_call && restarting {
-        registers.remove(0);
+        registers.remove(RAX);
     }
     registers
 }
@@ -218,8 +218,12 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
         for module in self.modules {
             let bias = module.loaded.load_bias;
             let image_range = AddressRange {
-                start: crate::ImageAddress::new(range.start.get().saturating_sub(bias)),
-                end: crate::ImageAddress::new(range.end.get().saturating_sub(bias)),
+                start: bias
+                    .unload(range.start)
+                    .unwrap_or(crate::ImageAddress::new(0)),
+                end: bias
+                    .unload(range.end)
+                    .unwrap_or(crate::ImageAddress::new(0)),
             };
             for (address, evidence) in module.image.instruction_starts(image_range) {
                 if let Ok(address) = module.loaded.virtual_address(address)

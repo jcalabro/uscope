@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::hits::{Known, Policy};
-use super::kernel::{Kernel, Tid};
+use super::kernel::{Kernel, Tgid, Tid};
 use super::marks::Mark;
 use crate::{StateSnapshot, StopReason, ThreadState, WatchAccess, WatchpointHit};
 
@@ -49,7 +49,7 @@ impl Intent {
 }
 
 /// The bytes of `intent` in `tgid`'s memory now.
-pub fn bytes(kernel: &Kernel, tgid: Tid, intent: &Intent) -> Option<Vec<u8>> {
+pub fn bytes(kernel: &Kernel, tgid: Tgid, intent: &Intent) -> Option<Vec<u8>> {
     kernel
         .processes
         .get(&tgid)?
@@ -60,7 +60,7 @@ pub fn bytes(kernel: &Kernel, tgid: Tid, intent: &Intent) -> Option<Vec<u8>> {
 /// A stop the controller just published, and what it is judged against.
 pub struct Stop<'a> {
     pub kernel: &'a Kernel,
-    pub tgid: Tid,
+    pub tgid: Tgid,
     /// Each stopped thread's own reason.
     pub reasons: &'a BTreeMap<Tid, StopReason>,
     pub intents: &'a [Intent],
@@ -120,7 +120,7 @@ pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
             }
             stopped.entry(id).or_default().insert(hit.hit_count);
             reach(Mark::WatchHit);
-            if tid != stop.tgid {
+            if tid != stop.tgid.leader() {
                 reach(Mark::WatchHitOnAnotherThread);
             }
         }

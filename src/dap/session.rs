@@ -2131,11 +2131,9 @@ impl Session {
                         .map(|record| record.module.load_bias)
                 });
                 match (self.image(library).await, bias) {
-                    (Some(image), Some(bias)) => (
-                        image,
-                        uscope::ImageAddress::new(address.get().wrapping_sub(bias)),
-                        Some(address),
-                    ),
+                    (Some(image), Some(bias)) => {
+                        (image, bias.wrapping_unload(address), Some(address))
+                    }
                     _ => {
                         return Placement {
                             source: None,

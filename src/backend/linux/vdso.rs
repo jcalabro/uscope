@@ -25,7 +25,7 @@ use object::LittleEndian;
 use object::elf;
 use object::read::elf::{FileHeader as _, ProgramHeader as _};
 
-use crate::{MemoryReadCompletion, VirtualAddress};
+use crate::{LoadBias, MemoryReadCompletion, VirtualAddress};
 
 use super::Controller;
 use super::memory::read_logical_memory;
@@ -47,13 +47,13 @@ const PROGRAM_HEADER_SIZE: u64 = size_of::<elf::ProgramHeader64<LittleEndian>>()
 const SECTION_HEADER_SIZE: u64 = size_of::<elf::SectionHeader64<LittleEndian>>() as u64;
 
 /// A module seen mapped in a process: its path and load bias.
-type ObservedModule = (PathBuf, u64);
+type ObservedModule = (PathBuf, LoadBias);
 
 /// An ELF image read from memory as the file it was mapped from.
 #[derive(Debug)]
 pub(super) struct MemoryImage {
     pub(super) data: Vec<u8>,
-    pub(super) load_bias: u64,
+    pub(super) load_bias: LoadBias,
 }
 
 /// Why memory does not hold a usable ELF image.
@@ -146,6 +146,7 @@ pub(super) fn read_memory_image(
     }
     let load_bias = start
         .checked_sub(link_base)
+        .map(LoadBias::new)
         .ok_or(Malformed("the image is linked above its address"))?;
     Ok(MemoryImage {
         data: read_prefix(size)?,
@@ -197,14 +198,14 @@ pub(super) fn vdso_mapping(maps: &str) -> Option<Range<u64>> {
 impl<P: InspectionOps> Controller<P> {
     /// The load bias of the registered vDSO module, if it is the image whose
     /// header is at `start`. A memory image's lowest segment holds its header.
-    fn registered_vdso(&self, start: u64) -> Option<u64> {
+    fn registered_vdso(&self, start: u64) -> Option<LoadBias> {
         self.modules.values().find_map(|module| {
             let placed = module.image.path().as_os_str() == VDSO_NAME
                 && module
                     .loaded
                     .load_bias
-                    .checked_add(module.image.address_range().start.get())
-                    == Some(start);
+                    .load(module.image.address_range().start)
+                    == Some(VirtualAddress::new(start));
             placed.then_some(module.loaded.load_bias)
         })
     }
@@ -332,7 +333,7 @@ mod tests {
         )
         .expect("the vDSO is an image");
         // The kernel links its vDSO at zero.
-        assert_eq!(image.load_bias, mapping.start);
+        assert_eq!(image.load_bias.get(), mapping.start);
         assert_eq!(image.data, memory[..image.data.len()]);
 
         // The section headers, past the loadable contents, end the file.

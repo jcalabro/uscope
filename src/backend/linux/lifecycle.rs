@@ -153,7 +153,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             ..Inferior::new(
                 origin,
                 pid,
-                LoadedModule::main(self.module_image.id(), 0),
+                LoadedModule::main(self.module_image.id(), crate::LoadBias::default()),
                 BTreeMap::from([(pid, TraceThread::starting(expected))]),
                 Some(waiter),
             )
@@ -183,7 +183,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut inferior = Inferior::new(
             InferiorOrigin::Attached,
             tgid,
-            LoadedModule::main(self.module_image.id(), 0),
+            LoadedModule::main(self.module_image.id(), crate::LoadBias::default()),
             threads,
             Some(waiter),
         );
@@ -355,7 +355,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// The load bias of the executable in `pid`'s process, which fails
     /// unless the process runs the executable.
-    fn executable_load_bias(&self, pid: Pid) -> Result<u64> {
+    fn executable_load_bias(&self, pid: Pid) -> Result<crate::LoadBias> {
         self.ptrace.load_bias(
             pid,
             &self.executable,
@@ -368,14 +368,14 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// process and starts following the dynamic loader, which the kernel
     /// mapped with the program, so breakpoints in libraries resolve as they
     /// load.
-    fn load_main_image(&mut self, load_bias: u64) -> Result<()> {
+    fn load_main_image(&mut self, load_bias: crate::LoadBias) -> Result<()> {
         self.place_main_image(load_bias)?;
         self.refresh_libraries()
     }
 
     /// Places the executable's image at `load_bias` and plants every
     /// breakpoint in it.
-    fn place_main_image(&mut self, load_bias: u64) -> Result<()> {
+    fn place_main_image(&mut self, load_bias: crate::LoadBias) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
         self.modules

@@ -16,7 +16,7 @@ use regex::{Captures, Regex};
 
 use crate::debug_info::{DebugInfo, VariableContext, VariableRuntime, VariableRuntimeError};
 use crate::inspection::InspectionBudget;
-use crate::unwind::{MemoryReader, RegisterFile};
+use crate::unwind::{DwarfRegister, MemoryReader, RegisterFile};
 use crate::{
     AddressRange, CodeInstanceKind, ImageAddress, LineNumber, ModuleImage, TypeKind, TypeNode,
     TypeReference, VariableQuery, VariableUnavailableReason, VirtualAddress,
@@ -1003,9 +1003,12 @@ impl<'a> Dumper<'a> {
                 addresses.extend([extent.range.start.get(), extent.range.end.get() - 1]);
             }
         }
-        let registers = RegisterFile::new(
-            (0..17).map(|register| (register, 0x7fff_0000 + u64::from(register) * 0x100)),
-        );
+        let registers = RegisterFile::new((0..17).map(|register| {
+            (
+                DwarfRegister::new(register),
+                0x7fff_0000 + u64::from(register) * 0x100,
+            )
+        }));
         let mut previous = String::new();
         for address in addresses {
             let at = ImageAddress::new(address);
@@ -1060,8 +1063,9 @@ impl MemoryReader for Synthetic {
 impl VariableRuntime for Synthetic {
     fn register(
         &mut self,
-        register: u16,
+        register: DwarfRegister,
     ) -> Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
+        let register = register.number();
         // General registers are words; the rest, vector registers.
         let bytes = if register < 17 { 8 } else { 16 };
         let value = 0x7fff_0000_u64 + u64::from(register) * 0x100;

@@ -112,7 +112,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn allocate_stop_id(&self) -> StopId;
     /// Resolves the file behind a module mapping and its load bias, or
     /// `None` when the file cannot be proven to be the mapped one.
-    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)>;
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)>;
     /// Loads the debug information of module files, each from a separate
     /// debug file that `search` finds when the module's own has none: all
     /// at once, with each result where its module is in `modules`.
@@ -127,7 +127,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         executable: &Path,
         image_base: u64,
         identity: FileIdentity,
-    ) -> Result<u64>;
+    ) -> Result<crate::LoadBias>;
     fn module_mappings(&self, _pid: Pid) -> Result<ProcessMappings> {
         Ok(ProcessMappings::default())
     }
@@ -456,7 +456,7 @@ impl LinuxTraceOps for LinuxPtrace {
         allocate_stop_id()
     }
 
-    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         identify_mapped_module(mapping)
     }
 
@@ -474,7 +474,7 @@ impl LinuxTraceOps for LinuxPtrace {
         executable: &Path,
         image_base: u64,
         identity: FileIdentity,
-    ) -> Result<u64> {
+    ) -> Result<crate::LoadBias> {
         self.assert_owner_thread();
         load_bias(pid, executable, image_base, identity)
     }

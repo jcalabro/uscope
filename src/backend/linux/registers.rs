@@ -6,7 +6,7 @@ use nix::libc;
 
 use crate::backend::linux::core_dump;
 use crate::debug_info::{VariableRegister, VariableRuntimeError};
-use crate::unwind::RegisterFile;
+use crate::unwind::{DwarfRegister, RegisterFile};
 use crate::{
     ExecutionContext, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot,
     RegisterValue, UnsupportedVariableFeature, VariableUnavailableReason,
@@ -14,25 +14,37 @@ use crate::{
 
 /// The general registers: DWARF number, name, and role, indexed by
 /// [`RegisterId`] in the order snapshots present them.
-const GENERAL_REGISTERS: [(u16, &str, Option<RegisterRole>); 18] = [
-    (0, "rax", None),
-    (3, "rbx", None),
-    (2, "rcx", None),
-    (1, "rdx", None),
-    (4, "rsi", None),
-    (5, "rdi", None),
-    (6, "rbp", Some(RegisterRole::FramePointer)),
-    (7, "rsp", Some(RegisterRole::StackPointer)),
-    (8, "r8", None),
-    (9, "r9", None),
-    (10, "r10", None),
-    (11, "r11", None),
-    (12, "r12", None),
-    (13, "r13", None),
-    (14, "r14", None),
-    (15, "r15", None),
-    (16, "rip", Some(RegisterRole::ProgramCounter)),
-    (49, "rflags", None),
+const GENERAL_REGISTERS: [(DwarfRegister, &str, Option<RegisterRole>); 18] = [
+    (DwarfRegister::new(0), "rax", None),
+    (DwarfRegister::new(3), "rbx", None),
+    (DwarfRegister::new(2), "rcx", None),
+    (DwarfRegister::new(1), "rdx", None),
+    (DwarfRegister::new(4), "rsi", None),
+    (DwarfRegister::new(5), "rdi", None),
+    (
+        DwarfRegister::new(6),
+        "rbp",
+        Some(RegisterRole::FramePointer),
+    ),
+    (
+        DwarfRegister::new(7),
+        "rsp",
+        Some(RegisterRole::StackPointer),
+    ),
+    (DwarfRegister::new(8), "r8", None),
+    (DwarfRegister::new(9), "r9", None),
+    (DwarfRegister::new(10), "r10", None),
+    (DwarfRegister::new(11), "r11", None),
+    (DwarfRegister::new(12), "r12", None),
+    (DwarfRegister::new(13), "r13", None),
+    (DwarfRegister::new(14), "r14", None),
+    (DwarfRegister::new(15), "r15", None),
+    (
+        DwarfRegister::new(16),
+        "rip",
+        Some(RegisterRole::ProgramCounter),
+    ),
+    (DwarfRegister::new(49), "rflags", None),
 ];
 
 fn general_descriptor(index: usize) -> RegisterDescriptor {
@@ -45,7 +57,7 @@ fn general_descriptor(index: usize) -> RegisterDescriptor {
     }
 }
 
-fn general_index(dwarf: u16) -> Option<usize> {
+fn general_index(dwarf: DwarfRegister) -> Option<usize> {
     GENERAL_REGISTERS
         .iter()
         .position(|(number, ..)| *number == dwarf)
@@ -100,7 +112,7 @@ pub(super) fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFi
 
 pub(super) fn x86_64_general_variable_register(
     registers: &libc::user_regs_struct,
-    dwarf: u16,
+    dwarf: DwarfRegister,
 ) -> Option<VariableRegister> {
     let index = general_index(dwarf)?;
     Some(VariableRegister {
@@ -113,7 +125,7 @@ pub(super) fn x86_64_general_variable_register(
 /// unwinder reconstructed for it.
 pub(super) fn x86_64_caller_variable_register(
     registers: &RegisterFile,
-    dwarf: u16,
+    dwarf: DwarfRegister,
 ) -> Result<VariableRegister, VariableRuntimeError> {
     if let Some(index) = general_index(dwarf) {
         let descriptor = general_descriptor(index);
@@ -125,10 +137,11 @@ pub(super) fn x86_64_caller_variable_register(
             None => Err(VariableUnavailableReason::RegisterNotSaved(descriptor.name).into()),
         };
     }
-    if (17..=32).contains(&dwarf) {
+    let number = dwarf.number();
+    if (17..=32).contains(&number) {
         // Callees may overwrite every SSE register without saving it.
         return Err(VariableUnavailableReason::RegisterNotSaved(
-            format!("xmm{}", dwarf - 17).into(),
+            format!("xmm{}", number - 17).into(),
         )
         .into());
     }
@@ -196,8 +209,11 @@ pub(super) type Fxsave = Arc<[u8; core_dump::FXSAVE_SIZE]>;
 const FXSAVE_X87_OFFSET: usize = 32;
 const FXSAVE_XMM_OFFSET: usize = 160;
 
-pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
-    let index = usize::from(dwarf - 17);
+pub(super) fn x86_64_xmm_variable_register(
+    registers: &Fxsave,
+    dwarf: DwarfRegister,
+) -> VariableRegister {
+    let index = usize::from(dwarf.number() - 17);
     let start = FXSAVE_XMM_OFFSET + index * 16;
     let bytes = registers[start..start + 16].to_vec();
     VariableRegister {
@@ -214,8 +230,11 @@ pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> Va
 /// One of the x87 registers st0 through st7, DWARF's 33 through 40, which
 /// FXSAVE stores from the stack's top, each in the low ten bytes of
 /// sixteen.
-pub(super) fn x86_64_x87_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
-    let index = usize::from(dwarf - 33);
+pub(super) fn x86_64_x87_variable_register(
+    registers: &Fxsave,
+    dwarf: DwarfRegister,
+) -> VariableRegister {
+    let index = usize::from(dwarf.number() - 33);
     let start = FXSAVE_X87_OFFSET + index * 16;
     VariableRegister {
         descriptor: RegisterDescriptor {

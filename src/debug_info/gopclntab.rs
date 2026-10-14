@@ -207,11 +207,11 @@ pub struct GoFunction {
     pub facts: GoFunctionFacts,
     /// The line of its `func` keyword or `TEXT` directive.
     pub start_line: i32,
-    name: u32,
-    pcsp: u32,
-    pcfile: u32,
-    pcln: u32,
-    cu_offset: u32,
+    name: NameOffset,
+    pcsp: PcTable,
+    pcfile: PcTable,
+    pcln: PcTable,
+    unit: CuIndex,
     /// Where the `pcdata` offsets begin, in the table.
     pcdata: usize,
     npcdata: u32,
@@ -222,7 +222,7 @@ impl GoFunction {
     /// Whether the function's code was compiled by Go: it has a stack
     /// table. Code the linker took from C objects has none.
     pub const fn is_go(&self) -> bool {
-        self.pcsp != 0
+        self.pcsp.0 != 0
     }
 
     pub const fn contains(&self, address: u64) -> bool {
@@ -234,12 +234,25 @@ impl GoFunction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InlinedCall {
     pub special: Option<SpecialFunction>,
-    name: u32,
+    name: NameOffset,
     /// The address of an instruction whose position is the call site.
     pub parent_pc: u64,
     /// The line of the inlined function's `func` keyword.
     pub start_line: i32,
 }
+
+/// An offset into `funcnametab`, where a function's name begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NameOffset(u32);
+
+/// An offset into `pctab`, where a pc-value table begins. Zero means the
+/// function has no such table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PcTable(u32);
+
+/// The index of a compile unit's first file slot in `cutab`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CuIndex(u32);
 
 /// One run of a pc-value table: `value` applies to `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,8 +508,8 @@ impl GoTable {
         {
             return Err(PclntabError::Truncated("a function record"));
         }
-        let name = field(1);
-        if usize::try_from(name).map_or(true, |name| name >= self.funcnametab.len()) {
+        let name = NameOffset(field(1));
+        if usize::try_from(name.0).map_or(true, |name| name >= self.funcnametab.len()) {
             return Err(malformed("a function's name is outside the name table"));
         }
         let flags = fixed[41];
@@ -513,10 +526,10 @@ impl GoTable {
             },
             start_line: field(9).cast_signed(),
             name,
-            pcsp: field(4),
-            pcfile: field(5),
-            pcln: field(6),
-            cu_offset: field(8),
+            pcsp: PcTable(field(4)),
+            pcfile: PcTable(field(5)),
+            pcln: PcTable(field(6)),
+            unit: CuIndex(field(8)),
             pcdata,
             npcdata,
             nfuncdata,
@@ -570,21 +583,36 @@ impl GoTable {
 
     /// The function's name, as Go spells it.
     pub fn name(&self, function: &GoFunction) -> Result<Arc<str>> {
-        self.string(&self.funcnametab, function.name as usize)
+        self.function_name(function.name)
     }
 
     /// The name of a function the compiler inlined.
     pub fn inlined_name(&self, call: &InlinedCall) -> Result<Arc<str>> {
-        self.string(&self.funcnametab, call.name as usize)
+        self.function_name(call.name)
     }
 
-    /// The runs of the pc-value table at `offset`, over one function.
-    fn runs(&self, function: &GoFunction, offset: u32) -> Option<PcRuns<'_>> {
-        if offset == 0 {
+    fn function_name(&self, offset: NameOffset) -> Result<Arc<str>> {
+        self.string(&self.funcnametab, offset.0 as usize)
+    }
+
+    /// The function's pc-value table at `index` among its `pcdata`, or
+    /// `None` when it has too few.
+    fn pcdata(&self, function: &GoFunction, index: usize) -> Option<PcTable> {
+        (index < function.npcdata as usize).then(|| {
+            PcTable(
+                read_u32(&self.data, function.pcdata + 4 * index)
+                    .expect("the record's pcdata is in bounds"),
+            )
+        })
+    }
+
+    /// The runs of a pc-value table, over one function.
+    fn runs(&self, function: &GoFunction, table: PcTable) -> Option<PcRuns<'_>> {
+        if table.0 == 0 {
             return None;
         }
         Some(PcRuns {
-            data: self.data[self.pctab.clone()].get(offset as usize..)?,
+            data: self.data[self.pctab.clone()].get(table.0 as usize..)?,
             offset: 0,
             pc: function.entry,
             entry: function.entry,
@@ -596,9 +624,9 @@ impl GoTable {
 
     /// The value a pc-value table holds at an address, or `None` when the
     /// function has no such table or the table does not reach the address.
-    fn value_at(&self, function: &GoFunction, offset: u32, address: u64) -> Result<Option<i32>> {
-        let Some(runs) = self.runs(function, offset) else {
-            return if offset == 0 {
+    fn value_at(&self, function: &GoFunction, table: PcTable, address: u64) -> Result<Option<i32>> {
+        let Some(runs) = self.runs(function, table) else {
+            return if table.0 == 0 {
                 Ok(None)
             } else {
                 Err(malformed("a pc-value table is outside the table"))
@@ -624,12 +652,10 @@ impl GoTable {
     pub fn preemptible(&self, function: &GoFunction, address: u64) -> Result<bool> {
         /// `abi.UnsafePointUnsafe`.
         const UNSAFE: i32 = -2;
-        if function.npcdata as usize <= PCDATA_UNSAFE_POINT {
+        let Some(table) = self.pcdata(function, PCDATA_UNSAFE_POINT) else {
             return Ok(true);
-        }
-        let offset = read_u32(&self.data, function.pcdata + 4 * PCDATA_UNSAFE_POINT)
-            .expect("the record's pcdata is in bounds");
-        Ok(self.value_at(function, offset, address)? != Some(UNSAFE))
+        };
+        Ok(self.value_at(function, table, address)? != Some(UNSAFE))
     }
 
     /// Whether `address` begins a function a prologue calls to grow its
@@ -651,12 +677,10 @@ impl GoTable {
     pub fn restarts_at_entry(&self, function: &GoFunction) -> Result<bool> {
         /// `abi.UnsafePointRestartAtEntry`.
         const RESTART_AT_ENTRY: i32 = -5;
-        if function.npcdata as usize <= PCDATA_UNSAFE_POINT {
-            return Ok(false);
-        }
-        let offset = read_u32(&self.data, function.pcdata + 4 * PCDATA_UNSAFE_POINT)
-            .expect("the record's pcdata is in bounds");
-        let Some(runs) = self.runs(function, offset) else {
+        let Some(runs) = self
+            .pcdata(function, PCDATA_UNSAFE_POINT)
+            .and_then(|table| self.runs(function, table))
+        else {
             return Ok(false);
         };
         for run in clipped(runs, function)? {
@@ -685,7 +709,8 @@ impl GoTable {
             return Ok(None);
         };
         let slot = function
-            .cu_offset
+            .unit
+            .0
             .checked_add(index)
             .and_then(|slot| usize::try_from(slot).ok())
             .and_then(|slot| slot.checked_mul(4))
@@ -764,14 +789,12 @@ impl GoTable {
     /// The inline-tree runs of a function: the index of the innermost
     /// inlined call at each address, or -1 outside inlined code.
     pub fn inline_runs(&self, function: &GoFunction) -> Result<Vec<PcRun>> {
-        if function.npcdata as usize <= PCDATA_INLINE_TREE_INDEX {
+        let Some(table) = self.pcdata(function, PCDATA_INLINE_TREE_INDEX) else {
             return Ok(Vec::new());
-        }
-        let offset = read_u32(&self.data, function.pcdata + 4 * PCDATA_INLINE_TREE_INDEX)
-            .expect("the record's pcdata is in bounds");
-        match self.runs(function, offset) {
+        };
+        match self.runs(function, table) {
             Some(runs) => clipped(runs, function),
-            None if offset == 0 => Ok(Vec::new()),
+            None if table.0 == 0 => Ok(Vec::new()),
             None => Err(malformed("a pc-value table is outside the table")),
         }
     }
@@ -799,8 +822,8 @@ impl GoTable {
             .and_then(|start| self.data.get(start..start.checked_add(INLINED_CALL_SIZE)?))
             .ok_or(PclntabError::Truncated("an inline tree"))?;
         let field = |index: usize| read_u32(record, 4 * index).expect("the entry is in bounds");
-        let name = field(1);
-        if name as usize >= self.funcnametab.len() {
+        let name = NameOffset(field(1));
+        if name.0 as usize >= self.funcnametab.len() {
             return Err(malformed(
                 "an inlined function's name is outside the name table",
             ));

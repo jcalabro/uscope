@@ -7,7 +7,7 @@
 //! reaches an address, as `PERF_TYPE_BREAKPOINT` does; the world samples
 //! threads where they are, as a clock event's tick would find them.
 
-use super::{Kernel, Tid};
+use super::{Kernel, Tgid, Tid};
 use crate::sim::cpu::{RBP, RSP, Registers};
 use crate::sim::memory::AddressSpace;
 
@@ -26,7 +26,7 @@ const TASK_SIZE: u64 = 0x7fff_ffff_f000;
 /// An execute breakpoint sampling every thread of one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
-    pub tgid: Tid,
+    pub tgid: Tgid,
     pub address: u64,
     pub stack_bytes: u32,
     /// The records written so far, as a ring holds them.
@@ -58,7 +58,7 @@ impl Kernel {
 
         let mut words = vec![
             0,
-            u64::from(thread.tgid.cast_unsigned()) | u64::from(tid.cast_unsigned()) << 32,
+            u64::from(thread.tgid.id().cast_unsigned()) | u64::from(tid.cast_unsigned()) << 32,
             thread.retired,
             0,
             1,

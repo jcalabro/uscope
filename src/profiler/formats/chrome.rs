@@ -2,8 +2,6 @@
 //! each thread's zones and labels as spans, and the program's marks as
 //! instants. Samples are not written: pprof and folded stacks hold them.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Value, json};
 
 use crate::capture::records::{MarkerKind, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED};
@@ -19,9 +17,7 @@ pub fn export(profile: &Profile) -> String {
     )]
     let micros = |time: i64| (time - start) as f64 / 1000.0;
     let mut events: Vec<Value> = Vec::new();
-    let mut pids = BTreeMap::new();
     for thread in profile.threads() {
-        pids.insert(thread.tid, thread.pid);
         if let Some(name) = thread.name {
             events.push(json!({
                 "ph": "M", "name": "thread_name", "pid": thread.pid, "tid": thread.tid,
@@ -60,7 +56,7 @@ pub fn export(profile: &Profile) -> String {
         };
         let mut event = json!({
             "ph": "i", "s": "t", "name": marker.name, "cat": category,
-            "pid": pids.get(&marker.tid).copied().unwrap_or(0), "tid": marker.tid,
+            "pid": marker.pid, "tid": marker.tid,
             "ts": micros(marker.time),
         });
         if let Some(text) = marker.text {

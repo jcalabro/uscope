@@ -1,5 +1,6 @@
 use super::builder::LineInput;
 use super::*;
+use crate::model::{Pid, Tid};
 
 /// A small capture with two threads, shared stacks, symbols, and a zone.
 fn sample_capture(offset: i64) -> Capture {
@@ -7,8 +8,8 @@ fn sample_capture(offset: i64) -> Capture {
     builder.setting("start", &offset.to_string());
     builder.setting("end", &(offset + 100).to_string());
     let module = builder.module("/bin/app", Some("abcd"), [7; 16], 4096);
-    let main_thread = builder.thread(10, 10, offset);
-    let worker = builder.thread(10, 11, offset + 1);
+    let main_thread = builder.thread(Pid::new(10), Tid::new(10), offset);
+    let worker = builder.thread(Pid::new(10), Tid::new(11), offset + 1);
     builder.thread_name(worker, "worker");
     let main = builder.frame(FrameKind::Native, module, 0x1000, 0);
     let work = builder.frame(FrameKind::Native, module, 0x2000, 0);
@@ -165,7 +166,7 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
 #[test]
 fn zones_of_one_span_keep_their_nesting_when_a_capture_is_rebuilt() {
     let mut builder = CaptureBuilder::new();
-    let thread = builder.thread(1, 1, 0);
+    let thread = builder.thread(Pid::new(1), Tid::new(1), 0);
     let site = |builder: &mut CaptureBuilder, name: &str| builder.site(name, "f.rs", 1, NONE, 0);
     let (inner, outer) = (site(&mut builder, "leaf"), site(&mut builder, "b"));
     for site in [inner, outer] {
@@ -229,7 +230,7 @@ fn merged_chunks_keep_each_tasks_labels() {
 #[test]
 fn a_builder_forgets_rows_before_a_moment() {
     let mut builder = CaptureBuilder::new();
-    let thread = builder.thread(1, 1, 0);
+    let thread = builder.thread(Pid::new(1), Tid::new(1), 0);
     let frame = builder.frame(FrameKind::Native, NONE, 0x10, 0);
     let stack = builder.stack(&[frame]);
     for time in [1, 5, 9] {

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::model::{Outcome, SyscallEvent, TraceEvent};
+use super::model::{Outcome, Pid, SyscallEvent, TraceEvent};
 use super::sockaddr::{self, SocketAddress};
 
 /// What one descriptor refers to.
@@ -92,7 +92,7 @@ struct Process {
 /// Every traced process's descriptors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FdTable {
-    processes: BTreeMap<u32, Process>,
+    processes: BTreeMap<Pid, Process>,
 }
 
 /// The calls the table follows, which an engine stops at whenever `-y`
@@ -199,7 +199,7 @@ fn resolve(process: &Process, dirfd: i64, path: &str) -> String {
 
 impl FdTable {
     /// Records what the engine read from `/proc` for a process.
-    pub fn seed(&mut self, process: u32, fds: impl IntoIterator<Item = (i64, Description)>) {
+    pub fn seed(&mut self, process: Pid, fds: impl IntoIterator<Item = (i64, Description)>) {
         self.processes.insert(
             process,
             Process {
@@ -212,7 +212,7 @@ impl FdTable {
 
     /// Records one descriptor, as an engine that read `/proc/PID/fd/N`
     /// right after the call made it does.
-    pub fn set(&mut self, process: u32, fd: i64, description: Description) {
+    pub fn set(&mut self, process: Pid, fd: i64, description: Description) {
         self.processes
             .entry(process)
             .or_default()
@@ -223,7 +223,7 @@ impl FdTable {
     /// A path a call of `process` named, made absolute against `dirfd`
     /// (`AT_FDCWD` for the working directory) when the table knows it.
     #[must_use]
-    pub fn resolve(&self, process: u32, dirfd: i64, path: &str) -> String {
+    pub fn resolve(&self, process: Pid, dirfd: i64, path: &str) -> String {
         self.processes
             .get(&process)
             .map_or_else(|| path.to_owned(), |known| resolve(known, dirfd, path))
@@ -231,7 +231,7 @@ impl FdTable {
 
     /// What a descriptor refers to, when the trace knows.
     #[must_use]
-    pub fn describe(&self, process: u32, fd: i64) -> Option<&Description> {
+    pub fn describe(&self, process: Pid, fd: i64) -> Option<&Description> {
         self.processes.get(&process)?.fds.get(&fd)
     }
 
@@ -239,7 +239,7 @@ impl FdTable {
     /// it lacks is not open: true once the process was read from the
     /// system or inherited such a table, until a gap.
     #[must_use]
-    pub fn knows(&self, process: u32) -> bool {
+    pub fn knows(&self, process: Pid) -> bool {
         self.processes
             .get(&process)
             .is_some_and(|process| process.read && !process.stale)
@@ -248,7 +248,7 @@ impl FdTable {
     /// What a descriptor referred to before the call about to be applied,
     /// which the engine already read the descriptors it made for.
     #[must_use]
-    pub fn describe_before(&self, process: u32, fd: i64) -> Option<&Description> {
+    pub fn describe_before(&self, process: Pid, fd: i64) -> Option<&Description> {
         let process = self.processes.get(&process)?;
         match process.fresh.get(&fd) {
             Some((_, replaced)) => replaced.as_ref(),
@@ -257,7 +257,7 @@ impl FdTable {
     }
 
     /// Processes whose tables a gap made stale, to read again.
-    pub fn stale(&self) -> impl Iterator<Item = u32> + '_ {
+    pub fn stale(&self) -> impl Iterator<Item = Pid> + '_ {
         self.processes
             .iter()
             .filter(|(_, process)| process.stale)
@@ -265,7 +265,7 @@ impl FdTable {
     }
 
     /// Every descriptor of a process, in order.
-    pub fn of(&self, process: u32) -> impl Iterator<Item = (i64, &Description)> {
+    pub fn of(&self, process: Pid) -> impl Iterator<Item = (i64, &Description)> {
         self.processes
             .get(&process)
             .into_iter()
@@ -318,7 +318,7 @@ impl FdTable {
                 ..
             } => {
                 let copy = self.processes.get(parent).cloned().unwrap_or_default();
-                self.processes.insert(*child, copy);
+                self.processes.insert(Pid::led_by(*child), copy);
             }
             TraceEvent::Exec { process, .. } => {
                 if let Some(table) = self.processes.get_mut(process) {
@@ -351,7 +351,7 @@ impl FdTable {
     /// Records what the engine read of one descriptor.
     fn descriptor(
         &mut self,
-        process: u32,
+        process: Pid,
         fd: i64,
         text: &Arc<str>,
         cloexec: bool,
@@ -697,14 +697,14 @@ impl FdTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syscalls::model::{Abi, Capture, CaptureState, EventFlags, ReadAt, SyscallId};
+    use crate::syscalls::model::{Abi, Capture, CaptureState, EventFlags, ReadAt, SyscallId, Tid};
 
     fn call(name: &str, args: &[u64], result: i64, captured: Vec<(u8, &[u8])>) -> TraceEvent {
         let mut words = [0; 6];
         words[..args.len()].copy_from_slice(args);
         TraceEvent::Call(SyscallEvent {
-            thread: 7,
-            process: 7,
+            thread: Tid::new(7),
+            process: Pid::new(7),
             call: SyscallId::named(Abi::X86_64, name).expect(name),
             args: words,
             captured: captured
@@ -726,7 +726,7 @@ mod tests {
 
     fn text(table: &FdTable, fd: i64) -> Option<String> {
         table
-            .describe(7, fd)
+            .describe(Pid::new(7), fd)
             .map(|description| description.text.to_string())
     }
 
@@ -751,8 +751,8 @@ mod tests {
         assert_eq!(text(&table, 4), None);
 
         table.apply(&TraceEvent::Exec {
-            thread: 7,
-            process: 7,
+            thread: Tid::new(7),
+            process: Pid::new(7),
             time: 3,
             path: "/bin/true".into(),
         });
@@ -770,7 +770,7 @@ mod tests {
         // What the engine read from /proc just before the call says more
         // than the call's relative path.
         table.apply(&TraceEvent::Descriptor {
-            process: 7,
+            process: Pid::new(7),
             fd: 4,
             time: 4,
             text: "/home/user/notes".into(),
@@ -778,7 +778,11 @@ mod tests {
             device: None,
             made: true,
         });
-        assert_eq!(table.describe_before(7, 4), None, "made by the next call");
+        assert_eq!(
+            table.describe_before(Pid::new(7), 4),
+            None,
+            "made by the next call"
+        );
         table.apply(&call(
             "openat",
             &[u64::MAX - 99, 0, 0],
@@ -810,14 +814,17 @@ mod tests {
         assert_eq!(text(&table, 5).as_deref(), Some("TCP:[->10.0.3.9:5432]"));
 
         table.apply(&TraceEvent::Spawn {
-            parent_thread: 7,
-            parent: 7,
-            child: 8,
+            parent_thread: Tid::new(7),
+            parent: Pid::new(7),
+            child: Tid::new(8),
             thread: false,
             time: 4,
         });
         assert_eq!(
-            table.describe(8, 5).map(|d| d.text.to_string()).as_deref(),
+            table
+                .describe(Pid::new(8), 5)
+                .map(|d| d.text.to_string())
+                .as_deref(),
             Some("TCP:[->10.0.3.9:5432]")
         );
 
@@ -826,6 +833,9 @@ mod tests {
         assert_eq!(text(&table, 4).as_deref(), Some("pipe:[]"));
 
         table.apply(&TraceEvent::Lost { time: 5, count: 1 });
-        assert_eq!(table.stale().collect::<Vec<_>>(), [7, 8]);
+        assert_eq!(
+            table.stale().collect::<Vec<_>>(),
+            [Pid::new(7), Pid::new(8)]
+        );
     }
 }

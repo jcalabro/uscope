@@ -867,15 +867,15 @@ impl Profile {
 
     /// Whether every mapping of `program` has the bias a breakpoint
     /// source assumed.
-    fn check_bias(&self, program: &Path, expected: u64) -> Result<(), RecordError> {
+    fn check_bias(&self, program: &Path, expected: crate::LoadBias) -> Result<(), RecordError> {
         let program =
             session::which(program).and_then(|program| std::fs::canonicalize(program).ok());
         let capture = &self.capture;
         for mapping in &capture.mappings {
             let path = capture.string(capture.modules[mapping.module.get() as usize].path.get());
-            if program.as_deref() == Some(Path::new(path)) && mapping.bias.get() != expected {
+            if program.as_deref() == Some(Path::new(path)) && mapping.bias.get() != expected.get() {
                 return Err(RecordError::Misplaced {
-                    expected,
+                    expected: expected.get(),
                     actual: mapping.bias.get(),
                 });
             }

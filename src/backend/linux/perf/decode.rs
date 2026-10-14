@@ -3,6 +3,8 @@
 //! size is malformed, never read past.
 
 use super::sys::sample;
+use crate::model::{Pid, Tid};
+use crate::unwind::DwarfRegister;
 
 /// The sample fields every event asks for, in the kernel's order.
 pub const SAMPLE_TYPE: u64 = sample::IDENTIFIER
@@ -23,11 +25,11 @@ pub const REGISTERS: u64 = 0x3ff | (0xff << 16);
 
 /// The DWARF number of each register [`REGISTERS`] asks for, in the order
 /// the kernel writes them.
-pub const DWARF_REGISTERS: [u16; 18] =
-    [0, 3, 2, 1, 4, 5, 6, 7, 16, 49, 8, 9, 10, 11, 12, 13, 14, 15];
+pub const DWARF_REGISTERS: [DwarfRegister; 18] =
+    DwarfRegister::each([0, 3, 2, 1, 4, 5, 6, 7, 16, 49, 8, 9, 10, 11, 12, 13, 14, 15]);
 
 /// The DWARF number of the flags register.
-pub const DWARF_FLAGS: u16 = 49;
+pub const DWARF_FLAGS: DwarfRegister = DwarfRegister::new(49);
 
 const RECORD_MMAP2: u32 = 10;
 const RECORD_COMM: u32 = 3;
@@ -62,8 +64,8 @@ impl Words<'_> {
 /// One sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample<'a> {
-    pub pid: u32,
-    pub tid: u32,
+    pub pid: Pid,
+    pub tid: Tid,
     pub time: u64,
     pub cpu: u32,
     pub period: u64,
@@ -89,7 +91,7 @@ impl Sample<'_> {
 /// A mapping of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mmap<'a> {
-    pub pid: u32,
+    pub pid: Pid,
     pub start: u64,
     pub length: u64,
     pub file_offset: u64,
@@ -106,21 +108,21 @@ pub enum Record<'a> {
     Mmap(Mmap<'a>),
     /// A thread's name, set or, when `exec`, changed by an exec.
     Comm {
-        pid: u32,
-        tid: u32,
+        pid: Pid,
+        tid: Tid,
         name: &'a [u8],
         exec: bool,
         time: u64,
     },
     Fork {
-        pid: u32,
-        ppid: u32,
-        tid: u32,
+        pid: Pid,
+        ppid: Pid,
+        tid: Tid,
         time: u64,
     },
     Exit {
-        pid: u32,
-        tid: u32,
+        pid: Pid,
+        tid: Tid,
         time: u64,
     },
     /// Records or samples the kernel dropped.
@@ -134,8 +136,8 @@ pub enum Record<'a> {
     /// A thread left its CPU, or came back to one. One that left while it
     /// could still run was `preempted`; one that did not blocked.
     Switch {
-        pid: u32,
-        tid: u32,
+        pid: Pid,
+        tid: Tid,
         out: bool,
         preempted: bool,
         time: u64,
@@ -254,7 +256,7 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
                 .position(|byte| *byte == 0)
                 .unwrap_or(path.len())];
             Record::Mmap(Mmap {
-                pid,
+                pid: Pid::new(pid),
                 start,
                 length,
                 file_offset,
@@ -272,8 +274,8 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
                 .position(|byte| *byte == 0)
                 .unwrap_or(name.len())];
             Record::Comm {
-                pid,
-                tid,
+                pid: Pid::new(pid),
+                tid: Tid::new(tid),
                 name,
                 exec: misc & MISC_COMM_EXEC != 0,
                 time,
@@ -282,10 +284,11 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
         RECORD_FORK | RECORD_EXIT => {
             let (pid, parent) = fields.pair()?;
             let (tid, _parent_tid) = fields.pair()?;
+            let (pid, tid) = (Pid::new(pid), Tid::new(tid));
             if kind == RECORD_FORK {
                 Record::Fork {
                     pid,
-                    ppid: parent,
+                    ppid: Pid::new(parent),
                     tid,
                     time,
                 }
@@ -307,8 +310,8 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
         RECORD_THROTTLE => Record::Throttle { time },
         // The thread is the sample_id's, which a switch record is all of.
         RECORD_SWITCH => Record::Switch {
-            pid: u32::from_le_bytes(id[..4].try_into().expect("four bytes")),
-            tid: u32::from_le_bytes(id[4..8].try_into().expect("four bytes")),
+            pid: Pid::new(u32::from_le_bytes(id[..4].try_into().expect("four bytes"))),
+            tid: Tid::new(u32::from_le_bytes(id[4..8].try_into().expect("four bytes"))),
             out: misc & MISC_SWITCH_OUT != 0,
             preempted: misc & MISC_SWITCH_OUT_PREEMPT != 0,
             time,
@@ -341,8 +344,8 @@ fn decode_sample(body: &[u8]) -> Result<Sample<'_>, Malformed> {
         data.get(..used).ok_or(Malformed)?
     };
     Ok(Sample {
-        pid,
-        tid,
+        pid: Pid::new(pid),
+        tid: Tid::new(tid),
         time,
         cpu,
         period,

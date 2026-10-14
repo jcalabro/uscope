@@ -908,7 +908,8 @@ impl Session {
         {
             Location::Code(address) => {
                 let code = self.code();
-                let (image, address) = code.function_entry(*address).ok_or_else(|| {
+                let entry = code.function_entry(uscope::VirtualAddress::new(*address));
+                let (image, address) = entry.ok_or_else(|| {
                     ErrorBody::new(format!("no loaded module has code at {address:#x}"))
                 })?;
                 let located = image.locate(address);

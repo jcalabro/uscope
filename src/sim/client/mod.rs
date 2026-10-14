@@ -27,7 +27,7 @@ use self::breakpoints::Added;
 use super::choices::{Choices, Stream};
 use super::hits::{Baseline, Published};
 use super::kernel::DebugBehavior;
-use super::kernel::Tid;
+use super::kernel::{Tgid, Tid};
 use super::loader::Image;
 use super::markers::Marker;
 use super::marks::{Mark, Marks};
@@ -103,10 +103,10 @@ pub struct Shared {
     pub notes: Rc<RefCell<Vec<String>>>,
     /// Processes something outside the session killed, which the world
     /// records when its fault fires.
-    pub killed: Rc<RefCell<BTreeSet<Tid>>>,
+    pub killed: Rc<RefCell<BTreeSet<Tgid>>>,
     /// Processes that began to end as a whole, killed or exiting their
     /// group, which the world records as it happens.
-    pub ending: Rc<RefCell<BTreeSet<Tid>>>,
+    pub ending: Rc<RefCell<BTreeSet<Tgid>>>,
     /// The user's breakpoints the debugger said it made enabled, and the
     /// client has not asked to remove or disable, with the image addresses
     /// of their locations. Temporary ones, which a stop may delete, are not
@@ -267,7 +267,8 @@ impl Client {
 
     /// Whether something outside the session killed `process`.
     fn killed(&self, process: ProcessId) -> bool {
-        Tid::try_from(process.get()).is_ok_and(|tgid| self.shared.killed.borrow().contains(&tgid))
+        Tid::try_from(process.get())
+            .is_ok_and(|id| self.shared.killed.borrow().contains(&Tgid::new(id)))
     }
 
     /// Accepts a failure of a request about `process` if the process began
@@ -322,7 +323,8 @@ impl Client {
 
     /// Whether `process` began to end as a whole.
     fn ending(&self, process: ProcessId) -> bool {
-        Tid::try_from(process.get()).is_ok_and(|tgid| self.shared.ending.borrow().contains(&tgid))
+        Tid::try_from(process.get())
+            .is_ok_and(|id| self.shared.ending.borrow().contains(&Tgid::new(id)))
     }
 
     fn mark(&self, mark: Mark) {
@@ -762,7 +764,7 @@ impl Client {
     }
 
     /// The load bias of the main executable.
-    async fn main_bias(&self) -> Result<u64, Failure> {
+    async fn main_bias(&self) -> Result<crate::LoadBias, Failure> {
         let modules = self
             .handle
             .loaded_modules()
@@ -787,7 +789,8 @@ impl Client {
         let length = self.draw(MAX_READ) + 1;
         let aim = if !traps.is_empty() && self.draw(2) == 0 {
             let image = *self.choices.borrow_mut().pick(Stream::Client, &traps);
-            Some(image + self.main_bias().await?)
+            let image = crate::ImageAddress::new(image);
+            Some(self.main_bias().await?.wrapping_load(image).get())
         } else {
             None
         };

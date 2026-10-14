@@ -938,7 +938,7 @@ struct FakeTrace {
     start_times: RefCell<BTreeMap<Pid, u64>>,
     /// Mapped library files, by path, with their load bias and whether
     /// their debug information loads.
-    libraries: RefCell<BTreeMap<PathBuf, (u64, bool)>>,
+    libraries: RefCell<BTreeMap<PathBuf, (crate::LoadBias, bool)>>,
     /// Statuses the kernel holds that no waiter has taken.
     unreaped: RefCell<BTreeMap<Pid, WaitEvent>>,
 }
@@ -1152,7 +1152,7 @@ impl LinuxTraceOps for FakeTrace {
     fn allocate_stop_id(&self) -> StopId {
         allocate_stop_id()
     }
-    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         let libraries = self.libraries.borrow();
         let (bias, _) = libraries.get(&mapping.path)?;
         Some((mapping.path.clone(), *bias))
@@ -1167,7 +1167,7 @@ impl LinuxTraceOps for FakeTrace {
                 .map(|(index, (path, (bias, _)))| ModuleMapping {
                     path: path.clone(),
                     inode: 100 + index as u64,
-                    start: *bias,
+                    start: bias.get(),
                     file_offset: 0,
                     deleted: false,
                     executable: true,
@@ -1229,8 +1229,8 @@ impl LinuxTraceOps for FakeTrace {
         _executable: &Path,
         _image_base: u64,
         _identity: FileIdentity,
-    ) -> Result<u64> {
-        Ok(0)
+    ) -> Result<crate::LoadBias> {
+        Ok(crate::LoadBias::default())
     }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
         self.record(format!("write_word {pid} {address:#x} {value:#x}"));
@@ -1673,7 +1673,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
         ..Inferior::new(
             InferiorOrigin::Launched,
             pid,
-            LoadedModule::main(image.id(), 0),
+            LoadedModule::main(image.id(), crate::LoadBias::default()),
             threads.iter().map(|&pid| (pid, stopped())).collect(),
             None,
         )
@@ -5963,7 +5963,10 @@ impl UnwindInfo for OutermostCallerUnwindInfo {
     ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
         match address.get() {
             0x30 => Ok(crate::unwind::UnwindStep {
-                registers: RegisterFile::new([(16, 0x50), (7, 0x1000)]),
+                registers: RegisterFile::new([
+                    (crate::unwind::RETURN_ADDRESS, 0x50),
+                    (crate::unwind::RSP, 0x1000),
+                ]),
                 cfa: VirtualAddress::new(0x1000),
                 signal_frame: false,
             }),
@@ -6448,7 +6451,7 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
     // A handler's frame returned into the trampoline, whose stack holds the
     // ucontext; each saved register gets a value of its own.
     let stack = 0x7fff_0000_u64;
-    let expected: Vec<(u16, u64)> = SIGCONTEXT_REGISTERS
+    let expected: Vec<_> = SIGCONTEXT_REGISTERS
         .iter()
         .enumerate()
         .map(|(slot, &register)| (register, 0x1000 + slot as u64 * 0x11))
@@ -6460,7 +6463,10 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
             .map(|(slot, &(_, value))| (stack + UCONTEXT_MCONTEXT + 8 * slot as u64, value))
             .collect(),
     );
-    let registers = RegisterFile::new([(7, stack), (16, trampoline.get())]);
+    let registers = RegisterFile::new([
+        (crate::unwind::RSP, stack),
+        (crate::unwind::RETURN_ADDRESS, trampoline.get()),
+    ]);
     let step = debug
         .unwind
         .unwind(trampoline, &registers, &mut memory)
@@ -6495,7 +6501,7 @@ fn new_modules_load_together_and_register_in_observation_order() {
             .trace()
             .libraries
             .borrow_mut()
-            .insert(PathBuf::from(path), (bias, loads));
+            .insert(PathBuf::from(path), (crate::LoadBias::new(bias), loads));
     }
     harness.trace().take_actions();
     let libraries = |harness: &WatchHarness| {
@@ -6546,11 +6552,10 @@ fn new_modules_load_together_and_register_in_observation_order() {
         [(1, "/lib/liba.so".into()), (3, "/lib/libc.so".into())]
     );
 
-    harness
-        .trace()
-        .libraries
-        .borrow_mut()
-        .insert(PathBuf::from("/lib/libd.so"), (0x7300_0000, true));
+    harness.trace().libraries.borrow_mut().insert(
+        PathBuf::from("/lib/libd.so"),
+        (crate::LoadBias::new(0x7300_0000), true),
+    );
     harness.controller.refresh_modules().unwrap();
     let loads = harness
         .trace()

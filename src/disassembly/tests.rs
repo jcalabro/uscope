@@ -460,9 +460,9 @@ fn indirect_targets_are_read_from_the_stopped_state() {
         })
     };
     let registers = RegisterFile::new([
-        (0, 0x1_0000_2008), // rax
-        (7, 0x2008),        // rsp
-        (58, 0x1ff0),       // fs base
+        (crate::unwind::RAX, 0x1_0000_2008),
+        (crate::unwind::RSP, 0x2008),
+        (crate::unwind::FS_BASE, 0x1ff0),
     ]);
     let needs = Some(IndirectTarget::NeedsRegisters);
     // Bytes, the target away from the stop, and the target at it.
@@ -543,7 +543,7 @@ fn indirect_targets_are_read_from_the_stopped_state() {
 
     // A register the stop does not determine is never guessed.
     let mut unknown = registers;
-    unknown.remove(0);
+    unknown.remove(crate::unwind::RAX);
     assert_eq!(indirect_target(&[0xff, 0xd0], Some(&unknown)), needs);
     assert_eq!(
         indirect_target(&[0xff, 0x24, 0xc5, 0x08, 0x20, 0, 0], Some(&unknown)),

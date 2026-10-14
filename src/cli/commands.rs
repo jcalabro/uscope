@@ -704,9 +704,7 @@ impl Cli {
             }
             Command::Display if first.is_none() && format.is_empty() => self.list_displays(),
             Command::Display => self.add_display(format, rest).await?,
-            Command::Undisplay => {
-                self.undisplay(parse_display_ids(&arguments, spec)?.as_deref())?
-            }
+            Command::Undisplay => self.undisplay(&arguments, spec)?,
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
@@ -943,10 +941,11 @@ impl Cli {
         watches: bool,
         spec: &CommandSpec,
     ) -> Result<Option<Vec<CountedId>>> {
-        let Some(ids) = parse_ids(words, watches, spec)? else {
+        let snapshot = self.debugger.snapshot().await?;
+        let most = snapshot.breakpoints.len() + snapshot.watchpoints.len();
+        let Some(ids) = parse_ids(words, watches, most, spec)? else {
             return Ok(None);
         };
-        let snapshot = self.debugger.snapshot().await?;
         let renderer = Renderer::new(false);
         for &id in &ids {
             let known = match id {
@@ -2719,7 +2718,7 @@ fn parse_memory_byte_count(value: Option<&str>, spec: &CommandSpec) -> Result<u6
 
 /// A breakpoint, or a watchpoint written `w` and its id, whose hits
 /// `condition`, `hits`, and `ignore` choose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum CountedId {
     Breakpoint(BreakpointId),
     Watchpoint(WatchpointId),
@@ -2903,12 +2902,20 @@ fn unquoted(text: &str) -> Result<String> {
 }
 
 /// Parses breakpoint and watchpoint ids, ranges of them such as `3-5` or
-/// `w1-2`, or `all` as `None`.
-fn parse_ids(words: &[&str], watches: bool, spec: &CommandSpec) -> Result<Option<Vec<CountedId>>> {
+/// `w1-2`, or `all` as `None`. Each id must name one of the `most` that
+/// exist, so past `most` ids one is surely missing and the rest are left
+/// unparsed: a range may be as wide as `1-4000000000`.
+fn parse_ids(
+    words: &[&str],
+    watches: bool,
+    most: usize,
+    spec: &CommandSpec,
+) -> Result<Option<Vec<CountedId>>> {
     if words == ["all"] {
         return Ok(None);
     }
     let mut ids = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for word in words {
         let (watch, digits) = word
             .strip_prefix('w')
@@ -2920,12 +2927,15 @@ fn parse_ids(words: &[&str], watches: bool, spec: &CommandSpec) -> Result<Option
             bail!("range {word} is empty");
         }
         for id in first..=last {
+            if ids.len() > most {
+                break;
+            }
             let id = if watch {
                 CountedId::Watchpoint(WatchpointId::new(id))
             } else {
                 CountedId::Breakpoint(BreakpointId::new(id))
             };
-            if !ids.contains(&id) {
+            if seen.insert(id) {
                 ids.push(id);
             }
         }
@@ -2939,8 +2949,12 @@ fn shell_quoted(text: &str) -> String {
 }
 
 /// Parses display numbers, ranges of them, or `all` as `None`.
-fn parse_display_ids(words: &[&str], spec: &CommandSpec) -> Result<Option<Vec<u64>>> {
-    parse_ids(words, false, spec)?
+pub(super) fn parse_display_ids(
+    words: &[&str],
+    most: usize,
+    spec: &CommandSpec,
+) -> Result<Option<Vec<u64>>> {
+    parse_ids(words, false, most, spec)?
         .map(|ids| {
             ids.into_iter()
                 .map(|id| match id {
@@ -3474,5 +3488,22 @@ mod tests {
                 "accepted invalid byte count {count:?}"
             );
         }
+    }
+
+    /// Each id a range names must exist, so a range past every breakpoint
+    /// that exists fails at once, however wide.
+    #[test]
+    fn a_wide_range_of_ids_is_parsed_at_once() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(
+                parse_ids(&["1-4000000000"], false, 1, spec(Command::Delete))
+                    .map(|ids| ids.map_or(0, |ids| ids.len())),
+            );
+        });
+        let parsed = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("parsing a wide range finishes");
+        assert!(parsed.as_ref().is_ok_and(|&count| count <= 2), "{parsed:?}");
     }
 }

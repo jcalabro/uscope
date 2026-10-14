@@ -91,8 +91,8 @@ pub const UCONTEXT_MCONTEXT: u64 = 40;
 
 /// The DWARF numbers of the general registers in the order the kernel's
 /// `sigcontext` saves them, from r8 to rip.
-pub const SIGCONTEXT_REGISTERS: [u16; 17] =
-    [8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16];
+pub const SIGCONTEXT_REGISTERS: [DwarfRegister; 17] =
+    DwarfRegister::each([8, 9, 10, 11, 12, 13, 14, 15, 5, 4, 6, 3, 1, 0, 2, 7, 16]);
 
 /// The registers a signal interrupted, from the `ucontext` the kernel
 /// placed at `context`, the stack pointer of the trampoline its handler
@@ -100,16 +100,66 @@ pub const SIGCONTEXT_REGISTERS: [u16; 17] =
 pub fn interrupted_registers(context: u64, memory: &mut dyn MemoryReader) -> Option<RegisterFile> {
     let mut registers = RegisterFile::new([]);
     for (slot, register) in SIGCONTEXT_REGISTERS.iter().enumerate() {
-        let address = context + UCONTEXT_MCONTEXT + 8 * slot as u64;
+        let address = context.checked_add(UCONTEXT_MCONTEXT + 8 * slot as u64)?;
         registers.set(*register, memory.read_u64(VirtualAddress::new(address))?);
     }
     Some(registers)
 }
 
-/// DWARF register numbers on x86-64.
-pub const RBP: u16 = 6;
-pub const RSP: u16 = 7;
-pub const RETURN_ADDRESS: u16 = 16;
+/// A register by its x86-64 psABI DWARF number, which is not its place in
+/// any register table: DWARF register 1 is rdx, not rbx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DwarfRegister(u16);
+
+impl DwarfRegister {
+    #[must_use]
+    pub const fn new(number: u16) -> Self {
+        Self(number)
+    }
+
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        self.0
+    }
+
+    /// The registers `numbers` name, in order.
+    #[must_use]
+    pub const fn each<const N: usize>(numbers: [u16; N]) -> [Self; N] {
+        let mut registers = [Self(0); N];
+        let mut at = 0;
+        while at < N {
+            registers[at] = Self(numbers[at]);
+            at += 1;
+        }
+        registers
+    }
+}
+
+impl From<gimli::Register> for DwarfRegister {
+    fn from(register: gimli::Register) -> Self {
+        Self(register.0)
+    }
+}
+
+impl std::fmt::Display for DwarfRegister {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+pub const RAX: DwarfRegister = DwarfRegister(0);
+pub const RBX: DwarfRegister = DwarfRegister(3);
+pub const RSI: DwarfRegister = DwarfRegister(4);
+pub const RDI: DwarfRegister = DwarfRegister(5);
+pub const RBP: DwarfRegister = DwarfRegister(6);
+pub const RSP: DwarfRegister = DwarfRegister(7);
+pub const R12: DwarfRegister = DwarfRegister(12);
+/// The return address column, which in a frame's own registers holds its
+/// instruction pointer.
+pub const RETURN_ADDRESS: DwarfRegister = DwarfRegister(16);
+/// The bases of FS and GS.
+pub const FS_BASE: DwarfRegister = DwarfRegister(58);
+pub const GS_BASE: DwarfRegister = DwarfRegister(59);
 
 /// What the unwinder knows about one frame.
 #[derive(Debug, Clone)]
@@ -122,30 +172,30 @@ pub struct FrameContext {
 /// Register values by DWARF number. An absent register is unknown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterFile {
-    values: BTreeMap<u16, u64>,
+    values: BTreeMap<DwarfRegister, u64>,
 }
 
 impl RegisterFile {
-    pub fn new(values: impl IntoIterator<Item = (u16, u64)>) -> Self {
+    pub fn new(values: impl IntoIterator<Item = (DwarfRegister, u64)>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }
     }
 
-    pub fn get(&self, register: u16) -> Option<u64> {
+    pub fn get(&self, register: DwarfRegister) -> Option<u64> {
         self.values.get(&register).copied()
     }
 
-    pub fn set(&mut self, register: u16, value: u64) {
+    pub fn set(&mut self, register: DwarfRegister, value: u64) {
         self.values.insert(register, value);
     }
 
-    pub fn remove(&mut self, register: u16) {
+    pub fn remove(&mut self, register: DwarfRegister) {
         self.values.remove(&register);
     }
 
     /// Every known register and its value, by number.
-    pub fn iter(&self) -> impl Iterator<Item = (u16, u64)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (DwarfRegister, u64)> + '_ {
         self.values
             .iter()
             .map(|(&register, &value)| (register, value))

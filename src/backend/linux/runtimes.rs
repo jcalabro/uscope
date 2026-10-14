@@ -80,7 +80,7 @@ struct ProcessStop<'a, P> {
     /// A stopped thread, through which memory is read.
     reader: Pid,
     breakpoints: &'a std::collections::BTreeMap<VirtualAddress, BreakpointSite>,
-    bias: u64,
+    bias: crate::LoadBias,
     /// Where the reads made are counted, when they are.
     usage: Option<&'a Cell<InspectionUsage>>,
     /// The process's threads, in the order of their ids.
@@ -128,7 +128,7 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
             .map(|registers| VirtualAddress::new(registers.rip))
     }
 
-    fn load_bias(&self) -> u64 {
+    fn load_bias(&self) -> crate::LoadBias {
         self.bias
     }
 

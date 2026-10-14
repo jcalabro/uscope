@@ -643,7 +643,7 @@ fn async_frame(
                 .as_ref()
                 .map_or(CodeRole::Ordinary, |function| function.role);
             let resumes = resume_address(image, &functions, *state)
-                .map(|address| VirtualAddress::new(address.get().wrapping_add(module.load_bias)));
+                .map(|address| module.load_bias.wrapping_load(address));
             StackFrame::from_parts(
                 level,
                 FrameKind::Async {

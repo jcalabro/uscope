@@ -20,6 +20,7 @@ Read the pages that match the work:
 | Work | Read first |
 |---|---|
 | Repository setup or an unfamiliar subsystem | [`dev/index.md`](dev/index.md), [`dev/architecture.md`](dev/architecture.md) |
+| New data structures, ids, or numeric parameters | [`dev/style.md`](dev/style.md) |
 | Run control, breakpoints, signals, or lifecycle | [`dev/process-control.md`](dev/process-control.md), [`dev/testing.md`](dev/testing.md) |
 | ELF, DWARF, unwinding, images, or the cache | [`dev/debug-information.md`](dev/debug-information.md) |
 | Go goroutines, Rust coroutines, or tokio tasks | [`dev/runtime-models.md`](dev/runtime-models.md), [`dev/testing.md`](dev/testing.md) |

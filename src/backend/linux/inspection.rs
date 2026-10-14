@@ -604,7 +604,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
 
     fn register(
         &mut self,
-        register: u16,
+        register: crate::unwind::DwarfRegister,
     ) -> std::result::Result<VariableRegister, VariableRuntimeError> {
         let native = match self.registers {
             FrameRegisters::Thread(native) => native,
@@ -621,7 +621,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         if let Some(value) = x86_64_general_variable_register(native, register) {
             return Ok(value);
         }
-        if (17..=40).contains(&register) {
+        if (17..=40).contains(&register.number()) {
             let floating = self.floating.get_or_insert_with(|| {
                 self.ptrace
                     .floating_registers(self.pid)
@@ -637,7 +637,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                     )
                 })
                 .map(|floating| {
-                    if register <= 32 {
+                    if register.number() <= 32 {
                         x86_64_xmm_variable_register(floating, register)
                     } else {
                         x86_64_x87_variable_register(floating, register)

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI};
 use super::kernel::catching::UserCatch;
-use super::kernel::{Kernel, State, StopKind, Tid};
+use super::kernel::{Kernel, State, StopKind, Tgid, Tid};
 use super::marks::Mark;
 use super::oracles::ending;
 use crate::StopReason;
@@ -150,7 +150,7 @@ pub fn judge(
 /// What a stop shows behind its call's pointers is what memory holds.
 fn judge_memory(
     kernel: &Kernel,
-    process: Tid,
+    process: Tgid,
     tid: Tid,
     stop: &crate::SyscallStop,
 ) -> Result<(), String> {

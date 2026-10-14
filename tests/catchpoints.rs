@@ -291,7 +291,8 @@ async fn a_call_under_a_breakpoint_stops_at_its_catchpoint() {
             .find(|record| record.path.ends_with(fixture))
             .expect("the program is loaded")
             .module
-            .load_bias;
+            .load_bias
+            .get();
         let address = VirtualAddress::new(bias + symbol(fixture, "raw_syscall"));
         scenario
             .add_breakpoint_spec(BreakpointSpec::Address(address))

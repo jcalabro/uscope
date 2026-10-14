@@ -44,7 +44,7 @@ impl TypeTables {
             word(stop, VirtualAddress::new(address))
                 .ok_or_else(|| Arc::<str>::from("a module's type table is unreadable"))
         };
-        let mut module = self.first_module.get().wrapping_add(stop.load_bias());
+        let mut module = stop.load_bias().wrapping_load(self.first_module).get();
         for _ in 0..MAX_MODULES {
             if module == 0 {
                 break;

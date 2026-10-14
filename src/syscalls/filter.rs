@@ -517,6 +517,7 @@ pub fn fd_value(word: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syscalls::model::{Pid, Tid};
 
     fn signal(name: &str) -> Option<i32> {
         match name {
@@ -574,8 +575,8 @@ mod tests {
         let filter = parse(&["status=failed", "signal=!INT", "trace-fds=3"]).expect("parses");
         assert!(!filter.signals.contains(&2) && filter.signals.contains(&15));
         let mut event = SyscallEvent {
-            thread: 1,
-            process: 1,
+            thread: Tid::new(1),
+            process: Pid::new(1),
             call: named("read"),
             args: [3, 0, 10, 0, 0, 0],
             captured: Vec::new(),

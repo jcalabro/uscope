@@ -3,7 +3,7 @@ use std::sync::Arc;
 use uscope::syscalls::blobs;
 use uscope::syscalls::fds::{Description, FdTable, Kind as FdKind};
 use uscope::syscalls::{
-    Abi, Capture, CaptureState, EventFlags, Outcome, ReadAt, SyscallEvent, SyscallId,
+    Abi, Capture, CaptureState, EventFlags, Outcome, Pid, ReadAt, SyscallEvent, SyscallId, Tid,
 };
 
 use super::*;
@@ -12,8 +12,8 @@ fn event(name: &str, args: &[u64], result: i64, captured: &[(u8, &[u8])]) -> Sys
     let mut words = [0; 6];
     words[..args.len()].copy_from_slice(args);
     SyscallEvent {
-        thread: 42,
-        process: 42,
+        thread: Tid::new(42),
+        process: Pid::new(42),
         call: SyscallId::named(Abi::X86_64, name).expect(name),
         args: words,
         captured: captured
@@ -176,7 +176,7 @@ fn memory_process_and_network_calls_decode_their_constants() {
 fn styles_change_descriptors_constants_and_names() {
     let mut table = FdTable::default();
     table.set(
-        42,
+        Pid::new(42),
         3,
         Description {
             text: "/etc/hostname".into(),

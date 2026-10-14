@@ -11,6 +11,7 @@ use crate::analysis::{CallTree, KeyKind, Keys};
 use crate::capture::Capture;
 use crate::capture::builder::{CaptureBuilder, LineInput};
 use crate::capture::records::{FrameKind, NONE, Truncation};
+use crate::model::{Pid, Tid};
 
 /// The most bytes a gzipped profile may grow to.
 const MOST_BYTES: u64 = 256 << 20;
@@ -116,7 +117,7 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
     let functions = functions(&raw)?;
     let frames = locations(&raw, &mut builder, &modules, &functions)?;
     let (time, end) = (raw.time, raw.time.saturating_add(raw.duration.max(0)));
-    let thread = builder.thread(0, 0, time);
+    let thread = builder.thread(Pid::new(0), Tid::new(0), time);
     builder.thread_name(thread, "every thread");
     let mut tasks: BTreeMap<String, u32> = BTreeMap::new();
     let mut ids = Vec::new();
@@ -165,7 +166,7 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
         };
         builder.sample(thread, time, weight, stack, task);
     }
-    builder.thread_exit(0, end);
+    builder.thread_exit(Tid::new(0), end);
     builder.setting("sample times", "none");
     let comments: Result<Vec<&str>, String> = raw
         .comments

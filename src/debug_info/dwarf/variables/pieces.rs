@@ -80,7 +80,7 @@ fn whole(
         }
         Location::Address { address } => Ok(ValueStorage::Memory(VirtualAddress::new(*address))),
         Location::Register { register } => {
-            let register = runtime.register(register.0)?;
+            let register = runtime.register((*register).into())?;
             if register.bytes.len() < size {
                 return Err(EvaluateError::Malformed(
                     "register value is shorter than the scalar type".into(),
@@ -258,7 +258,7 @@ fn piece_location(
             address: VirtualAddress::new(*address),
             bit_offset,
         },
-        Location::Register { register } => match runtime.register(register.0) {
+        Location::Register { register } => match runtime.register((*register).into()) {
             Ok(register) => {
                 if !covers(&register.bytes) {
                     return Err(EvaluateError::Malformed(

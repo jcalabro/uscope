@@ -37,8 +37,45 @@ use debug_regs::DebugRegisters;
 use shadow::{Shadow, Tracking};
 use signals::{Pending, SIGTRAP};
 
-/// A thread or process identifier.
+/// A thread identifier.
 pub type Tid = i32;
+
+/// A thread group's identifier: its process's id, which is its leader's
+/// thread id but never stands in for a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tgid(Tid);
+
+impl Tgid {
+    /// The process the kernel's ABI numbers `id`.
+    #[must_use]
+    pub const fn new(id: Tid) -> Self {
+        Self(id)
+    }
+
+    /// The process's number in the kernel's ABI.
+    #[must_use]
+    pub const fn id(self) -> Tid {
+        self.0
+    }
+
+    /// The group `leader` leads.
+    #[must_use]
+    pub const fn led_by(leader: Tid) -> Self {
+        Self(leader)
+    }
+
+    /// The group's leader.
+    #[must_use]
+    pub const fn leader(self) -> Tid {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Tgid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 /// The identifier the first simulated process gets.
 const FIRST_TID: Tid = 1000;
@@ -269,7 +306,7 @@ pub enum Tracing {
 )]
 pub struct Thread {
     pub tid: Tid,
-    pub tgid: Tid,
+    pub tgid: Tgid,
     pub tracing: Tracing,
     pub registers: Registers,
     /// `orig_rax`: the system call the thread entered last, until it runs
@@ -368,7 +405,7 @@ impl Thread {
     fn created(
         creator: &Self,
         id: Tid,
-        group: Tid,
+        group: Tgid,
         call: u64,
         traced: bool,
         shadow: Shadow,
@@ -429,7 +466,7 @@ impl Thread {
 }
 
 pub struct Process {
-    pub tgid: Tid,
+    pub tgid: Tgid,
     /// The name `comm` reports: the executable's file name, cut to fifteen
     /// bytes.
     pub name: Arc<str>,
@@ -471,7 +508,7 @@ pub enum Parent {
     /// which reaps it at once.
     Launcher,
     /// The process that forked it, with `wait4`, after SIGCHLD.
-    Process(Tid),
+    Process(Tgid),
     /// The reaper orphans pass to, which reaps them at once (K-FORK-3).
     Init,
 }
@@ -501,7 +538,7 @@ pub struct Ended {
 /// A process that ended, waiting for its parent to reap it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zombie {
-    pub parent: Tid,
+    pub parent: Tgid,
     pub creator: Option<Tid>,
     pub status: ExitStatus,
     pub root: Tid,
@@ -539,7 +576,7 @@ pub enum Happening {
     /// A process reaped a child it forked.
     ReapedChild { parent: Tid, child: Tid },
     /// Init reaped a process whose parent was gone.
-    ReapedOrphan { tgid: Tid },
+    ReapedOrphan { tgid: Tgid },
     /// The tracer tried to seize a thread that had finished exiting.
     SeizeRefused { tid: Tid },
     /// An interrupt reached a thread already stopped, which it stops again
@@ -548,7 +585,7 @@ pub enum Happening {
     /// An untraced thread entered its process's job-control stop.
     JobStopped { tid: Tid },
     /// SIGCONT ended a process's job-control stop.
-    Continued { tgid: Tid },
+    Continued { tgid: Tgid },
     /// The tracer resumed a thread from a signal-delivery-stop without
     /// its signal.
     Suppressed { tid: Tid, signal: i32 },
@@ -575,12 +612,12 @@ pub struct Kernel {
     /// traces, and the signals it sends name it.
     caller: std::cell::Cell<i32>,
     next_tid: Tid,
-    pub processes: BTreeMap<Tid, Process>,
+    pub processes: BTreeMap<Tgid, Process>,
     pub threads: BTreeMap<Tid, Thread>,
     /// Processes reaped, with how they ended.
-    pub ended: BTreeMap<Tid, Ended>,
+    pub ended: BTreeMap<Tgid, Ended>,
     /// Processes that ended and wait for their parents to reap them.
-    pub zombies: BTreeMap<Tid, Zombie>,
+    pub zombies: BTreeMap<Tgid, Zombie>,
     /// What each process the tracer launched, and the processes it forked,
     /// wrote to standard output and error, in order, by launched process.
     pub outputs: BTreeMap<Tid, Vec<u8>>,
@@ -595,7 +632,7 @@ pub struct Kernel {
     pub happenings: Vec<Happening>,
     /// The process the debugger controls, whose memory the user's
     /// breakpoints and watches are in.
-    pub debugged: Option<Tid>,
+    pub debugged: Option<Tgid>,
     /// Addresses where the user's breakpoints are certainly enabled, as
     /// the client last knew them. The breakpoint-accounting oracle watches
     /// executions there.
@@ -785,9 +822,9 @@ impl Kernel {
         let comm = &comm[..comm.len().min(15)];
         let start_time = self.allocate_start_time();
         self.processes.insert(
-            tid,
+            Tgid::led_by(tid),
             Process {
-                tgid: tid,
+                tgid: Tgid::led_by(tid),
                 name: Arc::from(comm),
                 space,
                 image,
@@ -817,7 +854,7 @@ impl Kernel {
             tid,
             Thread {
                 tid,
-                tgid: tid,
+                tgid: Tgid::led_by(tid),
                 tracing: if traced {
                     Tracing::Attached {
                         tracer: self.tracer,
@@ -877,7 +914,7 @@ impl Kernel {
 
     /// Whether `thread` is a zombie leader whose group still has others.
     fn delayed(&self, thread: &Thread) -> bool {
-        thread.tid == thread.tgid
+        thread.tid == thread.tgid.leader()
             && matches!(thread.state, State::Zombie(_))
             && self
                 .threads
@@ -896,7 +933,7 @@ impl Kernel {
         let mut status = thread.report.take().expect("a report");
         if let State::Zombie(own) = thread.state {
             let group = thread.tgid;
-            let leader = tid == group;
+            let leader = tid == group.leader();
             self.threads.remove(&tid);
             let process = self.processes.get(&group).expect("a zombie's process");
             // K-EXIT-6: a group exit decides every status reaped after it.
@@ -1032,7 +1069,9 @@ impl Kernel {
             0
         };
         #[cfg(test)]
-        let watch_hits = if self.sabotage == Some(Sabotage::MissWatchTraps) && tid != thread.tgid {
+        let watch_hits = if self.sabotage == Some(Sabotage::MissWatchTraps)
+            && tid != thread.tgid.leader()
+        {
             0
         } else if self.sabotage == Some(Sabotage::RepeatWatchTraps) && outcome == Outcome::Completed
         {
@@ -1299,7 +1338,7 @@ impl Kernel {
     /// the thread the client steps has come to hidden as a no-op, under
     /// [`Sabotage::HideSteppedCalls`].
     #[cfg(test)]
-    fn hide_stepped_call(&self, tgid: Tid, address: u64, word: u64) -> u64 {
+    fn hide_stepped_call(&self, tgid: Tgid, address: u64, word: u64) -> u64 {
         // Once the thread has moved: a call it stands at as the step begins
         // may be the one the step is to go into.
         let Some(thread) = self
@@ -1328,7 +1367,7 @@ impl Kernel {
 
     /// A word ptrace reads, as a sabotaged kernel reports it.
     #[cfg(test)]
-    pub(super) fn sabotage_read(&self, tgid: Tid, address: u64, word: u64) -> u64 {
+    pub(super) fn sabotage_read(&self, tgid: Tgid, address: u64, word: u64) -> u64 {
         let return_slot = |exact: bool| {
             self.threads_of(tgid).any(|thread| {
                 thread
@@ -1434,7 +1473,7 @@ impl Kernel {
     /// its address, the byte, and the program's. A page still shared with
     /// the image was never written.
     #[must_use]
-    pub fn planted(&self, group: Tid) -> Option<Planted> {
+    pub fn planted(&self, group: Tgid) -> Option<Planted> {
         let process = self.processes.get(&group)?;
         process.image.code().find_map(|(page_address, original)| {
             if process
@@ -1473,7 +1512,7 @@ impl Kernel {
 
     /// The threads of `group` not yet reaped, as `/proc/<tgid>/task` lists
     /// them.
-    pub fn threads_of(&self, group: Tid) -> impl Iterator<Item = &Thread> + '_ {
+    pub fn threads_of(&self, group: Tgid) -> impl Iterator<Item = &Thread> + '_ {
         self.threads
             .values()
             .filter(move |thread| thread.tgid == group)

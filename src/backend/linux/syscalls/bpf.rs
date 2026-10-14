@@ -37,9 +37,10 @@ use crate::syscalls::captures::{self, CopyKind};
 use crate::syscalls::specs::{self, Arg, Count, MemKind, Ret, Struct};
 use crate::syscalls::stats::{self, BUCKETS, Folded};
 use crate::syscalls::{
-    Abi, CallStack, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, ProcessEnd,
-    ReadAt, SyscallEvent, SyscallId, SyscallStats, TraceEvent,
+    Abi, CallStack, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, Pid, ProcessEnd,
+    ReadAt, SyscallEvent, SyscallId, SyscallStats, Tid, TraceEvent,
 };
+use crate::unwind::DwarfRegister;
 use crate::unwind::sample::SampledState;
 
 /// The programs, as `build.rs` compiled them.
@@ -466,10 +467,10 @@ pub enum Record {
 /// A thread's stack as the kernel saw it, to unwind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampledStack {
-    pub thread: u32,
-    pub process: u32,
+    pub thread: Tid,
+    pub process: Pid,
     /// The user registers by DWARF number.
-    pub registers: [(u16, u64); 17],
+    pub registers: [(DwarfRegister, u64); 17],
     /// The kernel's walk of the frame pointers, the instruction first.
     pub chain: Vec<u64>,
     /// The stack's bytes from its pointer up, if copied.
@@ -524,9 +525,9 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
         RECORD_SPAWN => {
             let raw: RawSpawnRecord = read(bytes)?;
             Ok(Record::Event(TraceEvent::Spawn {
-                parent_thread: header.tid,
-                parent: header.tgid,
-                child: raw.child,
+                parent_thread: Tid::new(header.tid),
+                parent: Pid::new(header.tgid),
+                child: Tid::new(raw.child),
                 thread: raw.child_tgid == header.tgid,
                 time: raw.time,
             }))
@@ -538,8 +539,8 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
                 .get(start..start + raw.len as usize)
                 .ok_or(DecodeError::Short(bytes.len()))?;
             Ok(Record::Event(TraceEvent::Exec {
-                thread: header.tid,
-                process: header.tgid,
+                thread: Tid::new(header.tid),
+                process: Pid::new(header.tgid),
                 time: raw.time,
                 path: String::from_utf8_lossy(path).into(),
             }))
@@ -548,14 +549,14 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
             let raw: RawExitRecord = read(bytes)?;
             Ok(Record::Event(if raw.last == 0 {
                 TraceEvent::ThreadExit {
-                    thread: header.tid,
-                    process: header.tgid,
+                    thread: Tid::new(header.tid),
+                    process: Pid::new(header.tgid),
                     time: raw.time,
                     end: process_end(raw.code),
                 }
             } else {
                 TraceEvent::Exit {
-                    process: header.tgid,
+                    process: Pid::new(header.tgid),
                     time: raw.time,
                     end: process_end(raw.code),
                 }
@@ -568,14 +569,14 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
             let code = word(8);
             // Processes send with SI_USER, SI_QUEUE, SI_TKILL, and the like.
             let sender = (code <= 0 && code != -2)
-                .then(|| u32::try_from(word(16)).ok())
+                .then(|| u32::try_from(word(16)).ok().map(Pid::new))
                 .flatten();
             // The rest of a siginfo holds no field of any kind of signal.
             let mut info = [0_u8; 128];
             info[..raw.info.len()].copy_from_slice(&raw.info);
             Ok(Record::Event(TraceEvent::Signal {
-                thread: header.tid,
-                process: header.tgid,
+                thread: Tid::new(header.tid),
+                process: Pid::new(header.tgid),
                 time: raw.time,
                 signal: raw.signal,
                 code: Some(code),
@@ -591,7 +592,7 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
             let name = bytes
                 .get(start..start + raw.len as usize)
                 .ok_or(DecodeError::Short(bytes.len()))?;
-            Ok(Record::Event(descriptor(header.tgid, &raw, name)))
+            Ok(Record::Event(descriptor(Pid::new(header.tgid), &raw, name)))
         }
         kind => Err(DecodeError::Kind(kind)),
     }
@@ -609,10 +610,11 @@ fn stack_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> 
         .get(chain_end..chain_end + raw.copied as usize)
         .ok_or(DecodeError::Short(bytes.len()))?;
     #[expect(clippy::cast_possible_truncation, reason = "seventeen registers")]
-    let registers = std::array::from_fn(|index| (index as u16, raw.regs[index]));
+    let registers =
+        std::array::from_fn(|index| (DwarfRegister::new(index as u16), raw.regs[index]));
     Ok(Record::Stack(SampledStack {
-        thread: header.tid,
-        process: header.tgid,
+        thread: Tid::new(header.tid),
+        process: Pid::new(header.tgid),
         registers,
         chain: chain
             .as_chunks::<8>()
@@ -674,8 +676,8 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
         }));
     }
     let event = SyscallEvent {
-        thread: header.tid,
-        process: header.tgid,
+        thread: Tid::new(header.tid),
+        process: Pid::new(header.tgid),
         call,
         args: raw.args,
         captured,
@@ -701,7 +703,7 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
 /// What a descriptor a call made refers to, as `/proc/PID/fd/N` would
 /// name it. The kernel gives no path, so a file's text is left empty and
 /// the descriptor table keeps the path the call named.
-fn descriptor(process: u32, raw: &RawFileRecord, name: &[u8]) -> TraceEvent {
+fn descriptor(process: Pid, raw: &RawFileRecord, name: &[u8]) -> TraceEvent {
     let name = String::from_utf8_lossy(name);
     let text = match raw.magic {
         PIPEFS_MAGIC => format!("pipe:[{}]", raw.ino),
@@ -730,7 +732,7 @@ fn descriptor(process: u32, raw: &RawFileRecord, name: &[u8]) -> TraceEvent {
 /// kernel counts over every traced process and `Folded` names by `process`.
 #[must_use]
 pub fn fold(
-    process: u32,
+    process: Pid,
     stats: impl IntoIterator<Item = (SyscallId, Vec<RawStatValue>)>,
     errnos: impl IntoIterator<Item = (RawErrnoKey, u64)>,
 ) -> Folded {
@@ -1302,8 +1304,8 @@ impl Loaded {
                 let record = RawInFlightRecord::read_from_bytes(bytes).ok()?;
                 let entry = record.entry;
                 (now.saturating_sub(entry.entered) >= after).then_some(InFlight {
-                    thread: record.tid,
-                    process: entry.tgid,
+                    thread: Tid::new(record.tid),
+                    process: Pid::new(entry.tgid),
                     call: SyscallId::new(abi_of(entry.abi)?, entry.nr),
                     args: entry.args,
                     entered: entry.entered,
@@ -1392,14 +1394,14 @@ impl Loaded {
     }
 
     /// The statistics counted so far into the half being counted into.
-    fn counted(&self, process: u32) -> Folded {
+    fn counted(&self, process: Pid) -> Folded {
         self.half(self.generation, process)
     }
 
     /// The statistics counted since the last call, or since tracing began:
     /// the kernel switches halves, every program that might still count
     /// into the old one finishes, and the old one is read and cleared.
-    fn take_counted(&mut self, process: u32) -> Result<Folded, BpfError> {
+    fn take_counted(&mut self, process: Pid) -> Result<Folded, BpfError> {
         let old = self.generation;
         self.configure(|config| config.flags ^= CONFIG_GENERATION)?;
         self.generation ^= 1;
@@ -1435,7 +1437,7 @@ impl Loaded {
     }
 
     /// The statistics in half `half` of the maps.
-    fn half(&self, half: u32, process: u32) -> Folded {
+    fn half(&self, half: u32, process: Pid) -> Folded {
         let rows = u32::try_from(self.rows.len().max(1)).unwrap_or(u32::MAX);
         let stats = self
             .ebpf
@@ -1708,8 +1710,8 @@ fn run(
 
 /// The traced processes as tracing begins.
 struct Begun {
-    first: u32,
-    live: BTreeSet<u32>,
+    first: Pid,
+    live: BTreeSet<Pid>,
     mappings: Vec<perf::Events>,
     gate: Option<Gate>,
     cgroup: Option<Cgroup>,
@@ -1733,9 +1735,9 @@ fn begin(
                 mappings.push(perf::Events::open(pid, &MAPPINGS).map_err(BpfError::Mappings)?);
             }
             seed_descriptors(pid, sink);
-            live.insert(pid);
+            live.insert(Pid::new(pid));
             sink.attached(pid);
-            pid
+            Pid::new(pid)
         }
         Start::Launch(command) => {
             let mut launched = launch::launch(
@@ -1754,10 +1756,10 @@ fn begin(
             }
             // Held at its gate, it has the descriptors it will execute with.
             seed_descriptors(pid, sink);
-            live.insert(pid);
+            live.insert(Pid::new(pid));
             launched.open().map_err(BpfError::Spawn)?;
             gate = Some(launched);
-            pid
+            Pid::new(pid)
         }
         Start::Attach(pids) => {
             for &pid in &pids {
@@ -1774,12 +1776,12 @@ fn begin(
                     stacks
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .read_maps(pid);
+                        .read_maps(Pid::new(pid));
                 }
-                live.insert(pid);
+                live.insert(Pid::new(pid));
                 sink.attached(pid);
             }
-            pids.first().copied().unwrap_or(0)
+            Pid::new(pids.first().copied().unwrap_or(0))
         }
         Start::Cgroup(traced, namespace) => {
             // Its processes as they are now, with their ids as shown.
@@ -1792,7 +1794,7 @@ fn begin(
                 }
             }
             cgroup = Some(traced);
-            0
+            Pid::new(0)
         }
     };
     Ok(Begun {
@@ -1825,15 +1827,15 @@ struct Reader<'a> {
     /// When the budget's window began, and the CPU time spent by then.
     window: (u64, u64),
     /// The traced processes still running.
-    live: BTreeSet<u32>,
-    first: u32,
+    live: BTreeSet<Pid>,
+    first: Pid,
     end: Option<ProcessEnd>,
     /// Arguments read at a call's entry, by thread, until its exit.
-    entries: BTreeMap<u32, SyscallEvent>,
+    entries: BTreeMap<Tid, SyscallEvent>,
     /// Unwinds each stack, when stacks were asked for.
     stacks: Option<super::stacks::SharedStacks>,
     /// Each thread's stack, until the call or signal it precedes.
-    sampled: BTreeMap<u32, SampledStack>,
+    sampled: BTreeMap<Tid, SampledStack>,
     /// What the traced processes map, as they map it, for their stacks.
     mappings: Vec<perf::Events>,
     batch: Vec<Record>,
@@ -1878,17 +1880,17 @@ impl Reader<'_> {
             // Processes that ended without a record, as when the ring was
             // full, are seen in /proc; whatever they sent is in the ring
             // before they are.
-            let gone: Vec<u32> = self
+            let gone: Vec<Pid> = self
                 .live
                 .iter()
                 .copied()
-                .filter(|&pid| ended(pid))
+                .filter(|&pid| ended(pid.get()))
                 .collect();
             self.drain(&mut ring);
             for pid in gone {
                 self.live.remove(&pid);
             }
-            if stopping && launched.is_some_and(|pid| !self.live.contains(&pid)) {
+            if stopping && launched.is_some_and(|pid| !self.live.contains(&Pid::new(pid))) {
                 self.live.clear();
             }
             let ended = match &self.cgroup {
@@ -2053,7 +2055,7 @@ impl Reader<'_> {
     }
 
     /// Unwinds the stack the kernel sent before a thread's call or signal.
-    fn unwind(&mut self, thread: u32) -> Option<CallStack> {
+    fn unwind(&mut self, thread: Tid) -> Option<CallStack> {
         let sampled = self.sampled.remove(&thread)?;
         let stacks = self.stacks.as_ref()?;
         let mut stacks = stacks
@@ -2102,15 +2104,15 @@ impl Reader<'_> {
                 }
                 match &event {
                     TraceEvent::Spawn { child, thread, .. } if !*thread && self.follow => {
-                        self.live.insert(*child);
+                        self.live.insert(Pid::led_by(*child));
                     }
                     TraceEvent::Exec {
                         thread, process, ..
-                    } if thread != process => {
+                    } if *thread != process.leader() => {
                         // A thread that executes takes its process's id.
                         if let Some(mut entry) = self.entries.remove(thread) {
-                            entry.thread = *process;
-                            self.entries.insert(*process, entry);
+                            entry.thread = process.leader();
+                            self.entries.insert(process.leader(), entry);
                         }
                     }
                     TraceEvent::Exit { process, end, .. } => {
@@ -2367,8 +2369,8 @@ mod tests {
         assert_eq!(
             (call.thread, call.process, call.call.name(), call.outcome),
             (
-                11,
-                10,
+                Tid::new(11),
+                Pid::new(10),
                 Some("openat"),
                 Outcome::Failed(crate::syscalls::Errno(2))
             )
@@ -2453,7 +2455,7 @@ mod tests {
         let mut two = one;
         two.min_ns = 20;
         let folded = fold(
-            7,
+            Pid::new(7),
             [(openat, vec![one, two])],
             [(
                 RawErrnoKey {
@@ -2464,7 +2466,7 @@ mod tests {
                 2,
             )],
         );
-        let stats = &folded.by_call[&(7, openat)];
+        let stats = &folded.by_call[&(Pid::new(7), openat)];
         assert_eq!(
             (stats.calls, stats.min_ns, stats.max_ns, stats.log2_ns[7]),
             (6, 20, 200, 6)

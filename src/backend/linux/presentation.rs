@@ -1642,7 +1642,8 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let primary = module
             .loaded
             .load_bias
-            .wrapping_add(group.get())
+            .wrapping_load(group)
+            .get()
             .wrapping_add(16);
         if self.word(whole)? != primary {
             return Ok(None);

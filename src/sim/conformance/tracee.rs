@@ -21,7 +21,7 @@ use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{RAX, Registers};
 use crate::sim::kernel::perf::perf_registers;
 use crate::sim::kernel::ptrace::CallInfo;
-use crate::sim::kernel::{Kernel, Options, Tid, WaitStatus};
+use crate::sim::kernel::{Kernel, Options, Tgid, Tid, WaitStatus};
 
 /// The simulated debugger's process identifier.
 const TRACER: i32 = 100;
@@ -245,7 +245,7 @@ impl SimTracee {
         self.kernel.forget_tracer(TRACER);
         let mut steps = 0;
         loop {
-            if let Some(ended) = self.kernel.ended.get(&self.pid) {
+            if let Some(ended) = self.kernel.ended.get(&Tgid::led_by(self.pid)) {
                 return match ended.status {
                     crate::sim::kernel::ExitStatus::Code(code) => format!("exited {code}"),
                     crate::sim::kernel::ExitStatus::Signal(signal, _) => {
@@ -342,16 +342,18 @@ impl Tracee for SimTracee {
         self.kernel.call_info(thread)
     }
     fn kill(&mut self) -> Result<(), Errno> {
-        self.kernel.kill(self.pid, libc::SIGKILL)
+        self.kernel.kill(Tgid::led_by(self.pid), libc::SIGKILL)
     }
     fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno> {
-        self.kernel.kill(process, signal)
+        self.kernel.kill(Tgid::new(process), signal)
     }
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno> {
-        self.kernel.tgkill(self.pid, thread, libc::SIGSTOP)
+        self.kernel
+            .tgkill(Tgid::led_by(self.pid), thread, libc::SIGSTOP)
     }
     fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno> {
-        self.kernel.tgkill(process, thread, libc::SIGSTOP)
+        self.kernel
+            .tgkill(Tgid::new(process), thread, libc::SIGSTOP)
     }
     fn job_stopped(&self, thread: Tid) -> bool {
         self.kernel
@@ -373,7 +375,7 @@ impl Tracee for SimTracee {
             .to_string()
     }
     fn thread_group(&self, thread: Tid) -> Option<Tid> {
-        self.kernel.thread_group(thread)
+        self.kernel.thread_group(thread).map(Tgid::id)
     }
     fn maps(&self, thread: Tid) -> Option<String> {
         self.kernel.maps(thread)
@@ -389,7 +391,7 @@ impl Tracee for SimTracee {
     }
     fn sample_at(&mut self, address: u64, stack_bytes: u32) {
         self.kernel.perf = Some(crate::sim::kernel::perf::Breakpoint {
-            tgid: self.pid,
+            tgid: Tgid::led_by(self.pid),
             address,
             stack_bytes,
             records: Vec::new(),
@@ -892,7 +894,7 @@ impl Record<'_> {
             let (record, length) = next.expect("the kernel writes whole records");
             if let decode::Record::Sample(sample) = record {
                 samples.push(Decoded {
-                    tid: Tid::try_from(sample.tid).expect("a thread id"),
+                    tid: Tid::try_from(sample.tid.get()).expect("a thread id"),
                     chain: sample.chain.iter().collect(),
                     registers: sample.registers.iter().collect(),
                     size: sample.stack_asked,

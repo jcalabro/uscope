@@ -12,6 +12,7 @@ use super::records::{
     ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, Zone, ZoneRange,
 };
 use crate::image::{StrId, StringsBuilder};
+use crate::model::{Pid, Tid};
 
 /// One source line of a frame, as a symbolizer reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,13 +35,13 @@ pub struct CaptureBuilder {
     modules: Vec<Module>,
     module_index: HashMap<(u32, u32, [u8; 16]), u32>,
     processes: Vec<Process>,
-    live_processes: HashMap<u32, u32>,
+    live_processes: HashMap<Pid, u32>,
     /// Each pid's and tid's ended rows, which an event from before its end
     /// still belongs to: an id names one process or thread at a time.
-    ended_processes: HashMap<u32, Vec<u32>>,
+    ended_processes: HashMap<Pid, Vec<u32>>,
     threads: Vec<Thread>,
-    live_threads: BTreeMap<u32, u32>,
-    ended_threads: HashMap<u32, Vec<u32>>,
+    live_threads: BTreeMap<Tid, u32>,
+    ended_threads: HashMap<Tid, Vec<u32>>,
     mappings: Vec<Mapping>,
     frames: Vec<Frame>,
     frame_index: HashMap<(u64, u32, u8), u32>,
@@ -153,7 +154,7 @@ impl CaptureBuilder {
     }
 
     /// The live process `pid`, which begins at `time` if not yet seen.
-    pub fn process(&mut self, pid: u32, time: i64) -> u32 {
+    pub fn process(&mut self, pid: Pid, time: i64) -> u32 {
         if let Some(&process) = self.live_processes.get(&pid) {
             return process;
         }
@@ -166,7 +167,7 @@ impl CaptureBuilder {
         }
         let process = index(self.processes.len());
         self.processes.push(Process {
-            pid: pid.into(),
+            pid: pid.get().into(),
             name: NONE.into(),
             start: time.into(),
             end: time.into(),
@@ -182,11 +183,11 @@ impl CaptureBuilder {
     }
 
     /// Ends process `pid` and its threads at `time`.
-    pub fn process_exit(&mut self, pid: u32, time: i64) {
+    pub fn process_exit(&mut self, pid: Pid, time: i64) {
         if let Some(process) = self.live_processes.remove(&pid) {
             self.processes[process as usize].end = time.into();
             self.ended_processes.entry(pid).or_default().push(process);
-            let ended: Vec<u32> = self
+            let ended: Vec<Tid> = self
                 .live_threads
                 .iter()
                 .filter(|(_, thread)| self.threads[**thread as usize].process.get() == process)
@@ -200,13 +201,13 @@ impl CaptureBuilder {
 
     /// The live thread `tid` of `pid`, which begins at `time` if not yet
     /// seen.
-    pub fn thread(&mut self, pid: u32, tid: u32, time: i64) -> u32 {
+    pub fn thread(&mut self, pid: Pid, tid: Tid, time: i64) -> u32 {
         if let Some(&thread) = self.live_threads.get(&tid) {
             let thread_record = &mut self.threads[thread as usize];
             if self.processes[thread_record.process.get() as usize]
                 .pid
                 .get()
-                == pid
+                == pid.get()
             {
                 if thread_record.end.get() < time {
                     thread_record.end = time.into();
@@ -220,7 +221,7 @@ impl CaptureBuilder {
             let thread = &self.threads[row as usize];
             thread.start.get() <= time
                 && time <= thread.end.get()
-                && self.processes[thread.process.get() as usize].pid.get() == pid
+                && self.processes[thread.process.get() as usize].pid.get() == pid.get()
         }) {
             return thread;
         }
@@ -231,7 +232,7 @@ impl CaptureBuilder {
         let thread = index(self.threads.len());
         self.threads.push(Thread {
             process: process.into(),
-            tid: tid.into(),
+            tid: tid.get().into(),
             name: NONE.into(),
             reserved: 0.into(),
             start: time.into(),
@@ -250,7 +251,7 @@ impl CaptureBuilder {
     }
 
     /// Ends thread `tid` at `time`.
-    pub fn thread_exit(&mut self, tid: u32, time: i64) {
+    pub fn thread_exit(&mut self, tid: Tid, time: i64) {
         if let Some(thread) = self.live_threads.remove(&tid) {
             self.ended_threads.entry(tid).or_default().push(thread);
             let thread = &mut self.threads[thread as usize];

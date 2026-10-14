@@ -11,8 +11,8 @@ use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
 use crate::runtime_model::{Crossing, futures};
 use crate::unwind::{
-    CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
-    collect_frames,
+    CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RETURN_ADDRESS,
+    RSP, RegisterFile, collect_frames,
 };
 pub(super) use crate::unwind::{UnwindModule, unwind_module_for};
 use crate::{
@@ -353,7 +353,7 @@ impl<P: InspectionOps> Controller<P> {
             RootOrigin::Suspended { .. } => return Err(Error::FrameSuspended),
         };
         let instruction = registers
-            .get(X86_64_RIP)
+            .get(RETURN_ADDRESS)
             .ok_or(Error::LocationUnavailable)?;
         let initial = FrameContext {
             instruction: VirtualAddress::new(instruction),
@@ -580,7 +580,7 @@ impl<P: InspectionOps> Controller<P> {
         if frame.segment != StackSegment::Task {
             return None;
         }
-        let stack_pointer = frame.registers.get(X86_64_RSP)?;
+        let stack_pointer = frame.registers.get(RSP)?;
         let low = match (root.thread(), root.context) {
             (Some(pid), _) => self.task_stack(inferior, pid)?.low,
             (None, ExecutionContext::Task(task)) => {
@@ -1308,10 +1308,6 @@ impl PhysicalStack {
     }
 }
 
-/// x86-64's DWARF numbers for the stack and instruction pointers.
-pub(super) const X86_64_RSP: u16 = 7;
-const X86_64_RIP: u16 = 16;
-
 /// Where a stack's frames begin, and the context a request named it by.
 #[derive(Debug, Clone)]
 pub(super) struct StackRoot {
@@ -1472,7 +1468,7 @@ impl RoleCallerProvider<'_, '_> {
     fn bounded_segment(&self) -> StackSegment {
         self.dwarf
             .registers
-            .get(X86_64_RSP)
+            .get(RSP)
             .and_then(|pointer| {
                 self.stacks
                     .iter()
@@ -1491,7 +1487,7 @@ impl RoleCallerProvider<'_, '_> {
     /// saved in the signal frame above a handler that returned to a signal
     /// trampoline: the trampoline's stack holds the `ucontext`.
     fn interrupted(&mut self) -> CallerResult {
-        let Some(context) = self.dwarf.registers.get(X86_64_RSP) else {
+        let Some(context) = self.dwarf.registers.get(RSP) else {
             return CallerResult::Finished(UnwindTermination::RegisterUnavailable {
                 register: "rsp".into(),
             });
@@ -1506,7 +1502,7 @@ impl RoleCallerProvider<'_, '_> {
             };
             registers.set(*register, value);
         }
-        let instruction = registers.get(X86_64_RIP).unwrap_or(0);
+        let instruction = registers.get(RETURN_ADDRESS).unwrap_or(0);
         self.dwarf.first = false;
         self.dwarf.registers = registers;
         self.carried = None;
@@ -1582,7 +1578,7 @@ impl RoleCallerProvider<'_, '_> {
                         self.dwarf.caller(current)
                     }
                     Some(Ok(Crossing::Continue(registers))) => {
-                        let Some(instruction) = registers.get(X86_64_RIP) else {
+                        let Some(instruction) = registers.get(RETURN_ADDRESS) else {
                             return unresolved("the task saved no instruction".into());
                         };
                         self.dwarf.first = false;
@@ -1678,7 +1674,7 @@ impl CallerProvider for DwarfCallerProvider<'_> {
                 return CallerResult::Finished(termination);
             }
         };
-        let Some(instruction) = step.registers.get(16) else {
+        let Some(instruction) = step.registers.get(RETURN_ADDRESS) else {
             return CallerResult::Finished(UnwindTermination::Complete);
         };
         if instruction == 0 {

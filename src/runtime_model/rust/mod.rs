@@ -29,7 +29,7 @@ use super::{
     RuntimeStop, StartedTask, StoredValue, TaskContext, TaskPage, TaskRef, TaskStarter,
     ThreadActivity,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{
     ExceptionFilter, ImageAddress, LanguageExceptionKind, StackSegment, ThreadId, VirtualAddress,
 };
@@ -47,10 +47,6 @@ const PANIC: ExceptionFilter = ExceptionFilter {
     default: true,
 };
 
-/// x86-64's DWARF numbers for the first two integer argument registers,
-/// which pass the payload's data and vtable.
-const RDI: u16 = 5;
-const RSI: u16 = 4;
 /// Where a trait object's vtable keeps its size, and its first method:
 /// `Display::fmt` for a payload, `type_id` for an `Any`.
 const VTABLE_SIZE: u64 = 8;
@@ -105,9 +101,10 @@ impl Payload<'_> {
     /// The demangled name of the method a vtable holds at `slot`.
     fn method(&self, vtable: u64, slot: u64) -> Result<Arc<str>, Arc<str>> {
         let method = self.word(vtable + slot)?;
-        let address = method
-            .checked_sub(self.stop.load_bias())
-            .map(ImageAddress::new)
+        let address = self
+            .stop
+            .load_bias()
+            .unload(VirtualAddress::new(method))
             .ok_or("the panic's vtable points outside the program")?;
         self.image
             .symbol_at(address)

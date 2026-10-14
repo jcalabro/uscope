@@ -37,6 +37,12 @@ pub struct PlotValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramMarker {
     pub kind: MarkerKind,
+    /// The row of the thread that marked it, by which a [`Query`] selects
+    /// the thread, if the record names one.
+    ///
+    /// [`Query`]: super::Query
+    pub thread: Option<u32>,
+    pub pid: u32,
     pub tid: u32,
     pub time: i64,
     /// Its site's name.
@@ -138,13 +144,20 @@ impl Profile {
                     kind,
                     MarkerKind::Frame | MarkerKind::Message | MarkerKind::Trigger
                 )
-                .then(|| ProgramMarker {
-                    kind,
-                    tid: self.tid(marker.thread.get()),
-                    time: marker.time.get(),
-                    name: self.site_name(marker.site.get()),
-                    text: (marker.text.get() != NONE)
-                        .then(|| capture.string(marker.text.get()).to_owned()),
+                .then(|| {
+                    let thread = capture.threads.get(marker.thread.get() as usize);
+                    ProgramMarker {
+                        kind,
+                        thread: thread.map(|_| marker.thread.get()),
+                        pid: thread.map_or(0, |thread| {
+                            capture.processes[thread.process.get() as usize].pid.get()
+                        }),
+                        tid: thread.map_or(0, |thread| thread.tid.get()),
+                        time: marker.time.get(),
+                        name: self.site_name(marker.site.get()),
+                        text: (marker.text.get() != NONE)
+                            .then(|| capture.string(marker.text.get()).to_owned()),
+                    }
                 })
             })
             .collect()

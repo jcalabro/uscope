@@ -37,8 +37,8 @@ use crate::syscalls::captures::{self, Limits, Memory};
 use crate::syscalls::specs::{self, Ret};
 use crate::syscalls::table::X32_SYSCALL_BIT;
 use crate::syscalls::{
-    Abi, CallSet, Capture, Device, EventFlags, InFlight, Outcome, ProcessEnd, ReadAt, SyscallEvent,
-    SyscallId, TraceEvent,
+    self as syscalls, Abi, CallSet, Capture, Device, EventFlags, InFlight, Outcome, ProcessEnd,
+    ReadAt, SyscallEvent, SyscallId, TraceEvent,
 };
 
 /// What to trace and how much to copy.
@@ -141,7 +141,7 @@ fn descriptor(process: u32, fd: i64, time: u64, made: bool) -> Option<TraceEvent
     if fd == AT_FDCWD {
         let link = std::fs::read_link(format!("/proc/{process}/cwd")).ok()?;
         return Some(TraceEvent::Descriptor {
-            process,
+            process: syscalls::Pid::new(process),
             fd,
             time,
             text: link.to_string_lossy().into(),
@@ -171,7 +171,7 @@ fn descriptor(process: u32, fd: i64, time: u64, made: bool) -> Option<TraceEvent
         })
     });
     Some(TraceEvent::Descriptor {
-        process,
+        process: syscalls::Pid::new(process),
         fd,
         time,
         text: link.to_string_lossy().into(),
@@ -293,8 +293,8 @@ impl Tracer<'_> {
             .filter_map(|(&tid, thread)| {
                 let entry = thread.pending.as_ref().filter(|entry| entry.chosen)?;
                 (now.saturating_sub(entry.entered) >= after).then_some(InFlight {
-                    thread: tid,
-                    process: thread.process,
+                    thread: syscalls::Tid::new(tid),
+                    process: syscalls::Pid::new(thread.process),
                     call: entry.call,
                     args: entry.args,
                     entered: entry.entered,
@@ -360,8 +360,8 @@ impl Tracer<'_> {
             outcome
         };
         self.emit(TraceEvent::Call(SyscallEvent {
-            thread: tid,
-            process: thread.process,
+            thread: syscalls::Tid::new(tid),
+            process: syscalls::Pid::new(thread.process),
             call: entry.call,
             args: entry.args,
             captured: entry.captured,
@@ -493,8 +493,8 @@ impl Tracer<'_> {
             }
             let stack = self.stack(process, tid);
             self.emit(TraceEvent::Call(SyscallEvent {
-                thread: tid,
-                process,
+                thread: syscalls::Tid::new(tid),
+                process: syscalls::Pid::new(process),
                 call,
                 args,
                 captured,
@@ -530,11 +530,12 @@ impl Tracer<'_> {
             (14, registers.r14),
             (15, registers.r15),
             (16, registers.rip),
-        ];
+        ]
+        .map(|(number, value)| (crate::unwind::DwarfRegister::new(number), value));
         let mut stacks = stacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(stacks.unwind_live(process, tid, &registers))
+        Some(stacks.unwind_live(syscalls::Pid::new(process), tid, &registers))
     }
 
     fn syscall_stop(&mut self, tid: u32, seccomp: bool) -> Result<(), Errno> {
@@ -591,9 +592,9 @@ impl Tracer<'_> {
                             self.reported.insert(process);
                         }
                         self.emit(TraceEvent::Spawn {
-                            parent_thread: tid,
-                            parent,
-                            child,
+                            parent_thread: syscalls::Tid::new(tid),
+                            parent: syscalls::Pid::new(parent),
+                            child: syscalls::Tid::new(child),
                             thread,
                             time: monotonic(),
                         });
@@ -624,14 +625,14 @@ impl Tracer<'_> {
                     stacks
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .forget(process);
+                        .forget(syscalls::Pid::new(process));
                 }
                 if self.reports(process) {
                     let path = std::fs::read_link(format!("/proc/{tid}/exe"))
                         .map_or_else(|_| "?".into(), |path| path.to_string_lossy().into());
                     self.emit(TraceEvent::Exec {
-                        thread: tid,
-                        process,
+                        thread: syscalls::Tid::new(tid),
+                        process: syscalls::Pid::new(process),
                         time: monotonic(),
                         path,
                     });
@@ -687,10 +688,11 @@ impl Tracer<'_> {
             let sender = code
                 .filter(|&code| code <= 0 && code != -2)
                 .and_then(|_| word(16))
-                .and_then(|pid| u32::try_from(pid).ok());
+                .and_then(|pid| u32::try_from(pid).ok())
+                .map(syscalls::Pid::new);
             self.emit(TraceEvent::Signal {
-                thread: tid,
-                process,
+                thread: syscalls::Tid::new(tid),
+                process: syscalls::Pid::new(process),
                 time: monotonic(),
                 signal: signal.number(),
                 code,
@@ -722,8 +724,8 @@ impl Tracer<'_> {
         if tid != process {
             if self.reports(process) {
                 self.emit(TraceEvent::ThreadExit {
-                    thread: tid,
-                    process,
+                    thread: syscalls::Tid::new(tid),
+                    process: syscalls::Pid::new(process),
                     time: monotonic(),
                     end,
                 });
@@ -761,7 +763,7 @@ impl Tracer<'_> {
         }
         if self.reports(process) {
             self.emit(TraceEvent::Exit {
-                process,
+                process: syscalls::Pid::new(process),
                 time: monotonic(),
                 end,
             });
@@ -1085,7 +1087,7 @@ pub fn seed_descriptors_as(process: u32, shown: u32, sink: &mut dyn Sink) {
     for fd in std::iter::once(AT_FDCWD).chain(fds) {
         if let Some(mut event) = descriptor(process, fd, time, false) {
             if let TraceEvent::Descriptor { process, .. } = &mut event {
-                *process = shown;
+                *process = syscalls::Pid::new(shown);
             }
             sink.event(event);
         }

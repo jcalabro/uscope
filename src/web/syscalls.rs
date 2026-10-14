@@ -14,7 +14,7 @@ use uscope::syscalls::procs::ProcessTree;
 use uscope::syscalls::specs::{self, Class};
 use uscope::syscalls::stats::{self, Folded, SyscallStats, bytes_moved};
 use uscope::syscalls::{
-    Errno, EventFlags, InFlight, Outcome, ProcessEnd, SyscallEvent, TraceEvent,
+    Errno, EventFlags, InFlight, Outcome, Pid, ProcessEnd, SyscallEvent, Tid, TraceEvent,
 };
 
 use super::protocol::{
@@ -104,7 +104,7 @@ impl Trace {
     }
 
     /// The program a process ran last.
-    fn program(&self, pid: u32) -> Option<String> {
+    fn program(&self, pid: Pid) -> Option<String> {
         let (_, image) = self.processes.get(pid)?.images.last()?;
         Some(image.rsplit('/').next().unwrap_or(image).to_owned())
     }
@@ -182,8 +182,8 @@ pub fn in_flight(blocked: &[InFlight], at: u64, live: bool) -> SyscallInFlight {
                 flags: EventFlags::default(),
             };
             SyscallBlocked {
-                tid: call.thread,
-                pid: call.process,
+                tid: call.thread.get(),
+                pid: call.process.get(),
                 tokens: tokens(present::entry(
                     &event,
                     &style,
@@ -254,7 +254,7 @@ impl Selection {
             || self
                 .threads
                 .as_ref()
-                .is_some_and(|threads| !threads.contains(&call.thread))
+                .is_some_and(|threads| !threads.contains(&call.thread.get()))
             || self
                 .latency
                 .is_some_and(|band| call.duration().map(stats::bucket) != Some(band))
@@ -738,8 +738,8 @@ fn log(trace: &Trace, query: &SyscallLogQuery) -> Result<SyscallLog, Failure> {
                 lines.push(SyscallLine {
                     event: index as u64,
                     time: trace.relative(call.time()),
-                    tid: call.thread,
-                    pid: call.process,
+                    tid: call.thread.get(),
+                    pid: call.process.get(),
                     tokens: tokens(line),
                     duration_ns: call.duration(),
                     failed: matches!(call.outcome, Outcome::Failed(_)),
@@ -759,8 +759,8 @@ fn log(trace: &Trace, query: &SyscallLogQuery) -> Result<SyscallLog, Failure> {
                     }
                     | TraceEvent::ThreadExit {
                         thread, process, ..
-                    } => (thread, process),
-                    TraceEvent::Exit { process, .. } => (process, process),
+                    } => (thread.get(), process.get()),
+                    TraceEvent::Exit { process, .. } => (process.leader().get(), process.get()),
                     _ => (0, 0),
                 };
                 lines.push(SyscallLine {
@@ -866,7 +866,7 @@ fn lanes(trace: &Trace, query: &SyscallLanesQuery) -> Result<SyscallLanes, Failu
         ..Selection::new(trace, &query.query)?
     };
     let slices = Slices::new(selection.span(trace), query.buckets);
-    let mut lanes: BTreeMap<(u32, u32), Lane> = BTreeMap::new();
+    let mut lanes: BTreeMap<(Pid, Tid), Lane> = BTreeMap::new();
     calls(trace, &selection, |_, call, _| {
         let Lane {
             busy,
@@ -894,8 +894,8 @@ fn lanes(trace: &Trace, query: &SyscallLanesQuery) -> Result<SyscallLanes, Failu
         lanes: lanes
             .into_iter()
             .map(|((pid, tid), lane)| SyscallLane {
-                tid,
-                pid,
+                tid: tid.get(),
+                pid: pid.get(),
                 name: trace.program(pid),
                 busy: lane.busy,
                 failed: lane.failed,
@@ -1045,7 +1045,7 @@ fn is_connect(call: &SyscallEvent) -> bool {
 
 fn processes(trace: &Trace, query: &SyscallQuery) -> Result<SyscallProcesses, Failure> {
     let selection = Selection::new(trace, query)?;
-    let mut counts: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
+    let mut counts: BTreeMap<Pid, (u64, u64)> = BTreeMap::new();
     calls(trace, &selection, |_, call, _| {
         let entry = counts.entry(call.process).or_default();
         entry.0 += 1;
@@ -1053,7 +1053,7 @@ fn processes(trace: &Trace, query: &SyscallQuery) -> Result<SyscallProcesses, Fa
     });
     // Parents first: each process after the one that made it.
     let mut ordered: Vec<SyscallProcess> = Vec::new();
-    let mut pending: Vec<u32> = trace
+    let mut pending: Vec<Pid> = trace
         .processes
         .iter()
         .filter(|process| {
@@ -1070,8 +1070,8 @@ fn processes(trace: &Trace, query: &SyscallQuery) -> Result<SyscallProcesses, Fa
         };
         let (calls, errors) = counts.get(&pid).copied().unwrap_or_default();
         ordered.push(SyscallProcess {
-            pid,
-            parent: process.parent,
+            pid: pid.get(),
+            parent: process.parent.map(Pid::get),
             images: process
                 .images
                 .iter()
@@ -1084,7 +1084,7 @@ fn processes(trace: &Trace, query: &SyscallQuery) -> Result<SyscallProcesses, Fa
             ended: process.ended.map(|(time, _)| trace.relative(time)),
             end: process.ended.map(|(_, end)| end_text(end)),
         });
-        let mut children: Vec<u32> = trace
+        let mut children: Vec<Pid> = trace
             .processes
             .iter()
             .filter(|child| child.parent == Some(pid))

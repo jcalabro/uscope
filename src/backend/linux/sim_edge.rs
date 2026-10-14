@@ -32,7 +32,7 @@ use crate::backend::{ControllerChannels, ControllerMessage, ExecutableSource, Fi
 use crate::debug_info::DebugInfo;
 use crate::protocol::{DebuggerEvent, LaunchOptions, Request, StopId};
 use crate::sim::cpu::Registers;
-use crate::sim::kernel::{Kernel, Options, SigInfo, Tid, WaitStatus};
+use crate::sim::kernel::{Kernel, Options, SigInfo, Tgid, Tid, WaitStatus};
 use crate::sim::loader::Image;
 use crate::{Error, Result, VirtualAddress};
 
@@ -193,6 +193,11 @@ const fn tid(pid: Pid) -> Tid {
     pid.as_raw()
 }
 
+/// The simulated process `pid` numbers.
+const fn tgid(pid: Pid) -> Tgid {
+    Tgid::new(pid.as_raw())
+}
+
 /// The options the controller traces every thread with.
 const fn trace_options(exit_kill: bool) -> Options {
     Options {
@@ -241,7 +246,7 @@ impl SimTrace {
         if !maps.is_empty() {
             return Ok(maps);
         }
-        let group = kernel.thread_group(tid(pid)).unwrap_or_else(|| tid(pid));
+        let group = kernel.thread_group(tid(pid)).unwrap_or_else(|| tgid(pid));
         Ok(kernel
             .threads_of(group)
             .filter_map(|thread| kernel.maps(thread.tid))
@@ -442,11 +447,11 @@ impl LinuxTraceOps for SimTrace {
 
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
         let kernel = self.kernel();
-        if !kernel.processes.contains_key(&tid(process)) {
+        if !kernel.processes.contains_key(&tgid(process)) {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
         }
         let mut threads = kernel
-            .threads_of(tid(process))
+            .threads_of(tgid(process))
             .map(|thread| Pid::from_raw(thread.tid))
             .collect::<Vec<_>>();
         threads.sort_unstable();
@@ -471,7 +476,7 @@ impl LinuxTraceOps for SimTrace {
     fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
         let kernel = self.kernel();
         let owner = kernel.process_of(tid(thread))?;
-        (owner.tgid == tid(process)).then(|| Arc::clone(&owner.name))
+        (owner.tgid == tgid(process)).then(|| Arc::clone(&owner.name))
     }
 
     fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool> {
@@ -504,7 +509,7 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
-        match self.kernel_mut().kill(tid(pid), signal.number()) {
+        match self.kernel_mut().kill(tgid(pid), signal.number()) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(errno) => Err(system(errno)),
         }
@@ -522,14 +527,14 @@ impl LinuxTraceOps for SimTrace {
     fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
         self.kernel()
             .thread_group(tid(pid))
-            .map(Pid::from_raw)
+            .map(|group| Pid::from_raw(group.id()))
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
     }
 
     fn process_start_time(&self, process: Pid) -> Option<u64> {
         self.kernel()
             .processes
-            .get(&tid(process))
+            .get(&tgid(process))
             .map(|process| process.start_time)
     }
 
@@ -543,7 +548,7 @@ impl LinuxTraceOps for SimTrace {
         StopId::new(next)
     }
 
-    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         let _ = self.gap::<()>("identifying a library");
         None
     }
@@ -565,7 +570,7 @@ impl LinuxTraceOps for SimTrace {
         executable: &Path,
         image_base: u64,
         identity: FileIdentity,
-    ) -> Result<u64> {
+    ) -> Result<crate::LoadBias> {
         load_bias_in(&self.maps(pid)?, executable, image_base, identity)
     }
 
@@ -663,7 +668,7 @@ impl LinuxTraceOps for SimTrace {
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
         self.kernel_mut()
-            .tgkill(tid(process), tid(thread), libc::SIGSTOP)
+            .tgkill(tgid(process), tid(thread), libc::SIGSTOP)
             .map_err(system)
     }
 
@@ -729,7 +734,7 @@ pub struct Truth {
     /// The published stop, if the inferior is stopped.
     pub public_stop: Option<u64>,
     /// The process the controller debugs.
-    pub inferior: Option<Tid>,
+    pub inferior: Option<Tgid>,
     /// Whether the inferior finished launching or attaching, which put its
     /// breakpoints and watchpoints in place.
     pub established: bool,
@@ -871,11 +876,11 @@ impl SimController {
     /// The process the controller debugs, as [`Truth::inferior`] says,
     /// without building the rest.
     #[must_use]
-    pub fn inferior(&self) -> Option<Tid> {
+    pub fn inferior(&self) -> Option<Tgid> {
         self.controller
             .inferior
             .as_ref()
-            .map(|inferior| inferior.tgid.as_raw())
+            .map(|inferior| Tgid::new(inferior.tgid.as_raw()))
     }
 
     /// The published stop, as [`Truth::public_stop`] says, without
@@ -970,7 +975,7 @@ impl SimController {
                 .collect(),
             active_execution: inferior.active.as_ref().map(|active| active.id.get()),
             public_stop: inferior.public_stop.as_ref().map(|stop| stop.id.get()),
-            inferior: Some(inferior.tgid.as_raw()),
+            inferior: Some(tgid(inferior.tgid)),
             established: self.controller.launch_reply.is_none()
                 && self.controller.attach_reply.is_none(),
             threads: inferior.threads.keys().map(|pid| pid.as_raw()).collect(),

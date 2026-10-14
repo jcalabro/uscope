@@ -5,7 +5,7 @@ use nix::errno::Errno;
 use nix::libc;
 
 use super::{
-    ExitStatus, Happening, Kernel, Parent, SigInfo, State, StopKind, Thread, Tid, Tracing,
+    ExitStatus, Happening, Kernel, Parent, SigInfo, State, StopKind, Tgid, Thread, Tid, Tracing,
     WaitStatus,
 };
 #[cfg(test)]
@@ -105,7 +105,7 @@ pub fn name(signal: i32) -> String {
 
 impl Kernel {
     /// `kill(tgid, signal)`, sent by the tracer: SIGKILL, or SIGCONT.
-    pub fn kill(&mut self, group: Tid, signal: i32) -> Result<(), Errno> {
+    pub fn kill(&mut self, group: Tgid, signal: i32) -> Result<(), Errno> {
         if !self.processes.contains_key(&group) {
             return Err(Errno::ESRCH);
         }
@@ -126,7 +126,7 @@ impl Kernel {
     /// interrupts each seized thread, as `PTRACE_INTERRUPT` does. Queued
     /// for the process when its leader is traced, it is otherwise
     /// discarded, as an ignored signal is (Linux's `sig_ignored`).
-    fn continue_process(&mut self, group: Tid) {
+    fn continue_process(&mut self, group: Tgid) {
         let sender = self.caller();
         #[cfg(test)]
         let sender = if self.sabotage == Some(Sabotage::MisattributeContinues) {
@@ -160,7 +160,11 @@ impl Kernel {
         if ended {
             self.happenings.push(Happening::Continued { tgid: group });
         }
-        if self.threads.get(&group).is_some_and(Thread::traced) {
+        if self
+            .threads
+            .get(&group.leader())
+            .is_some_and(Thread::traced)
+        {
             self.processes
                 .get_mut(&group)
                 .expect("the process lives")
@@ -190,7 +194,7 @@ impl Kernel {
     }
 
     /// Queues SIGCHLD with `code` for `group`'s parent, if a live process.
-    pub(super) fn notify_parent(&mut self, group: Tid, code: i32) {
+    pub(super) fn notify_parent(&mut self, group: Tgid, code: i32) {
         let Some(Parent::Process(parent)) =
             self.processes.get(&group).map(|process| process.parent)
         else {
@@ -200,7 +204,7 @@ impl Kernel {
             parent.shared.insert(SigInfo {
                 signal: libc::SIGCHLD,
                 code,
-                pid: group,
+                pid: group.id(),
                 address: 0,
             });
         }
@@ -209,7 +213,7 @@ impl Kernel {
     /// `tgkill(tgid, tid, SIGSTOP)`, sent by the tracer. K-INT-2: a thread
     /// that has not been reaped, even a zombie, accepts it. K-STOP-3: it
     /// flushes a pending SIGCONT.
-    pub fn tgkill(&mut self, group: Tid, tid: Tid, signal: i32) -> Result<(), Errno> {
+    pub fn tgkill(&mut self, group: Tgid, tid: Tid, signal: i32) -> Result<(), Errno> {
         let tracer = self.caller();
         if self
             .threads
@@ -250,7 +254,7 @@ impl Kernel {
     /// one at the exit event of its own `exit` finishes exiting, and any
     /// other runs to its exit. A group already exiting keeps its status,
     /// and its threads at their exit events stay there (K-EXIT-4).
-    pub(super) fn kill_process(&mut self, group: Tid, exit: ExitStatus) {
+    pub(super) fn kill_process(&mut self, group: Tgid, exit: ExitStatus) {
         let Some(process) = self.processes.get_mut(&group) else {
             return;
         };
@@ -424,7 +428,7 @@ impl Kernel {
                     && thread.tid != tid
                     && !matches!(thread.state, State::Zombie(_))
             });
-        if tid == group && alone {
+        if tid == group.leader() && alone {
             self.happenings.push(Happening::LeaderExitedAlone { tid });
         }
         if !traced {

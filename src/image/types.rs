@@ -14,11 +14,11 @@ use zerocopy::little_endian::{I128, U16, U32, U64, U128};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::functions::{
-    FunctionRecord, GenericRecord, LocationRecord, language_code, language_of, span, valid_language,
+    FunctionRecord, GenericRecord, LocationRecord, language_code, language_of, valid_language,
 };
 use super::index::{self, NameEntry};
 use super::strings::{StrId, Strings, StringsBuilder};
-use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
+use super::{Builder, Image, NONE, Record, SharedRecord, Span, TableKind};
 use crate::{
     Accessibility, ArgumentOrigin, ArrayBound, ArrayDimension, ArrayExtent, ArrayOrdering,
     BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, EnumerationOrigin, Enumerator,
@@ -27,6 +27,10 @@ use crate::{
     TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, Variant,
     VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
 };
+
+/// What a type's parts are: its members, enumerators, dimensions, or
+/// parameters, by its kind, each in its own table.
+pub enum TypeParts {}
 
 /// One type. What each field holds depends on [`TypeRecord::kind`]; a
 /// field its kind does not use is zero, or [`NONE`] for references.
@@ -49,14 +53,11 @@ pub struct TypeRecord {
     /// returns; a variant type's tag type. [`NONE`] when absent.
     pub target: U32,
     /// Members, enumerators, dimensions, or parameters.
-    pub first: U32,
-    pub count: U32,
+    pub parts: Span<TypeParts>,
     /// Base classes.
-    pub bases: U32,
-    pub base_count: U32,
+    pub bases: Span<BaseRecord>,
     /// A variant type's variants.
-    pub variants: U32,
-    pub variant_count: U32,
+    pub variants: Span<VariantRecord>,
     /// A variant type's stored discriminant member, or [`NONE`].
     pub discriminant: U32,
     pub byte_size: U64,
@@ -217,10 +218,8 @@ impl Record for BaseRecord {
 pub struct VariantRecord {
     /// The variant's name, or [`NONE`].
     pub name: U32,
-    pub selectors: U32,
-    pub selector_count: U32,
-    pub members: U32,
-    pub member_count: U32,
+    pub selectors: Span<SelectorRecord>,
+    pub members: Span<MemberRecord>,
     /// Whether the variant is the default, which has no selectors.
     pub default: u8,
 }
@@ -446,13 +445,10 @@ impl SharedRecord for Item {
 pub struct IdentityRecord {
     /// The enclosing scopes and the inline namespaces among them, as
     /// strings in [`TableKind::IdentityStrings`].
-    pub path: U32,
-    pub path_count: U32,
-    pub inline: U32,
-    pub inline_count: U32,
+    pub path: Span<Item>,
+    pub inline: Span<Item>,
     pub base: U32,
-    pub arguments: U32,
-    pub argument_count: U32,
+    pub arguments: Span<ArgumentRecord>,
     /// Where a template parameter pack begins among the arguments, or
     /// [`NONE`].
     pub pack: U32,
@@ -642,15 +638,15 @@ impl Encoder {
         &mut self,
         strings: &mut StringsBuilder,
         members: &[RecordMember],
-    ) -> Result<(U32, U32), TooMany> {
+    ) -> Result<Span<MemberRecord>, TooMany> {
         let first = number(self.members.len())?;
         for member in members {
             self.member(strings, member)?;
         }
-        Ok((first.into(), number(members.len())?.into()))
+        Ok(Span::new(first, number(members.len())?))
     }
 
-    fn bases(&mut self, bases: &[BaseClass]) -> Result<(U32, U32), TooMany> {
+    fn bases(&mut self, bases: &[BaseClass]) -> Result<Span<BaseRecord>, TooMany> {
         let first = number(self.bases.len())?;
         for base in bases {
             let (layout, offset, bit_size) = layout(base.layout);
@@ -663,7 +659,7 @@ impl Encoder {
                 virtual_base: u8::from(base.virtuality == BaseClassVirtuality::Virtual),
             });
         }
-        Ok((first.into(), number(bases.len())?.into()))
+        Ok(Span::new(first, number(bases.len())?))
     }
 
     fn base_type(
@@ -688,17 +684,17 @@ impl Encoder {
         identity: &TypeIdentity,
     ) -> Result<u32, TooMany> {
         let mut segments =
-            |segments: &[Arc<str>], this: &mut Self| -> Result<(U32, U32), TooMany> {
+            |segments: &[Arc<str>], this: &mut Self| -> Result<Span<Item>, TooMany> {
                 let first = number(this.identity_strings.len())?;
                 for segment in segments {
                     this.identity_strings.push(Item {
                         value: Self::text(strings, segment)?,
                     });
                 }
-                Ok((first.into(), number(segments.len())?.into()))
+                Ok(Span::new(first, number(segments.len())?))
             };
-        let (path, path_count) = segments(&identity.path, self)?;
-        let (inline, inline_count) = segments(&identity.inline_namespaces, self)?;
+        let path = segments(&identity.path, self)?;
+        let inline = segments(&identity.inline_namespaces, self)?;
         let arguments = number(self.arguments.len())?;
         for argument in identity.arguments.iter() {
             self.arguments.push(match argument {
@@ -734,12 +730,9 @@ impl Encoder {
         let index = number(self.identities.len())?;
         self.identities.push(IdentityRecord {
             path,
-            path_count,
             inline,
-            inline_count,
             base: Self::text(strings, &identity.base)?,
-            arguments: arguments.into(),
-            argument_count: number(identity.arguments.len())?.into(),
+            arguments: Span::new(arguments, number(identity.arguments.len())?),
             pack: match identity.pack {
                 Some(pack) => number(pack)?,
                 None => NONE,
@@ -763,12 +756,9 @@ impl Encoder {
             base_name: NONE.into(),
             identity: NONE.into(),
             target: NONE.into(),
-            first: 0.into(),
-            count: 0.into(),
-            bases: 0.into(),
-            base_count: 0.into(),
-            variants: 0.into(),
-            variant_count: 0.into(),
+            parts: Span::new(0, 0),
+            bases: Span::new(0, 0),
+            variants: Span::new(0, 0),
             discriminant: NONE.into(),
             byte_size: 0.into(),
             value: 0.into(),
@@ -811,8 +801,8 @@ impl Encoder {
                 record.kind = kinds::ENUMERATION;
                 Self::base_type(&mut record, strings, representation)?;
                 record.target = reference(*underlying);
-                record.first = number(self.enumerators.len())?.into();
-                record.count = number(enumerators.len())?.into();
+                record.parts =
+                    Span::new(number(self.enumerators.len())?, number(enumerators.len())?);
                 for enumerator in enumerators.iter() {
                     self.enumerators.push(EnumeratorRecord {
                         name: Self::text(strings, &enumerator.name)?,
@@ -852,8 +842,7 @@ impl Encoder {
                 record.kind = kinds::ARRAY;
                 record.detail = code(&ORDERINGS, ordering);
                 record.target = reference(Some(*element));
-                record.first = number(self.dimensions.len())?.into();
-                record.count = number(dimensions.len())?.into();
+                record.parts = Span::new(number(self.dimensions.len())?, number(dimensions.len())?);
                 self.dimensions
                     .extend(dimensions.iter().map(|dimension| DimensionRecord {
                         lower_bound: dimension.lower_bound.into(),
@@ -868,8 +857,10 @@ impl Encoder {
                 record.kind = kinds::RUNTIME_ARRAY;
                 record.detail = code(&ORDERINGS, ordering);
                 record.target = reference(Some(*element));
-                record.first = number(self.runtime_dimensions.len())?.into();
-                record.count = number(dimensions.len())?.into();
+                record.parts = Span::new(
+                    number(self.runtime_dimensions.len())?,
+                    number(dimensions.len())?,
+                );
                 self.runtime_dimensions
                     .extend(dimensions.iter().map(RuntimeDimensionRecord::of));
             }
@@ -891,8 +882,8 @@ impl Encoder {
             } => {
                 record.kind = kinds::RECORD;
                 record.detail = code(&RECORDS, kind);
-                (record.first, record.count) = self.members(strings, members)?;
-                (record.bases, record.base_count) = self.bases(bases)?;
+                record.parts = self.members(strings, members)?.cast();
+                record.bases = self.bases(bases)?;
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
             }
             TypeKind::Union {
@@ -900,7 +891,7 @@ impl Encoder {
                 incomplete,
             } => {
                 record.kind = kinds::UNION;
-                (record.first, record.count) = self.members(strings, members)?;
+                record.parts = self.members(strings, members)?.cast();
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
             }
             TypeKind::Variant {
@@ -913,10 +904,9 @@ impl Encoder {
             } => {
                 record.kind = kinds::VARIANT;
                 record.detail = code(&STORAGE, storage);
-                (record.first, record.count) = self.members(strings, common_members)?;
-                (record.bases, record.base_count) = self.bases(bases)?;
-                record.variants = number(self.variants.len())?.into();
-                record.variant_count = number(variants.len())?.into();
+                record.parts = self.members(strings, common_members)?.cast();
+                record.bases = self.bases(bases)?;
+                record.variants = Span::new(number(self.variants.len())?, number(variants.len())?);
                 for variant in variants.iter() {
                     let selectors = number(self.selectors.len())?;
                     let (default, selector_count) = match &variant.selection {
@@ -940,16 +930,14 @@ impl Encoder {
                         }
                     };
                     // A variant's members follow the previous variant's.
-                    let (members, member_count) = self.members(strings, &variant.members)?;
+                    let members = self.members(strings, &variant.members)?;
                     self.variants.push(VariantRecord {
                         name: match &variant.name {
                             Some(name) => Self::text(strings, name)?,
                             None => NONE.into(),
                         },
-                        selectors: selectors.into(),
-                        selector_count: selector_count.into(),
+                        selectors: Span::new(selectors, selector_count),
                         members,
-                        member_count,
                         default,
                     });
                 }
@@ -990,8 +978,7 @@ impl Encoder {
             } => {
                 record.kind = kinds::SIGNATURE;
                 record.target = reference(*returns);
-                record.first = number(self.parameters.len())?.into();
-                record.count = number(parameters.len())?.into();
+                record.parts = Span::new(number(self.parameters.len())?, number(parameters.len())?);
                 self.parameters
                     .extend(parameters.iter().map(|parameter| Item {
                         value: parameter.id.get().into(),
@@ -1113,7 +1100,7 @@ pub fn add_to(
             ..
         } = &info.kind
         {
-            let first = record.first.get() as usize;
+            let first = record.parts.first() as usize;
             let mut seen = foldhash::HashSet::default();
             for (enumerator, encoded) in listed.iter().zip(&encoder.enumerators[first..]) {
                 if seen.insert(&enumerator.name) {
@@ -1326,17 +1313,18 @@ impl<'a> TypeView<'a> {
         }
     }
 
-    fn members(self, image: ModuleImageId, first: U32, count: U32) -> Arc<[RecordMember]> {
-        let first = first.get() as usize;
-        self.members[first..first + count.get() as usize]
+    fn members(self, image: ModuleImageId, members: Span<MemberRecord>) -> Arc<[RecordMember]> {
+        members
+            .rows(self.members)
             .iter()
             .map(|member| self.member(image, member))
             .collect()
     }
 
     fn bases(self, image: ModuleImageId, record: &TypeRecord) -> Arc<[BaseClass]> {
-        let first = record.bases.get() as usize;
-        self.bases[first..first + record.base_count.get() as usize]
+        record
+            .bases
+            .rows(self.bases)
             .iter()
             .map(|base| BaseClass {
                 type_ref: TypeReference {
@@ -1358,15 +1346,14 @@ impl<'a> TypeView<'a> {
     fn kind(self, image: ModuleImageId, record: &TypeRecord) -> TypeKind {
         let target = Self::reference(image, record.target);
         let required = || target.expect("validation checked the target");
-        let first = record.first.get() as usize;
-        let count = record.count.get() as usize;
+        let parts = record.parts.range();
         let incomplete = has(record, type_flags::INCOMPLETE);
         match record.kind {
             kinds::BASE => TypeKind::Base(self.base_type(record)),
             kinds::ENUMERATION => TypeKind::Enumeration {
                 representation: self.base_type(record),
                 underlying: target,
-                enumerators: self.enumerators[first..first + count]
+                enumerators: self.enumerators[parts]
                     .iter()
                     .map(|enumerator| Enumerator {
                         name: self.text(enumerator.name),
@@ -1391,7 +1378,7 @@ impl<'a> TypeView<'a> {
             },
             kinds::ARRAY => TypeKind::Array {
                 element: required(),
-                dimensions: self.dimensions[first..first + count]
+                dimensions: self.dimensions[parts]
                     .iter()
                     .map(|dimension| ArrayDimension {
                         lower_bound: dimension.lower_bound.get(),
@@ -1402,7 +1389,7 @@ impl<'a> TypeView<'a> {
             },
             kinds::RUNTIME_ARRAY => TypeKind::RuntimeArray {
                 element: required(),
-                dimensions: self.runtime_dimensions[first..first + count]
+                dimensions: self.runtime_dimensions[parts]
                     .iter()
                     .map(|dimension| {
                         dimension
@@ -1419,26 +1406,26 @@ impl<'a> TypeView<'a> {
             },
             kinds::RECORD => TypeKind::Record {
                 kind: RECORDS[usize::from(record.detail)],
-                members: self.members(image, record.first, record.count),
+                members: self.members(image, record.parts.cast()),
                 bases: self.bases(image, record),
                 incomplete,
             },
             kinds::UNION => TypeKind::Union {
-                members: self.members(image, record.first, record.count),
+                members: self.members(image, record.parts.cast()),
                 incomplete,
             },
             kinds::VARIANT => {
-                let first_variant = record.variants.get() as usize;
-                let variants = self.variants
-                    [first_variant..first_variant + record.variant_count.get() as usize]
+                let variants = record
+                    .variants
+                    .rows(self.variants)
                     .iter()
                     .map(|variant| Variant {
                         name: self.optional_text(variant.name),
                         selection: if variant.default == 0 {
-                            let first = variant.selectors.get() as usize;
                             VariantSelection::Selectors(
-                                self.selectors
-                                    [first..first + variant.selector_count.get() as usize]
+                                variant
+                                    .selectors
+                                    .rows(self.selectors)
                                     .iter()
                                     .map(|selector| {
                                         if selector.range == 0 {
@@ -1455,7 +1442,7 @@ impl<'a> TypeView<'a> {
                         } else {
                             VariantSelection::Default
                         },
-                        members: self.members(image, variant.members, variant.member_count),
+                        members: self.members(image, variant.members),
                     })
                     .collect();
                 let discriminant = if has(record, type_flags::STORED) {
@@ -1469,7 +1456,7 @@ impl<'a> TypeView<'a> {
                 };
                 TypeKind::Variant {
                     storage: STORAGE[usize::from(record.detail)],
-                    common_members: self.members(image, record.first, record.count),
+                    common_members: self.members(image, record.parts.cast()),
                     bases: self.bases(image, record),
                     discriminant: Box::new(discriminant),
                     variants,
@@ -1488,7 +1475,7 @@ impl<'a> TypeView<'a> {
             kinds::FUNCTION => TypeKind::Function,
             kinds::SIGNATURE => TypeKind::Signature {
                 returns: target,
-                parameters: self.parameters[first..first + count]
+                parameters: self.parameters[parts]
                     .iter()
                     .map(|parameter| TypeReference {
                         image,
@@ -1505,20 +1492,21 @@ impl<'a> TypeView<'a> {
     }
 
     fn identity(self, image: ModuleImageId, record: &IdentityRecord) -> TypeIdentity {
-        let segments = |first: U32, count: U32| -> Arc<[Arc<str>]> {
-            let first = first.get() as usize;
-            self.identity_strings[first..first + count.get() as usize]
+        let segments = |segments: Span<Item>| -> Arc<[Arc<str>]> {
+            segments
+                .rows(self.identity_strings)
                 .iter()
                 .map(|segment| self.text(segment.value))
                 .collect()
         };
-        let first = record.arguments.get() as usize;
         TypeIdentity {
             language: language_of(record.language, record.other_language.get()),
-            path: segments(record.path, record.path_count),
-            inline_namespaces: segments(record.inline, record.inline_count),
+            path: segments(record.path),
+            inline_namespaces: segments(record.inline),
             base: self.text(record.base),
-            arguments: self.arguments[first..first + record.argument_count.get() as usize]
+            arguments: record
+                .arguments
+                .rows(self.arguments)
                 .iter()
                 .map(|argument| match argument.kind {
                     TYPE_ARGUMENT => TypeArgument::Type(TypeReference {
@@ -1667,11 +1655,10 @@ struct Cursors {
     identities: u32,
 }
 
-/// Advances `cursor` past a list at `first` of `count`, failing unless
-/// the list begins at it.
-const fn follows(cursor: &mut u32, first: U32, count: U32) -> bool {
-    let fits = first.get() == *cursor;
-    *cursor = cursor.saturating_add(count.get());
+/// Advances `cursor` past a list, failing unless the list begins at it.
+const fn follows<T>(cursor: &mut u32, list: Span<T>) -> bool {
+    let fits = list.first() == *cursor;
+    *cursor = cursor.saturating_add(list.count());
     fits
 }
 
@@ -1699,7 +1686,6 @@ fn validate_types(image: &Image) -> Result<(), String> {
         let only = |allowed: u16| flags & !allowed == 0;
         let unused = |id: U32| id.get() == NONE;
         let none = |value: U64| value.get() == 0;
-        let no_list = |first: U32, count: U32| first.get() == 0 && count.get() == 0;
         let no_text = unused(record.text) && unused(record.base_name);
         let base_type = || {
             text(record.text)
@@ -1711,10 +1697,9 @@ fn validate_types(image: &Image) -> Result<(), String> {
             && none(record.value)
             && none(record.bit_size)
             && record.detail == 0
-            && no_list(record.first, record.count);
-        let no_bases = no_list(record.bases, record.base_count);
-        let no_variants =
-            no_list(record.variants, record.variant_count) && unused(record.discriminant);
+            && record.parts == Span::EMPTY;
+        let no_bases = record.bases == Span::EMPTY;
+        let no_variants = record.variants == Span::EMPTY && unused(record.discriminant);
         if !text(record.name) {
             return Err("a type is malformed".into());
         }
@@ -1732,7 +1717,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                 base_type()
                     && only(f::SIZED | f::BIT_SIZED)
                     && unused(record.target)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && no_bases
                     && no_variants
             }
@@ -1740,7 +1725,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                 base_type()
                     && only(f::SIZED | f::BIT_SIZED | f::NAMED_CONSTANTS | f::SCOPED)
                     && valid_optional_type(record.target, count)
-                    && follows(&mut cursors.enumerators, record.first, record.count)
+                    && follows(&mut cursors.enumerators, record.parts)
                     && no_bases
                     && no_variants
             }
@@ -1748,7 +1733,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                 no_text
                     && record.detail == 0
                     && none(record.bit_size)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED)
                     && valid_optional_type(record.target, count)
                     && no_bases
@@ -1758,7 +1743,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                 no_text
                     && usize::from(record.detail) < REFERENCES.len()
                     && none(record.bit_size)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED)
                     && valid_type(record.target, count)
                     && no_bases
@@ -1771,23 +1756,22 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && none(record.bit_size)
                     && only(f::SIZED)
                     && valid_type(record.target, count)
-                    && follows(&mut cursors.dimensions, record.first, record.count)
+                    && follows(&mut cursors.dimensions, record.parts)
                     && no_bases
                     && no_variants
             }
             kinds::RUNTIME_ARRAY => {
-                let first = record.first.get() as usize;
                 no_text
                     && usize::from(record.detail) < ORDERINGS.len()
                     && none(record.value)
                     && none(record.bit_size)
                     && only(f::SIZED)
                     && valid_type(record.target, count)
-                    && span(record.first, record.count, runtime_dimensions.len())
-                    && runtime_dimensions[first..first + record.count.get() as usize]
+                    && record.parts.within(runtime_dimensions.len())
+                    && runtime_dimensions[record.parts.range()]
                         .iter()
                         .all(|dimension| dimension.dimension().is_some())
-                    && follows(&mut cursors.runtime_dimensions, record.first, record.count)
+                    && follows(&mut cursors.runtime_dimensions, record.parts)
                     && no_bases
                     && no_variants
             }
@@ -1796,7 +1780,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && valid_slice_words(record.value.get())
                     && none(record.bit_size)
                     && record.detail == 0
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED | f::TEXT)
                     && valid_type(record.target, count)
                     && no_bases
@@ -1809,8 +1793,8 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && none(record.bit_size)
                     && only(f::SIZED | f::INCOMPLETE)
                     && unused(record.target)
-                    && follows(&mut cursors.members, record.first, record.count)
-                    && follows(&mut cursors.bases, record.bases, record.base_count)
+                    && follows(&mut cursors.members, record.parts)
+                    && follows(&mut cursors.bases, record.bases)
                     && no_variants
             }
             kinds::UNION => {
@@ -1820,7 +1804,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && none(record.bit_size)
                     && only(f::SIZED | f::INCOMPLETE)
                     && unused(record.target)
-                    && follows(&mut cursors.members, record.first, record.count)
+                    && follows(&mut cursors.members, record.parts)
                     && no_bases
                     && no_variants
             }
@@ -1838,32 +1822,24 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     } else {
                         unused(record.target)
                     }
-                    && follows(&mut cursors.members, record.first, record.count)
-                    && follows(&mut cursors.bases, record.bases, record.base_count)
-                    && follows(&mut cursors.variants, record.variants, record.variant_count);
+                    && follows(&mut cursors.members, record.parts)
+                    && follows(&mut cursors.bases, record.bases)
+                    && follows(&mut cursors.variants, record.variants);
                 // Each variant's selectors and members follow the last's,
                 // then the stored discriminant.
-                ok && span(record.variants, record.variant_count, variants.len())
-                    && variants[record.variants.get() as usize
-                        ..(record.variants.get() + record.variant_count.get()) as usize]
-                        .iter()
-                        .all(|variant| {
-                            (variant.name.get() == NONE || text(variant.name))
-                                && variant.default <= 1
-                                && (variant.default == 0 || variant.selector_count.get() == 0)
-                                && follows(
-                                    &mut cursors.selectors,
-                                    variant.selectors,
-                                    variant.selector_count,
-                                )
-                                && follows(
-                                    &mut cursors.members,
-                                    variant.members,
-                                    variant.member_count,
-                                )
-                        })
+                ok && record.variants.within(variants.len())
+                    && record.variants.rows(variants).iter().all(|variant| {
+                        (variant.name.get() == NONE || text(variant.name))
+                            && variant.default <= 1
+                            && (variant.default == 0 || variant.selectors.count() == 0)
+                            && follows(&mut cursors.selectors, variant.selectors)
+                            && follows(&mut cursors.members, variant.members)
+                    })
                     && if stored {
-                        follows(&mut cursors.members, record.discriminant, 1.into())
+                        follows(
+                            &mut cursors.members,
+                            Span::<MemberRecord>::new(record.discriminant.get(), 1),
+                        )
                     } else {
                         unused(record.discriminant)
                     }
@@ -1873,7 +1849,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && usize::from(record.detail) < MODIFIERS.len()
                     && none(record.value)
                     && none(record.bit_size)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED)
                     && valid_type(record.target, count)
                     && no_bases
@@ -1884,7 +1860,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && usize::from(record.detail) < RELATIONSHIPS.len()
                     && none(record.value)
                     && none(record.bit_size)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED)
                     && valid_optional_type(record.target, count)
                     && no_bases
@@ -1900,7 +1876,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && none(record.bit_size)
                     && only(f::SIZED | f::VARIADIC | f::PROTOTYPED)
                     && valid_optional_type(record.target, count)
-                    && follows(&mut cursors.parameters, record.first, record.count)
+                    && follows(&mut cursors.parameters, record.parts)
                     && no_bases
                     && no_variants
             }
@@ -1910,7 +1886,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && record.detail == 0
                     && none(record.value)
                     && none(record.bit_size)
-                    && no_list(record.first, record.count)
+                    && record.parts == Span::EMPTY
                     && only(f::SIZED)
                     && unused(record.target)
                     && no_bases
@@ -1920,8 +1896,11 @@ fn validate_types(image: &Image) -> Result<(), String> {
         };
         let sized = flags & f::SIZED != 0 || none(record.byte_size);
         // Identities follow in type order too.
-        let identity =
-            unused(record.identity) || follows(&mut cursors.identities, record.identity, 1.into());
+        let identity = unused(record.identity)
+            || follows(
+                &mut cursors.identities,
+                Span::<IdentityRecord>::new(record.identity.get(), 1),
+            );
         if !valid || !sized || !identity {
             return Err("a type is malformed".into());
         }
@@ -2006,15 +1985,11 @@ fn validate_lists(image: &Image) -> Result<(), String> {
     for identity in image.table::<IdentityRecord>() {
         let go = identity.flags & identity_flags::GO != 0;
         let runtime = identity.flags & identity_flags::RUNTIME_TYPE != 0;
-        if !follows(&mut strings_cursor, identity.path, identity.path_count)
-            || !follows(&mut strings_cursor, identity.inline, identity.inline_count)
-            || !follows(
-                &mut arguments_cursor,
-                identity.arguments,
-                identity.argument_count,
-            )
+        if !follows(&mut strings_cursor, identity.path)
+            || !follows(&mut strings_cursor, identity.inline)
+            || !follows(&mut arguments_cursor, identity.arguments)
             || !text(identity.base)
-            || (identity.pack.get() != NONE && identity.pack.get() > identity.argument_count.get())
+            || (identity.pack.get() != NONE && identity.pack.get() > identity.arguments.count())
             || usize::from(identity.origin) >= ORIGINS.len()
             || !valid_language(identity.language, identity.other_language.get())
             || identity.flags & !identity_flags::ALL != 0
@@ -2152,8 +2127,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
         if record.kind != kinds::ENUMERATION {
             continue;
         }
-        let first = record.first.get() as usize;
-        let mut names = enumerators[first..first + record.count.get() as usize]
+        let mut names = enumerators[record.parts.range()]
             .iter()
             .map(|enumerator| enumerator.name.get())
             .collect::<Vec<_>>();

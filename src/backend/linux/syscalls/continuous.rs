@@ -208,12 +208,12 @@ impl Continuous {
 mod tests {
     use super::*;
     use crate::profiler::Profile;
-    use crate::syscalls::{Abi, EventFlags, SyscallId};
+    use crate::syscalls::{Abi, EventFlags, Pid, SyscallId, Tid};
 
     fn call(name: &str, entered: u64, took: u64, outcome: Outcome) -> TraceEvent {
         TraceEvent::Call(SyscallEvent {
-            thread: 7,
-            process: 7,
+            thread: Tid::new(7),
+            process: Pid::new(7),
             call: SyscallId::named(Abi::X86_64, name).expect(name),
             args: [0; 6],
             captured: Vec::new(),
