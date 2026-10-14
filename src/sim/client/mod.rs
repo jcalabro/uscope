@@ -293,6 +293,10 @@ pub struct Client {
     /// The last execution that resumed one thread alone.
     pub alone: Cell<Option<ExecutionId>>,
 
+    /// The execution of a step the client started without waiting for it,
+    /// until the client sees it end.
+    pub stepping: Cell<Option<ExecutionId>>,
+
     /// What the client saw at the last stop, which the hits since are
     /// judged against.
     pub baseline: RefCell<Option<Baseline>>,
@@ -425,6 +429,7 @@ impl Client {
 
             match snapshot.inferior.clone() {
                 InferiorState::NotRunning => {
+                    self.end_unwaited_step(None);
                     if launches == self.script.launches {
                         break;
                     }
@@ -457,6 +462,7 @@ impl Client {
                     ..
                 } => {
                     if last_stop != Some(stop_id) {
+                        self.end_unwaited_step(Some(&reason));
                         self.note_stop(stop_id, process_id, &reason)?;
                         let at_breakpoints = snapshot
                             .threads
@@ -515,6 +521,16 @@ impl Client {
         }
 
         self.shutdown().await
+    }
+
+    /// Ends the step the client began without waiting for it, if one runs,
+    /// at the first stop since, whatever stopped it, or as the program
+    /// ended.
+    fn end_unwaited_step(&self, reason: Option<&StopReason>) {
+        if self.stepping.take().is_some() {
+            self.observe(Observation::StepEnded(reason.cloned()));
+            self.mark(Mark::UnwaitedStepEnded);
+        }
     }
 
     /// Holds the children the program forks, for the world to hand to
@@ -639,6 +655,13 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
+        let stepping = execution.is_some() && self.stepping.get() == execution;
+        let during_step = |mark| {
+            if stepping {
+                self.mark(mark);
+            }
+        };
+
         if self.script.catching && self.control(4) == 0 {
             if self.control(3) == 0 {
                 self.remove_catch().await?;
@@ -647,14 +670,17 @@ impl Client {
             }
 
             self.mark(Mark::CatchEditWhileRunning);
+            during_step(Mark::EditDuringStep);
             return Ok(());
         }
 
         if self.control(8) == 0 {
             if self.script.watching && self.control(2) == 0 {
                 self.toggle_watch(true).await?;
+                during_step(Mark::EditDuringStep);
             } else if self.toggle_breakpoint(breakpoints).await? {
                 self.mark(Mark::EditWhileRunning);
+                during_step(Mark::EditDuringStep);
             }
 
             return Ok(());
@@ -663,6 +689,7 @@ impl Client {
         match self.draw(if self.script.watching { 8 } else { 7 }) {
             0 => {
                 self.note("pause");
+                during_step(Mark::PauseDuringStep);
                 match self.handle.pause().await {
                     Ok(reason) => self.note(format!("paused: {reason:?}")),
                     Err(Error::EventStreamLagged(_)) => self.mark(Mark::ClientLagged),
@@ -674,15 +701,18 @@ impl Client {
             1 => {
                 if self.add_breakpoint(breakpoints).await? {
                     self.mark(Mark::EditWhileRunning);
+                    during_step(Mark::EditDuringStep);
                 }
             }
             2 => {
                 if self.remove_breakpoint(breakpoints).await? {
                     self.mark(Mark::EditWhileRunning);
+                    during_step(Mark::EditDuringStep);
                 }
             }
             3 => {
                 self.mark(Mark::KilledRunning);
+                during_step(Mark::KillDuringStep);
                 self.kill(true).await?;
             }
             4 => self.amend_breakpoint(breakpoints).await?,

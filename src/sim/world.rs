@@ -490,6 +490,7 @@ impl<'a> World<'a> {
             shared: shared.clone(),
             script: script(&swarm, program, variant, run, attach),
             alone: Cell::new(None),
+            stepping: Cell::new(None),
             baseline: RefCell::new(None),
             disabled_watches: RefCell::new(BTreeMap::new()),
             released_while_running: Cell::new(false),

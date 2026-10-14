@@ -134,6 +134,19 @@ marks! {
     /// The stepping oracle judged where a step ended.
     StepJudged,
 
+    /// A step the client did not wait for ended.
+    UnwaitedStepEnded,
+
+    /// The client paused while a step ran.
+    PauseDuringStep,
+
+    /// The client changed a breakpoint, watchpoint, or catchpoint while a
+    /// step ran.
+    EditDuringStep,
+
+    /// The client killed the program while a step ran.
+    KillDuringStep,
+
     /// A source step in unoptimized code passed the exact rules.
     SourceStepExact,
 

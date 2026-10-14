@@ -10,10 +10,11 @@ use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::{
-    Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, ExecutionContext,
-    Expression, FrameKind, LogMessage, PresentedFrame, ScalarValue, StackFrameId, StateSnapshot,
-    StepKind, StopContext, StopId, StopReason, ThreadState, UnwindTermination, VariableKind,
-    VariableSnapshot, VariableState, VariableValue, VariableValueSource, VirtualAddress,
+    Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, ExceptionDisposition,
+    ExecutionContext, Expression, FrameKind, InferiorState, LogMessage, PresentedFrame,
+    ResumeScope, ScalarValue, StackFrameId, StateSnapshot, StepKind, StopContext, StopId,
+    StopReason, ThreadState, UnwindTermination, VariableKind, VariableSnapshot, VariableState,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 /// Assigns `$pc` in a frame, and checks it reads back as assigned.
@@ -118,6 +119,12 @@ impl Client {
             });
         }
 
+        // Half the steps the oracle can judge run while the client goes on
+        // acting, as it pauses, edits, or kills.
+        if !ambiguous && matches!(caller, Caller::Trusted) && self.control(2) == 0 {
+            return self.start_step(&before, kind).await;
+        }
+
         let result = self.handle.step(kind).await;
         self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
         if ambiguous {
@@ -171,6 +178,47 @@ impl Client {
             }
             (Err(error), Caller::Trusted) => {
                 return Err(protocol(format!("step {kind:?} failed: {error}")));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Starts a step from the stop `before` shows without waiting for it,
+    /// which ends at the client's next stop, or with the program.
+    async fn start_step(&self, before: &StateSnapshot, kind: StepKind) -> Result<(), Failure> {
+        let (Some(stop), Some(context), InferiorState::Stopped { process_id, .. }) =
+            (before.stop_id, before.selected, &before.inferior)
+        else {
+            return Err(protocol(format!("a step began from {before:?}")));
+        };
+
+        let frame = match kind {
+            StepKind::Out => before.selected_frame.unwrap_or(StackFrameId::INNERMOST),
+            _ => StackFrameId::INNERMOST,
+        };
+
+        let result = self
+            .handle
+            .start_step(
+                stop,
+                context,
+                frame,
+                kind,
+                ResumeScope::Process(*process_id),
+                ExceptionDisposition::Pass,
+            )
+            .await;
+        match result {
+            Ok(execution) => {
+                self.note(format!("began step {kind:?} as execution {execution}"));
+                self.stepping.set(Some(execution));
+            }
+            Err(error) if self.refused_unarmed(&error).await? => {
+                self.observe(Observation::StepEnded(None));
+            }
+            Err(error) => {
+                return Err(protocol(format!("beginning step {kind:?} failed: {error}")));
             }
         }
 
