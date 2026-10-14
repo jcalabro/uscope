@@ -59,7 +59,8 @@ just sim 600
 
 The default sweep runs for 30 seconds. `just all` includes it. Use the ten
 minute sweep before merging lifecycle, run-control, attach, concurrency, or
-model changes. A sweep groups similar failures and reports the shortest run in
+model changes. A sweep groups failures by `Failure::signature()`, the check
+and its message with the numbers left out, and reports the shortest run in
 each group. Replay one and use `--at STEP` to inspect its state.
 
 Golden programs under `tests/golden` are checked in as sources and manifests.
@@ -177,29 +178,48 @@ debugger fix where possible.
 
 ## Faults and external events
 
-Fault injection represents events Linux can really produce: process death at
-a preemption point, group exit during stop handling, trace ownership races,
-debug-register failures, and similar conditions.
+A fault is something Linux can really do to a session. Today that is a
+SIGKILL from outside: at a chosen action, between two of the controller's
+ptrace requests, or right after a clone or fork. A run plans at most one.
+The swarm also varies how the debug registers answer, faithfully, discarding
+writes, or with their slots busy.
 
 Every fault has a legal window and source. The simulator must not invent an
-errno or ordering with no kernel evidence. Fault choice zero should normally
-mean the simplest no-fault path so shrinking moves toward a smaller run.
+errno or ordering with no kernel evidence.
 
 External events are scheduled between controller operations, not in the
 middle of an operation the native contract treats as atomic.
 
 ## Oracles
 
-An oracle states one invariant and compares independent facts. Examples
-include:
+An oracle states one invariant and compares independent facts. Among them:
 
-- every public live thread corresponds to a world thread owned by the trace;
-- a public all-stop has no running live tracee;
-- pending signals and reported stop reasons match kernel evidence;
-- installed breakpoints preserve program bytes and owner counts;
-- selected frames and registers agree with CPU and shadow state;
-- memory reads hide trap bytes and report unavailable ranges;
-- cleanup leaves no owned tracees, replies, or worker state;
+- while a stop is published, every thread of the inferior is stopped, and
+  the controller's threads are exactly those;
+- code holds the program's bytes, or a trap the controller says it
+  installed, and every site has an owner;
+- a memory read of code shows the program's bytes, never a planted trap;
+- each breakpoint location begins a statement row of its line in binutils'
+  line table, or, in unoptimized code, lies in its function;
+- no breakpoint hit goes unseen, and hit counts and conditions decide stops
+  as the client's policy says;
+- a watch on a named object watches where the symbol table and loader put
+  it, and no watched access goes unseen;
+- every call a catchpoint stops is reported, none is resumed unreported, and
+  a catch stop names the call the kernel holds the thread in;
+- backtraces match the calls the CPU made, and in unoptimized code each
+  frame's line and function are what binutils say;
+- variables, expressions, and entry values hold what memory and registers
+  hold, and a step ends where the source rules allow;
+- a presented container shows every element memory holds, by the program's
+  views;
+- the event auditor reads every event: each exit reports the kernel's
+  status and is published once, and every process exit and every thread's
+  own exit that the tracer reaped is published;
+- a program under the debugger writes and exits as it does undisturbed, and
+  any death but SIGKILL fails;
+- when the session ends no controller holds a thread in a stop, and no
+  process remains;
 - profiler samples decode to the world stack and mapping active at capture.
 
 An oracle must not call the implementation helper that computes the value it
@@ -211,19 +231,22 @@ test-only.
 
 ## Coverage marks
 
-Marks record semantic events reached by a run: a co-hit repair, a signal
-during all-stop gathering, an attach race, an exit phase, a watchpoint overlap,
-or another feature branch. Fixed gate seeds must cover required marks.
+Marks record semantic events reached by a run: two threads stopped at
+breakpoints at once (`CoHit`), an attach that finds a thread already gone
+(`SeizeRefused`), a leader exiting while its threads run on
+(`LeaderExitedAlone`), a watchpoint hit on another thread
+(`WatchHitOnAnotherThread`), or another feature branch. Fixed gate seeds must
+cover required marks.
 
 Marks are not line coverage. Add one when the behavior has a meaningful name
 and an oracle or test expectation. Do not add marks merely to make a percentage
 larger.
 
-## Shrinking failures
+## Replaying failures
 
-Choice encoding is designed so simpler alternatives have smaller values. A
-failure report groups traces by a stable fingerprint and keeps the shortest
-representative. Replay that seed before making changes:
+There is no shrinker. A sweep groups failures by `Failure::signature()` and
+keeps the shortest run in each group, the smaller seed breaking ties. Replay
+that seed before making changes:
 
 ```sh
 just sim-seed SEED

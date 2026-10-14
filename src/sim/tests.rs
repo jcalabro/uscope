@@ -90,9 +90,9 @@ fn a_skipped_temporary_trap_fails_breakpoint_accounting() {
     ));
 }
 
-/// A debugger that misreads a call's first argument resumes calls an
-/// `$arg0` condition stops without reporting them, which catch accounting
-/// catches.
+/// A kernel that misreports a call's first argument makes the debugger
+/// resume calls an `$arg0` condition stops without reporting them, which
+/// catch accounting catches.
 #[test]
 fn a_misread_first_argument_fails_catch_accounting() {
     assert!(fails_with(
@@ -465,9 +465,6 @@ fn forgotten_stop_requests_fail_the_holding_oracle() {
     assert_eq!(first_failure_with(Sabotage::ForgetStopRequests), "holding");
 }
 
-/// A kernel that hides a pending SIGCONT makes a session detaching from a
-/// held child leave the SIGCONT that ended its stop for the program, which
-/// transparency catches.
 /// A kernel that misattributes SIGCONT makes a session take the one it sent
 /// to end a held child's stop for the program's own, and pass it on, which
 /// transparency catches.
@@ -481,6 +478,9 @@ fn misattributed_continues_fail_transparency() {
     );
 }
 
+/// A kernel that hides a pending SIGCONT makes a session detaching from a
+/// held child leave the SIGCONT that ended its stop for the program, which
+/// transparency catches.
 #[test]
 fn hidden_continues_fail_transparency() {
     some_failure_saying(
