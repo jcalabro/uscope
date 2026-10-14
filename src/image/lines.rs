@@ -381,6 +381,11 @@ impl LineTables {
     /// describe, such as hand-written assembly placed after a compiled
     /// function, runs on to the next row: that code has no source line.
     pub fn clip_at(&mut self, function_starts: &[ImageAddress]) {
+        debug_assert!(
+            function_starts.is_sorted_by(|earlier, later| earlier < later),
+            "the {} function starts that clip line ranges are not in strict order",
+            function_starts.len()
+        );
         for range in &mut self.ranges {
             let start = ImageAddress::new(range.start.get());
             let end = ImageAddress::new(range.end.get());
@@ -514,10 +519,10 @@ pub(super) fn decode_row(
     let extra = (flags & row_flags::EXTRA != 0)
         .then(|| {
             let at = u32::try_from(index).expect("row indexes fit u32");
-            extras
-                .binary_search_by_key(&at, |extra| extra.row.get())
-                .ok()
-                .map(|found| &extras[found])
+            let found = extras.binary_search_by_key(&at, |extra| extra.row.get());
+            // Validation pairs every flagged row with an extra.
+            debug_assert!(found.is_ok(), "row {at} is flagged, but has no extra");
+            found.ok().map(|found| &extras[found])
         })
         .flatten();
     let line = match (row.line.get(), extra) {
@@ -676,6 +681,11 @@ impl Files {
         );
         self.paths.push(path.clone());
         self.ids.insert(path, id);
+        debug_assert_eq!(
+            self.ids.len(),
+            self.paths.len(),
+            "every interned path has one file id"
+        );
         id
     }
 
@@ -684,6 +694,11 @@ impl Files {
         for path in self.paths.drain(len.min(self.paths.len())..) {
             self.ids.remove(&path);
         }
+        debug_assert_eq!(
+            self.ids.len(),
+            self.paths.len(),
+            "every kept path has one file id"
+        );
     }
 
     /// The file a relative path names when exactly one absolute path ends

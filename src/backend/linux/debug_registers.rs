@@ -23,6 +23,11 @@ pub const STATUS_IDLE: u64 = 0xffff_0ff0;
 /// DR6 B0-B3: which slots reported a hit.
 const STATUS_HITS: u64 = 0xf;
 
+// Each slot's R/W and LEN fields take four bits of DR7 from bit 16.
+const _: () = assert!(16 + 4 * SLOT_COUNT <= 32, "DR7 has no room for the slots");
+// Clearing DR6 must not read as a hit.
+const _: () = assert!(STATUS_IDLE & STATUS_HITS == 0, "idle DR6 reports a hit");
+
 /// The first address Linux refuses for user hardware breakpoints
 /// (`TASK_SIZE_MAX` with 4-level paging). A watched span must end at or
 /// before it.
@@ -110,6 +115,9 @@ pub fn split_range(address: u64, length: u64) -> Result<Vec<Chunk>, RangeError> 
         });
         cursor += length;
     }
+    if cfg!(debug_assertions) {
+        check_exact_cover(address, length, &chunks);
+    }
     Ok(chunks)
 }
 
@@ -190,6 +198,14 @@ impl DebugRegisterPlan {
         chunks: &[Chunk],
         access: SlotAccess,
     ) -> Result<Self, CapacityError> {
+        debug_assert!(
+            !self
+                .slots
+                .iter()
+                .flatten()
+                .any(|slot| slot.owners.contains(&id)),
+            "watchpoint {id} is armed while it already holds a slot"
+        );
         let mut next = self.clone();
         let mut required = 0;
         for chunk in chunks {
@@ -216,6 +232,9 @@ impl DebugRegisterPlan {
                 available,
             });
         }
+        if cfg!(debug_assertions) {
+            next.check_invariants();
+        }
         Ok(next)
     }
 
@@ -230,7 +249,45 @@ impl DebugRegisterPlan {
                 }
             }
         }
+        if cfg!(debug_assertions) {
+            next.check_invariants();
+        }
         next
+    }
+
+    /// Panics unless every slot is owned, aligned, and encoded in DR7 as
+    /// planned, and every free slot is clear there.
+    fn check_invariants(&self) {
+        let control = self.control();
+        for (index, slot) in self.slots.iter().enumerate() {
+            let enabled = control >> (2 * index) & 1 == 1;
+            let fields = control >> (16 + 4 * index) & 0xf;
+            if let Some(slot) = slot {
+                debug_assert!(!slot.owners.is_empty(), "slot {index} has no owner");
+                debug_assert!(
+                    slot.chunk
+                        .address
+                        .is_multiple_of(u64::from(slot.chunk.length)),
+                    "slot {index} watches {:#x}, not aligned to its {} bytes",
+                    slot.chunk.address,
+                    slot.chunk.length
+                );
+                debug_assert!(enabled, "slot {index} is not enabled in DR7");
+                debug_assert_eq!(
+                    fields,
+                    slot.access.control_bits() | slot.chunk.length_bits() << 2,
+                    "slot {index}'s access and length fields in DR7 are wrong"
+                );
+            } else {
+                debug_assert!(!enabled, "free slot {index} is enabled in DR7");
+                debug_assert_eq!(fields, 0, "free slot {index} has fields in DR7");
+            }
+        }
+        debug_assert_eq!(
+            control & !0xffff_00ff,
+            0,
+            "DR7 sets bits outside the enables and slot fields"
+        );
     }
 
     /// The DR7 value arming every planned slot with a local enable bit.
@@ -317,7 +374,6 @@ pub fn fuzz(data: &[u8]) {
                 let Ok(chunks) = split_range(address, length) else {
                     continue;
                 };
-                assert_exact_cover(address, length, &chunks);
                 match plan.with_watchpoint(id, &chunks, access) {
                     Ok(next) => {
                         plan = next;
@@ -346,16 +402,30 @@ pub fn fuzz(data: &[u8]) {
     assert_eq!(plan.control(), 0);
 }
 
-#[cfg(any(test, feature = "fuzzing"))]
-fn assert_exact_cover(address: u64, length: u64, chunks: &[Chunk]) {
+/// Panics unless `chunks` cover `[address, address + length)` exactly, in
+/// order, each naturally aligned.
+fn check_exact_cover(address: u64, length: u64, chunks: &[Chunk]) {
     let mut cursor = address;
     for chunk in chunks {
-        assert_eq!(chunk.address, cursor, "chunks are contiguous");
-        assert!(matches!(chunk.length, 1 | 2 | 4 | 8));
-        assert!(chunk.address.is_multiple_of(u64::from(chunk.length)));
+        debug_assert_eq!(chunk.address, cursor, "chunks are contiguous");
+        debug_assert!(
+            matches!(chunk.length, 1 | 2 | 4 | 8),
+            "a chunk of {} bytes",
+            chunk.length
+        );
+        debug_assert!(
+            chunk.address.is_multiple_of(u64::from(chunk.length)),
+            "the chunk at {:#x} is not aligned to its {} bytes",
+            chunk.address,
+            chunk.length
+        );
         cursor = chunk.end();
     }
-    assert_eq!(cursor, address + length, "chunks cover the range exactly");
+    debug_assert_eq!(
+        cursor,
+        address + length,
+        "chunks cover {address:#x} for {length} bytes exactly"
+    );
 }
 
 #[cfg(any(test, feature = "fuzzing"))]
@@ -385,23 +455,7 @@ fn assert_plan_invariants(
             );
         }
     }
-    let control = plan.control();
-    for (index, slot) in plan.slots.iter().enumerate() {
-        let enabled = control & (1 << (2 * index)) != 0;
-        assert_eq!(enabled, slot.is_some());
-        if slot.is_none() {
-            assert_eq!(
-                control >> (16 + 4 * index) & 0xf,
-                0,
-                "free slots are zeroed"
-            );
-        }
-    }
-    assert_eq!(
-        control & !0xffff_00ff,
-        0,
-        "only enable and slot fields are set"
-    );
+    plan.check_invariants();
 }
 
 #[cfg(test)]
@@ -437,7 +491,7 @@ mod tests {
                 let optimal = optimal_chunks(address, length);
                 match split_range(address, length) {
                     Ok(chunks) => {
-                        assert_exact_cover(address, length, &chunks);
+                        check_exact_cover(address, length, &chunks);
                         assert_eq!(chunks.len() as u64, optimal, "{address:#x}+{length}");
                     }
                     Err(RangeError::TooLarge { required }) => {

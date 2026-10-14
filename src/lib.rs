@@ -629,16 +629,27 @@ impl Debugger {
     /// Ends the session and joins the backend controller. A launched inferior
     /// is killed and reaped; an attached one is detached and left running.
     pub async fn shutdown(mut self) -> Result<()> {
-        let (send, receive) = oneshot::channel();
+        let (send, mut receive) = oneshot::channel();
         self.shutdown_permit
             .take()
             .expect("shutdown permit is present")
             .send(ControllerMessage::Request(Request::Shutdown {
                 reply: send,
             }));
-        let result = match timeout(SHUTDOWN_TIMEOUT, receive).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(Error::RequestCancelled),
+        // A controller that ended, as a panic ends it, closes its queue
+        // with the request in it unanswered. One that answered closed it
+        // after, so the answer is there to take, even when the runtime's
+        // budget held back the wait for it.
+        let replied = timeout(SHUTDOWN_TIMEOUT, async {
+            tokio::select! {
+                biased;
+                replied = &mut receive => replied.ok(),
+                () = self.handle.requests.closed() => receive.try_recv().ok(),
+            }
+        });
+        let result = match replied.await {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(Error::RequestCancelled),
             Err(_) => return Err(Error::ShutdownTimedOut),
         };
 

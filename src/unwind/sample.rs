@@ -99,6 +99,21 @@ pub fn unwind_sample(
     sample: SampledState<'_>,
     limit: usize,
 ) -> (Vec<SampledFrame>, StackEnd) {
+    let (frames, end) = sampled_frames(modules, rules, sample, limit);
+    debug_assert!(
+        frames.len() <= limit,
+        "a sample unwound to {} frames, past its limit of {limit}",
+        frames.len()
+    );
+    (frames, end)
+}
+
+fn sampled_frames(
+    modules: &[UnwindModule<'_>],
+    rules: &mut FrameRules,
+    sample: SampledState<'_>,
+    limit: usize,
+) -> (Vec<SampledFrame>, StackEnd) {
     let registers = RegisterFile::new(sample.registers.iter().copied());
     let Some(instruction) = registers
         .get(RETURN_ADDRESS)
@@ -147,6 +162,11 @@ pub fn unwind_memory(
         }
         end => end,
     };
+    debug_assert!(
+        walked.unwound.len() <= limit,
+        "a stack unwound to {} frames, past its limit of {limit}",
+        walked.unwound.len()
+    );
     (frames(walked.unwound), end)
 }
 
@@ -242,6 +262,9 @@ fn walk_cfi(
         // interrupted instruction, with the registers the kernel saved.
         if let Some(trampoline) = signal_trampoline(modules, caller, &step.registers) {
             unwound.push(trampoline);
+            if unwound.len() >= limit {
+                return Walked::certain(unwound, StackEnd::Truncated(Truncation::DepthLimit, None));
+            }
             let interrupted = step
                 .registers
                 .get(RSP)

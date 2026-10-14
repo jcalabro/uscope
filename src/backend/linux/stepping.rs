@@ -157,7 +157,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
             (
                 process_id(inferior.tgid),
-                ExecutionId::new(inferior.next_execution.wrapping_add(1)),
+                ExecutionId::new(inferior.next_execution + 1),
                 self.ptrace.allocate_stop_id(),
                 presentation,
             )

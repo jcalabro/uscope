@@ -589,6 +589,33 @@ fn pid_only_attach_discovers_the_executable_and_quit_detaches() {
     assert_eq!(target.wait().code(), Some(23));
 }
 
+/// A panic that ends the controller releases an attached process as a
+/// detach would, whether the panic finds it stopped or running: no trap
+/// of a breakpoint and no watchpoint is left to kill it, and it runs on to
+/// its usual exit. Development builds panic on request.
+#[test]
+fn a_controller_panic_releases_an_attached_process_unharmed() {
+    for (after, command) in [("backtrace", "backtrace"), ("continue", "continue")] {
+        let mut target = support::ExternalProcess::spawn(&fixture("build/test-programs/attach"));
+        let process = target.process_id().get().to_string();
+        let output = uscope_command()
+            .env("USCOPE_TEST_PANIC_AFTER", after)
+            .args(["--batch", "--attach", &process])
+            .args(["--eval", "break attach_breakpoint"])
+            .args(["--eval", "awatch attach_value"])
+            .args(["--eval", command])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{after}: {stderr}");
+        assert!(stderr.contains("a panic injected"), "{after}: {stderr}");
+        target.release();
+        assert_eq!(target.wait().code(), Some(23), "{after}: {stderr}");
+    }
+}
+
 /// `--attach NAME` attaches to the one process of that name, and refuses
 /// to choose among several.
 #[test]

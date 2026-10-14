@@ -232,6 +232,7 @@ impl TypeArenaBuilder<'_, '_> {
             "complex parts are added once every unit is walked"
         );
         let base = self.entries.base_len();
+        check_cut_order(cuts);
         // The unit whose walk built a type, by its number.
         let unit_of = |id: usize| cuts.partition_point(|cut| cut.end <= id);
         let made = |made: Option<TypeId>, start: usize, end: usize| {
@@ -280,6 +281,11 @@ impl TypeArenaBuilder<'_, '_> {
                 .insert(key, id);
         }
         for (key, id) in by_die.into_entries() {
+            debug_assert!(
+                id.index() >= base,
+                "a walk's own DIE names type {}, below the shared {base}",
+                id.index()
+            );
             units[unit_of(id.index())].by_die.insert(key, id);
         }
         for id in self.explicit_names.into_own().iter() {
@@ -737,6 +743,14 @@ pub(super) fn walk_units_apart<'data>(
     let Ok(groups) = units.groups() else {
         return false;
     };
+    // Claiming in order needs each group named by its first unit.
+    for (unit, &group) in groups.iter().enumerate() {
+        debug_assert!(
+            group <= unit && groups[group] == group,
+            "unit {unit}'s group {group} is not named by the group's first unit"
+        );
+    }
+    debug_assert!(walk_ahead > 0, "a walk window of no units waits forever");
     let mut members = vec![Vec::new(); units.len()];
     for (unit, group) in groups.iter().enumerate() {
         members[*group].push(unit);
@@ -918,4 +932,14 @@ fn walk_group<'data>(
             (unit, walk)
         })
         .collect()
+}
+
+/// Panics unless each unit's walk ends at or after the one before it, as
+/// the searches of the cuts need.
+fn check_cut_order(cuts: &[Cut]) {
+    debug_assert!(
+        cuts.windows(2)
+            .all(|pair| pair[0].end <= pair[1].end && pair[0].aliases <= pair[1].aliases),
+        "a unit's walk ends before the walk of the unit before it"
+    );
 }

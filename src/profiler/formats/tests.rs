@@ -118,6 +118,14 @@ proptest! {
     }
 }
 
+/// Weights that add up past what a count holds are refused, as a total of
+/// them could not be taken.
+#[test]
+fn weights_that_add_up_past_a_count_are_refused() {
+    let text = format!("main;a {}\nmain;b 1\n", u64::MAX);
+    assert!(Profile::import(text.as_bytes()).is_err());
+}
+
 /// A file's format is its own magic, gzip's, or its name's.
 #[test]
 fn a_file_says_its_format_by_its_bytes_or_its_name() {

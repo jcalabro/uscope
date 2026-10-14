@@ -373,6 +373,18 @@ impl Capture {
             index(sample.stack.get(), self.stacks.len(), "samples")?;
             index(sample.task.get(), self.tasks.len(), "samples")?;
         }
+        // Queries total the weights.
+        let samples = (self.samples.iter()).try_fold(0_u64, |total, sample| {
+            total.checked_add(sample.weight.get())
+        });
+        let waits = (self.task_waits.iter())
+            .try_fold(0_u64, |total, wait| total.checked_add(wait.weight.get()));
+        if samples.is_none() || waits.is_none() {
+            return Err(format!(
+                "samples or waits weigh more than {} in all",
+                u64::MAX
+            ));
+        }
         grouped(
             &self.off_cpu_ranges,
             self.off_cpu.len(),

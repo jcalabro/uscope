@@ -182,6 +182,12 @@ impl Checkpoints {
     }
 
     fn keep(&mut self, cursor: &Cursor) {
+        // A restored checkpoint has a value for each of its levels.
+        debug_assert_eq!(
+            cursor.variables.len(),
+            cursor.levels.len(),
+            "a checkpoint is kept before its last clause generated"
+        );
         let expected = (self.cursors.len() as u64 + 1) * CHECKPOINT_INTERVAL;
         if cursor.position == expected {
             self.cursors.push(cursor.clone());
@@ -446,6 +452,11 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         depth: usize,
         machine: &mut ViewMachine<'_, M>,
     ) -> Result<Option<Var>, Failure> {
+        debug_assert_eq!(
+            self.visited.len(),
+            self.cursor.levels.len(),
+            "each started level has one visited set"
+        );
         let position = self.cursor.position;
         let outer = &mut self.values;
         let visited = &mut self.visited[depth];

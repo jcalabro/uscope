@@ -799,6 +799,11 @@ pub(super) fn make_presentation(
     inline_chain: &[CodeInstanceId],
     visible: usize,
 ) -> Result<FramePresentation> {
+    debug_assert!(
+        visible <= inline_chain.len(),
+        "presenting {visible} inline frames of a chain of {}",
+        inline_chain.len()
+    );
     let hidden = inline_chain
         .len()
         .checked_sub(visible)
@@ -1019,6 +1024,53 @@ pub(super) struct Expanded {
     pub(super) lost: Vec<crate::TypeReference>,
 }
 
+impl Expanded {
+    /// Panics unless each frame is at its level, has an origin among the
+    /// stack's `activations` and the futures, and every note of a future
+    /// not followed names a frame of the trace.
+    pub(super) fn check_invariants(&self, activations: usize) {
+        let frames = &self.trace.frames;
+        debug_assert_eq!(
+            self.origins.len(),
+            frames.len(),
+            "every frame has one origin"
+        );
+        for (level, (frame, origin)) in frames.iter().zip(&self.origins).enumerate() {
+            debug_assert!(
+                usize::try_from(frame.level).is_ok_and(|claimed| claimed == level),
+                "the frame at {level} claims level {}",
+                frame.level
+            );
+            debug_assert_eq!(
+                frame.id,
+                StackFrameId::new(frame.level),
+                "the frame at {level} is not identified by its level"
+            );
+            debug_assert!(
+                origin.activation < activations,
+                "the frame at {level} comes from activation {} of {activations}",
+                origin.activation
+            );
+            debug_assert!(
+                origin
+                    .future
+                    .is_none_or(|future| future < self.futures.len()),
+                "the frame at {level} drives future {:?} of {}",
+                origin.future,
+                self.futures.len()
+            );
+        }
+        for note in self.trace.unfollowed.iter() {
+            debug_assert!(
+                usize::try_from(note.driver.get()).is_ok_and(|driver| driver < frames.len()),
+                "a future not followed names frame {} of {}",
+                note.driver.get(),
+                frames.len()
+            );
+        }
+    }
+}
+
 /// A stack's logical frames: each activation's inline frames, innermost
 /// first, then the activation itself, then the functions that left by the
 /// tail calls `tail_jumps` finds between it and its caller, the last first.
@@ -1076,7 +1128,7 @@ fn expand_inline_backtrace(
         }
     }
 
-    Ok(Expanded {
+    let expanded = Expanded {
         trace: Backtrace {
             context: subject,
             frames: frames.into(),
@@ -1086,7 +1138,11 @@ fn expand_inline_backtrace(
         origins,
         futures: Vec::new(),
         lost: Vec::new(),
-    })
+    };
+    if cfg!(debug_assertions) {
+        expanded.check_invariants(stack.frames.len());
+    }
+    Ok(expanded)
 }
 
 /// One activation's logical frames: its inline frames, innermost first,

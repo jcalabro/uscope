@@ -80,8 +80,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .next_watchpoint_id
             .checked_add(1)
             .ok_or_else(|| backend_error(LinuxError::WatchpointIdExhausted))?;
-        let plan = options
-            .enabled
+        let plan = (options.enabled && !inferior.stack_moves.sets_aside(task))
             .then(|| planned_with(&inferior.watch.plan, id, &chunks, slot_access))
             .transpose()?;
         // Read before arming, so a failed read leaves nothing armed.
@@ -196,6 +195,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 continue;
             };
+            debug_assert!(
+                watchpoint.enabled,
+                "a hit is reported for watchpoint {id}, which is disabled"
+            );
             watchpoint.hit_count = watchpoint.hit_count.saturating_add(1);
             let hit_count = watchpoint.hit_count;
             let condition = watchpoint
@@ -273,10 +276,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let watchpoint = &record.watchpoint;
         let (plan, observed) = if enabled {
-            let slot_access = match watchpoint.access {
-                WatchAccess::ReadWrite => SlotAccess::ReadWrite,
-                _ => SlotAccess::Write,
-            };
+            let slot_access = slot_access(watchpoint.access);
             let chunks =
                 debug_registers::split_range(watchpoint.address.get(), watchpoint.byte_size)
                     .map_err(|error| {
@@ -287,13 +287,24 @@ impl<P: LinuxTraceOps> Controller<P> {
                             inferior.watch.plan.free_slots(),
                         )
                     })?;
-            let plan = planned_with(&inferior.watch.plan, id, &chunks, slot_access)?;
+            let plan = if inferior.stack_moves.sets_aside(record.task) {
+                None
+            } else {
+                Some(planned_with(
+                    &inferior.watch.plan,
+                    id,
+                    &chunks,
+                    slot_access,
+                )?)
+            };
             let observed = self.read_watched_bytes(watchpoint.address, watchpoint.byte_size)?;
             (plan, Some(observed))
         } else {
-            (inferior.watch.plan.without_watchpoint(id), None)
+            (Some(inferior.watch.plan.without_watchpoint(id)), None)
         };
-        self.arm_all_threads(plan)?;
+        if let Some(plan) = plan {
+            self.arm_all_threads(plan)?;
+        }
         let record = self
             .inferior
             .as_mut()
@@ -405,7 +416,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
-        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        inferior.watch.generation += 1;
         inferior.watch.plan = plan;
         let generation = inferior.watch.generation;
         for pid in programmed {
@@ -467,6 +478,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// an attached process, which would otherwise kill it with SIGTRAP.
     pub(super) fn clear_attached_debug_registers(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        debug_assert!(
+            inferior.watch.plan.is_empty(),
+            "an attached process starts with {} debug-register slots planned",
+            inferior.watch.plan.slots().iter().flatten().count()
+        );
+        // Each thread is marked as carrying the current plan.
         let generation = inferior.watch.generation;
         let empty = DebugRegisterPlan::default();
         for (&pid, thread) in &mut inferior.threads {
@@ -664,7 +681,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let had_watchpoints = !inferior.watch.watchpoints.is_empty();
         inferior.watch.watchpoints.clear();
         inferior.watch.plan = DebugRegisterPlan::default();
-        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        inferior.watch.generation += 1;
         if had_watchpoints {
             self.publish_watchpoints_changed();
         }
@@ -1091,4 +1108,18 @@ fn program_debug_registers(
         }
     }
     Ok(())
+}
+
+/// The debug-register access that reports a watch's accesses. A read watch
+/// is refused when added, as x86 has no read-only condition.
+pub(super) fn slot_access(access: WatchAccess) -> SlotAccess {
+    debug_assert_ne!(
+        access,
+        WatchAccess::Read,
+        "a read watch was added, which x86 cannot report"
+    );
+    match access {
+        WatchAccess::ReadWrite => SlotAccess::ReadWrite,
+        WatchAccess::Change | WatchAccess::Write | WatchAccess::Read => SlotAccess::Write,
+    }
 }

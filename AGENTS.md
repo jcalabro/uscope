@@ -32,6 +32,7 @@ Read the pages that match the work:
 | Timings, allocation, or benchmarks | [`dev/performance.md`](dev/performance.md) |
 | Browser client or web protocol | [`dev/web-ui.md`](dev/web-ui.md) |
 | Documentation | [`dev/documentation.md`](dev/documentation.md) |
+| Assertions, invariants, or what happens on a panic | [`dev/assertions.md`](dev/assertions.md) |
 
 The files in `plans/` are decision logs and implementation records. They are
 not current user documentation. Do not rewrite them while changing docs.
@@ -57,6 +58,10 @@ not current user documentation. Do not rewrite them while changing docs.
   traits.
 - Resolve source paths while loading metadata, but read source files lazily and
   outside the controller thread.
+- Assert internal invariants that the type system cannot prove, and never
+  assert on input. Use `debug_assert!` by default and `assert!` only when
+  continuing would damage the tracee. See
+  [`dev/assertions.md`](dev/assertions.md).
 - Unsafe code is denied unless narrowly required. Every exception needs a
   safety comment and must pass the configured lints. Unsafe code must be
   tested under Miri.

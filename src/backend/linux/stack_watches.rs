@@ -24,7 +24,7 @@ use crate::{AddressRange, Error, Result, RuntimeId, TaskId, VirtualAddress};
 
 use super::activation::{Activation, StackView, TaskStack};
 use super::breakpoints::remove_breakpoint_owner_from;
-use super::debug_registers::{self, SlotAccess};
+use super::debug_registers;
 use super::frames::StackRoot;
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_registers;
@@ -63,6 +63,35 @@ impl StackMoves {
     pub(super) fn forget(&mut self, address: VirtualAddress) {
         self.movers.remove(&address);
         self.returns.remove(&address);
+    }
+
+    /// Every site planted: the movers' entries and the moves' returns.
+    pub(super) fn planted(&self) -> BTreeSet<VirtualAddress> {
+        self.movers.keys().chain(&self.returns).copied().collect()
+    }
+
+    /// Begins a move of `task`'s stack by `thread`, as entering the mover
+    /// does.
+    #[cfg(test)]
+    pub(super) fn begin(&mut self, thread: Pid, task: TaskId) {
+        self.moving.push(Move {
+            thread,
+            task,
+            returns_to: VirtualAddress::new(0),
+            stack: 0,
+            returned: false,
+        });
+    }
+
+    /// Whether a watch on `task`'s stack, if any, is set aside: it holds
+    /// no debug registers until its stack lands, and the follow arms it
+    /// there.
+    pub(super) fn sets_aside(&self, task: Option<TaskWatch>) -> bool {
+        task.is_some_and(|watch| {
+            self.moving
+                .iter()
+                .any(|moving| !moving.returned && moving.task == watch.task)
+        })
     }
 }
 
@@ -238,15 +267,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .map(|moving| moving.returns_to)
             .collect::<BTreeSet<_>>();
-        let planted = (inferior.stack_moves.movers.keys())
-            .chain(&inferior.stack_moves.returns)
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let planted = inferior.stack_moves.planted();
         let needed = wanted
             .keys()
             .chain(&returns)
             .copied()
             .collect::<BTreeSet<_>>();
+        // The record changes with each site, so that a failed edit leaves
+        // it naming exactly the sites planted.
         for &address in planted.difference(&needed) {
             remove_breakpoint_owner_from(
                 &self.ptrace,
@@ -254,16 +282,23 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address,
                 BreakpointOwner::StackMove,
             )?;
+            inferior.stack_moves.forget(address);
         }
         let pid = inferior.memory_thread();
-        for &address in &needed {
-            if !planted.contains(&address) {
-                self.ptrace.install_breakpoint(
-                    pid,
-                    &mut inferior.breakpoints,
-                    address,
-                    BreakpointOwner::StackMove,
-                )?;
+        for &address in needed.difference(&planted) {
+            self.ptrace.install_breakpoint(
+                pid,
+                &mut inferior.breakpoints,
+                address,
+                BreakpointOwner::StackMove,
+            )?;
+            match wanted.get(&address) {
+                Some(&runtime) => {
+                    inferior.stack_moves.movers.insert(address, runtime);
+                }
+                None => {
+                    inferior.stack_moves.returns.insert(address);
+                }
             }
         }
         inferior.stack_moves.movers = wanted;
@@ -416,20 +451,24 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(address) = address else {
                 continue;
             };
-            let access = match record.watchpoint.access {
-                crate::WatchAccess::ReadWrite => SlotAccess::ReadWrite,
-                _ => SlotAccess::Write,
-            };
+            let access = super::watchpoints::slot_access(record.watchpoint.access);
+            // A disabled watch follows its stack too, so that enabling it
+            // watches where the value is, but holds no slots meanwhile.
             let placed = debug_registers::split_range(address.get(), record.watchpoint.byte_size)
                 .ok()
                 .and_then(|chunks| {
+                    if !record.watchpoint.enabled {
+                        return Some((None, chunks));
+                    }
                     plan.with_watchpoint(id, &chunks, access)
                         .ok()
-                        .map(|next| (next, chunks))
+                        .map(|next| (Some(next), chunks))
                 });
             match placed {
                 Some((next, chunks)) => {
-                    plan = next;
+                    if let Some(next) = next {
+                        plan = next;
+                    }
                     if address != record.watchpoint.address {
                         moved.insert(id, (address, chunks));
                     }

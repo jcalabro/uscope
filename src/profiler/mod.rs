@@ -156,7 +156,7 @@ impl std::fmt::Display for SampleSource {
 pub struct RecordOptions {
     pub source: SampleSource,
     pub stack: StackCopy,
-    /// The most frames a stack keeps.
+    /// The most frames a stack keeps, at least one.
     pub max_frames: usize,
     /// Pages each CPU's ring holds: the most a burst of samples can write
     /// before they are drained. Fewer lose more samples, every one counted.

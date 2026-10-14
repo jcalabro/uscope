@@ -314,6 +314,16 @@ impl CaptureBuilder {
 
     /// The stack node of `frame` called from `parent`.
     pub fn child(&mut self, parent: u32, frame: u32) -> u32 {
+        debug_assert!(
+            parent == NONE || (parent as usize) < self.stacks.len(),
+            "stack parent {parent} is not among the {} stacks",
+            self.stacks.len()
+        );
+        debug_assert!(
+            (frame as usize) < self.frames.len(),
+            "stack frame {frame} is not among the {} frames",
+            self.frames.len()
+        );
         if let Some(&stack) = self.stack_index.get(&(parent, frame)) {
             return stack;
         }
@@ -336,6 +346,16 @@ impl CaptureBuilder {
 
     /// Records an on-CPU sample of a thread.
     pub fn sample(&mut self, thread: u32, time: i64, weight: u64, stack: u32, task: u32) {
+        debug_assert!(
+            stack == NONE || (stack as usize) < self.stacks.len(),
+            "a sample of thread {thread} at {time} has stack {stack}, not among the {} stacks",
+            self.stacks.len()
+        );
+        debug_assert!(
+            task == NONE || (task as usize) < self.tasks.len(),
+            "a sample of thread {thread} at {time} has task {task}, not among the {} tasks",
+            self.tasks.len()
+        );
         self.samples[thread as usize].push(Sample {
             time: time.into(),
             weight: weight.into(),
@@ -391,6 +411,11 @@ impl CaptureBuilder {
 
     /// Gives a frame its source lines, innermost inline first.
     pub fn symbolize(&mut self, frame: u32, module: u32, lines: &[LineInput<'_>]) {
+        debug_assert!(
+            (frame as usize) < self.frames.len(),
+            "symbolizing frame {frame}, not among the {} frames",
+            self.frames.len()
+        );
         let start = index(self.lines.len());
         for line in lines {
             let name = self.string(line.function);
@@ -1022,6 +1047,14 @@ impl CaptureBuilder {
         markers.sort_by_key(|marker| (marker.time.get(), marker.thread.get()));
         let mut gaps = self.gaps;
         gaps.sort_by_key(|gap| gap.start.get());
+        // The chunks of one file may hold gaps that overlap; a gap keeps only
+        // what no earlier one covers.
+        let mut covered = i64::MIN;
+        gaps.retain_mut(|gap| {
+            gap.start = gap.start.get().max(covered).into();
+            covered = covered.max(gap.end.get());
+            gap.start.get() <= gap.end.get()
+        });
         let mut task_waits = self.task_waits;
         task_waits.sort_by_key(|wait| (wait.time.get(), wait.task.get()));
         let mut strings = self.strings;
@@ -1037,7 +1070,7 @@ impl CaptureBuilder {
                 }
             })
             .collect();
-        Capture {
+        let capture = Capture {
             strings: strings.into_bytes(),
             settings,
             modules: self.modules,
@@ -1075,7 +1108,14 @@ impl CaptureBuilder {
             syscall_notes: self.syscall_notes,
             syscall_stats: self.syscall_stats,
             syscall_errnos: self.syscall_errnos,
+        };
+        // A saved capture is read back through the same check.
+        if cfg!(debug_assertions)
+            && let Err(error) = capture.validate()
+        {
+            panic!("the builder made a capture that fails validation: {error}");
         }
+        capture
     }
 }
 

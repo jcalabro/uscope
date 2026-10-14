@@ -539,6 +539,10 @@ pub fn parse(source: &str, text: &str) -> File {
         let start = parser.position;
         match parser.view() {
             Ok(view) => {
+                debug_assert!(
+                    parser.position > start,
+                    "the view at offset {start} was parsed without consuming it"
+                );
                 if views.len() == MAX_VIEWS {
                     errors.push(parser.error_at(
                         start,
@@ -552,7 +556,12 @@ pub fn parse(source: &str, text: &str) -> File {
                 errors.push(error);
                 // Resume at the next view.
                 parser.position = start;
-                if !parser.skip_to_next_view() {
+                let resumed = parser.skip_to_next_view();
+                debug_assert!(
+                    parser.position > start,
+                    "resuming after the view at offset {start} did not advance"
+                );
+                if !resumed {
                     break;
                 }
             }

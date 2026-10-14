@@ -121,6 +121,7 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
     let mut tasks: BTreeMap<String, u32> = BTreeMap::new();
     let mut ids = Vec::new();
     let mut values = Vec::new();
+    let mut total = 0_u64;
     for sample in &raw.samples {
         ids.clear();
         values.clear();
@@ -136,6 +137,9 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
         let Some(weight) = weigh.weight(&values)? else {
             continue;
         };
+        total = total
+            .checked_add(weight)
+            .ok_or_else(|| format!("the samples weigh more than {} in all", u64::MAX))?;
         let mut stack = Vec::with_capacity(ids.len());
         for id in &ids {
             let frame = frames

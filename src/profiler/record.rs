@@ -103,9 +103,9 @@ pub struct Processor {
     /// Each thread off its CPU since a switch: its row, when it left, and
     /// whether it was preempted.
     switched_out: BTreeMap<u32, (u32, u64, bool)>,
-    /// Where each gap in sampling began, in time order, and where the
-    /// last one ended: a recording that ends paused ends there.
-    gaps: Vec<u64>,
+    /// Each gap in sampling, in time order and apart, and where the last
+    /// one ended: a recording that ends paused ends there.
+    gaps: Vec<(u64, u64)>,
     gaps_end: u64,
     /// The CPU time of this thread when the processor began, and what
     /// loading images has taken of it since.
@@ -153,7 +153,8 @@ impl Processor {
             vdso: None,
             processes: BTreeMap::new(),
             next_module: 0,
-            limit,
+            // A stack keeps at least its innermost frame.
+            limit: limit.max(1),
             carry: Vec::new(),
             latest: 0,
             first: None,
@@ -788,11 +789,40 @@ impl Processor {
     /// Records that every event was off from `start` to `end`, and why. A
     /// thread that left its CPU before a gap may have come back unseen in
     /// it, so its interval ends where the gap begins.
+    ///
+    /// A budget pause is recorded when it ends, after the task snapshots
+    /// taken in it recorded theirs, so it keeps only the spans around them.
     pub fn gap(&mut self, start: u64, end: u64, reason: GapReason) {
-        self.gaps.push(start);
+        // A clock that failed reads as zero.
+        if end <= start {
+            return;
+        }
+        let first = self.gaps.partition_point(|&(_, earlier)| earlier <= start);
+        let last = self.gaps.partition_point(|&(later, _)| later < end);
+        let mut from = start;
+        let mut pieces = Vec::new();
+        for &(covered, until) in &self.gaps[first..last] {
+            if from < covered {
+                pieces.push((from, covered));
+            }
+            from = from.max(until);
+        }
+        if from < end {
+            pieces.push((from, end));
+        }
+        for &(start, end) in &pieces {
+            self.builder
+                .gap(start.cast_signed(), end.cast_signed(), reason);
+        }
+        let mut merged = self.gaps[first..last].to_vec();
+        merged.extend_from_slice(&pieces);
+        merged.sort_unstable();
+        self.gaps.splice(first..last, merged);
         self.gaps_end = self.gaps_end.max(end);
-        self.builder
-            .gap(start.cast_signed(), end.cast_signed(), reason);
+        debug_assert!(
+            self.gaps.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+            "the gaps overlap after adding {start}..{end}"
+        );
     }
 
     /// Notes the task a sample of process `pid` ran, when a task snapshot
@@ -966,8 +996,8 @@ impl Processor {
 
     /// Where the first gap after `time` began, or the end of time.
     fn next_gap(&self, time: u64) -> u64 {
-        let next = self.gaps.partition_point(|start| *start <= time);
-        self.gaps.get(next).copied().unwrap_or(u64::MAX)
+        let next = self.gaps.partition_point(|&(start, _)| start <= time);
+        self.gaps.get(next).map_or(u64::MAX, |&(start, _)| start)
     }
 
     /// The CPU time loading images has taken.
@@ -987,7 +1017,8 @@ impl Processor {
     fn symbolize_new(&mut self) {
         let start = self.first.unwrap_or(0);
         self.builder.setting("start", &start.to_string());
-        let end = self.latest.max(self.gaps_end);
+        // A segment cut after the last record ends no earlier than it began.
+        let end = self.latest.max(self.gaps_end).max(start);
         self.builder.setting("end", &end.to_string());
         if self.symbols_later {
             return;
@@ -1180,6 +1211,18 @@ pub fn thread_cpu() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A segment cut where every record was processed, with nothing
+    /// recorded after it, ends no earlier than it begins.
+    #[test]
+    fn a_last_segment_with_nothing_after_its_cut_ends_where_it_begins() {
+        let mut processor = Processor::new(DebugFileSearch::default(), 64);
+        processor.ingest(&[], Some(5_000));
+        let first = processor.segment();
+        let last = processor.finish();
+        assert_eq!(first.span().1, 5_000);
+        assert_eq!(last.span(), (5_000, 5_000));
+    }
 
     /// A full ring drops whatever does not fit, so a thread can come back
     /// to its CPU and exit unseen. Once its process has exited, the thread

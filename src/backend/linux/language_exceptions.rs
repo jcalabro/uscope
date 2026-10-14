@@ -75,14 +75,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|(address, site)| wanted.get(address) != Some(site))
             .map(|(address, _)| *address)
             .collect::<Vec<_>>();
+        // Each hook is forgotten only once its trap is, so that a failed
+        // removal is retried.
         for address in stale {
-            inferior.runtime_hooks.remove(&address);
             remove_breakpoint_owner_from(
                 &self.ptrace,
                 inferior,
                 address,
                 BreakpointOwner::Runtime,
             )?;
+            inferior.runtime_hooks.remove(&address);
         }
         let pid = inferior.memory_thread();
         for (address, site) in wanted {

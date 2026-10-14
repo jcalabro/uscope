@@ -8,9 +8,10 @@ use std::time::Duration;
 use support::Scenario;
 use uscope::profiler::budget::Budget;
 use uscope::profiler::{
-    Attachment, CallNode, DEEP_STACK_COPY, Granularity, MarkerKind, Preset, ProbeSelection,
-    Profile, Query, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, SampledStack, Save,
-    StackCopy, StackEnding, StackView, Watch, record, record_attached, record_watched,
+    Attachment, CallNode, DEEP_STACK_COPY, GapReason, Granularity, MarkerKind, Preset,
+    ProbeSelection, Profile, Query, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource,
+    SampledStack, Save, StackCopy, StackEnding, StackView, Watch, record, record_attached,
+    record_watched,
 };
 
 /// The profile-stacks fixture across languages, compilers, optimization,
@@ -935,6 +936,27 @@ fn a_signal_handlers_stack_goes_on_through_what_the_signal_interrupted() {
     }
 }
 
+/// A stack keeps at most its frame limit, the limit falling just past the
+/// signal trampoline that leads to what the signal interrupted.
+#[test]
+fn a_signal_handlers_stack_keeps_to_its_frame_limit() {
+    for variant in ["gcc-o0", "clang-o2-nofp"] {
+        let mut command = Command::new(Scenario::fixture(&format!("profile-signals-{variant}")));
+        command.arg("3").stdout(Stdio::null());
+        let options = RecordOptions {
+            max_frames: 2,
+            ..calls_of("on_signal")
+        };
+        let recording = record(command, &options).expect("record");
+        assert!(recording.status.success(), "{variant}");
+        let stacks = recording.profile.stacks();
+        assert_eq!(stacks.len(), 3, "{variant}");
+        for stack in &stacks {
+            assert_eq!(stack.functions, ["on_signal", "__restore_rt"], "{variant}");
+        }
+    }
+}
+
 #[test]
 fn a_stack_through_the_vdso_goes_on_to_its_callers() {
     let mut command = Command::new(Scenario::fixture("profile-vdso"));
@@ -1436,7 +1458,18 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
         })
         .collect();
     let (spinner, running) = spinner_of(&spun);
-    let receivers: Vec<u64> = profile.task_waits().iter().map(|wait| wait.task).collect();
+    // Go may preempt the spinner, which a snapshot then finds runnable,
+    // but never receiving.
+    let receivers: Vec<u64> = profile
+        .task_waits()
+        .iter()
+        .filter(|wait| {
+            wait.functions
+                .iter()
+                .any(|function| function == "main.receive")
+        })
+        .map(|wait| wait.task)
+        .collect();
     assert!(!receivers.contains(&spinner), "{spinner} {receivers:?}");
     let task = profile
         .tasks()
@@ -1556,6 +1589,58 @@ fn live_task_snapshots_find_goroutines_waiting_without_a_pause() {
     assert!(profile.gaps().is_empty(), "{:?}", profile.gaps());
     assert_eq!(profile.live_snapshots().0, taken);
     assert_receivers_wait(&profile);
+}
+
+/// A task snapshot taken while the budget has sampling paused falls inside
+/// that pause: the gaps the two leave stay apart and in time order, as a
+/// saved capture needs them.
+#[test]
+fn snapshots_in_a_budget_pause_leave_gaps_apart() {
+    // The program waits on its input, so it never exits while a snapshot
+    // holds it; the recording ends it between snapshots.
+    let (reader, _writer) = std::io::pipe().expect("pipe");
+    let mut command = Command::new(Scenario::fixture("profile-go-waits"));
+    command
+        .stdin(reader)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let options = RecordOptions {
+        budget: Some(Budget {
+            cpu: 0.001,
+            period: Duration::from_millis(50),
+        }),
+        task_snapshots: Some(Duration::from_millis(50)),
+        ..RecordOptions::default()
+    };
+    let stop = AtomicBool::new(false);
+    let recording = record_watched(
+        command,
+        &options,
+        &mut Watch {
+            every: Duration::from_millis(20),
+            publish: &mut |profile| {
+                if profile.task_snapshots().0 >= 8 && profile.paused(GapReason::Budget).len() >= 3 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+            stop: &stop,
+            save: None,
+        },
+    )
+    .expect("record");
+    let gaps = recording.profile.gaps();
+    assert!(
+        gaps.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+        "{gaps:?}"
+    );
+    let snapshots = recording.profile.paused(GapReason::TaskSnapshot);
+    let budget = recording.profile.paused(GapReason::Budget);
+    assert!(
+        snapshots
+            .iter()
+            .any(|&(start, _)| budget.iter().any(|&(from, to)| from < start && start <= to)),
+        "no snapshot fell in a budget pause: {gaps:?}"
+    );
 }
 
 /// Records `command` with a task snapshot every 50 ms, `live` or stopping

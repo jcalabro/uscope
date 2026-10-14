@@ -203,6 +203,10 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         self.0.wait_status(pid)
     }
 
+    fn poll_status(&self, pid: Pid) -> Option<WaitEvent> {
+        self.0.poll_status(pid)
+    }
+
     fn process_start_time(&self, process: Pid) -> Option<u64> {
         self.0.process_start_time(process)
     }

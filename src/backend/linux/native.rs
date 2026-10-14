@@ -92,6 +92,12 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn reap(&self, pid: Pid) -> Result<()>;
     /// Waits for the next status of one tracee, as `waitpid(pid, __WALL)`.
     fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno>;
+    /// Takes a status one tracee already has, without waiting, as
+    /// `waitpid(pid, __WALL | WNOHANG)`. Only a controller whose waiter has
+    /// stopped may take one.
+    fn poll_status(&self, _pid: Pid) -> Option<WaitEvent> {
+        None
+    }
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
     /// A process's start time in clock ticks since boot, which tells it
     /// apart from a later process given the same identifier.
@@ -422,6 +428,11 @@ impl LinuxTraceOps for LinuxPtrace {
         wait_for(pid, libc::__WALL)
             .map(|_| ())
             .map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn poll_status(&self, pid: Pid) -> Option<WaitEvent> {
+        self.assert_owner_thread();
+        wait_for(pid, libc::__WALL | libc::WNOHANG).ok().flatten()
     }
 
     fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno> {

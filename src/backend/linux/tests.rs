@@ -939,6 +939,8 @@ struct FakeTrace {
     /// Mapped library files, by path, with their load bias and whether
     /// their debug information loads.
     libraries: RefCell<BTreeMap<PathBuf, (u64, bool)>>,
+    /// Statuses the kernel holds that no waiter has taken.
+    unreaped: RefCell<BTreeMap<Pid, WaitEvent>>,
 }
 
 impl FakeTrace {
@@ -1137,6 +1139,9 @@ impl LinuxTraceOps for FakeTrace {
     }
     fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
         panic!("unexpected wait")
+    }
+    fn poll_status(&self, pid: Pid) -> Option<WaitEvent> {
+        self.unreaped.borrow_mut().remove(&pid)
     }
     fn process_start_time(&self, process: Pid) -> Option<u64> {
         self.start_times.borrow().get(&process).copied()
@@ -2795,6 +2800,142 @@ fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
     );
     assert!(harness.controller.inferior.is_none());
     assert!(harness.controller.orphans.is_none());
+}
+
+/// After a panic, an attached process is released as a detach would:
+/// the trap a thread executed before any waiter took its stop is given
+/// back its instruction and the thread rewound over it, debug registers
+/// are cleared, and a signal a thread stopped to take, in a status the
+/// controller had not handled, is delivered as it is released.
+#[test]
+fn a_panic_releases_an_attached_process_as_a_detach_would() {
+    let mut harness = watch_harness(2);
+    harness.attached();
+    let (trapped, signaled) = (harness.threads[0], harness.threads[1]);
+    let site = VirtualAddress::new(0x40);
+    harness.inferior().breakpoints.insert(
+        site,
+        BreakpointSite {
+            original_byte: 0x55,
+            installed: true,
+            owners: BTreeSet::from([BreakpointOwner::Runtime]),
+        },
+    );
+    harness.trace().put_byte(site, BREAKPOINT_OPCODE);
+    harness.trace().set_pc(trapped, 0x41);
+    harness.trace().set_siginfo(trapped, libc::SI_KERNEL, None);
+    harness
+        .trace()
+        .unreaped
+        .borrow_mut()
+        .insert(trapped, WaitEvent::Stopped(trapped, Signal::SIGTRAP));
+    harness
+        .controller
+        .pending
+        .borrow_mut()
+        .push_back(ControllerMessage::Wait(WaitEvent::Stopped(
+            signaled,
+            Signal::SIGUSR1,
+        )));
+    harness.trace().take_actions();
+
+    harness.controller.release_after_panic();
+
+    let actions = harness.trace().take_actions();
+    for expected in [
+        format!("write_word {trapped} 0x40 0x55"),
+        format!("set_registers {trapped} rip=0x40"),
+        format!("write {trapped} dr7=0x0"),
+        format!("write {signaled} dr7=0x0"),
+        format!("detach {trapped} None"),
+        format!("detach {signaled} Some(SIGUSR1)"),
+    ] {
+        assert!(actions.contains(&expected), "{expected} in {actions:#?}");
+    }
+    assert!(harness.controller.inferior.is_none());
+}
+
+/// The controller's invariant check fires on state that contradicts
+/// itself: a site that no owner holds.
+#[test]
+#[should_panic(expected = "the site at 0x40 has no owners")]
+fn the_invariant_check_finds_a_site_no_owner_holds() {
+    let mut harness = watch_harness(1);
+    harness.controller.check_invariants();
+    harness.inferior().breakpoints.insert(
+        VirtualAddress::new(0x40),
+        BreakpointSite {
+            original_byte: 0x90,
+            installed: true,
+            owners: BTreeSet::new(),
+        },
+    );
+    harness.controller.check_invariants();
+}
+
+/// A client's shutdown after one the controller began itself, as a failed
+/// attach does, is answered once the first is done, not begun again.
+#[test]
+fn a_shutdown_requested_during_another_is_answered_when_it_ends() {
+    let mut harness = watch_harness(2);
+    harness.attached();
+    harness.controller.begin_shutdown(None);
+    assert!(
+        harness.controller.inferior.is_none(),
+        "the stopped process is detached at once"
+    );
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    let keeps_running = harness
+        .controller
+        .handle_message(ControllerMessage::Request(Request::Shutdown { reply }));
+    assert!(!keeps_running, "nothing is left to wait for");
+    assert!(
+        matches!(result.try_recv(), Ok(Ok(()))),
+        "the second shutdown is answered"
+    );
+}
+
+/// A kill requested while an attached process is being detached is
+/// answered when the detach ends the session.
+#[test]
+fn a_kill_during_a_detach_is_answered_when_it_ends() {
+    let mut harness = watch_harness(1);
+    harness.attached();
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.kill(reply);
+    harness.controller.begin_shutdown(None);
+    assert!(
+        harness.controller.inferior.is_none(),
+        "the process is detached"
+    );
+    assert!(
+        matches!(result.try_recv(), Ok(Ok(()))),
+        "the kill is answered"
+    );
+}
+
+/// An attached process whose threads all exit while it is detached hands
+/// a child killed for traps it kept to the orphans, whose exit the waiter
+/// still collects.
+#[test]
+fn a_vanished_attached_process_leaves_its_killed_child_to_be_reaped() {
+    let mut harness = watch_harness(1);
+    harness.attached();
+    let child = Pid::from_raw(6000);
+    let inferior = harness.inferior();
+    inferior.killed_children.insert(child);
+    inferior.threads.clear();
+    harness.controller.shutting_down = true;
+    harness.controller.detach_when_stopped().expect("detach");
+    assert!(harness.controller.inferior.is_none());
+    assert_eq!(
+        harness
+            .controller
+            .orphans
+            .as_ref()
+            .map(|orphans| orphans.killed.clone()),
+        Some(BTreeSet::from([child]))
+    );
 }
 
 /// A shutdown that meets a fork event its parent's SIGKILL superseded
@@ -4529,6 +4670,57 @@ impl UnwindInfo for FlatUnwindInfo {
     ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
         Err(UnwindTermination::Complete)
     }
+}
+
+/// A watch enabled while its task's stack moves stays set aside, holding
+/// no debug registers on the stack being left, until the move returns.
+#[test]
+fn a_watch_enabled_while_its_stack_moves_stays_set_aside() {
+    let mut harness = watch_harness(1);
+    let task = crate::TaskId {
+        runtime: crate::RuntimeId::new(4),
+        number: 1,
+    };
+    let watchpoint = harness
+        .add_watching_with(
+            0x6000,
+            8,
+            WatchAccess::Write,
+            WatchpointOptions {
+                enabled: false,
+                ..WatchpointOptions::default()
+            },
+        )
+        .expect("add a disabled watch");
+    let mover = harness.threads[0];
+    let inferior = harness.inferior();
+    inferior
+        .watch
+        .watchpoints
+        .get_mut(&watchpoint.id)
+        .expect("the watch is recorded")
+        .task = Some(stack_watches::TaskWatch {
+        task,
+        below_top: 0x100,
+    });
+    inferior.stack_moves.begin(mover, task);
+
+    let enabled = harness
+        .controller
+        .set_watchpoint_enabled(watchpoint.id, true)
+        .expect("enable the watch");
+    assert!(enabled.enabled);
+    let inferior = harness.inferior();
+    assert!(
+        inferior
+            .watch
+            .plan
+            .slots()
+            .iter()
+            .flatten()
+            .all(|slot| !slot.owners.contains(&watchpoint.id)),
+        "the watch holds slots while its stack moves"
+    );
 }
 
 /// Begins a source step over a line of `task`, which `thread` runs, with

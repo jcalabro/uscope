@@ -156,3 +156,32 @@ async fn a_watched_local_follows_its_stack_until_its_function_returns() {
         }
     }
 }
+
+/// A disabled watch holds no debug registers, which the controller's
+/// invariant check enforces after every message, as its stack moves.
+#[tokio::test]
+async fn a_disabled_watch_stays_disarmed_while_its_stack_moves() {
+    for fixture in BUILDS {
+        let (mut scenario, watchpoint, _, _) = watching(fixture, WatchAccess::Change).await;
+        let disabled = scenario
+            .operation(
+                "disable the watch",
+                scenario
+                    .handle()
+                    .set_watchpoint_enabled(watchpoint.id, false),
+            )
+            .await;
+        assert!(!disabled.enabled, "{fixture}");
+        loop {
+            match scenario.resume_to_stop().await {
+                StopReason::Breakpoint { .. } => break,
+                // The watch's function returning ends it.
+                StopReason::WatchpointInvalidated { .. } => {}
+                // Go preempts its threads with SIGURG.
+                StopReason::Exception(exception) if exception.code == 23 => {}
+                other => panic!("{fixture}: a disabled watch stopped the program: {other:?}"),
+            }
+        }
+        scenario.shutdown().await;
+    }
+}

@@ -122,6 +122,11 @@ opt-level = 1
 debug = 1
 lto = "off"
 
+# An integer overflow is a bug; a release build panics on one rather than
+# wrapping to a plausible wrong value. See dev/assertions.md.
+[profile.release]
+overflow-checks = true
+
 # Profilers read release builds with line tables, which name the functions
 # and lines their costs belong to.
 [profile.profiling]
