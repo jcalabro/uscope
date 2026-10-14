@@ -717,7 +717,11 @@ fn collect_plt(
         let Ok(entry_bytes) = usize::try_from(entry_size) else {
             continue;
         };
-        let end = start.saturating_add(code.len() as u64);
+        // A section past the last address is malformed, and its stubs
+        // have no addresses.
+        let Some(end) = start.checked_add(code.len() as u64) else {
+            continue;
+        };
         for (index, entry) in code.chunks_exact(entry_bytes).enumerate() {
             let address = start + index as u64 * entry_size;
             let Some(name) = got_slot(entry, address).and_then(|slot| targets.get(&slot)) else {
@@ -771,6 +775,9 @@ pub fn plt_frames(
                 _ => 16,
             };
             let header = usize::from(name == b".plt");
+            // A section past the last address is malformed, and its stubs
+            // have no addresses.
+            section.address().checked_add(code.len() as u64)?;
             Some((section.address(), code, entry_size, header))
         })
     };
@@ -1721,5 +1728,32 @@ mod tests {
             [],
             "more pushes than any stub makes"
         );
+    }
+
+    /// A malformed section whose code runs past the last address holds no
+    /// stub, rather than overflowing the address of one.
+    #[test]
+    fn a_plt_past_the_last_address_has_no_stubs() {
+        // endbr64; jmp *0(%rip); nopw 0(%rax,%rax): one 16-byte stub.
+        const STUB: [u8; 16] = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0xff, 0x25, 0, 0, 0, 0, 0x66, 0x0f, 0x1f, 0x44, 0, 0,
+        ];
+        let mut data = object(
+            Architecture::X86_64,
+            |_| Vec::new(),
+            &[(".plt.sec", STUB.repeat(2))],
+        );
+        let index = object::File::parse(&*data)
+            .expect("parse test object")
+            .section_by_name(".plt.sec")
+            .expect("the stubs' section")
+            .index()
+            .0;
+        let word = |at: usize| u64::from_le_bytes(data[at..at + 8].try_into().expect("a word"));
+        let headers = usize::try_from(word(0x28)).expect("a header offset");
+        let address = headers + index * 64 + 0x10;
+        data[address..address + 8].copy_from_slice(&(u64::MAX - 8).to_le_bytes());
+        let object = object::File::parse(&*data).expect("parse test object");
+        assert_eq!(plt_frames(&object, |_| true), []);
     }
 }
