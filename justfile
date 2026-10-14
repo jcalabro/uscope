@@ -15,10 +15,10 @@ max_test_threads := "16"
 default: check
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test web-test docs
+check: lint test miri web-test docs
 
 # Runs everything to check before committing.
-all: check miri web-e2e stress sim bench-smoke
+all: check web-e2e stress sim bench-smoke
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
