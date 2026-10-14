@@ -552,8 +552,9 @@ and site ownership judge every session's controller):
   the debugger planted, and has run no instruction, until a session seizes
   it.
 - *Clean exit:* no controller exits holding a thread in a stop, which Linux
-  would leave stopped forever, and when every session ends no process
-  remains, not even a zombie.
+  would wake to run on untraced (`__ptrace_unlink`) without the detach
+  that restores it, a release the model does not model (section 5), and
+  when every session ends no process remains, not even a zombie.
 - *Liveness:* a run fails as stuck when nothing can happen while a client
   waits, when a controller keeps running after answering a shutdown, or
   after two million actions.
