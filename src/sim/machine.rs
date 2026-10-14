@@ -14,7 +14,7 @@ use nix::libc;
 
 use super::choices::{Choices, Stream};
 use super::faults::Faults;
-use super::kernel::{Happening, Kernel, Parent, Planted, State, Tid, signals};
+use super::kernel::{Happening, Kernel, Parent, Planted, State, Tgid, Tid, signals};
 use super::marks::{Mark, Marks};
 use super::schedule::{Action, Scheduler, SessionId};
 #[cfg(test)]
@@ -34,9 +34,9 @@ pub struct Machine {
     pub faults: RefCell<Faults>,
     pub marks: Rc<RefCell<Marks>>,
     /// Processes something outside the session killed.
-    pub killed: Rc<RefCell<BTreeSet<Tid>>>,
+    pub killed: Rc<RefCell<BTreeSet<Tgid>>>,
     /// Processes that began to end as a whole.
-    pub ending: Rc<RefCell<BTreeSet<Tid>>>,
+    pub ending: Rc<RefCell<BTreeSet<Tgid>>>,
     /// Whether the first session holds the children its program forks.
     pub following: Rc<Cell<bool>>,
     /// Threads the debugger released with code not the program's: the
@@ -106,7 +106,7 @@ impl Machine {
                         .kernel
                         .borrow()
                         .process_of(parent)
-                        .is_some_and(|process| process.tgid != parent)
+                        .is_some_and(|process| process.tgid.leader() != parent)
                     {
                         marks.hit(Mark::ForkedFromThread);
                     }

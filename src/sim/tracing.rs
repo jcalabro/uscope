@@ -144,7 +144,7 @@ impl TraceModel {
             );
             let made = (
                 Tid::new(call.tid.cast_unsigned()),
-                Pid::new(call.tgid.cast_unsigned()),
+                Pid::new(call.tgid.id().cast_unsigned()),
                 SyscallId::new(Abi::X86_64, call.number),
                 call.args,
                 &outcome,
@@ -207,7 +207,7 @@ fn errno_of(returned: i64) -> Option<u16> {
 fn record(call: &Served, sequence: u64) -> Vec<u8> {
     bpf::encode_call(
         call.tid.cast_unsigned(),
-        call.tgid.cast_unsigned(),
+        call.tgid.id().cast_unsigned(),
         SyscallId::new(Abi::X86_64, call.number),
         call.args,
         call.returned,

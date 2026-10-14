@@ -6,8 +6,8 @@ use nix::errno::Errno;
 use nix::libc;
 
 use super::{
-    DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Thread, Tid, Tracing,
-    WaitStatus,
+    DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Tgid, Thread, Tid,
+    Tracing, WaitStatus,
 };
 use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, Registers};
 #[cfg(test)]
@@ -119,14 +119,14 @@ impl Kernel {
         #[cfg(test)]
         let phantom = self.sabotage == Some(Sabotage::PhantomArming);
         let thread = self.stopped_mut(tid)?;
-        let contended = if thread.tid == thread.tgid {
+        let contended = if thread.tid == thread.tgid.leader() {
             0
         } else {
             contended
         };
         let others = contended + thread.debug_held;
         #[cfg(test)]
-        if phantom && thread.tid != thread.tgid {
+        if phantom && thread.tid != thread.tgid.leader() {
             let registers = thread.debug.clone();
             return self
                 .phantom_debug
@@ -243,7 +243,7 @@ impl Kernel {
     /// The thread group `/proc/<tid>/status` names, until the thread is
     /// reaped.
     #[must_use]
-    pub fn thread_group(&self, tid: Tid) -> Option<Tid> {
+    pub fn thread_group(&self, tid: Tid) -> Option<Tgid> {
         self.threads.get(&tid).map(|thread| thread.tgid)
     }
 

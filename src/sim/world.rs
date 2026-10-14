@@ -48,7 +48,7 @@ use super::corpus::{Corpus, Program, Run, Variant};
 use super::faults::{Faults, Plan};
 use super::kernel::shadow::Tracking;
 use super::kernel::watching::UserWatch;
-use super::kernel::{Kernel, Parent, State, StopKind, Tid};
+use super::kernel::{Kernel, Parent, State, StopKind, Tgid, Tid};
 use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles::{self, HeardTrap};
@@ -324,7 +324,7 @@ struct World<'a> {
     waiting: VecDeque<HeldChild>,
     /// The children held that no session has seized, and that were not
     /// released, which the holding oracle watches.
-    held: BTreeSet<Tid>,
+    held: BTreeSet<Tgid>,
     /// Each thread's latest arrival at a trap the controller heard of.
     arrivals: BTreeMap<Tid, Arrival>,
     /// The step the client requested, until it ends.
@@ -640,7 +640,7 @@ impl<'a> World<'a> {
         let kernel = self.machine.kernel.borrow();
         let mut marks = self.machine.marks.borrow_mut();
         while let Ok(child) = receiver.try_recv() {
-            let tgid = tid_of(child.process().process_id);
+            let tgid = tgid_of(child.process().process_id);
             marks.hit(Mark::ChildHeld);
             if kernel
                 .processes
@@ -668,7 +668,7 @@ impl<'a> World<'a> {
             .pop_front()
             .expect("follow needs a held child")
             .hand_over();
-        let tgid = tid_of(held.process_id);
+        let tgid = tgid_of(held.process_id);
         let decision = self.machine.choices.borrow_mut().below(Stream::Client, 8);
         if decision == 1
             && let Some(receiver) = self.shared.held.borrow_mut().as_mut()
@@ -716,7 +716,7 @@ impl<'a> World<'a> {
     /// will not adopt it: `SIGCONT` from the first session's process, once
     /// the child is known to be the one held.
     fn release(&mut self, held: HeldProcess) -> Result<(), Failure> {
-        let tgid = tid_of(held.process_id);
+        let tgid = tgid_of(held.process_id);
         let mut kernel = self.machine.kernel.borrow_mut();
         let start_time = kernel
             .processes
@@ -1505,8 +1505,8 @@ fn start_controller(
 }
 
 /// The simulated thread a process identifier names.
-fn tid_of(process: ProcessId) -> Tid {
-    Tid::try_from(process.get()).expect("a simulated process id fits")
+fn tgid_of(process: ProcessId) -> Tgid {
+    Tgid::new(Tid::try_from(process.get()).expect("a simulated process id fits"))
 }
 
 /// Starts the program untraced, for the client to attach to.

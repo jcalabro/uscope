@@ -3,7 +3,7 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::{ENOSYS_RESULT, ExitStatus, Happening, Kernel, Thread, Tid};
+use super::{ENOSYS_RESULT, ExitStatus, Happening, Kernel, Tgid, Thread, Tid};
 use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, RSP};
 
 const SYS_WRITE: u64 = 1;
@@ -26,7 +26,7 @@ const THREAD_FLAGS: u64 = 0x50f00;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Served {
     pub tid: Tid,
-    pub tgid: Tid,
+    pub tgid: Tgid,
     pub number: u32,
     pub args: [u64; 6],
     /// What it returned, or `None` for one that ended its thread.
@@ -98,7 +98,9 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
         SYS_WAIT4 if argument(R10) == 0 => {
             kernel.wait4(tid, argument(RDI), argument(RSI), argument(RDX))
         }
-        SYS_GETPID => u64::try_from(kernel.threads[&tid].tgid).expect("process ids are positive"),
+        SYS_GETPID => {
+            u64::try_from(kernel.threads[&tid].tgid.id()).expect("process ids are positive")
+        }
         SYS_GETPPID => kernel.parent_of(tid),
         SYS_EXIT => {
             inside_call(kernel, tid);
@@ -116,7 +118,7 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
                     .group_exit
                     .get_or_insert(ExitStatus::Code(code));
             }
-            if tid == group {
+            if tid == group.leader() {
                 kernel.leader_exits.insert(tid, code);
             }
             kernel.reach_exit(tid, ExitStatus::Code(code));

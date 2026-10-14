@@ -13,7 +13,7 @@ use nix::libc;
 
 use super::syscalls::failure;
 use super::{
-    Ended, ExitStatus, Happening, Kernel, Parent, Pending, Process, SigInfo, State, StopKind,
+    Ended, ExitStatus, Happening, Kernel, Parent, Pending, Process, SigInfo, State, StopKind, Tgid,
     Thread, Tid, Tracing, Zombie,
 };
 use crate::sim::cpu::RAX;
@@ -61,7 +61,7 @@ impl Kernel {
         let thread = Thread::created(
             caller,
             child,
-            child,
+            Tgid::led_by(child),
             super::syscalls::SYS_FORK,
             traced,
             shadow,
@@ -69,7 +69,7 @@ impl Kernel {
         let start_time = self.allocate_start_time();
         let parent = &self.processes[&group];
         let process = Process {
-            tgid: child,
+            tgid: Tgid::led_by(child),
             name: parent.name.clone(),
             space: parent.space.clone(),
             image: parent.image.clone(),
@@ -83,7 +83,7 @@ impl Kernel {
             continued: false,
             start_time,
         };
-        self.processes.insert(child, process);
+        self.processes.insert(Tgid::led_by(child), process);
         self.threads.insert(child, thread);
         self.happenings
             .push(Happening::Forked { parent: tid, child });
@@ -108,6 +108,7 @@ impl Kernel {
         let Ok(child) = Tid::try_from(pid.cast_signed()) else {
             return failure(Errno::ECHILD);
         };
+        let process = Tgid::new(child);
         if child <= 0 || options != WNOHANG {
             self.gap(format!(
                 "wait4 for {} with options {options:#x}",
@@ -118,7 +119,7 @@ impl Kernel {
         let group = self.threads[&tid].tgid;
         if let Some(zombie) = self
             .zombies
-            .get(&child)
+            .get(&process)
             .filter(|zombie| zombie.parent == group)
         {
             let word = wait_word(zombie.status);
@@ -131,9 +132,9 @@ impl Kernel {
                     return failure(Errno::EFAULT);
                 }
             }
-            let zombie = self.zombies.remove(&child).expect("the zombie");
+            let zombie = self.zombies.remove(&process).expect("the zombie");
             self.ended.insert(
-                child,
+                process,
                 Ended {
                     status: zombie.status,
                     root: zombie.root,
@@ -147,7 +148,7 @@ impl Kernel {
         }
         let lives = self
             .processes
-            .get(&child)
+            .get(&process)
             .is_some_and(|process| process.parent == Parent::Process(group));
         if lives { 0 } else { failure(Errno::ECHILD) }
     }
@@ -157,7 +158,7 @@ impl Kernel {
         let parent = match self.processes[&self.threads[&tid].tgid].parent {
             Parent::Tracer => self.tracer,
             Parent::Launcher => LAUNCHER,
-            Parent::Process(parent) => parent,
+            Parent::Process(parent) => parent.id(),
             Parent::Init => INIT,
         };
         u64::try_from(parent).expect("process ids are positive")
@@ -171,12 +172,12 @@ impl Kernel {
             .processes
             .values()
             .filter(|process| process.creator == Some(tid))
-            .map(|process| process.tgid);
+            .map(|process| process.tgid.leader());
         let ended = self
             .zombies
             .iter()
             .filter(|(_, zombie)| zombie.creator == Some(tid))
-            .map(|(&child, _)| child);
+            .map(|(child, _)| child.leader());
         let mut children = live.chain(ended).collect::<Vec<_>>();
         children.sort_unstable();
         children
@@ -222,7 +223,7 @@ impl Kernel {
 
     /// Ends a process whose last thread is gone: its parent reaps it (see
     /// the module documentation).
-    pub(super) fn end_process(&mut self, group: Tid, exit: ExitStatus) {
+    pub(super) fn end_process(&mut self, group: Tgid, exit: ExitStatus) {
         let process = self.processes.remove(&group).expect("the process");
         match process.parent {
             reaper @ (Parent::Tracer | Parent::Launcher) => {
@@ -254,7 +255,7 @@ impl Kernel {
                     .insert(SigInfo {
                         signal: libc::SIGCHLD,
                         code: child_code(exit),
-                        pid: group,
+                        pid: group.id(),
                         address: 0,
                     });
             }
@@ -264,7 +265,7 @@ impl Kernel {
         }
     }
 
-    fn reap_orphan(&mut self, tgid: Tid, status: ExitStatus, root: Tid, killed_externally: bool) {
+    fn reap_orphan(&mut self, tgid: Tgid, status: ExitStatus, root: Tid, killed_externally: bool) {
         self.ended.insert(
             tgid,
             Ended {
@@ -333,7 +334,7 @@ impl Kernel {
     pub(super) fn reap_untraced(&mut self, tid: Tid) {
         let thread = &self.threads[&tid];
         let group = thread.tgid;
-        if tid != group {
+        if tid != group.leader() {
             self.threads.remove(&tid);
         }
         self.end_with_untraced_leader(group);
@@ -341,14 +342,14 @@ impl Kernel {
 
     /// Ends `group` when only its leader is left, an untraced zombie, which
     /// its parent then reaps (K-EXIT-5).
-    pub(super) fn end_with_untraced_leader(&mut self, group: Tid) {
+    pub(super) fn end_with_untraced_leader(&mut self, group: Tgid) {
         let leader_alone = self
             .threads
-            .get(&group)
+            .get(&group.leader())
             .is_some_and(|leader| !leader.traced() && matches!(leader.state, State::Zombie(_)))
             && self.threads_of(group).count() == 1;
         if leader_alone {
-            let leader = self.threads.remove(&group).expect("the leader");
+            let leader = self.threads.remove(&group.leader()).expect("the leader");
             let State::Zombie(own) = leader.state else {
                 unreachable!("the leader is a zombie")
             };
