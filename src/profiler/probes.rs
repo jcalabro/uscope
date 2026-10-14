@@ -199,9 +199,18 @@ pub fn ring_header(bytes: &[u8]) -> Result<RingHeader, &'static str> {
     if state > abi::RING_CLAIMED {
         return Err("a ring has an unknown state");
     }
+    // A thread sets its ring's clock as it takes the ring, so only a ring
+    // whose records are read has one.
+    let clock = u16::from(bytes[6]);
+    if matches!(state, abi::RING_ACTIVE | abi::RING_RETIRED)
+        && clock != abi::CLOCK_MONOTONIC
+        && clock != abi::CLOCK_TSC
+    {
+        return Err("a ring has an unknown clock");
+    }
     Ok(RingHeader {
         size,
-        clock: u16::from(bytes[6]),
+        clock,
         thread: word(8),
         state,
         interrupted: long(16),
@@ -815,5 +824,32 @@ mod tests {
             anchors.monotonic(1_000 + 6 * ANCHOR_SPACING),
             5_000_000_000 + 2 * ANCHOR_SPACING
         );
+    }
+
+    /// A ring whose records are on a clock the ABI does not name breaks it,
+    /// as a ring of an unknown size or state does: its times are not read
+    /// as some other clock's. A ring no thread has taken has no clock yet.
+    #[test]
+    fn a_ring_on_an_unknown_clock_breaks_the_abi() {
+        let header = |state: u32, clock: u8| {
+            let mut bytes = [0; abi::RING_HEADER];
+            bytes[..4].copy_from_slice(&abi::RING_MAGIC.to_le_bytes());
+            bytes[4] = abi::RING_VERSION;
+            bytes[5] = abi::LEAST_RING_SIZE as u8;
+            bytes[6] = clock;
+            bytes[12..16].copy_from_slice(&state.to_le_bytes());
+            ring_header(&bytes).map(|header| header.clock)
+        };
+        for state in [abi::RING_ACTIVE, abi::RING_RETIRED] {
+            for clock in [abi::CLOCK_MONOTONIC, abi::CLOCK_TSC] {
+                assert_eq!(header(state, clock as u8), Ok(clock));
+            }
+            for clock in [0, 3, u8::MAX] {
+                assert_eq!(header(state, clock), Err("a ring has an unknown clock"));
+            }
+        }
+        for state in [abi::RING_FREE, abi::RING_CLAIMED] {
+            assert_eq!(header(state, 0), Ok(0));
+        }
     }
 }
