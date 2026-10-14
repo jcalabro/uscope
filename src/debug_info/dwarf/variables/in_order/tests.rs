@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 /// Adds walks to a list, holding until it is told to stop holding.
@@ -63,4 +65,36 @@ fn units_after_the_walk_stops_holding_are_added_unwalked() {
         // have been walked; none claimed after it was.
         assert_eq!(log.added[5], None, "group 5 begins only after unit 2");
     }
+}
+
+/// A worker whose walk panics leaves units no one adds. The others must
+/// not wait for them forever: the panic ends the walk.
+#[test]
+fn a_panicking_walk_ends_the_walk() {
+    let (ended, end) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (order, members) = groups();
+        let log = Log {
+            added: Vec::new(),
+            fails_at: None,
+        };
+        let in_order = InOrder::new(&order, &members, log, 1);
+        let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::thread::scope(|scope| {
+                for _ in 0..2 {
+                    scope.spawn(|| {
+                        in_order.work(|group, units| {
+                            assert_ne!(group, 0, "a walk that panics");
+                            walk(group, units)
+                        });
+                    });
+                }
+            });
+        }));
+        let _ = ended.send(walked.is_err());
+    });
+    let panicked = end
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the walk ends when a worker panics");
+    assert!(panicked, "the panic reaches the caller");
 }

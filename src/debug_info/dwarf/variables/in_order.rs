@@ -69,6 +69,7 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
     /// the group and its units, until none is left, adding what is ready as
     /// it goes. Every worker runs it.
     pub fn work(&self, walk: impl Fn(usize, &[usize]) -> Vec<(usize, Option<W>)>) {
+        let _unwinding = AbandonOnUnwind(self);
         while let Some(&group) = self.order.get(self.claimed.fetch_add(1, Ordering::Relaxed)) {
             self.window.enter(group, &self.abandoned);
             let units = &self.members[group];
@@ -83,6 +84,15 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
                 .extend(walks);
             self.add_ready();
         }
+    }
+
+    /// Stops walking the units left, and wakes every worker waiting to.
+    fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Relaxed);
+        // Under the lock, so that no worker sees the walk held and then
+        // waits past the wake.
+        drop(self.window.added.lock().unwrap_or_else(PoisonError::into_inner));
+        self.window.progress.notify_all();
     }
 
     /// The number of units added, and what they were added to.
@@ -124,6 +134,19 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
             {
                 break;
             }
+        }
+    }
+}
+
+/// Abandons the walk when a worker unwinds from a panic, which leaves units
+/// that no one adds: the workers waiting for them then finish, and the
+/// panic reaches whoever started them rather than every worker waiting.
+struct AbandonOnUnwind<'a, 'g, W, A: Add<W>>(&'a InOrder<'g, W, A>);
+
+impl<W, A: Add<W>> Drop for AbandonOnUnwind<'_, '_, W, A> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.abandon();
         }
     }
 }
