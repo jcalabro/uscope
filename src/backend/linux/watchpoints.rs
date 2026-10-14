@@ -80,8 +80,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .next_watchpoint_id
             .checked_add(1)
             .ok_or_else(|| backend_error(LinuxError::WatchpointIdExhausted))?;
-        let plan = options
-            .enabled
+        let plan = (options.enabled && !inferior.stack_moves.sets_aside(task))
             .then(|| planned_with(&inferior.watch.plan, id, &chunks, slot_access))
             .transpose()?;
         // Read before arming, so a failed read leaves nothing armed.
@@ -273,10 +272,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let watchpoint = &record.watchpoint;
         let (plan, observed) = if enabled {
-            let slot_access = match watchpoint.access {
-                WatchAccess::ReadWrite => SlotAccess::ReadWrite,
-                _ => SlotAccess::Write,
-            };
+            let slot_access = slot_access(watchpoint.access);
             let chunks =
                 debug_registers::split_range(watchpoint.address.get(), watchpoint.byte_size)
                     .map_err(|error| {
@@ -287,13 +283,24 @@ impl<P: LinuxTraceOps> Controller<P> {
                             inferior.watch.plan.free_slots(),
                         )
                     })?;
-            let plan = planned_with(&inferior.watch.plan, id, &chunks, slot_access)?;
+            let plan = if inferior.stack_moves.sets_aside(record.task) {
+                None
+            } else {
+                Some(planned_with(
+                    &inferior.watch.plan,
+                    id,
+                    &chunks,
+                    slot_access,
+                )?)
+            };
             let observed = self.read_watched_bytes(watchpoint.address, watchpoint.byte_size)?;
             (plan, Some(observed))
         } else {
-            (inferior.watch.plan.without_watchpoint(id), None)
+            (Some(inferior.watch.plan.without_watchpoint(id)), None)
         };
-        self.arm_all_threads(plan)?;
+        if let Some(plan) = plan {
+            self.arm_all_threads(plan)?;
+        }
         let record = self
             .inferior
             .as_mut()
@@ -1091,4 +1098,18 @@ fn program_debug_registers(
         }
     }
     Ok(())
+}
+
+/// The debug-register access that reports a watch's accesses. A read watch
+/// is refused when added, as x86 has no read-only condition.
+pub(super) fn slot_access(access: WatchAccess) -> SlotAccess {
+    debug_assert_ne!(
+        access,
+        WatchAccess::Read,
+        "a read watch was added, which x86 cannot report"
+    );
+    match access {
+        WatchAccess::ReadWrite => SlotAccess::ReadWrite,
+        WatchAccess::Change | WatchAccess::Write | WatchAccess::Read => SlotAccess::Write,
+    }
 }

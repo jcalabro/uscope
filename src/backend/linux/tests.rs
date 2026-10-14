@@ -4531,6 +4531,57 @@ impl UnwindInfo for FlatUnwindInfo {
     }
 }
 
+/// A watch enabled while its task's stack moves stays set aside, holding
+/// no debug registers on the stack being left, until the move returns.
+#[test]
+fn a_watch_enabled_while_its_stack_moves_stays_set_aside() {
+    let mut harness = watch_harness(1);
+    let task = crate::TaskId {
+        runtime: crate::RuntimeId::new(4),
+        number: 1,
+    };
+    let watchpoint = harness
+        .add_watching_with(
+            0x6000,
+            8,
+            WatchAccess::Write,
+            WatchpointOptions {
+                enabled: false,
+                ..WatchpointOptions::default()
+            },
+        )
+        .expect("add a disabled watch");
+    let mover = harness.threads[0];
+    let inferior = harness.inferior();
+    inferior
+        .watch
+        .watchpoints
+        .get_mut(&watchpoint.id)
+        .expect("the watch is recorded")
+        .task = Some(stack_watches::TaskWatch {
+        task,
+        below_top: 0x100,
+    });
+    inferior.stack_moves.begin(mover, task);
+
+    let enabled = harness
+        .controller
+        .set_watchpoint_enabled(watchpoint.id, true)
+        .expect("enable the watch");
+    assert!(enabled.enabled);
+    let inferior = harness.inferior();
+    assert!(
+        inferior
+            .watch
+            .plan
+            .slots()
+            .iter()
+            .flatten()
+            .all(|slot| !slot.owners.contains(&watchpoint.id)),
+        "the watch holds slots while its stack moves"
+    );
+}
+
 /// Begins a source step over a line of `task`, which `thread` runs, with
 /// its plan's site at 0x40.
 fn begin_task_step(harness: &mut WatchHarness, thread: Pid, task: crate::TaskId) {
