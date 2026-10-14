@@ -94,6 +94,8 @@ pub struct Stacks {
     processes: BTreeMap<u32, Vec<Mapped>>,
     rules: FrameRules,
     next_module: u32,
+    /// The identifier the next image read gets, the vDSO's among them.
+    next_image: u32,
     /// The vDSO's image, read from uscope's own, which the kernel maps
     /// alike into every process, and the address it links at.
     vdso: Vdso,
@@ -147,6 +149,7 @@ impl Stacks {
             processes: BTreeMap::new(),
             rules: FrameRules::default(),
             next_module: 0,
+            next_image: 0,
             vdso: Vdso::Unread,
         }
     }
@@ -195,7 +198,7 @@ impl Stacks {
             Vdso::Unreadable => return None,
             Vdso::Unread => {}
         }
-        let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
+        let id = self.next_image_id();
         let vdso = perf::own_vdso().and_then(|(data, link)| {
             let path = std::path::Path::new(super::super::vdso::VDSO_NAME);
             let info = crate::debug_info::load_module_bytes(path, &data, id, &self.search).ok()?;
@@ -428,12 +431,18 @@ impl Stacks {
         self.processes.insert(process, modules);
     }
 
+    const fn next_image_id(&mut self) -> ModuleImageId {
+        let id = ModuleImageId::new(self.next_image);
+        self.next_image += 1;
+        id
+    }
+
     fn image(&mut self, file: &std::path::Path, inode: u64) -> Image {
         let key = (file.to_path_buf(), inode);
         if let Some(image) = self.images.get(&key) {
             return image.clone();
         }
-        let id = ModuleImageId::new(u32::try_from(self.images.len()).unwrap_or(u32::MAX));
+        let id = self.next_image_id();
         let image = crate::image::backing::read_input(file)
             .ok()
             .map(|(data, _)| Image {
@@ -472,5 +481,23 @@ fn stack(frames: &[SampledFrame], end: StackEnd) -> CallStack {
             StackEnd::Complete => None,
             StackEnd::Truncated(reason, _) => Some(reason as u8),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn the_vdso_and_a_file_read_after_it_have_their_own_images() {
+        let mut stacks = Stacks::default();
+        let (vdso, _) = stacks.vdso().expect("uscope's own vDSO is readable");
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/basic");
+        let file = stacks.image(&file, 0);
+        let id = |image: &Image| image.info.as_ref().map(|info| info.image.id());
+        assert!(id(&vdso).is_some() && id(&file).is_some());
+        assert_ne!(id(&vdso), id(&file));
     }
 }
