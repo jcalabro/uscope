@@ -1458,7 +1458,18 @@ fn task_snapshots_find_each_goroutine_where_it_waits_or_runs() {
         })
         .collect();
     let (spinner, running) = spinner_of(&spun);
-    let receivers: Vec<u64> = profile.task_waits().iter().map(|wait| wait.task).collect();
+    // Go may preempt the spinner, which a snapshot then finds runnable,
+    // but never receiving.
+    let receivers: Vec<u64> = profile
+        .task_waits()
+        .iter()
+        .filter(|wait| {
+            wait.functions
+                .iter()
+                .any(|function| function == "main.receive")
+        })
+        .map(|wait| wait.task)
+        .collect();
     assert!(!receivers.contains(&spinner), "{spinner} {receivers:?}");
     let task = profile
         .tasks()
