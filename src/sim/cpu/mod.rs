@@ -2,14 +2,19 @@
 //! time against its registers and address space.
 //!
 //! iced-x86 decodes; [`ops`] gives each instruction its meaning. Only the
-//! instructions the golden corpus executes are implemented, each checked
-//! against the real CPU by the lockstep test (`conformance::cpu`). Any other
-//! instruction is reported as [`Outcome::Unsupported`], never guessed. The
+//! instruction forms in [`IMPLEMENTED`] are, which the lockstep test
+//! (`conformance::cpu`) requires to be exactly those the golden corpus
+//! executes on the real CPU, but for [`PROBED_THROUGH_THE_KERNEL`]. Any
+//! other instruction is reported as [`Outcome::Unsupported`], never
+//! guessed. The
 //! CPU knows nothing of ptrace or signals: the kernel turns each
 //! [`Outcome`] into what Linux would do.
 
 mod flags;
 mod ops;
+
+#[cfg(test)]
+pub use ops::{IMPLEMENTED, PROBED_THROUGH_THE_KERNEL};
 
 use iced_x86::{
     Decoder, DecoderOptions, FlowControl, Formatter as _, GasFormatter, Instruction, Mnemonic,
@@ -465,8 +470,12 @@ mod tests {
     /// SIGILL or a too-long instruction's SIGSEGV.
     #[test]
     fn accesses_linux_answers_by_what_the_model_does_not_know_are_gaps() {
-        // A name, the code, and the registers it starts with.
+        // What the gap says, the code, and the registers it starts with.
         type Case<'a> = (&'a str, &'a [u8], &'a [(usize, u64)]);
+        const GROWTH: &str = "an access the stack would grow over";
+        const PAST: &str = "an access past the user half";
+        const UNREADABLE: &str = "a read of memory mapped writable or executable";
+        const UNDECODED: &str = "bytes that do not decode";
 
         let stack = 0x7fff_fffd_e000;
         let mut memory = AddressSpace::default();
@@ -490,37 +499,28 @@ mod tests {
             Backing::Stack,
         );
 
+        // A return to the address `ret` finds here.
+        let slot = stack + 0x100;
+        assert!(memory.poke(slot, 1 << 47));
         let cases: [Case<'_>; 10] = [
-            // push %rax
-            ("below the stack", &[0x50], &[(RSP, stack)]),
-            // mov (%rax), %rcx
-            (
-                "far below the stack",
-                &[0x48, 0x8b, 0x08],
-                &[(RAX, 0x10_0000)],
-            ),
-            ("past the user half", &[0x48, 0x8b, 0x08], &[(RAX, 1 << 47)]),
-            (
-                "non-canonical",
-                &[0x48, 0x8b, 0x08],
-                &[(RAX, 0x8000_0000_0000_0000)],
-            ),
-            ("wrapping", &[0x48, 0x8b, 0x08], &[(RAX, u64::MAX - 3)]),
-            ("write-only", &[0x48, 0x8b, 0x08], &[(RAX, 0x3000)]),
-            ("execute-only", &[0x48, 0x8b, 0x08], &[(RAX, 0x5000)]),
-            // jmp *%rax
-            (
-                "a branch past the user half",
-                &[0xff, 0xe0],
-                &[(RAX, 1 << 47)],
-            ),
-            // push %es, invalid in 64-bit mode
-            ("an undefined opcode", &[0x06], &[]),
-            // fifteen operand-size prefixes and a nop: sixteen bytes
-            ("a too-long instruction", &[0x66; 15], &[]),
+            // push %rax, below the stack.
+            (GROWTH, &[0x50], &[(RSP, stack)]),
+            // mov (%rax), %rcx, far below the stack.
+            (GROWTH, &[0x48, 0x8b, 0x08], &[(RAX, 0x10_0000)]),
+            (PAST, &[0x48, 0x8b, 0x08], &[(RAX, 1 << 47)]),
+            (PAST, &[0x48, 0x8b, 0x08], &[(RAX, 0x8000_0000_0000_0000)]),
+            (PAST, &[0x48, 0x8b, 0x08], &[(RAX, u64::MAX - 3)]),
+            (UNREADABLE, &[0x48, 0x8b, 0x08], &[(RAX, 0x3000)]),
+            (UNREADABLE, &[0x48, 0x8b, 0x08], &[(RAX, 0x5000)]),
+            // ret, to past the user half.
+            ("a branch past the user half", &[0xc3], &[(RSP, slot)]),
+            // push %es, undefined in 64-bit mode.
+            (UNDECODED, &[0x06], &[]),
+            // Fifteen operand-size prefixes and a nop: sixteen bytes.
+            (UNDECODED, &[0x66; 15], &[]),
         ];
 
-        for (name, code, values) in cases {
+        for (why, code, values) in cases {
             let mut code = code.to_vec();
             code.resize(16, 0x90);
             assert!(memory.poke_bytes(0x1000, &code));
@@ -535,10 +535,10 @@ mod tests {
             let before = registers;
             let outcome = execute(&mut registers, &mut memory, false).outcome;
             assert!(
-                matches!(outcome, Outcome::Unsupported(_)),
-                "{name}: {outcome:?}"
+                matches!(&outcome, Outcome::Unsupported(text) if text.starts_with(why)),
+                "{why} {values:x?}: {outcome:?}"
             );
-            assert_eq!(registers, before, "{name}");
+            assert_eq!(registers, before, "{why} {values:x?}");
         }
 
         // Within the stack and the code, the same instructions run.
@@ -550,6 +550,21 @@ mod tests {
         assert!(memory.poke_bytes(0x1000, &[0x50]));
         let outcome = execute(&mut registers, &mut memory, false).outcome;
         assert_eq!(outcome, Outcome::Completed);
+    }
+
+    /// The implemented forms are sorted, as the search for one needs, and
+    /// every form the kernel's probes run is one of them.
+    #[test]
+    fn the_implemented_forms_are_sorted() {
+        assert!(
+            IMPLEMENTED.is_sorted(),
+            "IMPLEMENTED is out of iced's order"
+        );
+        assert!(
+            PROBED_THROUGH_THE_KERNEL
+                .iter()
+                .all(|code| IMPLEMENTED.contains(code))
+        );
     }
 
     /// `syscall` saves the trap flag a single step sets in r11, though

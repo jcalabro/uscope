@@ -8,17 +8,17 @@
 //! kernel's result is copied in and writable memory must agree. The test
 //! fails at the first instruction that diverges, and prints it.
 //!
-//! Threads take turns: the current one runs until it makes a system call,
-//! then the next in creation order runs. Every other thread waits in a
+//! Threads take turns: the current one runs until it makes a system call
+//! other than `fork`, then the next in creation order runs. Every other thread waits in a
 //! ptrace-stop meanwhile, so the program interleaves on the CPU exactly as
 //! in the interpreter. A new thread starts from the registers Linux gave
 //! it, which the kernel's conformance tests check. A fork child takes its
 //! turn too, in a copy of the interpreter's memory, and its exit sends its
 //! parent a SIGCHLD the program ignores.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use iced_x86::{Instruction, RflagsBits};
+use iced_x86::{Code, Instruction, RflagsBits};
 use nix::libc;
 
 use crate::backend::native_tracee::NativeTracee;
@@ -40,7 +40,8 @@ const SYS_WAIT4: u64 = 61;
 const SYS_EXIT_GROUP: u64 = 231;
 
 /// Every golden program, in every variant and with every argument list its
-/// manifest names, executes identically in the interpreter and on the CPU.
+/// manifest names, executes identically in the interpreter and on the CPU,
+/// and together they execute every instruction form the model implements.
 #[test]
 fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
     let corpus = Corpus::load().expect("load the golden corpus");
@@ -60,15 +61,16 @@ fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
     // spawns and waits for its own tracees alone.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map_or(1, |count| count.get().min(4));
-    let checked = std::thread::scope(|scope| {
+    let (checked, executed) = std::thread::scope(|scope| {
         let workers = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
                     let mut checked = 0;
+                    let mut executed = BTreeSet::new();
                     while let Some(&(variant, run)) =
                         runs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                     {
-                        match lockstep(variant, &run.arguments) {
+                        match lockstep(variant, &run.arguments, &mut executed) {
                             Ok(steps) => checked += steps,
                             Err(divergence) => panic!(
                                 "{} {:?} diverged from the CPU: {divergence}",
@@ -77,7 +79,7 @@ fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
                         }
                     }
 
-                    checked
+                    (checked, executed)
                 })
             })
             .collect::<Vec<_>>();
@@ -88,9 +90,27 @@ fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-            .sum::<u64>()
+            .fold(
+                (0, BTreeSet::new()),
+                |(checked, mut executed), (steps, codes)| {
+                    executed.extend(codes);
+                    (checked + steps, executed)
+                },
+            )
     });
     assert!(checked > 0, "no instruction was checked");
+
+    // The model implements exactly the forms checked here, so a form the
+    // corpus stops executing, or one added without a program that
+    // executes it, fails. (The model refuses any other, so none ran.)
+    let unexecuted = cpu::IMPLEMENTED
+        .iter()
+        .filter(|&code| !executed.contains(code) && !cpu::PROBED_THROUGH_THE_KERNEL.contains(code))
+        .collect::<Vec<_>>();
+    assert!(
+        unexecuted.is_empty(),
+        "the model implements forms no golden program executes: {unexecuted:?}"
+    );
 }
 
 /// A thread the lockstep runs, in the process it belongs to.
@@ -102,12 +122,17 @@ struct Stepped {
 }
 
 /// Runs one program in lockstep to its exit, and every child it forks to
-/// theirs, returning how many instructions were compared.
+/// theirs, returning how many instructions were compared. Adds the form
+/// of each instruction that completed to `executed`.
 #[expect(
     clippy::too_many_lines,
     reason = "one loop follows every way a step can end, as the CPU reports it"
 )]
-fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
+fn lockstep(
+    variant: &Variant,
+    arguments: &[String],
+    executed: &mut BTreeSet<Code>,
+) -> Result<u64, String> {
     let (native, first) = NativeTracee::spawn(&variant.file, arguments);
     let leader = native.pid();
     if first != WaitStatus::Stopped(leader, libc::SIGTRAP) {
@@ -151,6 +176,10 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         }
 
         let at = format!("thread {tid}: {}", cpu::describe(&instruction));
+        if matches!(outcome, Outcome::Completed | Outcome::Syscall) {
+            executed.insert(instruction.code());
+        }
+
         match outcome {
             Outcome::Completed => {}
             Outcome::Syscall => {
@@ -285,7 +314,12 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         if outcome == Outcome::Syscall {
             compare_memory(&native, process, &memories[&process])
                 .map_err(|difference| format!("{at}: {difference}"))?;
-            current = (current + 1) % threads.len();
+
+            // A forking thread keeps its turn, so that it waits for its
+            // child before the child runs as well as after.
+            if before.general[RAX] != SYS_FORK {
+                current = (current + 1) % threads.len();
+            }
         }
     }
 

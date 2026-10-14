@@ -6,17 +6,160 @@
 
 use std::cell::Cell;
 
-use iced_x86::{EncodingKind, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{Code, Instruction, Mnemonic, OpKind, Register};
 
 use super::flags::{self, mask, sign_extend, with_status};
 use super::{
     Access, Accesses, CARRY, DIRECTION, FPE_INTDIV, Fault, Outcome, R11, RAX, RBP, RCX, RDI, RDX,
-    RSI, RSP, Registers, SI_KERNEL, SIGFPE, SIGSEGV, Stop,
+    RSI, RSP, Registers, SIGFPE, Stop,
 };
 
 use crate::sim::memory::AddressSpace;
 
 type Step = Result<Outcome, Stop>;
+
+/// Every instruction form the model implements, in iced's order. The
+/// lockstep test (`conformance::cpu`) executes each on the real CPU, but
+/// for [`PROBED_THROUGH_THE_KERNEL`], and requires this list to be
+/// exactly the forms it executes, so a form is added with a golden
+/// program that executes it. Any other form is a gap, though it shares a
+/// mnemonic with one here.
+pub const IMPLEMENTED: [Code; 128] = [
+    Code::Add_rm32_r32,
+    Code::Add_rm64_r64,
+    Code::Add_r32_rm32,
+    Code::Add_r64_rm64,
+    Code::Add_RAX_imm32,
+    Code::Or_rm8_r8,
+    Code::Or_rm64_r64,
+    Code::And_r64_rm64,
+    Code::And_AL_imm8,
+    Code::Sub_rm32_r32,
+    Code::Sub_rm64_r64,
+    Code::Xor_rm32_r32,
+    Code::Xor_rm64_r64,
+    Code::Xor_r64_rm64,
+    Code::Cmp_rm64_r64,
+    Code::Cmp_r64_rm64,
+    Code::Cmp_AL_imm8,
+    Code::Push_r64,
+    Code::Pop_r64,
+    Code::Movsxd_r64_rm32,
+    Code::Imul_r16_rm16_imm16,
+    Code::Imul_r64_rm64_imm32,
+    Code::Imul_r32_rm32_imm8,
+    Code::Imul_r64_rm64_imm8,
+    Code::Jb_rel8_64,
+    Code::Jae_rel8_64,
+    Code::Je_rel8_64,
+    Code::Jne_rel8_64,
+    Code::Jbe_rel8_64,
+    Code::Ja_rel8_64,
+    Code::Js_rel8_64,
+    Code::Jns_rel8_64,
+    Code::Jl_rel8_64,
+    Code::Jge_rel8_64,
+    Code::Jle_rel8_64,
+    Code::Jg_rel8_64,
+    Code::Add_rm8_imm8,
+    Code::Or_rm8_imm8,
+    Code::And_rm8_imm8,
+    Code::Cmp_rm8_imm8,
+    Code::Add_rm64_imm32,
+    Code::Add_rm32_imm8,
+    Code::Add_rm64_imm8,
+    Code::Adc_rm64_imm8,
+    Code::Sbb_rm64_imm8,
+    Code::And_rm32_imm8,
+    Code::And_rm64_imm8,
+    Code::Sub_rm32_imm8,
+    Code::Sub_rm64_imm8,
+    Code::Cmp_rm32_imm8,
+    Code::Cmp_rm64_imm8,
+    Code::Test_rm8_r8,
+    Code::Test_rm32_r32,
+    Code::Test_rm64_r64,
+    Code::Xchg_rm64_r64,
+    Code::Mov_rm8_r8,
+    Code::Mov_rm16_r16,
+    Code::Mov_rm32_r32,
+    Code::Mov_rm64_r64,
+    Code::Mov_r8_rm8,
+    Code::Mov_r32_rm32,
+    Code::Mov_r64_rm64,
+    Code::Lea_r32_m,
+    Code::Lea_r64_m,
+    Code::Nopw,
+    Code::Nopd,
+    Code::Cdqe,
+    Code::Movsb_m8_m8,
+    Code::Test_AL_imm8,
+    Code::Stosb_m8_AL,
+    Code::Mov_r8_imm8,
+    Code::Mov_r32_imm32,
+    Code::Mov_r64_imm64,
+    Code::Shl_rm32_imm8,
+    Code::Shl_rm64_imm8,
+    Code::Shr_rm32_imm8,
+    Code::Shr_rm64_imm8,
+    Code::Retnq,
+    Code::Mov_rm8_imm8,
+    Code::Mov_rm16_imm16,
+    Code::Mov_rm32_imm32,
+    Code::Mov_rm64_imm32,
+    Code::Leaveq,
+    Code::Int3,
+    Code::Shr_rm64_1,
+    Code::Call_rel32_64,
+    Code::Jmp_rel32_64,
+    Code::Jmp_rel8_64,
+    Code::Test_rm8_imm8,
+    Code::Neg_rm32,
+    Code::Neg_rm64,
+    Code::Mul_rm64,
+    Code::Div_rm64,
+    Code::Inc_rm64,
+    Code::Dec_rm64,
+    Code::Call_rm64,
+    Code::Syscall,
+    Code::Nop_rm16,
+    Code::Nop_rm32,
+    Code::Cmovb_r64_rm64,
+    Code::Cmovae_r64_rm64,
+    Code::Cmove_r32_rm32,
+    Code::Cmove_r64_rm64,
+    Code::Cmovne_r32_rm32,
+    Code::Cmovne_r64_rm64,
+    Code::Cmova_r64_rm64,
+    Code::Jb_rel32_64,
+    Code::Jae_rel32_64,
+    Code::Je_rel32_64,
+    Code::Jne_rel32_64,
+    Code::Jbe_rel32_64,
+    Code::Ja_rel32_64,
+    Code::Jg_rel32_64,
+    Code::Setb_rm8,
+    Code::Setae_rm8,
+    Code::Sete_rm8,
+    Code::Setne_rm8,
+    Code::Seta_rm8,
+    Code::Setle_rm8,
+    Code::Shld_rm64_r64_imm8,
+    Code::Imul_r32_rm32,
+    Code::Imul_r64_rm64,
+    Code::Movzx_r32_rm8,
+    Code::Movzx_r32_rm16,
+    Code::Movsx_r32_rm8,
+    Code::Movsx_r64_rm8,
+    Code::Xadd_rm32_r32,
+    Code::Xadd_rm64_r64,
+];
+
+/// The implemented forms the lockstep cannot execute, each pinned by a
+/// kernel probe that runs it through the model instead: no golden program
+/// executes `int3`, which K-TRAP-1's breakpoints do.
+#[cfg(test)]
+pub const PROBED_THROUGH_THE_KERNEL: [Code; 1] = [Code::Int3];
 
 const SET_ON_CONDITION: [Mnemonic; 16] = [
     Mnemonic::Seto,
@@ -66,17 +209,11 @@ pub(super) fn execute(
     memory: &mut AddressSpace,
     accesses: &Cell<Accesses>,
 ) -> Step {
-    // Each arm below implements a mnemonic's general-register forms. One
-    // that shares the mnemonic but works on other registers, as SSE's
-    // `movsd` shares the string move's, or moves the stack by other than
-    // a quadword, is a different instruction.
-    let other_registers = (0..instruction.op_count()).any(|operand| {
-        instruction.op_kind(operand) == OpKind::Register
-            && !instruction.op_register(operand).is_gpr()
-    });
-    let narrow_stack = matches!(instruction.mnemonic(), Mnemonic::Push | Mnemonic::Pop)
-        && instruction.stack_pointer_increment().unsigned_abs() != 8;
-    if instruction.encoding() != EncodingKind::Legacy || other_registers || narrow_stack {
+    // Each arm below gives a mnemonic its meaning, but only the forms the
+    // lockstep checked are implemented: one that shares the mnemonic but
+    // works on other registers, as SSE's `movsd` shares the string
+    // move's, or on other widths, is a different instruction.
+    if IMPLEMENTED.binary_search(&instruction.code()).is_err() {
         return Err(Stop::Unsupported);
     }
 
@@ -157,15 +294,7 @@ pub(super) fn execute(
             cpu.push(cpu.registers.rip)?;
             cpu.registers.rip = target;
         }
-        Mnemonic::Ret => {
-            let target = cpu.pop()?;
-            if instruction.op_count() == 1 {
-                let release = cpu.read(0)?;
-                cpu.registers.general[RSP] = cpu.registers.general[RSP].wrapping_add(release);
-            }
-
-            cpu.registers.rip = target;
-        }
+        Mnemonic::Ret => cpu.registers.rip = cpu.pop()?,
         Mnemonic::Jmp => cpu.registers.rip = cpu.branch_target()?,
         Mnemonic::Add | Mnemonic::Sub | Mnemonic::Cmp => {
             let bits = cpu.bits(0)?;
@@ -241,7 +370,7 @@ pub(super) fn execute(
             cpu.write(0, result)?;
             cpu.set_status(status);
         }
-        Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr => {
+        Mnemonic::Shl | Mnemonic::Shr => {
             let bits = cpu.bits(0)?;
             let count = cpu.shift_count(1, bits)?;
             if count != 0 {
@@ -280,22 +409,8 @@ pub(super) fn execute(
             return Ok(Outcome::Syscall);
         }
         Mnemonic::Int3 => return Ok(Outcome::Breakpoint),
-        Mnemonic::Stosb => cpu.string(1, false)?,
-        Mnemonic::Stosw => cpu.string(2, false)?,
-        Mnemonic::Stosd => cpu.string(4, false)?,
-        Mnemonic::Stosq => cpu.string(8, false)?,
-        Mnemonic::Movsb => cpu.string(1, true)?,
-        Mnemonic::Movsw => cpu.string(2, true)?,
-        Mnemonic::Movsd => cpu.string(4, true)?,
-        Mnemonic::Movsq => cpu.string(8, true)?,
-        // A privileged instruction in user mode: a general-protection fault.
-        Mnemonic::Hlt => {
-            return Err(Stop::Fault(Fault {
-                signal: SIGSEGV,
-                code: SI_KERNEL,
-                address: None,
-            }));
-        }
+        Mnemonic::Stosb => cpu.repeated_string(false)?,
+        Mnemonic::Movsb => cpu.repeated_string(true)?,
         _ => return Err(Stop::Unsupported),
     }
 
@@ -336,38 +451,44 @@ impl Cpu<'_> {
         Ok(())
     }
 
-    /// One iteration of `stos` or `movs`, or all of a repeated one that
-    /// has none left. The CPU traps between iterations of a repeated one,
-    /// with `rip` still at it.
-    fn string(&mut self, size: usize, copies: bool) -> Result<(), Stop> {
-        let repeated = self.instruction.has_rep_prefix();
-        if repeated && self.registers.general[RCX] == 0 {
+    /// One iteration of `rep stosb` or `rep movsb`, or all of one that has
+    /// none left. The CPU traps between iterations, with `rip` still at
+    /// the instruction. Only the forms the lockstep executes are
+    /// implemented: one without `rep`, with `repne`, or with 32-bit
+    /// addresses is another instruction.
+    fn repeated_string(&mut self, copies: bool) -> Result<(), Stop> {
+        if !self.instruction.has_rep_prefix()
+            || self.instruction.has_repne_prefix()
+            || self.instruction.op0_kind() != OpKind::MemoryESRDI
+        {
+            return Err(Stop::Unsupported);
+        }
+
+        if self.registers.general[RCX] == 0 {
             return Ok(());
         }
 
         let delta = if self.registers.rflags & DIRECTION == 0 {
-            size as u64
+            1
         } else {
-            (size as u64).wrapping_neg()
+            1_u64.wrapping_neg()
         };
 
         let destination = self.registers.general[RDI];
         let value = if copies {
             let source = self.registers.general[RSI];
-            let value = self.load(source, size)?;
+            let value = self.load(source, 1)?;
             self.registers.general[RSI] = source.wrapping_add(delta);
             value
         } else {
-            self.registers.general[RAX] & mask(size * 8)
+            self.registers.general[RAX] & 0xff
         };
 
-        self.store(destination, size, value)?;
+        self.store(destination, 1, value)?;
         self.registers.general[RDI] = destination.wrapping_add(delta);
-        if repeated {
-            self.registers.general[RCX] -= 1;
-            if self.registers.general[RCX] != 0 {
-                self.registers.rip = self.instruction.ip();
-            }
+        self.registers.general[RCX] -= 1;
+        if self.registers.general[RCX] != 0 {
+            self.registers.rip = self.instruction.ip();
         }
 
         Ok(())

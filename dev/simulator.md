@@ -143,7 +143,9 @@ fail with a model gap that names the operation and action. The response is:
 
 The CPU implements only instructions present in the golden corpus and needed
 to reach modeled behavior. An unknown instruction is a model gap. Do not
-decode it as a no-op.
+decode it as a no-op. The forms it implements are listed in `cpu/ops.rs`'s
+`IMPLEMENTED`, and the CPU lockstep fails unless the corpus executes every
+one, so add a form together with a golden program that executes it.
 
 CPU memory obeys mapping permissions and produces modeled faults. Ptrace
 memory accesses follow ptrace rules and can read or write despite ordinary

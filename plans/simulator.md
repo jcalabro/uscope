@@ -328,11 +328,20 @@ its registers and mappings into the interpreter, and single-steps both
 together. After every instruction it compares the general registers,
 `rip`, and the flags the instruction defines (iced-x86's
 `rflags_undefined` names the rest). At a `syscall`, the native result is
-copied in and writable memory must agree. Threads and fork children take
-turns, switching at system calls, while the others wait in ptrace-stops,
-so the program interleaves on the CPU exactly as in the interpreter. The
-first divergence fails, printed decoded. This validates every instruction
-the corpus executes.
+copied in and writable memory must agree, as it must at each exit.
+Threads and fork children take turns, switching at system calls but
+`fork`, whose caller keeps its turn so that it polls for its child
+before the child runs as well as after, while the others wait in
+ptrace-stops, so the program interleaves on the CPU exactly as in the
+interpreter. The first divergence fails, printed decoded. The test also
+records the iced `Code` of every instruction that completes, and fails
+unless together they are exactly `cpu/ops.rs`'s `IMPLEMENTED` forms but
+`int3`, which K-TRAP-1 runs through the model: every form the model
+implements is validated against the CPU, and the model refuses any
+other, though it shares a mnemonic with one it implements. Forms share
+a `Code` whether their operand is a register or memory, and with or
+without `lock`; the string moves are implemented only with `rep` and
+64-bit addresses, the forms the corpus executes.
 
 ## 7. CPU, memory, and shadow state
 
@@ -340,8 +349,9 @@ the corpus executes.
 gives each implemented instruction its meaning. A step returns its outcome
 (`Completed`, `Syscall`, `Breakpoint`, `Fault`, or `Unsupported`, which is a
 model gap), whether it was a call or a return, and every load and store it
-made, `rep` iterations one at a time. Instructions are added only when the
-corpus needs them, each covered by lockstep. The CPU knows nothing of
+made, `rep` iterations one at a time. Instruction forms are added only
+when the corpus executes them, to `IMPLEMENTED`, where the lockstep
+requires them (section 6). The CPU knows nothing of
 ptrace: the kernel applies the trap flag and the debug registers to each
 outcome and its accesses. The trap flag a single step sets is in
 `rflags` while the instruction runs, so `syscall` saves it in r11, as
