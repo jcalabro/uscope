@@ -664,7 +664,8 @@ impl Client {
 
     /// The first `elements` children of a presentation, in pages of `size`,
     /// each resuming where the one before it ended, until one comes back
-    /// empty, as a page whose budget ran out at once does.
+    /// empty, as a page whose budget ran out at once does: that one is
+    /// kept, to say why.
     async fn pages(
         &self,
         reference: &Arc<crate::ValueChildrenReference>,
@@ -683,12 +684,12 @@ impl Client {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            if page.children.is_empty() {
-                break;
-            }
-
+            let empty = page.children.is_empty();
             offset += page.children.len() as u64;
             pages.push(page);
+            if empty {
+                break;
+            }
         }
 
         Ok(pages)

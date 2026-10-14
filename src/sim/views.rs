@@ -160,6 +160,10 @@ pub struct Shown {
     /// Elements from one page, then from pages of the client's size.
     pub whole: Vec<Item>,
     pub paged: Vec<Item>,
+
+    /// Whether a page of each said its budget ran out, which alone ends
+    /// the elements early.
+    pub truncated: [bool; 2],
 }
 
 /// Where a child's value is and its bytes, when it was read from memory.
@@ -263,8 +267,15 @@ pub fn judge(truth: &Truth, shown: &Shown) -> Result<Vec<Mark>, String> {
                 ));
             }
 
-            for (pages, which) in [(&shown.whole, "one page"), (&shown.paged, "small pages")] {
-                if pages.len() > items.len() || pages[..] != items[..pages.len()] {
+            for ((pages, truncated), which) in [&shown.whole, &shown.paged]
+                .into_iter()
+                .zip(shown.truncated)
+                .zip(["one page", "small pages"])
+            {
+                if pages.len() > items.len()
+                    || pages[..] != items[..pages.len()]
+                    || pages.len() < items.len() && !truncated
+                {
                     return Err(format!(
                         "in {which}, it shows {pages:?}, but holds {items:?}"
                     ));
@@ -299,7 +310,12 @@ pub fn within(page: &ValueChildPage, limits: InspectionLimits) -> Result<(), Str
 
 /// What one presentation's value showed, from the client's observation.
 #[must_use]
-pub fn shown(value: &InspectedValue, whole: Vec<Item>, paged: Vec<Item>) -> Option<Shown> {
+pub fn shown(
+    value: &InspectedValue,
+    whole: Vec<Item>,
+    paged: Vec<Item>,
+    truncated: [bool; 2],
+) -> Option<Shown> {
     let VariableState::Available {
         presentation: Some(presentation),
         ..
@@ -314,6 +330,7 @@ pub fn shown(value: &InspectedValue, whole: Vec<Item>, paged: Vec<Item>) -> Opti
         problem: presentation.problem.clone(),
         whole,
         paged,
+        truncated,
     })
 }
 
@@ -362,6 +379,7 @@ mod tests {
             problem: None,
             whole: items.clone(),
             paged: items,
+            truncated: [false; 2],
         }
     }
 
@@ -378,6 +396,13 @@ mod tests {
         let mut dropped = list_shown(items.clone());
         dropped.whole.remove(1);
         assert!(judge(&truth, &dropped).is_err());
+
+        // Only a page whose budget ran out may end the elements early.
+        let mut ended = list_shown(items.clone());
+        ended.paged.pop();
+        assert!(judge(&truth, &ended).is_err());
+        ended.truncated[1] = true;
+        assert!(judge(&truth, &ended).is_ok());
         let mut moved = list_shown(items.clone());
         moved.paged[2].value.0 += 4;
         assert!(judge(&truth, &moved).is_err());
@@ -407,6 +432,7 @@ mod tests {
             problem: Some(ViewProblem::Cycle { at: 3 }),
             whole: Vec::new(),
             paged: Vec::new(),
+            truncated: [false; 2],
         };
 
         assert_eq!(judge(&truth, &refused), Ok(vec![Mark::ViewCycleRefused]));

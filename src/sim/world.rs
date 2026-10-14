@@ -1178,9 +1178,21 @@ impl<'a> World<'a> {
             }
             Err(error) => Err(format!("reading its elements failed: {error}")),
         };
+        let truncated = |fetched: &Result<Vec<crate::ValueChildPage>, String>| {
+            fetched.as_ref().is_ok_and(|fetched| {
+                fetched
+                    .iter()
+                    .any(|page| page.completion != crate::InspectionCompletion::Complete)
+            })
+        };
 
-        let shown = views::shown(value, items(whole)?, items(paged)?)
-            .ok_or_else(|| format!("its view presented nothing: {:?}", value.state))?;
+        let shown = views::shown(
+            value,
+            items(whole)?,
+            items(paged)?,
+            [truncated(whole), truncated(paged)],
+        )
+        .ok_or_else(|| format!("its view presented nothing: {:?}", value.state))?;
         views::judge(&truth, &shown)
     }
 
