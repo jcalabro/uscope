@@ -882,7 +882,10 @@ impl Cli {
         }
         match self.execute(line).await? {
             Control::Continue(output) => Ok(Some(output)),
-            Control::ClearScreen | Control::Quit => unreachable!("refused above"),
+            Control::ClearScreen | Control::Quit => bail!(
+                "`{}` is not available in the debug console; use the debugger's controls",
+                spec.name
+            ),
         }
     }
 
@@ -1001,15 +1004,14 @@ impl Cli {
         let renderer = self.renderers.stdout;
         let mut output = format::breakpoint(&breakpoint, &placed, renderer);
         if address && !temporary && self.keeps_breakpoints() {
-            write!(
+            let _ = write!(
                 output,
                 "\n{}",
                 renderer.paint(
                     Role::Muted,
                     "(not kept for the next session: an address does not survive a rebuild)"
                 )
-            )
-            .expect("writing to a String cannot fail");
+            );
         }
         Ok(output)
     }
@@ -2101,7 +2103,10 @@ impl Cli {
             [] => {
                 let mut lines = vec!["values are presented with, in order:".to_owned()];
                 {
-                    let views = self.views.lock().expect("the view sources are whole");
+                    let views = self
+                        .views
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lines.extend(
                         views
                             .session
@@ -2126,7 +2131,10 @@ impl Cli {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|error| anyhow!(error))?;
                 {
-                    let mut views = self.views.lock().expect("the view sources are whole");
+                    let mut views = self
+                        .views
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     views.session.splice(0..0, files.into_iter().rev());
                 }
                 for warning in self.reload_views().await {
@@ -2140,7 +2148,7 @@ impl Cli {
             ["clear"] => {
                 self.views
                     .lock()
-                    .expect("the view sources are whole")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .session
                     .clear();
                 for warning in self.reload_views().await {
@@ -2391,12 +2399,13 @@ impl Cli {
             output.push('\n');
             match self.source_context().await {
                 Ok(context) => output.push_str(&self.source_listing(&context, true).await),
-                Err(error) => write!(
-                    output,
-                    "{}: {error}",
-                    renderer.paint(Role::Warning, "source unavailable")
-                )
-                .expect("writing to a String cannot fail"),
+                Err(error) => {
+                    _ = write!(
+                        output,
+                        "{}: {error}",
+                        renderer.paint(Role::Warning, "source unavailable")
+                    );
+                }
             }
         }
         Ok(output)
@@ -2457,12 +2466,11 @@ impl Cli {
                 renderer.paint(Role::Metadata, source)
             );
             if with_address {
-                write!(
+                let _ = write!(
                     text,
                     " ({})",
                     renderer.paint(Role::Metadata, location.address)
-                )
-                .expect("writing to a String cannot fail");
+                );
             }
             return Ok(text);
         }
@@ -2639,7 +2647,7 @@ impl Cli {
         let cached = self
             .highlights
             .lock()
-            .expect("the highlight cache is whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(path)
             .filter(|(when, _)| *when == modified)
             .map(|(_, lexed)| lexed.clone());
@@ -2656,7 +2664,7 @@ impl Cli {
         );
         self.highlights
             .lock()
-            .expect("the highlight cache is whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(path.to_owned(), (modified, lexed.clone()));
         Some(lexed)
     }
@@ -2685,7 +2693,7 @@ fn parse_frame_target(spec: &CommandSpec, argument: Option<&str>) -> Result<Fram
         (Command::Frame, Some(level)) => FrameTarget::Level(level),
         (Command::Up, count) => FrameTarget::Outward(count.unwrap_or(1)),
         (Command::Down, count) => FrameTarget::Inward(count.unwrap_or(1)),
-        _ => unreachable!("only frame commands select frames"),
+        _ => return Err(spec.usage_error()),
     })
 }
 
@@ -3179,7 +3187,7 @@ impl Cli {
         let current = *self
             .exceptions
             .lock()
-            .expect("the exception stops are whole");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let filters = uscope::ExceptionStops::filters();
         let (shown, stops) = match arguments {
             [] => (filters.iter().collect::<Vec<_>>(), current),
@@ -3197,14 +3205,15 @@ impl Cli {
                 let stops = match choice {
                     [] => current,
                     ["on" | "off"] => {
-                        let chosen = current
-                            .with(filter.id, choice[0] == "on")
-                            .expect("a listed filter");
+                        let chosen =
+                            current.with(filter.id, choice[0] == "on").ok_or_else(|| {
+                                anyhow!("exception filter '{}' cannot be set", filter.id)
+                            })?;
                         self.debugger.set_exception_stops(chosen).await?;
                         *self
                             .exceptions
                             .lock()
-                            .expect("the exception stops are whole") = chosen;
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = chosen;
                         chosen
                     }
                     _ => return Err(spec.usage_error()),

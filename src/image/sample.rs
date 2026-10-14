@@ -1,5 +1,10 @@
 //! A small image with every kind of row, which tests and the fuzz harness
 //! change to see what validation makes of it.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests and the fuzz harness build the sample"
+)]
 
 use std::path::PathBuf;
 
@@ -1267,6 +1272,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     for range in image.table::<LineRange>() {
         read = read.wrapping_add(
             lines::line_entry(addresses, rows, extras, range)
+                .expect("every range has a location")
                 .location
                 .line
                 .get(),

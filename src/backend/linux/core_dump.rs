@@ -333,7 +333,7 @@ fn parse<'data, R: ReadRef<'data>>(data: R, len: u64) -> Result<Metadata, CoreEr
                 let mut iterator = program_header
                     .notes(endian, data)
                     .map_err(|error| invalid(format!("note segment is malformed: {error}")))?
-                    .expect("PT_NOTE headers yield notes");
+                    .ok_or_else(|| invalid("note segment is malformed"))?;
                 parse_notes(&mut iterator, &mut notes)?;
             }
             _ => {}
@@ -442,16 +442,25 @@ fn current_thread<'a>(
         .ok_or_else(|| invalid(format!("{note} precedes every NT_PRSTATUS note")))
 }
 
-fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("two bytes"))
+/// Reads `N` bytes at `offset`, or reports that the note ends before them.
+fn bytes_at<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], CoreError> {
+    bytes
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk::<N>)
+        .copied()
+        .ok_or_else(|| invalid("a core note field lies past the end of its note"))
 }
 
-fn i32_at(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, CoreError> {
+    Ok(u16::from_le_bytes(bytes_at(bytes, offset)?))
 }
 
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("eight bytes"))
+fn i32_at(bytes: &[u8], offset: usize) -> Result<i32, CoreError> {
+    Ok(i32::from_le_bytes(bytes_at(bytes, offset)?))
+}
+
+fn u64_at(bytes: &[u8], offset: usize) -> Result<u64, CoreError> {
+    Ok(u64::from_le_bytes(bytes_at(bytes, offset)?))
 }
 
 fn c_string(bytes: &[u8]) -> Arc<str> {
@@ -469,17 +478,17 @@ fn parse_prstatus(bytes: &[u8]) -> Result<CoreThread, CoreError> {
             bytes.len()
         )));
     }
-    let tid = u32::try_from(i32_at(bytes, PRSTATUS_PID_OFFSET))
+    let tid = u32::try_from(i32_at(bytes, PRSTATUS_PID_OFFSET)?)
         .ok()
         .filter(|tid| *tid != 0)
         .ok_or_else(|| invalid("NT_PRSTATUS names an invalid thread identifier"))?;
     let mut values = [0_u64; GENERAL_REGISTER_COUNT];
     for (index, value) in values.iter_mut().enumerate() {
-        *value = u64_at(bytes, PRSTATUS_REGISTERS_OFFSET + index * 8);
+        *value = u64_at(bytes, PRSTATUS_REGISTERS_OFFSET + index * 8)?;
     }
     Ok(CoreThread {
         tid,
-        current_signal: u16_at(bytes, PRSTATUS_SIGNAL_OFFSET),
+        current_signal: u16_at(bytes, PRSTATUS_SIGNAL_OFFSET)?,
         registers: user_registers(values),
         fxsave: None,
         signal: None,
@@ -552,13 +561,12 @@ pub(super) const fn user_registers(
 }
 
 fn parse_siginfo(bytes: &[u8]) -> Result<CoreSignal, CoreError> {
-    if bytes.len() != SIGINFO_SIZE {
-        return Err(invalid(format!(
+    let bytes = <&[u8; SIGINFO_SIZE]>::try_from(bytes).map_err(|_| {
+        invalid(format!(
             "NT_SIGINFO has {} bytes; expected {SIGINFO_SIZE}",
             bytes.len()
-        )));
-    }
-    let bytes = bytes.try_into().expect("its size was just checked");
+        ))
+    })?;
     let (number, metadata) = super::native::decode_siginfo(bytes);
     Ok(CoreSignal {
         number,
@@ -575,7 +583,7 @@ fn parse_prpsinfo(bytes: &[u8]) -> Result<CoreProcess, CoreError> {
             bytes.len()
         )));
     }
-    let pid = u32::try_from(i32_at(bytes, PRPSINFO_PID_OFFSET))
+    let pid = u32::try_from(i32_at(bytes, PRPSINFO_PID_OFFSET)?)
         .ok()
         .filter(|pid| *pid != 0)
         .ok_or_else(|| invalid("NT_PRPSINFO names an invalid process identifier"))?;
@@ -591,11 +599,15 @@ fn parse_auxv(bytes: &[u8]) -> Result<Vec<(u64, u64)>, CoreError> {
     if !remainder.is_empty() {
         return Err(invalid("NT_AUXV is not a whole number of entries"));
     }
-    Ok(entries
-        .iter()
-        .map(|entry| (u64_at(entry, 0), u64_at(entry, 8)))
-        .take_while(|&(key, _)| key != 0)
-        .collect())
+    let mut pairs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = u64_at(entry, 0)?;
+        if key == 0 {
+            break;
+        }
+        pairs.push((key, u64_at(entry, 8)?));
+    }
+    Ok(pairs)
 }
 
 fn parse_files(bytes: &[u8]) -> Result<Vec<CoreFileMapping>, CoreError> {
@@ -603,8 +615,8 @@ fn parse_files(bytes: &[u8]) -> Result<Vec<CoreFileMapping>, CoreError> {
     if bytes.len() < 16 {
         return Err(malformed());
     }
-    let count = usize::try_from(u64_at(bytes, 0)).map_err(|_| malformed())?;
-    let page_size = u64_at(bytes, 8);
+    let count = usize::try_from(u64_at(bytes, 0)?).map_err(|_| malformed())?;
+    let page_size = u64_at(bytes, 8)?;
     if page_size == 0 {
         return Err(invalid("NT_FILE declares a zero page size"));
     }
@@ -620,9 +632,9 @@ fn parse_files(bytes: &[u8]) -> Result<Vec<CoreFileMapping>, CoreError> {
     let mut files = Vec::with_capacity(count);
     for index in 0..count {
         let entry = 16 + index * FILE_ENTRY_SIZE;
-        let start = u64_at(bytes, entry);
-        let end = u64_at(bytes, entry + 8);
-        let file_offset = u64_at(bytes, entry + 16)
+        let start = u64_at(bytes, entry)?;
+        let end = u64_at(bytes, entry + 8)?;
+        let file_offset = u64_at(bytes, entry + 16)?
             .checked_mul(page_size)
             .ok_or_else(malformed)?;
         if start >= end {
@@ -789,7 +801,8 @@ pub(super) fn recorded_build_id(
         return Ok(None);
     };
     let length = run.min(first.end - first.start).min(MAX_RECORDED_HEADER);
-    let mut header = vec![0; usize::try_from(length).expect("the header bound fits usize")];
+    let mut header =
+        vec![0; usize::try_from(length).map_err(|_| invalid("the header bound is too large"))?];
     core.source.read_exact_at(&mut header, offset)?;
     Ok(elf_build_id(header.as_slice()).map(<[u8]>::to_vec))
 }

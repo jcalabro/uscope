@@ -63,6 +63,8 @@ not current user documentation. Do not rewrite them while changing docs.
   assert on input. Use `debug_assert!` by default and `assert!` only when
   continuing would damage the tracee. See
   [`dev/assertions.md`](dev/assertions.md).
+- Production code never calls `unwrap`, `expect`, `panic!`, or
+  `unreachable!`; Clippy denies them outside tests. Return an error instead.
 - Unsafe code is denied unless narrowly required. Every exception needs a
   safety comment and must pass the configured lints. Unsafe code must be
   tested under Miri.

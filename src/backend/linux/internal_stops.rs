@@ -44,12 +44,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             edit.reject(error);
             return;
         }
-        self.inferior
+        let Some(barrier) = self
+            .inferior
             .as_mut()
             .and_then(|inferior| inferior.barrier.as_mut())
-            .expect("an internal stop has a barrier")
-            .edits
-            .push(edit);
+        else {
+            edit.reject(Error::internal("an internal stop has a barrier"));
+            return;
+        };
+        barrier.edits.push(edit);
         if let Err(error) = self.finish_barrier_if_ready() {
             self.fail_inferior(error);
         }
@@ -157,7 +160,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.barrier.as_mut())
-            .expect("an internal stop has a barrier");
+            .ok_or_else(|| Error::internal("an internal stop has a barrier"))?;
         let kind = std::mem::discriminant(&edit);
         if !barrier
             .edits
@@ -209,7 +212,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.thread_mut(pid)?.stopped_at_breakpoint = Some(address);
         if inferior.barrier.is_none() && others_stopped(inferior, pid) {
-            self.queue_repair(pid, address);
+            self.queue_repair(pid, address)?;
             return self.start_next_repair();
         }
         // The repair runs when the stop resumes execution.

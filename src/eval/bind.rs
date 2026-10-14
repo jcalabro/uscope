@@ -90,9 +90,8 @@ fn bind_as<S: Scope>(
     finish: Finish,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
     let mut casts = 0;
-    let binder = Binder::new(scope, expression.text(), mode, None);
     for (index, ambiguity) in expression.ambiguities().iter().enumerate() {
-        if binder.names_value(&ambiguity.name)? {
+        if Binder::names_value(scope, &ambiguity.name)? {
             continue;
         }
         let ty = TypeName {
@@ -100,7 +99,7 @@ fn bind_as<S: Scope>(
             pointers: 0,
             span: ambiguity.span,
         };
-        if binder.resolve_type(&ty).is_ok() {
+        if Binder::resolve_type(scope, &ty).is_ok() {
             casts |= 1 << index;
         } else {
             return Err(ExpressionError::new(
@@ -114,7 +113,7 @@ fn bind_as<S: Scope>(
         }
     }
     let tree = expression.reading(casts).map_err(Clone::clone)?;
-    let mut binder = Binder::new(scope, expression.text(), mode, Some(tree));
+    let mut binder = Binder::new(scope, expression.text(), mode, tree);
     let root = match tree.kind(tree.root()) {
         NodeKind::Assign { op, target, value } if mode == Mode::Assign => {
             binder.assignment(*op, *target, *value, tree.span(tree.root()))?
@@ -149,12 +148,12 @@ struct Binder<'a, S: Scope> {
     scope: &'a S,
     text: &'a str,
     mode: Mode,
-    tree: Option<&'a Tree>,
+    tree: &'a Tree,
     nodes: usize,
 }
 
 impl<'a, S: Scope> Binder<'a, S> {
-    const fn new(scope: &'a S, text: &'a str, mode: Mode, tree: Option<&'a Tree>) -> Self {
+    const fn new(scope: &'a S, text: &'a str, mode: Mode, tree: &'a Tree) -> Self {
         Self {
             scope,
             text,
@@ -165,11 +164,16 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     const fn tree(&self) -> &'a Tree {
-        self.tree.expect("binding a reading")
+        self.tree
     }
 
     fn error(span: Span, kind: ErrorKind, message: impl Into<String>) -> ExpressionError {
         ExpressionError::new(kind, span, message)
+    }
+
+    /// A broken invariant of the binder, which no expression can cause.
+    fn broken(span: Span, fact: &str) -> ExpressionError {
+        Self::error(span, ErrorKind::Unsupported, format!("internal: {fact}"))
     }
 
     /// `$arg0` to `$arg5`, `$ret`, or `$path`: what the call that stopped
@@ -298,10 +302,14 @@ impl<'a, S: Scope> Binder<'a, S> {
                         format!("there is no register `${name}`"),
                     )
                 })?;
-                let ty = Ty::Int(
-                    IntType::new(register.width, false)
-                        .unwrap_or_else(|| IntType::new(64, false).expect("64 is a valid width")),
-                );
+                let Some(int) = IntType::new(register.width, false) else {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Unsupported,
+                        format!("`${name}` has a width of {} bits", register.width),
+                    ));
+                };
+                let ty = Ty::Int(int);
                 self.node(Op::Register(register), ty, span)
             }
             NodeKind::Integer { value, suffix } => self.integer(value, suffix, false, span),
@@ -340,7 +348,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 )),
             },
             NodeKind::Cast { ty, operand, .. } => {
-                let target = self.resolve_type(&ty)?;
+                let target = Self::resolve_type(self.scope, &ty)?;
                 let operand = self.bind(operand)?;
                 self.convert(operand, target, span)
             }
@@ -389,19 +397,19 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
             NodeKind::Slice { base, start, end } => self.slice(id, base, start, end, span),
             NodeKind::SizeOf(SizeOf::Type(ty)) => {
-                let ty = self.resolve_type(&ty)?;
+                let ty = Self::resolve_type(self.scope, &ty)?;
                 self.size_constant(&ty, span)
             }
             NodeKind::SizeOf(SizeOf::Operand(operand)) => {
                 if let NodeKind::Name(path) = self.tree().kind(operand).clone()
-                    && !self.names_value(&path)?
+                    && !Self::names_value(self.scope, &path)?
                 {
                     let name = TypeName {
                         base: TypeBase::Named(path),
                         pointers: 0,
                         span: self.tree().span(operand),
                     };
-                    let ty = self.resolve_type(&name)?;
+                    let ty = Self::resolve_type(self.scope, &name)?;
                     return self.size_constant(&ty, span);
                 }
                 let operand = self.bind(operand)?;
@@ -409,7 +417,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 self.size_constant(&operand.ty, span)
             }
             NodeKind::OffsetOf { ty, member } => {
-                let ty = self.resolve_type(&ty)?;
+                let ty = Self::resolve_type(self.scope, &ty)?;
                 self.offset_constant(&ty, &member, span)
             }
             NodeKind::ContainerOf {
@@ -418,7 +426,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 member,
             } => {
                 let pointer = self.bind(pointer)?;
-                let target = self.resolve_type(&ty)?;
+                let target = Self::resolve_type(self.scope, &ty)?;
                 self.container_of(pointer, target, &member, span)
             }
             NodeKind::Global(name) => match self.scope.global(&name) {
@@ -541,11 +549,10 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     /// Whether a path names a value, possibly through members.
-    fn names_value(&self, path: &Path) -> Result<bool, ExpressionError> {
+    fn names_value(scope: &S, path: &Path) -> Result<bool, ExpressionError> {
         for count in Self::splits(path) {
             let span = path.segments[0].span.to(path.segments[count - 1].span);
-            match self
-                .scope
+            match scope
                 .lookup(&Self::prefix_text(path, count), path.global)
                 .map_err(|refusal| Self::refused(span, refusal))?
             {
@@ -671,7 +678,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             Some(Suffix::Size { signed }) => {
                 IntType::new(self.scope.pointer_size().saturating_mul(8), signed)
             }
-            Some(Suffix::F32 | Suffix::F64) => unreachable!("float suffixes make float literals"),
+            Some(Suffix::F32 | Suffix::F64) => None,
         };
         let int =
             int.ok_or_else(|| Self::error(span, ErrorKind::Syntax, "the suffix names no type"))?;
@@ -695,13 +702,13 @@ impl<'a, S: Scope> Binder<'a, S> {
     // ---- Types ----
 
     /// The type a type name means: a built-in, then the program's.
-    fn resolve_type(&self, name: &TypeName) -> Result<Ty, ExpressionError> {
+    fn resolve_type(scope: &S, name: &TypeName) -> Result<Ty, ExpressionError> {
         let span = name.span;
         let query = match &name.base {
             TypeBase::Named(path) => {
                 if let [segment] = path.segments.as_slice()
                     && !path.global
-                    && let Some(ty) = builtin(&segment.name, self.scope.pointer_size())
+                    && let Some(ty) = builtin(&segment.name, scope.pointer_size())
                 {
                     return Ok(Self::pointers(ty, name.pointers));
                 }
@@ -721,7 +728,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 tag: Some(*tag),
             },
         };
-        match self.scope.lookup_type(&query) {
+        match scope.lookup_type(&query) {
             TypeLookup::Found(ty) => Ok(Self::pointers(Ty::Program(ty), name.pointers)),
             TypeLookup::Ambiguous(candidates) => Err(Self::error(
                 span,
@@ -737,7 +744,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             TypeLookup::NotFound => match &name.base {
                 TypeBase::CWords(_)
                     if let Some(c) = CBaseType::from_name(&query.name)
-                        && self.scope.c_base_type(c).is_some() =>
+                        && scope.c_base_type(c).is_some() =>
                 {
                     Ok(Self::pointers(Ty::C(c), name.pointers))
                 }
@@ -901,7 +908,10 @@ impl<'a, S: Scope> Binder<'a, S> {
     fn deref_place(&mut self, node: Bound<S>) -> BindResult<S> {
         let span = node.span;
         let Ty::Program(from) = node.ty else {
-            unreachable!("only program types are stored in places")
+            return Err(Self::broken(
+                span,
+                "only program types are stored in places",
+            ));
         };
         let planned = self
             .scope
@@ -979,7 +989,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 // `*array` is its first element.
                 let pointer = self.operand(node)?;
                 let Ty::Pointer(element) = pointer.ty.clone() else {
-                    unreachable!("an array decays to a pointer")
+                    return Err(Self::broken(span, "an array decays to a pointer"));
                 };
                 self.deref_value(pointer, &element, span)
             }
@@ -1427,7 +1437,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         _ => None,
                     })
                     .max()
-                    .expect("one operand is a float");
+                    .ok_or_else(|| Self::broken(span, "one operand is a float"))?;
                 let left = self.float_operand(left, format)?;
                 let right = self.float_operand(right, format)?;
                 let op = match op {
@@ -1747,7 +1757,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                             },
                         })
                         .max()
-                        .expect("one branch is a float");
+                        .ok_or_else(|| Self::broken(span, "one branch is a float"))?;
                     let then = self.float_operand(then, format)?;
                     let otherwise = self.float_operand(otherwise, format)?;
                     (then, otherwise, Ty::Float(format))
@@ -2085,7 +2095,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             return Err(self.type_error(&base, &category, what));
         }
         let Ty::Program(from) = base.ty else {
-            unreachable!("records are program types")
+            return Err(Self::broken(base.span, "records are program types"));
         };
         if !base.is_place() {
             return Err(Self::error(
@@ -2159,7 +2169,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         ty,
                         *span,
                     )?;
-                    let target = target.expect("a sized pointee");
+                    let target = target.ok_or_else(|| Self::broken(*span, "a sized pointee"))?;
                     node = self.deref_value(moved, &target, *span)?;
                     pending = &pending[1..];
                 }
@@ -2174,7 +2184,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     if node.is_place() =>
                 {
                     let Ty::Program(from) = node.ty else {
-                        unreachable!("indexed places are program types")
+                        return Err(Self::broken(*span, "indexed places are program types"));
                     };
                     let native = matches!(
                         category,

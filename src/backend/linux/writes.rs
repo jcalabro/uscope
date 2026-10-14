@@ -84,7 +84,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if !(address.get()..end).contains(&target) {
                     continue;
                 }
-                let user = bytes[usize::try_from(target - address.get()).expect("bounded")];
+                let user = usize::try_from(target - address.get())
+                    .ok()
+                    .and_then(|offset| bytes.get(offset))
+                    .copied()
+                    .ok_or_else(|| Error::internal("a write covers the bytes it stores"))?;
                 count += 1;
                 match inferior.breakpoints.get(&VirtualAddress::new(target)) {
                     Some(site) if site.installed => hidden.push((target, user)),
@@ -234,7 +238,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let reason = StopReason::Jump;
         let presentation = self.presentation_for_thread(pid, Some(&reason))?;
         let pc = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
-        let stop_id = self.ptrace.allocate_stop_id();
+        let stop_id = self.ptrace.allocate_stop_id()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let execution = ExecutionId::new(inferior.next_execution + 1);
         inferior.next_execution = execution.get();

@@ -272,14 +272,18 @@ enum Next {
 impl<'a> Run<'a> {
     fn new(image: &'a dyn DispatchImage, member: StateMember, value: u64) -> Self {
         let mut registers = [UNKNOWN; 16];
-        registers[index(Register::RDI).expect("rdi is general")] = Cell {
-            value: Value::Object(0),
-            state: false,
-        };
-        registers[index(Register::RSP).expect("rsp is general")] = Cell {
-            value: Value::Stack(0),
-            state: false,
-        };
+        if let Some(rdi) = index(Register::RDI) {
+            registers[rdi] = Cell {
+                value: Value::Object(0),
+                state: false,
+            };
+        }
+        if let Some(rsp) = index(Register::RSP) {
+            registers[rsp] = Cell {
+                value: Value::Stack(0),
+                state: false,
+            };
+        }
         Self {
             image,
             member,

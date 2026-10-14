@@ -905,7 +905,11 @@ impl DwarfVariableInfo {
                             words: *words,
                         });
                     }
-                    _ => unreachable!("only arrays and slices were accepted above"),
+                    _ => {
+                        return Err(Error::internal(
+                            "only arrays and slices were accepted as indexable",
+                        ));
+                    }
                 }
                 Ok(planned(steps, consumed, Some(element)))
             }
@@ -1187,7 +1191,9 @@ impl DwarfVariableInfo {
                 ));
             }
             Metadata::Absent(MetadataAbsence::NoFrameBase | MetadataAbsence::NotApplicable) => {
-                unreachable!("data-object value cannot contain a frame-base absence")
+                return Err(EvaluateError::Malformed(
+                    "data-object value cannot contain a frame-base absence".into(),
+                ));
             }
             Metadata::Malformed(description) => {
                 return Err(EvaluateError::Malformed(description));
@@ -1222,7 +1228,9 @@ impl DwarfVariableInfo {
             });
         }
         let ValueDescription::Location(location) = description else {
-            unreachable!("constant values returned above")
+            return Err(EvaluateError::Malformed(
+                "constant value reached location lookup".into(),
+            ));
         };
         let expression = select(self.locations().list(location), address)
             .map_err(|error| match error {
@@ -1311,7 +1319,8 @@ impl DwarfVariableInfo {
                 "slice descriptor size does not match its target layout".into(),
             ));
         }
-        let size = usize::try_from(byte_size).expect("a few words fit usize");
+        let size =
+            usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let (source, raw) = storage::read(storage, size, runtime, budget)?;
         let word = |index: u8| {
             let index = usize::from(index);
@@ -1386,7 +1395,7 @@ impl DwarfVariableInfo {
                 &ValueStorage::Memory(closure),
                 context,
                 type_id,
-                u64::try_from(captures.len()).expect("capture count fits u64"),
+                captures.len() as u64,
                 None,
             )),
             Some(Err(_)) | None => {
@@ -2115,15 +2124,23 @@ impl DwarfVariableInfo {
                 Ok((source, raw, padding)) => match decode_scalar(base, &raw, self.target) {
                     // Bytes the program does not hold are no part of the
                     // value it shows.
-                    Ok(value) if padding => leaf(
-                        source,
-                        Arc::from(
-                            &raw[..usize::try_from(significant_bytes(base, self.target))
-                                .expect("a scalar's size fits usize")],
-                        ),
-                        VariableValue::Scalar(value),
-                        DereferenceState::NotApplicable,
-                    ),
+                    Ok(value) if padding => {
+                        let Some(significant) =
+                            usize::try_from(significant_bytes(base, self.target))
+                                .ok()
+                                .and_then(|count| raw.get(..count))
+                        else {
+                            return Err(Error::internal(
+                                "a scalar's significant bytes exceed its storage",
+                            ));
+                        };
+                        leaf(
+                            source,
+                            Arc::from(significant),
+                            VariableValue::Scalar(value),
+                            DereferenceState::NotApplicable,
+                        )
+                    }
                     // A complex number's parts are its children.
                     Ok(value @ ScalarValue::Complex { .. })
                         if self.complex_part_type(base).is_some() =>
@@ -2664,9 +2681,9 @@ impl DwarfVariableInfo {
                 usage: budget.usage(),
             });
         }
-        let mut children = Vec::with_capacity(
-            usize::try_from(requested_end - offset).expect("page limit fits usize"),
-        );
+        let page_len = usize::try_from(requested_end - offset)
+            .map_err(|_| Error::internal("child page length exceeds usize"))?;
+        let mut children = Vec::with_capacity(page_len);
         // Linear pages are the common high-volume path. Capture one bounded
         // contiguous interval so scalar children do not turn a 256-element
         // page into 256 ptrace reads. If the coalesced read crosses an
@@ -2793,10 +2810,14 @@ impl DwarfVariableInfo {
                 break;
             }
             let (relationship, type_id, child_storage) = if let Some(captures) = &captures {
-                let (member, by_reference) =
-                    &captures[usize::try_from(index).expect("bounded capture index fits usize")];
+                let Some((member, by_reference)) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| captures.get(index))
+                else {
+                    return Err(Error::internal("child index is past its captures"));
+                };
                 let RecordMemberLayout::ByteOffset(capture_offset) = member.layout else {
-                    unreachable!("captures are located by their offset")
+                    return Err(Error::internal("captures are not located by their offset"));
                 };
                 let mut child_storage = i64::try_from(capture_offset)
                     .map_err(|_| VariableUnavailableReason::EvaluationLimit.into())
@@ -2823,7 +2844,8 @@ impl DwarfVariableInfo {
                     child_storage,
                 )
             } else if let Some((aggregate, bases, members, variant)) = aggregate {
-                let index = usize::try_from(index).expect("bounded aggregate index fits usize");
+                let index = usize::try_from(index)
+                    .map_err(|_| Error::internal("aggregate child index exceeds usize"))?;
                 let (child, relationship, type_id, layout) = if let Some(base) = bases.get(index) {
                     (
                         DynamicAggregateChild::Base(index),

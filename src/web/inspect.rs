@@ -153,14 +153,14 @@ pub async fn sources(images: &Images) -> SourceFiles {
 /// Functions whose names hold `query`, ASCII case aside: whole names first,
 /// then those it begins, holds, or holds the letters of in order, and
 /// shorter names before longer ones.
-pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
+pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functions, Failure> {
     let wanted = query.query.trim().to_ascii_lowercase();
     let limit = query.limit.map_or(50, |limit| limit.min(200)) as usize;
     if wanted.is_empty() {
-        return Functions {
+        return Ok(Functions {
             functions: Vec::new(),
             more: false,
-        };
+        });
     }
     let images = images.with_sources().await;
     // A short query matches most of a large program, so candidates are
@@ -202,7 +202,12 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
         }
         let (_, _, _, module, id) = candidates[position];
         let image = &images[module];
-        let function = image.function(id).expect("a candidate's function");
+        let Some(function) = image.function(id) else {
+            return Err(Failure::new(
+                ErrorKind::Failed,
+                "internal: a ranked candidate names no function",
+            ));
+        };
         let declared = function.declaration();
         let described = FunctionMatch {
             name: function.name().to_string(),
@@ -222,10 +227,10 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Functions {
         }
         found.push(described);
     }
-    Functions {
+    Ok(Functions {
         functions: found,
         more,
-    }
+    })
 }
 
 /// How well `name` matches `query`, both lowercase, best first, or none.
@@ -254,7 +259,7 @@ pub async fn source(
     let recorded = Path::new(path);
     let mut found = None;
     let mut breakable = BTreeSet::new();
-    let every = LineNumber::new(1).expect("one")..=LineNumber::new(u64::MAX).expect("nonzero");
+    let every = FIRST_LINE..=LAST_LINE;
     for image in images.with_sources().await {
         let Some(file) = image
             .source_files()
@@ -283,6 +288,9 @@ pub async fn source(
 
 /// The most tasks a list holds, each of which costs a backtrace.
 const TASK_LIMIT: usize = 512;
+
+const FIRST_LINE: LineNumber = LineNumber::new(1).expect("line one is nonzero");
+const LAST_LINE: LineNumber = LineNumber::new(u64::MAX).expect("u64::MAX is nonzero");
 
 /// The program's tasks at a stop, each where the code the program wrote
 /// has it, as the CLI's `tasks` says.

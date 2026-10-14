@@ -87,6 +87,13 @@ enum DwarfError {
     },
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
+    #[error(transparent)]
+    Binding(crate::image::facts::Unbound),
+    /// More of something than an image numbers with its `u32` ids.
+    #[error("the debug information has more {0} than an image can hold")]
+    TooMany(&'static str),
+    #[error("the debug information does not fit an image: {0}")]
+    Seal(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl DwarfError {
@@ -302,7 +309,11 @@ impl<'a, 'data> DieWalk<'a, 'data> {
     pub(super) fn decode(
         &mut self,
     ) -> gimli::Result<&gimli::DebuggingInformationEntry<Reader<'data>>> {
-        let (abbreviation, die) = self.pending.take().expect("a DIE to decode");
+        let Some((abbreviation, die)) = self.pending.take() else {
+            return Err(gimli::Error::NoEntryAtGivenOffset(
+                self.entry.offset.0 as u64,
+            ));
+        };
         self.entry.tag = abbreviation.tag();
         self.entry.has_children = abbreviation.has_children();
         self.entry.offset = die.offset;
@@ -608,7 +619,7 @@ impl<'data> Units<'data> {
         }
         gimli::UnitOffset(key.offset)
             .to_debug_info_offset(&self.units[key.unit].header)
-            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
+            .map(|offset| offset.0 as u64)
     }
 }
 
@@ -869,9 +880,7 @@ fn load_debug_info(
             .map(|file| Arc::new(file.path.clone())),
         id: image_id,
     };
-    let built = |tables| {
-        bind(&binding, Arc::new(tables)).expect("an image binds to the files it was built from")
-    };
+    let built = |tables| bind(&binding, Arc::new(tables)).map_err(DwarfError::Binding);
     let read = |separate: Option<&super::separate::DebugFile>, supplementary: &Supplementary| {
         let rejected = rejected
             .as_ref()
@@ -882,7 +891,7 @@ fn load_debug_info(
         let read = read(separate.as_ref(), &supplementary)?;
         // What the image was read from is not needed to seal it.
         drop((separate, supplementary, rejected));
-        return Ok((built(read.seal()), CacheOutcome::Off));
+        return Ok((built(read.seal()?)?, CacheOutcome::Off));
     };
     let phase = crate::span!("cache.read");
     let mut inputs = vec![data];
@@ -915,13 +924,13 @@ fn load_debug_info(
     crate::count!("cache_misses", 1);
     let read = read(separate.as_ref(), &supplementary)?;
     drop((separate, supplementary, rejected));
-    let tables = read.seal();
+    let tables = read.seal()?;
     let phase = crate::span!("cache.write");
     if let Err(error) = cache.put(key, &tables) {
         crate::cache::report(format_args!("{error}"));
     }
     drop(phase);
-    Ok((built(tables), outcome))
+    Ok((built(tables)?, outcome))
 }
 
 /// Reads what an image of a file's debug information holds, from the
@@ -1049,9 +1058,9 @@ struct Read {
 }
 
 impl Read {
-    fn seal(self) -> crate::image::Image {
+    fn seal(self) -> std::result::Result<crate::image::Image, DwarfError> {
         let _phase = crate::span!("image_indexes");
-        crate::model::seal(self.target, self.address_range, self.metadata)
+        crate::model::seal(self.target, self.address_range, self.metadata).map_err(DwarfError::Seal)
     }
 }
 
@@ -2740,6 +2749,17 @@ fn code_instances(
             count += 1;
         }
     }
+    if let Some(((function, _), _)) = raw
+        .iter()
+        .zip(&instances)
+        .zip(definitions)
+        .find(|((_, id), definition)| id.is_some() && function_ids[**definition].is_none())
+    {
+        return Err(DwarfError::ReferencedFunctionMissing {
+            unit: function.key.unit,
+            offset: function.key.offset,
+        });
+    }
     let code_instances = raw
         .par_iter()
         .zip(&instances)
@@ -2747,7 +2767,8 @@ fn code_instances(
         .filter_map(|((function, id), definition)| {
             Some(CodeInstanceInfo {
                 id: (*id)?,
-                function: function_ids[*definition].expect("definition has a function ID"),
+                // Every instance's definition has an ID, as checked above.
+                function: function_ids[*definition]?,
                 parent: match function.kind {
                     RawFunctionKind::Inline => {
                         containing_instance(function.parent, raw, &instances)
@@ -4346,7 +4367,7 @@ mod tests {
                     crate::timings::Recording::start(crate::timings::Options::default())
                         .expect("no other recording");
                 let apart = load(jobs);
-                let report = recording.finish();
+                let report = recording.finish().unwrap();
                 assert!(apart == serial, "{fixture} differs with {jobs} workers");
                 assert_eq!(
                     report.counters.get("units_walked_in_order"),
@@ -4565,8 +4586,11 @@ mod tests {
             partial.image.statement_rows().count(),
             full.image.statement_rows().count()
         );
-        assert_ne!(partial.image.globals().len(), 0);
-        assert_eq!(partial.image.globals().len(), full.image.globals().len());
+        assert_ne!(partial.image.globals().count(), 0);
+        assert_eq!(
+            partial.image.globals().count(),
+            full.image.globals().count()
+        );
         // A frame says why it shows no locals, rather than seeming to have
         // none.
         let run = full

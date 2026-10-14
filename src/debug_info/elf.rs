@@ -325,12 +325,13 @@ pub fn load_sections(object: &object::File<'_>) -> Vec<SectionInfo> {
         .collect::<Vec<_>>();
     sections.sort();
 
+    // ELF numbers sections with `u32`s, so every section has an id.
     sections
         .into_iter()
-        .enumerate()
+        .zip(0..=u32::MAX)
         .map(
-            |(index, (start, end, name, executable, writable))| SectionInfo {
-                id: SectionId::new(u32::try_from(index).expect("section count fits in u32")),
+            |((start, end, name, executable, writable), index)| SectionInfo {
+                id: SectionId::new(index),
                 name: name.into(),
                 range: AddressRange {
                     start: ImageAddress::new(start),
@@ -917,12 +918,19 @@ fn normalize(
     // the tie and keep the order deterministic.
     symbols.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
 
+    // A table of more symbols than `u32` ids number would take a file of
+    // some hundred gigabytes.
+    debug_assert!(
+        u32::try_from(symbols.len()).is_ok(),
+        "{} symbols",
+        symbols.len()
+    );
     symbols
         .into_iter()
-        .enumerate()
+        .zip(0..=u32::MAX)
         .map(
-            |(index, (address, name, _, symbol, (extent, storage)))| SymbolInfo {
-                id: SymbolId::new(u32::try_from(index).expect("symbol count fits in u32")),
+            |((address, name, _, symbol, (extent, storage)), index)| SymbolInfo {
+                id: SymbolId::new(index),
                 address: ImageAddress::new(address),
                 kind: symbol.kind,
                 binding: symbol.binding,
@@ -1003,6 +1011,10 @@ fn extent(
 /// synthesized from structured input, then checks catalog and lookup
 /// invariants at every symbol boundary and at input-chosen addresses.
 #[cfg(feature = "fuzzing")]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 pub(super) fn fuzz(data: &[u8]) {
     let (bytes, unwind) = if data.starts_with(b"\x7fELF") {
         (data.to_vec(), Vec::new())
@@ -1080,6 +1092,10 @@ pub(super) fn fuzz(data: &[u8]) {
 /// result contains its address and outranks every other containing extent,
 /// and no address inside an extent goes unnamed.
 #[cfg(feature = "fuzzing")]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8]) {
     let probes = symbols
         .iter()
@@ -1129,6 +1145,10 @@ fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8])
 /// Checks that a description names its address's section and prefers a
 /// code symbol, naming data only through declared storage.
 #[cfg(feature = "fuzzing")]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 fn assert_description(image: &crate::ModuleImage, symbols: &[SymbolInfo], address: ImageAddress) {
     let description = image.describe(address);
     assert_eq!(description.address, address);

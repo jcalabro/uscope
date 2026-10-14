@@ -109,7 +109,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     /// process-wide counter so no two sessions in a process share one; an
     /// edge whose sessions share nothing, as a simulation's, may count its
     /// own so that a session's identifiers do not depend on the others.
-    fn allocate_stop_id(&self) -> StopId;
+    fn allocate_stop_id(&self) -> Result<StopId>;
     /// Resolves the file behind a module mapping and its load bias, or
     /// `None` when the file cannot be proven to be the mapped one.
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)>;
@@ -210,7 +210,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
     ) -> Result<()> {
-        let site = sites.get_mut(&address).expect("known breakpoint site");
+        let site = sites
+            .get_mut(&address)
+            .ok_or_else(|| Error::internal("a breakpoint site is known"))?;
         if !site.installed {
             return Ok(());
         }
@@ -230,7 +232,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
     ) -> Result<()> {
-        let site = sites.get_mut(&address).expect("known breakpoint site");
+        let site = sites
+            .get_mut(&address)
+            .ok_or_else(|| Error::internal("a breakpoint site is known"))?;
         if site.installed {
             return Ok(());
         }
@@ -452,7 +456,7 @@ impl LinuxTraceOps for LinuxPtrace {
         i32::try_from(std::process::id()).unwrap_or(i32::MAX)
     }
 
-    fn allocate_stop_id(&self) -> StopId {
+    fn allocate_stop_id(&self) -> Result<StopId> {
         allocate_stop_id()
     }
 
@@ -872,16 +876,42 @@ pub(super) const fn errno(error: rustix::io::Errno) -> Errno {
 /// 16 whose layout the code selects, holding the sender's process or the
 /// faulting address.
 pub(super) fn decode_siginfo(bytes: &[u8; 128]) -> (i32, SignalMetadata) {
-    let i32_at = |offset: usize| {
-        i32::from_ne_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
-    };
-    let number = i32_at(0);
-    let code = i32_at(8);
+    // The union at 16 holds the sender's process ID, or the fault address
+    // as eight bytes, so its first bytes are the sender's.
+    let [
+        n0,
+        n1,
+        n2,
+        n3,
+        _,
+        _,
+        _,
+        _,
+        c0,
+        c1,
+        c2,
+        c3,
+        _,
+        _,
+        _,
+        _,
+        u0,
+        u1,
+        u2,
+        u3,
+        u4,
+        u5,
+        u6,
+        u7,
+        ..,
+    ] = *bytes;
+    let number = i32::from_ne_bytes([n0, n1, n2, n3]);
+    let code = i32::from_ne_bytes([c0, c1, c2, c3]);
     let metadata = SignalMetadata {
         code,
-        sender: siginfo_names_sender(code).then(|| i32_at(16)),
+        sender: siginfo_names_sender(code).then(|| i32::from_ne_bytes([u0, u1, u2, u3])),
         fault_address: siginfo_has_fault_address(number, code)
-            .then(|| u64::from_ne_bytes(bytes[16..24].try_into().expect("eight bytes"))),
+            .then(|| u64::from_ne_bytes([u0, u1, u2, u3, u4, u5, u6, u7])),
     };
     (number, metadata)
 }

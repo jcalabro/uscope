@@ -113,7 +113,12 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
     if bytes.len() < HEADER || bytes[..8] != FILE_MAGIC {
         return Err(FileError::NotACapture);
     }
-    let version = u32::from_le_bytes(bytes[8..12].try_into().expect("four bytes"));
+    let version = u32::from_le_bytes(
+        *bytes
+            .get(8..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .ok_or(FileError::NotACapture)?,
+    );
     if version != FILE_VERSION {
         return Err(FileError::Version(version));
     }
@@ -135,10 +140,11 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
         captures.push(Capture::from_chunk(aligned.as_bytes()).map_err(FileError::Chunk)?);
     }
     let chunks = captures.len();
-    let capture = match captures.len() {
-        0 => return Err(FileError::Empty),
-        1 => captures.pop().expect("one capture"),
-        _ => {
+    let capture = match captures.pop() {
+        None => return Err(FileError::Empty),
+        Some(only) if captures.is_empty() => only,
+        Some(last) => {
+            captures.push(last);
             let mut builder = CaptureBuilder::new();
             for capture in &captures {
                 builder.absorb(capture);
@@ -175,12 +181,12 @@ fn index(bytes: &[u8]) -> Option<Vec<(u64, u64)>> {
         .iter()
         .map(|entry| {
             let (offset, length) = entry.split_at(8);
-            (
-                u64::from_le_bytes(offset.try_into().expect("eight bytes")),
-                u64::from_le_bytes(length.try_into().expect("eight bytes")),
-            )
+            Some((
+                u64::from_le_bytes(*offset.first_chunk::<8>()?),
+                u64::from_le_bytes(*length.first_chunk::<8>()?),
+            ))
         })
-        .collect();
+        .collect::<Option<_>>()?;
     spans
         .iter()
         .all(|(offset, length)| {
@@ -196,8 +202,9 @@ fn scan(bytes: &[u8]) -> Vec<(u64, u64)> {
     let mut spans = Vec::new();
     let mut position = HEADER;
     while let Some(length) = bytes
-        .get(position..position + 8)
-        .map(|length| u64::from_le_bytes(length.try_into().expect("eight bytes")))
+        .get(position..)
+        .and_then(<[u8]>::first_chunk::<8>)
+        .map(|length| u64::from_le_bytes(*length))
     {
         let start = position + 8;
         let Some(end) = usize::try_from(length)

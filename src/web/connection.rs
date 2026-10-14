@@ -168,7 +168,5 @@ fn error(id: u64, kind: ErrorKind, message: &str) -> ServerMessage {
 }
 
 fn encode(message: &ServerMessage) -> Utf8Bytes {
-    serde_json::to_string(message)
-        .expect("messages serialize")
-        .into()
+    super::session::encode(message).into()
 }

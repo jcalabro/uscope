@@ -28,7 +28,7 @@ fn a_recording_collects_every_threads_spans_and_counts() {
     }
     crate::count!("loose", 3_u64);
     mark("ready");
-    let report = recording.finish();
+    let report = recording.finish().unwrap();
 
     let phase = |name: &str| {
         report
@@ -75,7 +75,7 @@ fn a_recording_collects_every_threads_spans_and_counts() {
     labels.sort_unstable();
     assert_eq!(labels, ["0x0", "0x1"]);
 
-    let decoded = Report::from_json(&report.to_json()).expect("the report reads back");
+    let decoded = Report::from_json(&report.to_json().unwrap()).expect("the report reads back");
     assert_eq!(decoded.phases.len(), report.phases.len());
     assert!(decoded.text(false).contains("decode"));
     assert!(decoded.threads_text().contains("load: 2 parts"));
@@ -96,7 +96,7 @@ fn nothing_is_measured_without_a_recording() {
     let before = crate::span!("before");
     let recording = Recording::start(Options::default()).expect("no other recording");
     drop(before);
-    let report = recording.finish();
+    let report = recording.finish().unwrap();
     assert!(report.phases.is_empty(), "{:?}", report.phases);
 }
 
@@ -104,7 +104,7 @@ fn nothing_is_measured_without_a_recording() {
 fn a_report_bounds_its_labels() {
     let recording = Recording::start(Options::default()).expect("no other recording");
     drop(crate::span!("long", "{}", "é".repeat(MAX_LABEL)));
-    let report = recording.finish();
+    let report = recording.finish().unwrap();
     let label = report
         .trace_events
         .iter()
@@ -120,7 +120,7 @@ fn a_report_says_whether_it_counted_instructions() {
         let _work = crate::span!("work");
         std::hint::black_box((0..10_000_u64).sum::<u64>());
     }
-    let report = recording.finish();
+    let report = recording.finish().unwrap();
     let work = &report.phases[0];
     match report.summary.instructions.as_str() {
         "counted" | "multiplexed" => assert!(work.instructions.is_some_and(|count| count > 0)),

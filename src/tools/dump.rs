@@ -88,7 +88,7 @@ pub(crate) fn dump_info(
     options: &Options,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let names = Names::new(&info.image);
+    let names = Names::new(&info.image)?;
     let mut dump = Dumper {
         info: Some(info),
         image: &info.image,
@@ -129,7 +129,7 @@ struct Names {
 
 impl Names {
     #[expect(clippy::too_many_lines, reason = "one name for each kind of entity")]
-    fn new(image: &ModuleImage) -> Self {
+    fn new(image: &ModuleImage) -> anyhow::Result<Self> {
         let files = image
             .source_files()
             .iter()
@@ -196,7 +196,7 @@ impl Names {
             .iter()
             .map(|section| format!("{}@{:#x}", section.name, section.range.start.get()))
             .collect();
-        let key_index = Regex::new(r"#\d+").expect("a pattern");
+        let key_index = Regex::new(r"#\d+")?;
         let nodes = image.types().collect::<Vec<_>>();
         let type_keys = crate::type_identity::TypeIndex::build(
             nodes.first().map(|node| node.reference().image),
@@ -233,7 +233,7 @@ impl Names {
                 .entry(u64::from(row.sequence.get()))
                 .or_insert(next);
         }
-        Self {
+        Ok(Self {
             types,
             functions,
             instances,
@@ -244,9 +244,8 @@ impl Names {
             sequences,
             pattern: Regex::new(
                 r"TypeReference \{ image: ModuleImageId\(\d+\), id: TypeId\((\d+)\) \}|(TypeId|FunctionId|CodeInstanceId|SymbolId|SourceFileId|GlobalVariableId|SectionId|LineSequenceId|CallSiteId)\((\d+)\)|\b(id|symbol|section): [A-Za-z]+Id\(\d+\), ",
-            )
-            .expect("a pattern"),
-        }
+            )?,
+        })
     }
 
     /// Text with every identifier replaced by what it names.
@@ -331,10 +330,16 @@ struct Dumper<'a> {
     out: &'a mut dyn Write,
 }
 
+const FIRST_LINE: LineNumber = LineNumber::new(1).expect("line one is nonzero");
+const LAST_LINE: LineNumber = LineNumber::new(u64::MAX).expect("the largest line is nonzero");
+
 impl<'a> Dumper<'a> {
-    const fn loaded(&self) -> &'a DebugInfo {
-        self.info
-            .expect("only a loaded module's sections read its variables and unwinding")
+    fn loaded(&self) -> std::io::Result<&'a DebugInfo> {
+        self.info.ok_or_else(|| {
+            std::io::Error::other(
+                "only a loaded module's sections read its variables and unwinding",
+            )
+        })
     }
 
     fn heading(&mut self, name: &str) -> std::io::Result<()> {
@@ -732,10 +737,7 @@ impl<'a> Dumper<'a> {
         for file in image.source_files() {
             let path = &names.files[file.id.index()];
             let all = image
-                .breakpoint_lines(
-                    file.id,
-                    LineNumber::new(1).expect("one")..=LineNumber::new(u64::MAX).expect("max"),
-                )
+                .breakpoint_lines(file.id, FIRST_LINE..=LAST_LINE)
                 .map(LineNumber::get)
                 .collect::<Vec<_>>();
             let mut text = format!(
@@ -743,7 +745,9 @@ impl<'a> Dumper<'a> {
                 image.keeps_line_breakpoints(file.id)
             );
             for line in lines.get(&file.id.index()).into_iter().flatten() {
-                let line = LineNumber::new(*line).expect("lines are one-based");
+                let Some(line) = LineNumber::new(*line) else {
+                    return Err(std::io::Error::other("a breakpoint line is zero"));
+                };
                 let mut addresses = image
                     .statement_addresses(file.id, line)
                     .map(ImageAddress::get)
@@ -891,7 +895,7 @@ impl<'a> Dumper<'a> {
     fn variables(&mut self, per_instance: usize) -> std::io::Result<()> {
         let image = self.image;
         let names = self.names;
-        let variables = &self.loaded().variables;
+        let variables = &self.loaded()?.variables;
         self.heading("variables")?;
         let context = |address| VariableContext {
             stop_id: crate::StopId::new(1),
@@ -1013,9 +1017,9 @@ impl<'a> Dumper<'a> {
         for address in addresses {
             let at = ImageAddress::new(address);
             let mut memory = Synthetic;
-            let cfa = self.loaded().unwind.cfa(at, &registers, &mut memory);
+            let cfa = self.loaded()?.unwind.cfa(at, &registers, &mut memory);
             let step = self
-                .loaded()
+                .loaded()?
                 .unwind
                 .unwind(at, &registers, &mut memory)
                 .map(|step| (step.registers, step.cfa, step.signal_frame));
@@ -1045,9 +1049,9 @@ struct Synthetic;
 /// Where the synthetic process maps its image.
 const BIAS: u64 = 0x5555_0000_0000;
 
-fn pattern(address: u64) -> u8 {
+const fn pattern(address: u64) -> u8 {
     // Small byte values keep lengths and counts read from memory small.
-    u8::try_from((address.wrapping_mul(0x9e37_79b9) >> 13) & 0x1f).expect("five bits")
+    ((address.wrapping_mul(0x9e37_79b9) >> 13) & 0x1f).to_le_bytes()[0]
 }
 
 impl MemoryReader for Synthetic {
@@ -1067,15 +1071,15 @@ impl VariableRuntime for Synthetic {
     ) -> Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
         let register = register.number();
         // General registers are words; the rest, vector registers.
-        let bytes = if register < 17 { 8 } else { 16 };
+        let bits: u16 = if register < 17 { 64 } else { 128 };
         let value = 0x7fff_0000_u64 + u64::from(register) * 0x100;
         let mut contents = value.to_le_bytes().to_vec();
-        contents.resize(bytes, 0);
+        contents.resize(usize::from(bits / 8), 0);
         Ok(crate::debug_info::VariableRegister {
             descriptor: crate::RegisterDescriptor {
                 id: crate::RegisterId::new(u32::from(register)),
                 name: format!("r{register}").into(),
-                bits: u16::try_from(bytes * 8).expect("register widths fit"),
+                bits,
                 role: None,
             },
             bytes: contents.into(),
@@ -1160,7 +1164,7 @@ mod tests {
                 ..ModuleMetadata::default()
             },
         );
-        let names = super::Names::new(&image);
+        let names = super::Names::new(&image).unwrap();
         let mut out = Vec::new();
         let mut dump = super::Dumper {
             info: None,

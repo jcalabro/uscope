@@ -373,7 +373,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Err(parked());
         };
         let stack = self.async_stack(inferior, &root)?.ok_or_else(parked)?;
-        let level = usize::try_from(frame.get()).expect("u32 fits usize");
+        let level = frame.get() as usize;
         let selected = (level..stack.futures.len())
             .find(|&index| matches!(stack.futures[index].kind, AsyncFrameKind::Coroutine { .. }))
             .ok_or_else(|| {
@@ -758,10 +758,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .filter(|(_, entries)| !entries.frees.is_empty())
             .and_then(|_| self.dispatch_return(pid));
-        let start = self
-            .active_step_mut()
-            .expect("the step remained active while its future was pending");
-        let mut awaiting = start.awaiting.take().expect("the step follows a future");
+        let start = self.active_step_mut().ok_or_else(|| {
+            Error::internal("the step remained active while its future was pending")
+        })?;
+        let mut awaiting = start
+            .awaiting
+            .take()
+            .ok_or_else(|| Error::internal("the step follows a future"))?;
         awaiting.waiting = waiting;
         awaiting.drop_glue = drop_glue;
         awaiting.inlined_drops = inlined_drops;
@@ -778,9 +781,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(execution, &waits.plan_sites())?;
-        *self
-            .active_step_mut()
-            .expect("the step remained active while its future was pending") = waits;
+        *self.active_step_mut().ok_or_else(|| {
+            Error::internal("the step remained active while its future was pending")
+        })? = waits;
         Ok(Some(Followed::Waits))
     }
 
@@ -910,7 +913,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// watched before stays a plan site, where a thread passes.
     fn watch_task_return(&mut self, task_return: TaskReturn) -> Result<()> {
         let execution = self.active_execution()?;
-        let start = self.active_step_mut().expect("the step waits for its task");
+        let start = self
+            .active_step_mut()
+            .ok_or_else(|| Error::internal("the step waits for its task"))?;
         let Some(awaiting) = start.awaiting.as_mut() else {
             return Ok(());
         };
@@ -1311,7 +1316,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.install_additional_plan_breakpoints(execution, &resumed.plan_sites())?;
         *self
             .active_step_mut()
-            .expect("the step remained active as its future resumed") = resumed;
+            .ok_or_else(|| Error::internal("the step remained active as its future resumed"))? =
+            resumed;
         self.go_on_without_plan(pid, address, Some(kind))?;
         Ok(true)
     }

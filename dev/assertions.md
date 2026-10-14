@@ -26,6 +26,11 @@ that the type system can't express.
    `get` and `checked_*`. Fuzzers run with debug assertions on, so a fuzz crash
    on an assertion means an input check is missing.
 
+   Production code never calls `unwrap`, `expect`, `panic!`, `unreachable!`,
+   `todo!`, or `unimplemented!`; Clippy denies them outside tests, fuzz
+   harnesses, and the simulator. A fact that should hold but didn't is
+   `Error::Internal`, or the module's own internal error, not a panic.
+
 3. **`debug_assert!` by default.** It runs in test, sim, and fuzz builds and
    costs nothing in release, so expensive checks are fine. Use `assert!` only
    when continuing would damage the tracee or a file uscope is writing. Use

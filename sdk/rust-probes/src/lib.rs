@@ -33,6 +33,19 @@
 //! The ABI is the records in [`abi`] and nothing Rust-specific, so that
 //! another language can write it.
 
+// Production code returns errors instead of panicking.
+// Tests may unwrap.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 #![cfg_attr(not(feature = "enabled"), no_std)]
 
 /// The records uscope reads, by their byte layout. Every field is little

@@ -126,7 +126,7 @@ fn function_ranges(
     let extent = image
         .symbol(symbol.symbol)
         .and_then(crate::image::symbols::Symbol::extent)
-        .expect("a code symbol has an extent");
+        .ok_or_else(|| Error::internal("a code symbol has an extent"))?;
     Ok((
         DisassembledFunction {
             module: module.loaded.id,

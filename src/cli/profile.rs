@@ -222,7 +222,10 @@ fn convert(args: &ConvertArgs) -> Result<()> {
     } else {
         StackView::Logical
     };
-    let bytes = read.profile.export(format, view);
+    let bytes = read
+        .profile
+        .export(format, view)
+        .with_context(|| format!("converting {}", args.input.display()))?;
     std::fs::write(&args.output, bytes)
         .with_context(|| format!("writing {}", args.output.display()))?;
     let kept = match format {
@@ -980,7 +983,7 @@ impl super::Cli {
         };
         self.profiling
             .lock()
-            .expect("profiling lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .command(arguments, live)
     }
 }

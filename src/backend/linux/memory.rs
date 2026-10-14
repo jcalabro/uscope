@@ -34,7 +34,8 @@ impl<P: InspectionOps> Controller<P> {
             .get()
             .checked_add(byte_count)
             .ok_or(Error::AddressOverflow)?;
-        let size = usize::try_from(byte_count).expect("bounded memory read size fits usize");
+        let size = usize::try_from(byte_count)
+            .map_err(|_| Error::internal("a bounded memory read size fits usize"))?;
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_process(inferior, requested_process)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -112,9 +113,11 @@ pub(super) fn read_logical_block(
         );
         for (site_address, site) in breakpoints.range(address..VirtualAddress::new(end)) {
             if site.installed {
-                let offset = usize::try_from(site_address.get() - address.get())
-                    .expect("an offset within the read fits usize");
-                bytes[offset] = site.original_byte;
+                let offset = offset_within(site_address.get() - address.get())?;
+                *bytes
+                    .get_mut(offset)
+                    .ok_or_else(|| Error::internal("a block read is shorter than requested"))? =
+                    site.original_byte;
             }
         }
         check_traps_hidden(address, &bytes, breakpoints);
@@ -142,6 +145,11 @@ pub(super) fn read_logical_block(
     })
 }
 
+/// A byte offset inside a word or read that the caller has bounded.
+fn offset_within(offset: u64) -> Result<usize> {
+    usize::try_from(offset).map_err(|_| Error::internal("a byte offset within a read fits usize"))
+}
+
 pub(super) fn read_logical_memory_with(
     address: VirtualAddress,
     size: usize,
@@ -162,10 +170,10 @@ pub(super) fn read_logical_memory_with(
     }
     let end = address
         .get()
-        .checked_add(u64::try_from(size).expect("memory read size fits u64"))
+        .checked_add(size as u64)
         .ok_or(Error::AddressOverflow)?;
     let mut bytes = Vec::with_capacity(size);
-    let word_size = u64::try_from(std::mem::size_of::<u64>()).expect("word size fits u64");
+    let word_size = u64::from(u64::BITS / 8);
     let mut current = address.get() & !(word_size - 1);
     while current < end {
         let (mut word, readable) = match read_word(current) {
@@ -183,15 +191,15 @@ pub(super) fn read_logical_memory_with(
         {
             let offset = site_address.get() - current;
             if site.installed {
-                word[usize::try_from(offset).expect("word offset fits usize")] = site.original_byte;
+                word[offset_within(offset)?] = site.original_byte;
             }
         }
         let readable_end = current.saturating_add(readable);
         let selected_start = address.get().max(current);
         let selected_end = end.min(readable_end);
         if selected_start < selected_end {
-            let start = usize::try_from(selected_start - current).expect("word offset fits usize");
-            let stop = usize::try_from(selected_end - current).expect("word offset fits usize");
+            let start = offset_within(selected_start - current)?;
+            let stop = offset_within(selected_end - current)?;
             bytes.extend_from_slice(&word[start..stop]);
         }
         if readable < word_size && readable_end < end {

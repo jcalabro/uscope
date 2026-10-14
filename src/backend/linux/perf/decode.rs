@@ -208,6 +208,15 @@ impl<'a> Fields<'a> {
     }
 }
 
+/// The `N` bytes at `offset`, or `Malformed` if the body ends before them.
+fn field<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], Malformed> {
+    bytes
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk::<N>)
+        .copied()
+        .ok_or(Malformed)
+}
+
 /// The record at the start of `bytes` and its length, or `None` at the
 /// end.
 pub fn next(bytes: &[u8]) -> Option<Result<(Record<'_>, usize), Malformed>> {
@@ -217,11 +226,12 @@ pub fn next(bytes: &[u8]) -> Option<Result<(Record<'_>, usize), Malformed>> {
     if bytes.len() < 8 {
         return Some(Err(Malformed));
     }
-    let kind = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
-    let misc = u16::from_le_bytes(bytes[4..6].try_into().expect("two bytes"));
-    let size = usize::from(u16::from_le_bytes(
-        bytes[6..8].try_into().expect("two bytes"),
-    ));
+    let Some(&[k0, k1, k2, k3, m0, m1, s0, s1]) = bytes.first_chunk::<8>() else {
+        return Some(Err(Malformed));
+    };
+    let kind = u32::from_le_bytes([k0, k1, k2, k3]);
+    let misc = u16::from_le_bytes([m0, m1]);
+    let size = usize::from(u16::from_le_bytes([s0, s1]));
     if size < 8 || size > bytes.len() {
         return Some(Err(Malformed));
     }
@@ -238,7 +248,7 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
         return Ok(Record::Other { time: None });
     };
     let (body, id) = body.split_at(split);
-    let time = u64::from_le_bytes(id[8..16].try_into().expect("eight bytes"));
+    let time = u64::from_le_bytes(field(id, 8)?);
     let mut fields = Fields { bytes: body };
     Ok(match kind {
         RECORD_MMAP2 => {
@@ -247,8 +257,11 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
             let length = fields.u64()?;
             let file_offset = fields.u64()?;
             let device = fields.take(24)?;
-            let inode = (misc & MISC_MMAP_BUILD_ID == 0)
-                .then(|| u64::from_le_bytes(device[8..16].try_into().expect("eight bytes")));
+            let inode = if misc & MISC_MMAP_BUILD_ID == 0 {
+                Some(u64::from_le_bytes(field(device, 8)?))
+            } else {
+                None
+            };
             let (protection, _flags) = fields.pair()?;
             let path = fields.bytes;
             let path = &path[..path
@@ -310,8 +323,8 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
         RECORD_THROTTLE => Record::Throttle { time },
         // The thread is the sample_id's, which a switch record is all of.
         RECORD_SWITCH => Record::Switch {
-            pid: Pid::new(u32::from_le_bytes(id[..4].try_into().expect("four bytes"))),
-            tid: Tid::new(u32::from_le_bytes(id[4..8].try_into().expect("four bytes"))),
+            pid: Pid::new(u32::from_le_bytes(field(id, 0)?)),
+            tid: Tid::new(u32::from_le_bytes(field(id, 4)?)),
             out: misc & MISC_SWITCH_OUT != 0,
             preempted: misc & MISC_SWITCH_OUT_PREEMPT != 0,
             time,

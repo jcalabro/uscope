@@ -237,9 +237,9 @@ fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
     tables
         .table::<crate::image::lines::FileRecord>()
         .iter()
-        .enumerate()
-        .map(|(index, file)| SourceFile {
-            id: SourceFileId::new(u32::try_from(index).expect("file indexes fit u32")),
+        .zip(0u32..)
+        .map(|(file, index)| SourceFile {
+            id: SourceFileId::new(index),
             path: Arc::new(
                 paths
                     .get(crate::image::PathId(file.path.get()))
@@ -249,20 +249,23 @@ fn source_files(tables: &crate::image::Image) -> Arc<[SourceFile]> {
         .collect()
 }
 
+/// Why metadata could not be sealed as an image.
+pub type SealError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Seals a module's metadata as an image.
 pub fn seal(
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
     mut metadata: ModuleMetadata,
-) -> crate::image::Image {
+) -> std::result::Result<crate::image::Image, SealError> {
     validate_dense_ids(&metadata);
     metadata.lines.clip_at(&function_starts(&metadata.symbols));
     crate::count!("types", metadata.types.len());
     let phase = crate::span!("image.seal");
-    let tables = seal_image(target, address_range, metadata);
+    let tables = seal_image(target, address_range, metadata)?;
     drop(phase);
     crate::count!("image_bytes", tables.as_bytes().len());
-    tables
+    Ok(tables)
 }
 
 /// Frees what was sealed on a thread of its own. The loader's records hold
@@ -278,7 +281,7 @@ fn seal_image(
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
     mut metadata: ModuleMetadata,
-) -> crate::image::Image {
+) -> std::result::Result<crate::image::Image, SealError> {
     let variables = std::mem::take(&mut metadata.variables);
     let types = std::mem::take(&mut metadata.types);
     let functions = std::mem::take(&mut metadata.functions);
@@ -290,7 +293,7 @@ fn seal_image(
     // laid out by kind, whatever order they are added in.
     let mut builder = crate::image::Builder::new(target);
     let mut strings = crate::image::StringsBuilder::default();
-    let ((classes, code), ()) = rayon::join(
+    let ((classes, code), before) = rayon::join(
         || {
             rayon::join(
                 || {
@@ -307,20 +310,20 @@ fn seal_image(
                 address_range,
                 metadata,
                 variables,
-            );
+            )
         },
     );
-    builder.absorb(code);
+    before?;
+    builder.absorb(code?);
     let phase = crate::span!("image.encode_types");
     crate::image::types::add_to(
         &mut builder,
         &mut strings,
         &crate::image::types::Types {
             nodes: &types,
-            classes: &classes,
+            classes: &classes?,
         },
-    )
-    .expect("the loader's types fit an image");
+    )?;
     drop(phase);
     free(types);
     crate::image::packages::add_to(
@@ -331,19 +334,16 @@ fn seal_image(
             .iter()
             .map(|package| (&*package.path, &*package.name)),
         &locations::packaged_names(&functions, &metadata.packages),
-    )
-    .expect("the loader's packages fit an image");
+    )?;
     crate::image::functions::add_functions_to(
         &mut builder,
         &mut strings,
         &functions,
         &code_instances,
-    )
-    .expect("the loader's functions fit an image");
+    )?;
     free((functions, code_instances));
     if let Some(unwind) = &metadata.unwind {
-        crate::image::unwind::add_to(&mut builder, &mut strings, unwind)
-            .expect("the loader's call-frame information fits an image");
+        crate::image::unwind::add_to(&mut builder, &mut strings, unwind)?;
     }
     builder
         .bytes(
@@ -353,7 +353,7 @@ fn seal_image(
         .bytes(crate::image::TableKind::Strings, strings.into_bytes());
     builder
         .seal(crate::image::Limits::default())
-        .expect("the loader's tables are valid")
+        .map_err(SealError::from)
 }
 
 /// The tables that pool no string: the lines, the files and their paths,
@@ -362,7 +362,7 @@ fn encode_without_strings<'a>(
     target: TargetDescription,
     metadata: &'a ModuleMetadata,
     code_instances: &[CodeInstanceInfo],
-) -> crate::image::Builder<'a> {
+) -> std::result::Result<crate::image::Builder<'a>, SealError> {
     let _phase = crate::span!("image.encode_without_strings");
     let mut builder = crate::image::Builder::new(target);
     let mut paths = crate::image::PathsBuilder::default();
@@ -370,7 +370,7 @@ fn encode_without_strings<'a>(
     metadata
         .files
         .add_to(&mut builder, &mut paths)
-        .expect("source paths come from NUL-terminated strings");
+        .ok_or("a source path holds a NUL, or the paths do not fit")?;
     metadata.locations.add_to(&mut builder);
     crate::image::functions::add_code_to(
         &mut builder,
@@ -379,10 +379,9 @@ fn encode_without_strings<'a>(
             prologue_ends: &metadata.lines.prologue_ends(),
             instruction_starts: &instruction_starts(metadata, code_instances),
         },
-    )
-    .expect("the loader's functions fit an image");
+    )?;
     builder.bytes(crate::image::TableKind::Paths, paths.into_bytes());
-    builder
+    Ok(builder)
 }
 
 /// The tables that pool strings before the types do, in the order they
@@ -393,15 +392,14 @@ fn encode_strings_before_types<'a>(
     address_range: AddressRange<ImageAddress>,
     metadata: &'a ModuleMetadata,
     variables: crate::image::variables::Variables,
-) {
+) -> std::result::Result<(), SealError> {
     crate::image::symbols::add_to(
         builder,
         strings,
         &metadata.symbols,
         &metadata.sections,
         &metadata.got_slots,
-    )
-    .expect("names come from NUL-terminated strings");
+    )?;
     crate::image::facts::add_to(
         builder,
         strings,
@@ -414,39 +412,40 @@ fn encode_strings_before_types<'a>(
             debug_information: &metadata.debug_information,
             locals_left_out: metadata.locals_left_out.as_deref(),
         },
-    )
-    .expect("the loader's facts fit an image");
+    )?;
     let phase = crate::span!("image.encode_variables");
-    crate::image::variables::add_to(builder, strings, &variables)
-        .expect("the loader's data objects fit an image");
+    crate::image::variables::add_to(builder, strings, &variables)?;
     drop(phase);
     free(variables);
-    crate::image::calls::add_to(builder, strings, &metadata.calls)
-        .expect("the loader's calls fit an image");
-    crate::image::type_facts::add_to(builder, strings, &metadata.type_facts)
-        .expect("the loader's type facts fit an image");
-    crate::image::resumes::add_to(builder, strings, &metadata.resumes)
-        .expect("the loader's resume points fit an image");
+    crate::image::calls::add_to(builder, strings, &metadata.calls)?;
+    crate::image::type_facts::add_to(builder, strings, &metadata.type_facts)?;
+    crate::image::resumes::add_to(builder, strings, &metadata.resumes)?;
     crate::image::declarations::add_to(builder, strings, &metadata.declarations)
-        .expect("the loader's declarations fit an image");
+        .map_err(SealError::from)
 }
 
 /// Each type's identity class, numbered in the order classes first come:
 /// two types share one when their identity keys are equal, as one type
 /// defined in several units is.
-fn type_classes(types: &[TypeNode]) -> Vec<u32> {
+fn type_classes(types: &[TypeNode]) -> std::result::Result<Vec<u32>, SealError> {
     // Only the keys are read, so the names are not indexed.
     let keys = crate::type_identity::canonical_keys(types.len(), |index| match &types[index] {
         TypeNode::Resolved(info) => Some(info),
         TypeNode::Malformed { .. } => None,
     });
+    // There are no more classes than types, so each numbers below them.
+    u32::try_from(keys.len()).map_err(|_| crate::image::types::TooMany)?;
     let mut classes = foldhash::HashMap::default();
-    keys.iter()
+    let mut next = 0_u32;
+    Ok(keys
+        .iter()
         .map(|key| {
-            let next = u32::try_from(classes.len()).expect("type counts fit u32");
-            *classes.entry(&**key).or_insert(next)
+            *classes.entry(&**key).or_insert_with(|| {
+                next += 1;
+                next - 1
+            })
         })
-        .collect()
+        .collect())
 }
 
 fn validate_dense_ids(metadata: &ModuleMetadata) {
@@ -499,7 +498,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
     }
     for (index, node) in metadata.types.iter().enumerate() {
         assert_eq!(
-            usize::try_from(node.reference().id.get()).expect("type ID fits usize"),
+            node.reference().id.get() as usize,
             index,
             "type IDs are dense and ordered"
         );
@@ -556,6 +555,10 @@ impl ModuleImage {
     /// Seals `metadata` and binds it to `path` as module 0: for tests and
     /// fuzzing, which build metadata by hand.
     #[cfg(any(test, feature = "fuzzing"))]
+    #[allow(
+        clippy::expect_used,
+        reason = "tests and the fuzz harness build images by hand"
+    )]
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
@@ -567,7 +570,7 @@ impl ModuleImage {
                 Arc::clone(path)
             }
         });
-        let tables = Arc::new(seal(target, address_range, metadata));
+        let tables = Arc::new(seal(target, address_range, metadata).expect("the metadata seals"));
         Self::bind(
             &Binding {
                 path: Arc::new(path),
@@ -809,7 +812,12 @@ impl ModuleImage {
     #[must_use]
     pub fn symbolize(&self, address: ImageAddress) -> Option<SymbolLocation> {
         let symbol = self.symbol_view().code_at(address)?;
-        let extent = symbol.extent().expect("indexed symbols have extents");
+        let extent = symbol.extent();
+        debug_assert!(
+            extent.is_some(),
+            "validation checked indexed symbols have extents"
+        );
+        let extent = extent?;
 
         Some(SymbolLocation {
             symbol: symbol.id(),
@@ -827,7 +835,12 @@ impl ModuleImage {
     /// declared storage is never attributed to the nearest preceding object.
     fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
         let symbol = self.symbol_view().data_at(address)?;
-        let storage = symbol.storage().expect("indexed symbols have storage");
+        let storage = symbol.storage();
+        debug_assert!(
+            storage.is_some(),
+            "validation checked indexed symbols have storage"
+        );
+        let storage = storage?;
 
         Some(SymbolLocation {
             symbol: symbol.id(),
@@ -919,11 +932,12 @@ impl ModuleImage {
     }
 
     /// Returns every global catalog entry in deterministic source order.
-    pub fn globals(&self) -> impl ExactSizeIterator<Item = GlobalVariableInfo> + '_ {
+    pub fn globals(&self) -> impl Iterator<Item = GlobalVariableInfo> + '_ {
         let view = crate::image::variables::VariableView::new(&self.tables);
-        (0..view.global_count()).map(move |index| {
-            self.decode_global(view, index)
-                .expect("every global in range is in the table")
+        (0..view.global_count()).filter_map(move |index| {
+            let global = self.decode_global(view, index);
+            debug_assert!(global.is_some(), "global {index} in range is in the table");
+            global
         })
     }
 
@@ -1221,9 +1235,8 @@ impl ModuleImage {
                     .collect(),
             });
         };
-        Ok(self
-            .global(*id)
-            .expect("global index references a catalog entry"))
+        self.global(*id)
+            .ok_or_else(|| Error::internal("the global index names no catalog entry"))
     }
 
     /// Returns all source files referenced by this image.
@@ -1620,10 +1633,10 @@ impl ModuleImage {
             })
             .collect();
 
-        match chains.len() {
-            0 => InlineFrameLookup::None,
-            1 => InlineFrameLookup::Unique(chains.into_iter().next().expect("one chain")),
-            _ => InlineFrameLookup::Ambiguous(chains.into()),
+        match <[InlineChain; 1]>::try_from(chains) {
+            Ok([chain]) => InlineFrameLookup::Unique(chain),
+            Err(chains) if chains.is_empty() => InlineFrameLookup::None,
+            Err(chains) => InlineFrameLookup::Ambiguous(chains.into()),
         }
     }
 
@@ -1901,7 +1914,7 @@ mod tests {
             ]
         );
         assert!(image.global(GlobalVariableId::new(2)).is_none());
-        assert_eq!(image.globals().len(), 2);
+        assert_eq!(image.globals().count(), 2);
         let selected = |selector| image.global_named(selector).expect(selector).id;
         assert_eq!(selected("left::shared"), GlobalVariableId::new(0));
         assert_eq!(selected("right.c::right::shared"), GlobalVariableId::new(1));

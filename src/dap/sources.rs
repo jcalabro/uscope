@@ -143,7 +143,9 @@ impl Session {
             .map(|file| self.local_path(&file.path))
             .collect::<BTreeSet<_>>();
         for path in paths {
-            let sources = self.loaded_sources.as_mut().expect("checked above");
+            let Some(sources) = self.loaded_sources.as_mut() else {
+                return Ok(());
+            };
             let modules = sources.entry(path.clone()).or_default();
             let new = modules.is_empty();
             modules.insert(module);

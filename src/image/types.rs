@@ -550,8 +550,8 @@ const ORIGINS: [ArgumentOrigin; 3] = [
     ArgumentOrigin::None,
 ];
 
-fn code<T: PartialEq>(known: &[T], value: &T) -> u8 {
-    super::functions::code_of(known, value)
+fn code<T: PartialEq>(known: &[T], value: &T) -> Result<u8, TooMany> {
+    super::functions::code_of(known, value).ok_or(TooMany)
 }
 
 /// What [`add_to`] encodes.
@@ -627,7 +627,7 @@ impl Encoder {
             bit_size: bit_size.into(),
             declaration: LocationRecord::of(member.declaration.as_ref()),
             layout,
-            accessibility: code(&ACCESSIBILITY, &member.accessibility),
+            accessibility: code(&ACCESSIBILITY, &member.accessibility)?,
             flags,
         });
         Ok(())
@@ -655,7 +655,7 @@ impl Encoder {
                 offset: offset.into(),
                 bit_size: bit_size.into(),
                 layout,
-                accessibility: code(&ACCESSIBILITY, &base.accessibility),
+                accessibility: code(&ACCESSIBILITY, &base.accessibility)?,
                 virtual_base: u8::from(base.virtuality == BaseClassVirtuality::Virtual),
             });
         }
@@ -669,7 +669,7 @@ impl Encoder {
     ) -> Result<(), TooMany> {
         record.text = Self::text(strings, &base.name)?;
         record.base_name = Self::text(strings, &base.base_name)?;
-        record.detail = code(&ENCODINGS, &base.encoding);
+        record.detail = code(&ENCODINGS, &base.encoding)?;
         record.value = base.byte_size.into();
         if let Some(bits) = base.bit_size {
             record.bit_size = bits.into();
@@ -715,7 +715,7 @@ impl Encoder {
                 },
             });
         }
-        let (language, other_language) = language_code(identity.language);
+        let (language, other_language) = language_code(identity.language).ok_or(TooMany)?;
         let mut flags = 0;
         let (go_kind, runtime_type) = match identity.go {
             Some(go) => {
@@ -741,7 +741,7 @@ impl Encoder {
             runtime_type: runtime_type.into(),
             other_language: other_language.into(),
             language,
-            origin: code(&ORIGINS, &identity.origin),
+            origin: code(&ORIGINS, &identity.origin)?,
             go_kind,
             flags,
         });
@@ -830,7 +830,7 @@ impl Encoder {
                 address_class,
             } => {
                 record.kind = kinds::REFERENCE;
-                record.detail = code(&REFERENCES, kind);
+                record.detail = code(&REFERENCES, kind)?;
                 record.target = reference(Some(*target));
                 record.value = (*address_class).into();
             }
@@ -840,7 +840,7 @@ impl Encoder {
                 ordering,
             } => {
                 record.kind = kinds::ARRAY;
-                record.detail = code(&ORDERINGS, ordering);
+                record.detail = code(&ORDERINGS, ordering)?;
                 record.target = reference(Some(*element));
                 record.parts = Span::new(number(self.dimensions.len())?, number(dimensions.len())?);
                 self.dimensions
@@ -855,7 +855,7 @@ impl Encoder {
                 ordering,
             } => {
                 record.kind = kinds::RUNTIME_ARRAY;
-                record.detail = code(&ORDERINGS, ordering);
+                record.detail = code(&ORDERINGS, ordering)?;
                 record.target = reference(Some(*element));
                 record.parts = Span::new(
                     number(self.runtime_dimensions.len())?,
@@ -881,7 +881,7 @@ impl Encoder {
                 incomplete,
             } => {
                 record.kind = kinds::RECORD;
-                record.detail = code(&RECORDS, kind);
+                record.detail = code(&RECORDS, kind)?;
                 record.parts = self.members(strings, members)?.cast();
                 record.bases = self.bases(bases)?;
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
@@ -903,7 +903,7 @@ impl Encoder {
                 incomplete,
             } => {
                 record.kind = kinds::VARIANT;
-                record.detail = code(&STORAGE, storage);
+                record.detail = code(&STORAGE, storage)?;
                 record.parts = self.members(strings, common_members)?.cast();
                 record.bases = self.bases(bases)?;
                 record.variants = Span::new(number(self.variants.len())?, number(variants.len())?);
@@ -957,7 +957,7 @@ impl Encoder {
             }
             TypeKind::Modified { modifier, target } => {
                 record.kind = kinds::MODIFIED;
-                record.detail = code(&MODIFIERS, modifier);
+                record.detail = code(&MODIFIERS, modifier)?;
                 record.target = reference(Some(*target));
             }
             TypeKind::Named {
@@ -965,7 +965,7 @@ impl Encoder {
                 relationship,
             } => {
                 record.kind = kinds::NAMED;
-                record.detail = code(&RELATIONSHIPS, relationship);
+                record.detail = code(&RELATIONSHIPS, relationship)?;
                 record.target = reference(*target);
             }
             TypeKind::Unspecified => record.kind = kinds::UNSPECIFIED,
@@ -1010,11 +1010,11 @@ fn slice_words(words: SliceWords) -> u64 {
 
 /// The words [`slice_words`] encodes.
 fn slice_words_of(value: u64) -> SliceWords {
-    let byte = |shift: u32| u8::try_from(value >> shift & 0xff).expect("one byte");
+    let [data, length, capacity, ..] = value.to_le_bytes();
     SliceWords {
-        data: byte(0),
-        length: byte(8),
-        capacity: Some(byte(16)).filter(|word| *word != NO_SLICE_WORD),
+        data,
+        length,
+        capacity: Some(capacity).filter(|word| *word != NO_SLICE_WORD),
     }
 }
 
@@ -1044,7 +1044,7 @@ fn go_kind_code(kind: GoKind) -> Result<u8, TooMany> {
         GoKind::Other(code) => code,
         kind => (1..=26)
             .find(|code| GoKind::from_abi(*code) == kind)
-            .expect("every named kind has a number"),
+            .ok_or(TooMany)?,
     };
     // An unknown kind's number decodes to it again.
     (GoKind::from_abi(code) == kind)
@@ -1270,11 +1270,21 @@ impl<'a> TypeView<'a> {
                 description: self.text(record.name),
             });
         }
+        let Some(kind) = self.kind(image, record) else {
+            debug_assert!(
+                false,
+                "validation checked type {id:?}'s targets and dimensions"
+            );
+            return Some(TypeNode::Malformed {
+                reference,
+                description: "the image's record of the type does not decode".into(),
+            });
+        };
         Some(TypeNode::Resolved(TypeInfo {
             reference,
             name: self.text(record.name),
             byte_size: has(record, type_flags::SIZED).then(|| record.byte_size.get()),
-            kind: self.kind(image, record),
+            kind,
             identity: (record.identity.get() != NONE).then(|| {
                 Arc::new(self.identity(image, &self.identities[record.identity.get() as usize]))
             }),
@@ -1343,12 +1353,12 @@ impl<'a> TypeView<'a> {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm for each kind of type")]
-    fn kind(self, image: ModuleImageId, record: &TypeRecord) -> TypeKind {
+    fn kind(self, image: ModuleImageId, record: &TypeRecord) -> Option<TypeKind> {
         let target = Self::reference(image, record.target);
-        let required = || target.expect("validation checked the target");
+        let required = || target;
         let parts = record.parts.range();
         let incomplete = has(record, type_flags::INCOMPLETE);
-        match record.kind {
+        Some(match record.kind {
             kinds::BASE => TypeKind::Base(self.base_type(record)),
             kinds::ENUMERATION => TypeKind::Enumeration {
                 representation: self.base_type(record),
@@ -1373,11 +1383,11 @@ impl<'a> TypeView<'a> {
             },
             kinds::REFERENCE => TypeKind::Reference {
                 kind: REFERENCES[usize::from(record.detail)],
-                target: required(),
+                target: required()?,
                 address_class: record.value.get(),
             },
             kinds::ARRAY => TypeKind::Array {
-                element: required(),
+                element: required()?,
                 dimensions: self.dimensions[parts]
                     .iter()
                     .map(|dimension| ArrayDimension {
@@ -1388,19 +1398,15 @@ impl<'a> TypeView<'a> {
                 ordering: ORDERINGS[usize::from(record.detail)],
             },
             kinds::RUNTIME_ARRAY => TypeKind::RuntimeArray {
-                element: required(),
+                element: required()?,
                 dimensions: self.runtime_dimensions[parts]
                     .iter()
-                    .map(|dimension| {
-                        dimension
-                            .dimension()
-                            .expect("validated runtime dimensions decode")
-                    })
-                    .collect(),
+                    .map(|dimension| dimension.dimension())
+                    .collect::<Option<_>>()?,
                 ordering: ORDERINGS[usize::from(record.detail)],
             },
             kinds::SLICE => TypeKind::Slice {
-                element: required(),
+                element: required()?,
                 words: slice_words_of(record.value.get()),
                 text: has(record, type_flags::TEXT),
             },
@@ -1450,7 +1456,7 @@ impl<'a> TypeView<'a> {
                         self.member(image, &self.members[record.discriminant.get() as usize]),
                     )
                 } else if has(record, type_flags::TAG_TYPE) {
-                    VariantDiscriminant::TagType(required())
+                    VariantDiscriminant::TagType(required()?)
                 } else {
                     VariantDiscriminant::Absent
                 };
@@ -1465,7 +1471,7 @@ impl<'a> TypeView<'a> {
             }
             kinds::MODIFIED => TypeKind::Modified {
                 modifier: MODIFIERS[usize::from(record.detail)],
-                target: required(),
+                target: required()?,
             },
             kinds::NAMED => TypeKind::Named {
                 target,
@@ -1488,7 +1494,7 @@ impl<'a> TypeView<'a> {
             _ => TypeKind::Opaque {
                 description: self.text(record.text),
             },
-        }
+        })
     }
 
     fn identity(self, image: ModuleImageId, record: &IdentityRecord) -> TypeIdentity {
@@ -1586,14 +1592,20 @@ impl TypeTable {
 
     /// The type `id` names.
     pub fn node(&self, id: TypeId) -> Option<&TypeNode> {
-        let slot = self.decoded.get(id.index())?;
-        Some(slot.get_or_init(|| {
-            Box::new(
-                self.view()
-                    .node(self.id, id)
-                    .expect("every slot has a type"),
-            )
-        }))
+        Some(self.decoded_node(self.decoded.get(id.index())?, id))
+    }
+
+    /// The type `id` names, decoded into `slot`, its slot.
+    fn decoded_node<'s>(&'s self, slot: &'s OnceLock<Box<TypeNode>>, id: TypeId) -> &'s TypeNode {
+        slot.get_or_init(|| {
+            Box::new(self.view().node(self.id, id).unwrap_or_else(|| {
+                debug_assert!(false, "type {id:?} has a slot but no record");
+                TypeNode::Malformed {
+                    reference: TypeReference { image: self.id, id },
+                    description: "the image has no record of the type".into(),
+                }
+            }))
+        })
     }
 
     /// The resolved type `reference` names, when it is this image's.
@@ -1618,12 +1630,10 @@ impl TypeTable {
 
     /// Every type, in identifier order.
     pub fn nodes(&self) -> impl ExactSizeIterator<Item = &TypeNode> + '_ {
-        (0..self.len()).map(|index| {
-            self.node(TypeId::new(
-                u32::try_from(index).expect("type counts fit u32"),
-            ))
-            .expect("every index has a type")
-        })
+        self.decoded
+            .iter()
+            .zip(super::ids(self.decoded.len()))
+            .map(|(slot, id)| self.decoded_node(slot, TypeId::new(id)))
     }
 }
 

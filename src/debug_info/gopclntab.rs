@@ -301,13 +301,12 @@ fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
 /// Reads one unsigned LEB128 varint of at most 32 bits.
 fn read_varint(data: &[u8], offset: &mut usize) -> Result<u32> {
     let mut value = 0_u32;
-    for index in 0..MAX_VARINT_BYTES {
+    for shift in (0_u32..).step_by(7).take(MAX_VARINT_BYTES) {
         let byte = *data
             .get(*offset)
             .ok_or(PclntabError::Truncated("a pc-value table"))?;
         *offset += 1;
         let bits = u32::from(byte & 0x7f);
-        let shift = 7 * u32::try_from(index).expect("varint index fits u32");
         if shift == 28 && bits > 0xf {
             return Err(malformed("a pc-value delta exceeds 32 bits"));
         }
@@ -460,11 +459,12 @@ impl GoTable {
                 .ok_or_else(|| malformed("a function's address overflows"))
         };
         let mut functions = Vec::with_capacity(nfunc);
-        let mut next = if nfunc == 0 { None } else { Some(entry(0)?) };
+        if nfunc == 0 {
+            return Ok(functions);
+        }
+        let mut start = entry(0)?;
         for index in 0..nfunc {
-            let start = next.expect("a function follows");
             let end = entry(index + 1)?;
-            next = Some(end);
             if end < start {
                 return Err(malformed("the function table is not sorted by address"));
             }
@@ -472,6 +472,7 @@ impl GoTable {
                 .and_then(|offset| usize::try_from(offset).ok())
                 .ok_or(PclntabError::Truncated("the function table"))?;
             functions.push(self.decode_function(pclntable, record, start, end, text)?);
+            start = end;
         }
         Ok(functions)
     }
@@ -488,13 +489,15 @@ impl GoTable {
             .checked_add(FUNC_SIZE)
             .and_then(|end| pclntable.get(record..end))
             .ok_or(PclntabError::Truncated("a function record"))?;
-        let field = |index: usize| read_u32(fixed, 4 * index).expect("the record is in bounds");
-        if text.checked_add(u64::from(field(0))) != Some(entry) {
+        let field = |index: usize| {
+            read_u32(fixed, 4 * index).ok_or(PclntabError::Truncated("a function record"))
+        };
+        if text.checked_add(u64::from(field(0)?)) != Some(entry) {
             return Err(malformed(
                 "a function record's entry differs from the function table's",
             ));
         }
-        let npcdata = field(7);
+        let npcdata = field(7)?;
         let nfuncdata = fixed[43];
         let trailing = usize::try_from(npcdata)
             .ok()
@@ -508,7 +511,7 @@ impl GoTable {
         {
             return Err(PclntabError::Truncated("a function record"));
         }
-        let name = NameOffset(field(1));
+        let name = NameOffset(field(1)?);
         if usize::try_from(name.0).map_or(true, |name| name >= self.funcnametab.len()) {
             return Err(malformed("a function's name is outside the name table"));
         }
@@ -524,12 +527,12 @@ impl GoTable {
                 sp_write: flags & FLAG_SP_WRITE != 0,
                 assembly: flags & FLAG_ASM != 0,
             },
-            start_line: field(9).cast_signed(),
+            start_line: field(9)?.cast_signed(),
             name,
-            pcsp: PcTable(field(4)),
-            pcfile: PcTable(field(5)),
-            pcln: PcTable(field(6)),
-            unit: CuIndex(field(8)),
+            pcsp: PcTable(field(4)?),
+            pcfile: PcTable(field(5)?),
+            pcln: PcTable(field(6)?),
+            unit: CuIndex(field(8)?),
             pcdata,
             npcdata,
             nfuncdata,
@@ -598,12 +601,9 @@ impl GoTable {
     /// The function's pc-value table at `index` among its `pcdata`, or
     /// `None` when it has too few.
     fn pcdata(&self, function: &GoFunction, index: usize) -> Option<PcTable> {
-        (index < function.npcdata as usize).then(|| {
-            PcTable(
-                read_u32(&self.data, function.pcdata + 4 * index)
-                    .expect("the record's pcdata is in bounds"),
-            )
-        })
+        (index < function.npcdata as usize)
+            .then(|| read_u32(&self.data, function.pcdata + 4 * index).map(PcTable))
+            .flatten()
     }
 
     /// The runs of a pc-value table, over one function.
@@ -808,7 +808,7 @@ impl GoTable {
             &self.data,
             function.pcdata + 4 * (function.npcdata as usize + FUNCDATA_INLINE_TREE),
         )
-        .expect("the record's funcdata is in bounds");
+        .ok_or(PclntabError::Truncated("an inline tree"))?;
         if tree == u32::MAX {
             return Err(malformed("an inline-tree index names no inline tree"));
         }
@@ -821,8 +821,10 @@ impl GoTable {
             .and_then(|offset| offset.checked_add(gofunc)?.checked_add(tree as usize))
             .and_then(|start| self.data.get(start..start.checked_add(INLINED_CALL_SIZE)?))
             .ok_or(PclntabError::Truncated("an inline tree"))?;
-        let field = |index: usize| read_u32(record, 4 * index).expect("the entry is in bounds");
-        let name = NameOffset(field(1));
+        let field = |index: usize| {
+            read_u32(record, 4 * index).ok_or(PclntabError::Truncated("an inline tree"))
+        };
+        let name = NameOffset(field(1)?);
         if name.0 as usize >= self.funcnametab.len() {
             return Err(malformed(
                 "an inlined function's name is outside the name table",
@@ -830,7 +832,7 @@ impl GoTable {
         }
         let parent_pc = function
             .entry
-            .checked_add_signed(i64::from(field(2).cast_signed()))
+            .checked_add_signed(i64::from(field(2)?.cast_signed()))
             .filter(|parent| function.contains(*parent))
             .ok_or_else(|| malformed("an inlined call's site is outside its function"))?;
         Ok(InlinedCall {
@@ -839,7 +841,7 @@ impl GoTable {
                 .and_then(|numbering| numbering.special(record[0])),
             name,
             parent_pc,
-            start_line: field(3).cast_signed(),
+            start_line: field(3)?.cast_signed(),
         })
     }
 }
@@ -1224,6 +1226,10 @@ fn go_release(object: &object::File<'_>) -> Option<GoRelease> {
 /// Exercises the table reader on arbitrary bytes, for the fuzz harness: as
 /// an ELF image to locate the table in, or as a table itself.
 #[cfg(feature = "fuzzing")]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 pub fn fuzz(data: &[u8]) {
     if data.starts_with(b"\x7fELF") {
         if let Ok(object) = object::File::parse(data)
@@ -1253,6 +1259,10 @@ pub fn fuzz(data: &[u8]) {
 /// Decodes everything a table holds, checking what every decoding promises.
 /// `code` stands in for the image's code bytes.
 #[cfg(feature = "fuzzing")]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 fn fuzz_table(table: &GoTable, code: &[u8]) {
     let code = |address: u64, length: usize| {
         let start = usize::try_from(address % 0x1_0000).ok()?;

@@ -102,7 +102,9 @@ pub fn read(path: &Path) -> Result<Contents, String> {
 /// place, creating the state directory with a `.gitignore` that keeps it
 /// out of the project's history.
 pub fn write(path: &Path, contents: &Contents) -> io::Result<()> {
-    let directory = path.parent().expect("a state file has a directory");
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("a state file has a directory"))?;
     if !directory.is_dir() {
         std::fs::create_dir_all(directory)?;
         std::fs::write(directory.join(".gitignore"), "*\n")?;

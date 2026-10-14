@@ -409,12 +409,18 @@ impl<'a> Site<'a> {
     pub fn target(self) -> SiteTarget {
         let value = self.record.target.get();
         // Validation keeps a string's or a list's number within u32.
-        let row = || u32::try_from(value).expect("validated");
+        let row = u32::try_from(value).ok();
         match self.record.target_kind {
             targets::CODE => SiteTarget::Code(ImageAddress::new(value)),
-            targets::SYMBOL => SiteTarget::Symbol(self.view.text(row())),
-            targets::COMPUTED => SiteTarget::Computed(Ok(LocationListId(row()))),
-            targets::COMPUTED_MALFORMED => SiteTarget::Computed(Err(self.view.text(row()))),
+            targets::SYMBOL => row.map_or(SiteTarget::Unknown, |row| {
+                SiteTarget::Symbol(self.view.text(row))
+            }),
+            targets::COMPUTED => row.map_or(SiteTarget::Unknown, |row| {
+                SiteTarget::Computed(Ok(LocationListId(row)))
+            }),
+            targets::COMPUTED_MALFORMED => row.map_or(SiteTarget::Unknown, |row| {
+                SiteTarget::Computed(Err(self.view.text(row)))
+            }),
             _ => SiteTarget::Unknown,
         }
     }

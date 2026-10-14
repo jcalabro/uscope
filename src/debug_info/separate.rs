@@ -544,7 +544,7 @@ pub fn has_dwarf(object: &object::File<'_>) -> bool {
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut text, byte| {
-        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(text, "{byte:02x}");
         text
     })
 }

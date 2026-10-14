@@ -5,6 +5,12 @@
     not(test),
     allow(dead_code, reason = "the view fuzzer uses only part of the world")
 )]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    reason = "a test double reports misuse by panicking"
+)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

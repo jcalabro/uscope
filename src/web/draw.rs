@@ -604,7 +604,7 @@ impl Walk<'_> {
                     ..
                 } = &child.state
                 else {
-                    unreachable!("only scalars are numbers");
+                    return Err(format!("`{path}`: its numbers are not all scalars"));
                 };
                 number_bytes(*first, scalar, &mut bytes);
             }
@@ -743,7 +743,7 @@ fn rows(kind: NumberKind, offset: u64, count: u64, dimensions: &[u64]) -> Datum 
         },
         [outer, inner @ ..] => {
             let each = count / (*outer).max(1);
-            let size = number_size(kind);
+            let size = number_size(kind) as u64;
             Datum::List {
                 items: (0..*outer)
                     .map(|row| rows(kind, offset + row * each * size, each, inner))
@@ -784,7 +784,7 @@ const fn kind(kind: uscope::NumberKind) -> NumberKind {
     }
 }
 
-const fn number_size(kind: NumberKind) -> u64 {
+const fn number_size(kind: NumberKind) -> usize {
     match kind {
         NumberKind::I8 | NumberKind::U8 => 1,
         NumberKind::I16 | NumberKind::U16 => 2,
@@ -832,7 +832,7 @@ fn number_bytes(kind: NumberKind, scalar: &ScalarValue, bytes: &mut Vec<u8>) {
         ScalarValue::Floating(FloatValue::Binary64(bits)) => u128::from(*bits),
         _ => 0,
     };
-    let size = usize::try_from(number_size(kind)).expect("a number's size fits");
+    let size = number_size(kind);
     bytes.extend_from_slice(&integer.to_le_bytes()[..size]);
 }
 

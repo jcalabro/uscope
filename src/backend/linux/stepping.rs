@@ -133,10 +133,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             validate_public_stop(inferior, Some(stop_id))?;
             validate_resumable(inferior)?;
             validate_stopped_thread(inferior, pid)?;
-            let stop = inferior
-                .public_stop
-                .as_ref()
-                .expect("public stop was validated");
+            let stop = inferior.public_stop.as_ref().ok_or(Error::NotStopped)?;
             let Some(current) = stop.presentations.get(&pid) else {
                 return Ok(None);
             };
@@ -158,17 +155,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             (
                 process_id(inferior.tgid),
                 ExecutionId::new(inferior.next_execution + 1),
-                self.ptrace.allocate_stop_id(),
+                self.ptrace.allocate_stop_id()?,
                 presentation,
             )
         };
 
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let stop = inferior.public_stop.as_mut().ok_or(Error::NotStopped)?;
         inferior.next_execution = execution_id.get();
-        let stop = inferior
-            .public_stop
-            .as_mut()
-            .expect("public stop was validated");
         stop.id = next_stop_id;
         stop.triggering_thread = pid;
         stop.selected = crate::ExecutionContext::Thread(debug_thread_id(pid));
@@ -459,7 +453,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let activation = self.top_activation(pid, &registers).ok();
         let start = self
             .active_step_mut()
-            .expect("the step remained active while it began following");
+            .ok_or_else(|| Error::internal("the step remained active while it began following"))?;
         *start = StepStart {
             source: location.source.clone(),
             code_instance: location.physical_instance,
@@ -883,9 +877,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         plan_addresses.insert(return_address);
         self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
 
-        let start = self
-            .active_step_mut()
-            .expect("source step remained active while installing its epilogue plan");
+        let start = self.active_step_mut().ok_or_else(|| {
+            Error::internal("source step remained active while installing its epilogue plan")
+        })?;
         start.plan_addresses.extend(plan_addresses);
         start.epilogue_traversal = Some(EpilogueTraversal {
             return_address,
@@ -1012,9 +1006,9 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         let plan_addresses = BTreeSet::from([cfi_return]);
         self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
-        let start = self
-            .active_step_mut()
-            .expect("source step remained active while installing its return plan");
+        let start = self.active_step_mut().ok_or_else(|| {
+            Error::internal("source step remained active while installing its return plan")
+        })?;
         start.plan_addresses.extend(plan_addresses);
         start.return_traversal = Some(ReturnTraversal {
             return_address: cfi_return,
@@ -1050,17 +1044,17 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         if kind == StepKind::IntoSource {
             self.retire_step_plan(execution)?;
-            let start = self
-                .active_step_mut()
-                .expect("source step remained active while retiring its return guard");
+            let start = self.active_step_mut().ok_or_else(|| {
+                Error::internal("source step remained active while retiring its return guard")
+            })?;
             start.plan_addresses.clear();
             start.epilogue_traversal = None;
             return Ok(());
         }
         self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
-        let start = self
-            .active_step_mut()
-            .expect("source step remained active while retiring its return guard");
+        let start = self.active_step_mut().ok_or_else(|| {
+            Error::internal("source step remained active while retiring its return guard")
+        })?;
         start.plan_addresses.remove(&address);
         start.epilogue_traversal = None;
         Ok(())
@@ -1087,9 +1081,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
-        let start = self
-            .active_step_mut()
-            .expect("source step remained active while retiring its return guard");
+        let start = self.active_step_mut().ok_or_else(|| {
+            Error::internal("source step remained active while retiring its return guard")
+        })?;
         start.plan_addresses.remove(&address);
         start.return_traversal = None;
         Ok(())
@@ -1154,7 +1148,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ActiveKind::Step { start, .. } => Some(start),
                 _ => None,
             })
-            .expect("source step has a starting state");
+            .ok_or_else(|| Error::internal("source step has a starting state"))?;
         // Waiting for its loop, a step completes only at its plan's
         // breakpoints.
         if start.running_on
@@ -1185,8 +1179,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         match kind {
-            StepKind::Advance => unreachable!("an advance runs as a step out"),
-            StepKind::IntoNewTask => unreachable!("{STEPS_OVER}"),
+            StepKind::Advance => Err(Error::internal("an advance runs as a step out")),
+            StepKind::IntoNewTask => Err(Error::internal(STEPS_OVER)),
             StepKind::Instruction | StepKind::OverInstruction => Ok(true),
             StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
             _ if start.following => self.step_into_source_is_complete(pid, &registers, start),
@@ -1509,8 +1503,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Neither does stepping over from code no debug information
         // describes, which steps as stepping in does.
         let activation = match kind {
-            StepKind::Advance => unreachable!("an advance runs as a step out"),
-            StepKind::IntoNewTask => unreachable!("{STEPS_OVER}"),
+            StepKind::Advance => return Err(Error::internal("an advance runs as a step out")),
+            StepKind::IntoNewTask => return Err(Error::internal(STEPS_OVER)),
             StepKind::Instruction | StepKind::OverInstruction => None,
             StepKind::IntoSource => self.top_activation(pid, &registers).ok(),
             StepKind::OverSource if code_instance.is_none() => {
@@ -1685,7 +1679,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 VirtualAddress::new(
                     registers
                         .rip
-                        .checked_add(u64::try_from(length).expect("instruction length fits u64"))
+                        .checked_add(length as u64)
                         .ok_or(Error::AddressOverflow)?,
                 ),
                 self.stack_position(pid, registers),
@@ -1849,7 +1843,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))?,
             );
             if frame == activation {
-                let level = u32::try_from(level).expect("frame limit fits u32");
+                let level =
+                    u32::try_from(level).map_err(|_| Error::internal("frame limit fits u32"))?;
                 let location = frame_lookup_address(level, &context)
                     .and_then(|address| inferior.loaded_module.image_address(address).ok())
                     .filter(|address| self.module_image.contains_address(*address))

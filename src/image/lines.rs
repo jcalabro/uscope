@@ -264,10 +264,11 @@ impl LineTables {
     /// Adds a row to the current sequence and returns its index.
     pub fn push_row(&mut self, row: &Row) -> Result<u32, TooManyRows> {
         let at = index(self.rows.len())?;
-        let sequence = self
-            .sequences
-            .last_mut()
-            .expect("a row belongs to a sequence");
+        let Some(sequence) = self.sequences.last_mut() else {
+            debug_assert!(false, "row {at} was pushed before any sequence began");
+            self.begin_sequence()?;
+            return self.push_row(row);
+        };
         sequence.rows = (sequence.rows.get() + 1).into();
         let line = u32::try_from(row.line)
             .ok()
@@ -415,10 +416,9 @@ impl LineTables {
         let mut order = self
             .sequences
             .iter()
-            .enumerate()
-            .flat_map(|(sequence, run)| {
+            .zip(0u32..)
+            .flat_map(|(run, sequence)| {
                 let first = run.first.get();
-                let sequence = u32::try_from(sequence).expect("sequence indexes fit u32");
                 (first..first + run.rows.get())
                     .filter(|index| is_public(&self.rows[*index as usize]))
                     .map(move |index| (index, sequence))
@@ -437,7 +437,10 @@ impl LineTables {
     pub fn line_entries(&self) -> Vec<crate::model::LineEntry> {
         self.ranges
             .iter()
-            .map(|range| line_entry(&self.addresses, &self.rows, &self.extras, range))
+            .map(|range| {
+                line_entry(&self.addresses, &self.rows, &self.extras, range)
+                    .expect("every range has a location")
+            })
             .collect()
     }
 }
@@ -518,10 +521,9 @@ pub(super) fn decode_row(
     let flags = row.flags;
     let extra = (flags & row_flags::EXTRA != 0)
         .then(|| {
-            let at = u32::try_from(index).expect("row indexes fit u32");
-            let found = extras.binary_search_by_key(&at, |extra| extra.row.get());
+            let found = extras.binary_search_by_key(&index, |extra| extra.row.get() as usize);
             // Validation pairs every flagged row with an extra.
-            debug_assert!(found.is_ok(), "row {at} is flagged, but has no extra");
+            debug_assert!(found.is_ok(), "row {index} is flagged, but has no extra");
             found.ok().map(|found| &extras[found])
         })
         .flatten();
@@ -575,18 +577,13 @@ pub(super) fn statement_rows<'a>(
 ) -> impl Iterator<Item = StatementRow> + 'a {
     sequences
         .iter()
-        .enumerate()
-        .flat_map(move |(sequence, run)| {
-            let first = run.first.get() as usize;
-            (first..first + run.rows.get() as usize).filter_map(move |index| {
-                let row = decode_row(addresses, rows, extras, index);
-                row.is_public().then(|| {
-                    statement_row(
-                        &row,
-                        u32::try_from(sequence).expect("sequence indexes fit u32"),
-                        u32::try_from(index - first).expect("row indexes fit u32"),
-                    )
-                })
+        .zip(0u32..)
+        .flat_map(move |(run, sequence)| {
+            let first = run.first.get();
+            (first..first + run.rows.get()).filter_map(move |index| {
+                let row = decode_row(addresses, rows, extras, index as usize);
+                row.is_public()
+                    .then(|| statement_row(&row, sequence, index - first))
             })
         })
 }
@@ -597,17 +594,21 @@ pub(super) fn line_entry(
     rows: &[LineRow],
     extras: &[LineExtra],
     range: &LineRange,
-) -> crate::model::LineEntry {
-    crate::model::LineEntry {
+) -> Option<crate::model::LineEntry> {
+    let location = decode_row(addresses, rows, extras, range.row.get() as usize).location();
+    debug_assert!(
+        location.is_some(),
+        "validation checked line range row {} has a location",
+        range.row.get()
+    );
+    Some(crate::model::LineEntry {
         range: AddressRange {
             start: ImageAddress::new(range.start.get()),
             end: ImageAddress::new(range.end.get()),
         },
-        location: decode_row(addresses, rows, extras, range.row.get() as usize)
-            .location()
-            .expect("a line range's row has a location"),
+        location: location?,
         statement: range.statement != 0,
-    }
+    })
 }
 
 /// The line ranges in the order they are persisted, and the indexes
@@ -630,12 +631,11 @@ pub(super) fn build_indexes(tables: &LineTables) -> LineIndexes {
 
     let mut statements = Vec::new();
     let mut boundaries = Vec::new();
-    for index in 0..tables.rows.len() {
-        let row = tables.row(index);
+    for (at, _) in (0u32..).zip(&tables.rows) {
+        let row = tables.row(at as usize);
         if !row.is_public() {
             continue;
         }
-        let at = u32::try_from(index).expect("row indexes fit u32");
         if row.statement
             && let Some(location) = row.location()
         {
@@ -676,9 +676,10 @@ impl Files {
         if let Some(&id) = self.ids.get(&path) {
             return id;
         }
-        let id = SourceFileId::new(
-            u32::try_from(self.paths.len()).expect("source file count fits in u32"),
-        );
+        // Past `u32::MAX` files, ids repeat, but the image cannot seal: the
+        // paths, each distinct and NUL-terminated, then outgrow the pool's
+        // `u32` offsets.
+        let id = SourceFileId::new(u32::try_from(self.paths.len()).unwrap_or(u32::MAX));
         self.paths.push(path.clone());
         self.ids.insert(path, id);
         debug_assert_eq!(
@@ -709,14 +710,12 @@ impl Files {
             let mut matches = self
                 .paths
                 .iter()
-                .enumerate()
-                .filter(|(_, candidate)| candidate.is_absolute() && candidate.ends_with(&path));
-            if let Some((index, _)) = matches.next()
+                .zip(0u32..)
+                .filter(|(candidate, _)| candidate.is_absolute() && candidate.ends_with(&path));
+            if let Some((_, index)) = matches.next()
                 && matches.next().is_none()
             {
-                return SourceFileId::new(
-                    u32::try_from(index).expect("source file count fits in u32"),
-                );
+                return SourceFileId::new(index);
             }
         }
         self.intern(path)
@@ -842,18 +841,18 @@ impl<'a> LineView<'a> {
     }
 
     /// Row `index` as a public statement row.
-    fn statement_row(self, index: usize) -> StatementRow {
-        let at = u32::try_from(index).expect("row indexes fit u32");
+    fn statement_row(self, at: u32) -> StatementRow {
         let sequence = self
             .sequences
             .partition_point(|sequence| sequence.first.get() <= at)
             - 1;
         let ordinal = at - self.sequences[sequence].first.get();
-        statement_row(
-            &self.row(index),
-            u32::try_from(sequence).expect("sequence indexes fit u32"),
-            ordinal,
-        )
+        let sequence = u32::try_from(sequence);
+        debug_assert!(
+            sequence.is_ok(),
+            "validation bounds the sequences below u32"
+        );
+        statement_row(&self.row(at as usize), sequence.unwrap_or(NONE), ordinal)
     }
 
     /// Every public statement row, in order.
@@ -867,7 +866,7 @@ impl<'a> LineView<'a> {
         mut indexes: Vec<usize>,
     ) -> impl Iterator<Item = crate::model::LineEntry> + 'a {
         indexes.sort_unstable_by_key(|index| self.ranges[*index].row.get());
-        indexes.into_iter().map(move |index| {
+        indexes.into_iter().filter_map(move |index| {
             line_entry(self.addresses, self.rows, self.extras, &self.ranges[index])
         })
     }
@@ -898,7 +897,7 @@ impl<'a> LineView<'a> {
                 first = Some(range);
             }
         }
-        first.map(|range| line_entry(self.addresses, self.rows, self.extras, range))
+        first.and_then(|range| line_entry(self.addresses, self.rows, self.extras, range))
     }
 
     /// The line ranges that start within any of `within`, in line-program
@@ -937,7 +936,7 @@ impl<'a> LineView<'a> {
         self.boundaries[first..]
             .iter()
             .take_while(move |boundary| at(boundary) == address)
-            .map(move |boundary| self.statement_row(boundary.row.get() as usize))
+            .map(move |boundary| self.statement_row(boundary.row.get()))
     }
 
     /// The statement keys of `file` with lines in `lines`, in (line, row)

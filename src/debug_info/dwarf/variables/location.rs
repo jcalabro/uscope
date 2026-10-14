@@ -319,7 +319,7 @@ fn indexed_addresses(
             continue;
         };
         let address = unit_dwarf(dwarf, unit).address(unit, index)?;
-        addresses.push((u64::try_from(index.0).expect("indexes fit u64"), address));
+        addresses.push((index.0 as u64, address));
     }
     Ok(addresses)
 }
@@ -343,7 +343,7 @@ fn calls(
             gimli::DieReference::DebugInfoRef(offset) => Some(offset),
         };
         if let Some(offset) = offset {
-            called.push(u64::try_from(offset.0).expect("DWARF offset fits u64"));
+            called.push(offset.0 as u64);
         }
     }
     Ok(called)
@@ -380,7 +380,7 @@ fn evaluation_unit(
             .header
             .debug_info_offset()
             .filter(|_| !units.is_supplementary(index))
-            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+            .map(|offset| offset.0 as u64),
         language: units.inherited_language(index),
         ..EvaluationUnit::default()
     };
@@ -409,10 +409,9 @@ fn evaluation_unit(
         };
         let encoding = gimli::DwAte(raw_encoding);
         if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
-            recorded.base_types.push((
-                u64::try_from(entry.offset().0).expect("DWARF offset fits u64"),
-                value_type,
-            ));
+            recorded
+                .base_types
+                .push((entry.offset().0 as u64, value_type));
         }
     }
     Ok(recorded)

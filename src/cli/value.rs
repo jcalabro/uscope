@@ -858,7 +858,8 @@ async fn first_children(
             reference.clone(),
             ValueChildQuery {
                 offset: 0,
-                limit: u32::try_from(requested).expect("bounded page fits u32"),
+                limit: u32::try_from(requested)
+                    .map_err(|_| uscope::Error::InvalidValueChildPageLimit(u32::MAX))?,
             },
             *remaining,
         )
@@ -1005,12 +1006,14 @@ pub fn watched_bytes(
             }
         }
         (Some(WatchedScalar::Boolean), 1) => (bytes[0] != 0).to_string(),
-        (Some(WatchedScalar::Float), 4) => uscope::float_text(uscope::FloatValue::Binary32(
-            u32::from_le_bytes(bytes.try_into().expect("four bytes")),
-        )),
-        (Some(WatchedScalar::Float), 8) => uscope::float_text(uscope::FloatValue::Binary64(
-            u64::from_le_bytes(bytes.try_into().expect("eight bytes")),
-        )),
+        (Some(WatchedScalar::Float), 4) => bytes.first_chunk::<4>().map_or_else(
+            || register_bytes(bytes, ByteOrder::Little),
+            |chunk| uscope::float_text(uscope::FloatValue::Binary32(u32::from_le_bytes(*chunk))),
+        ),
+        (Some(WatchedScalar::Float), 8) => bytes.first_chunk::<8>().map_or_else(
+            || register_bytes(bytes, ByteOrder::Little),
+            |chunk| uscope::float_text(uscope::FloatValue::Binary64(u64::from_le_bytes(*chunk))),
+        ),
         (Some(WatchedScalar::Address), 8) => format!("{:#x}", little_endian(bytes)),
         _ => register_bytes(bytes, ByteOrder::Little),
     }

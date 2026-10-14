@@ -215,7 +215,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         self.0.tracer_process()
     }
 
-    fn allocate_stop_id(&self) -> StopId {
+    fn allocate_stop_id(&self) -> Result<StopId> {
         self.0.allocate_stop_id()
     }
 

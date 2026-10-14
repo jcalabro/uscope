@@ -558,7 +558,7 @@ fn declared_length<M: Machine>(
         return Ok(declared);
     }
     let super::bind::BoundGenerator::Range(length) = &scan.clauses[0].generator else {
-        unreachable!("random access is one range");
+        return Err(internal("random access is one range"));
     };
     machine.set_variables(&[]);
     let generated = count(length, machine, "range's length")?;
@@ -863,7 +863,7 @@ pub fn present<M: Machine>(
             Presented::value(machine.present(&place)?)
         }
         BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
-            unreachable!("`if` and `match` are resolved")
+            return Err(internal("`if` and `match` are resolved"));
         }
     };
     presented.named = named(bound, shape).len() as u64;
@@ -1013,7 +1013,7 @@ fn preview<M: Machine>(
                 ),
                 vec![&key.state, &value.state],
             ),
-            _ => unreachable!("items are elements or entries"),
+            _ => return Err(internal("items are elements or entries")),
         };
         characters += rendered.chars().count() + 2;
         items.push(rendered);
@@ -1322,7 +1322,7 @@ pub fn length<M: Machine>(
         }
         BoundShape::Record(_) => Err(refused("a record has no length")),
         BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
-            unreachable!("`if` and `match` are resolved")
+            Err(internal("`if` and `match` are resolved"))
         }
     }
 }

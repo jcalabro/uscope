@@ -163,38 +163,43 @@ impl<M: Machine> Interpreter<'_, M> {
         Self::error(span, ErrorKind::Arithmetic, error.to_string())
     }
 
+    /// A broken invariant of the binder, which no expression can cause.
+    fn invariant<T>(fact: &'static str) -> Result<T, Halt> {
+        Err(Halt::Failed(crate::Error::internal(fact)))
+    }
+
     fn integer(&mut self, node: &Node<M::Object, M::Step>) -> Result<Integer, Halt> {
         match self.eval(node)? {
             Value::Int(integer) => Ok(integer),
-            _ => unreachable!("the binder made this operand an integer"),
+            _ => Self::invariant("the binder made this operand an integer"),
         }
     }
 
     fn truth(&mut self, node: &Node<M::Object, M::Step>) -> Result<bool, Halt> {
         match self.eval(node)? {
             Value::Bool(value) => Ok(value),
-            _ => unreachable!("the binder made this operand a truth value"),
+            _ => Self::invariant("the binder made this operand a truth value"),
         }
     }
 
     fn pointer(&mut self, node: &Node<M::Object, M::Step>) -> Result<u64, Halt> {
         match self.eval(node)? {
             Value::Pointer(address) => Ok(address),
-            _ => unreachable!("the binder made this operand a pointer"),
+            _ => Self::invariant("the binder made this operand a pointer"),
         }
     }
 
     fn float(&mut self, node: &Node<M::Object, M::Step>) -> Result<Float, Halt> {
         match self.eval(node)? {
             Value::Float(value) => Ok(value),
-            _ => unreachable!("the binder made this operand a float"),
+            _ => Self::invariant("the binder made this operand a float"),
         }
     }
 
     fn place(&mut self, node: &Node<M::Object, M::Step>) -> Result<M::Place, Halt> {
         match self.eval(node)? {
             Value::Place(place) => Ok(place),
-            _ => unreachable!("the binder made this operand a program place"),
+            _ => Self::invariant("the binder made this operand a program place"),
         }
     }
 
@@ -308,7 +313,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Op::Register(register) => {
                 let raw = Self::at(span, self.machine.register(register))?;
                 let Ty::Int(int) = node.ty else {
-                    unreachable!("registers are unsigned integers")
+                    return Self::invariant("registers are unsigned integers");
                 };
                 Value::Int(Integer::Typed(Bits::from_raw(int, raw)))
             }
@@ -324,7 +329,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     Value::Pointer(Self::at(place.span, self.machine.address(&at))?)
                 }
                 Value::Raw(address) => Value::Pointer(address),
-                _ => unreachable!("the binder takes addresses of places only"),
+                _ => return Self::invariant("the binder takes addresses of places only"),
             },
             Op::Negate(operand) => {
                 let value = self.integer(operand)?.value();
@@ -463,7 +468,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 how: Length::Bytes,
             } => {
                 let Value::Text(bytes) = self.eval(operand)? else {
-                    unreachable!("the binder measures strings as strings")
+                    return Self::invariant("the binder measures strings as strings");
                 };
                 Value::Int(Integer::Exact(Exact::from(bytes.len() as u128)))
             }
@@ -500,7 +505,9 @@ impl<M: Machine> Interpreter<'_, M> {
             }
             Op::Fit(operand) => self.fit(&node.ty, operand)?,
             Op::Range { .. } | Op::Assign { .. } => {
-                unreachable!("ranges and assignments are only ever the whole expression")
+                return Self::invariant(
+                    "ranges and assignments are only ever the whole expression",
+                );
             }
         })
     }
@@ -648,7 +655,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 Value::Float(value) => !value.is_zero(),
                 Value::Pointer(address) => address != 0,
                 Value::Bool(value) => value,
-                _ => unreachable!("the binder converts only scalars to truth values"),
+                _ => return Self::invariant("the binder converts only scalars to truth values"),
             }),
             Conversion::BoolToInteger(int) => {
                 let value = u128::from(self.truth(operand)?);
@@ -661,7 +668,13 @@ impl<M: Machine> Interpreter<'_, M> {
             Conversion::IntegerToPointer => {
                 let value = self.integer(operand)?.value();
                 let width = u8::try_from(self.address_width()).unwrap_or(64);
-                let int = IntType::new(width, false).expect("address widths are valid");
+                let Some(int) = IntType::new(width, false) else {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Unsupported,
+                        format!("a {width}-bit address is not a width uscope computes with"),
+                    ));
+                };
                 let bits = Bits::truncate(int, value);
                 Value::Pointer(u64::try_from(bits.raw()).unwrap_or(u64::MAX))
             }
@@ -714,7 +727,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Comparison::Texts => {
                 let (Value::Text(left), Value::Text(right)) = (self.eval(left)?, self.eval(right)?)
                 else {
-                    unreachable!("the binder compares strings with strings")
+                    return Self::invariant("the binder compares strings with strings");
                 };
                 Some(if left == right {
                     Ordering::Equal
@@ -725,7 +738,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Comparison::Text => {
                 let place = self.place(left)?;
                 let Value::Text(literal) = self.eval(right)? else {
-                    unreachable!("the binder compares text with a string")
+                    return Self::invariant("the binder compares text with a string");
                 };
                 let equal = self.text_equals(&place, &literal, left.span)?;
                 Some(if equal {
@@ -744,7 +757,7 @@ impl<M: Machine> Interpreter<'_, M> {
             (BinaryOp::Le, Some(order)) => order != Ordering::Greater,
             (BinaryOp::Gt, Some(order)) => order == Ordering::Greater,
             (BinaryOp::Ge, Some(order)) => order != Ordering::Less,
-            _ => unreachable!("only comparisons compare"),
+            _ => return Self::invariant("only comparisons compare"),
         })
     }
 
@@ -753,7 +766,7 @@ impl<M: Machine> Interpreter<'_, M> {
         match self.eval(node)? {
             Value::Pointer(address) => Ok(address),
             Value::Int(_) => Ok(0),
-            _ => unreachable!("the binder compares pointers with pointers and zero"),
+            _ => Self::invariant("the binder compares pointers with pointers and zero"),
         }
     }
 
@@ -872,13 +885,10 @@ impl<M: Machine> Interpreter<'_, M> {
             Value::Int(integer) => Some(integer.value()),
             Value::Bool(value) => Some(Exact::from(u128::from(*value))),
             Value::Pointer(address) => Some(Exact::from(u128::from(*address))),
-            Value::Float(float) => float
-                .to_int(IntType::new(128, true).expect("valid"))
-                .ok()
-                .and_then(|bits| {
-                    (float.compare_exact(bits.value()) == Some(std::cmp::Ordering::Equal))
-                        .then(|| bits.value())
-                }),
+            Value::Float(float) => float.to_int(IntType::I128).ok().and_then(|bits| {
+                (float.compare_exact(bits.value()) == Some(std::cmp::Ordering::Equal))
+                    .then(|| bits.value())
+            }),
             _ => None,
         };
         Ok(match category(self.machine, ty) {
@@ -993,12 +1003,12 @@ impl<M: Machine> Interpreter<'_, M> {
                     })?;
                 (None, Some(stored))
             }
-            _ => unreachable!("the binder slices text and places only"),
+            _ => return Self::invariant("the binder slices text and places only"),
         };
         let length = match (&computed, &stored) {
             (Some(bytes), _) => bytes.len() as u64,
             (_, Some(stored)) => stored.length,
-            _ => unreachable!("text is computed or stored"),
+            _ => return Self::invariant("text is computed or stored"),
         };
         let (start, end) = (
             start.unwrap_or(0),
@@ -1026,7 +1036,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     })?;
                 Self::at(span, self.machine.read(address, last - first))?
             }
-            _ => unreachable!("text is computed or stored"),
+            _ => return Self::invariant("text is computed or stored"),
         }))
     }
 
@@ -1054,7 +1064,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 }
                 Key::Text(text.bytes.to_vec())
             }
-            Value::Raw(_) => unreachable!("the binder loads raw keys"),
+            Value::Raw(_) => return Self::invariant("the binder loads raw keys"),
         })
     }
 
@@ -1108,7 +1118,7 @@ impl<M: Machine> Interpreter<'_, M> {
                         VariableValue::Scalar(ScalarValue::Unsigned(unsigned))
                     }
                     (_, _, Some(signed)) => VariableValue::Scalar(ScalarValue::Signed(signed)),
-                    _ => unreachable!("exact integers fit i128 or u128"),
+                    _ => return Self::invariant("exact integers fit i128 or u128"),
                 }
             }
             Value::Float(value) => VariableValue::Scalar(ScalarValue::Floating(value.to_value())),
@@ -1118,7 +1128,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 address: VirtualAddress::new(*address),
             }),
             Value::Place(_) | Value::Raw(_) | Value::Text(_) => {
-                unreachable!("places and strings are presented elsewhere")
+                return Self::invariant("places and strings are presented elsewhere");
             }
         };
         let raw = size.map(|size| std::sync::Arc::from(self.encode_scalar(&scalar, size)));

@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
 use uscope::profiler::{
     DiffCost, GapReason, Granularity, KeyKind, Keys, Lanes, MarkerKind, NO_KEY, NO_TASK, Preset,
@@ -132,7 +132,7 @@ impl Profiles {
         profile: Profile,
         in_flight: (Vec<InFlight>, u64),
     ) {
-        let mut entries = self.entries.write().expect("profiles lock");
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         let id = info.id.clone();
         entries.insert(
             id,
@@ -153,7 +153,7 @@ impl Profiles {
     }
 
     /// A profile's file, by its id, and the name to save it under.
-    pub fn file(&self, id: &str) -> Option<(String, Vec<u8>)> {
+    pub fn file(&self, id: &str) -> Option<(String, std::io::Result<Vec<u8>>)> {
         let entry = self.entry(id).ok()?;
         let name = if std::path::Path::new(&entry.info.name)
             .extension()
@@ -168,7 +168,12 @@ impl Profiles {
 
     /// Ends every recording, killing its program, and waits for each.
     pub fn shutdown(&self) {
-        let recordings = std::mem::take(&mut *self.recordings.lock().expect("recordings lock"));
+        let recordings = std::mem::take(
+            &mut *self
+                .recordings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         for recorder in recordings.values() {
             recorder.stop.store(true, Ordering::Relaxed);
         }
@@ -192,7 +197,10 @@ impl Profiles {
             }
             Request::StopRecording(protocol::ProfileRef { profile, .. }) => {
                 controls(role)?;
-                let recordings = self.recordings.lock().expect("recordings lock");
+                let recordings = self
+                    .recordings
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let recorder = recordings.get(&profile).ok_or_else(|| {
                     Failure::new(ErrorKind::Invalid, format!("{profile} is not recording"))
                 })?;
@@ -279,7 +287,7 @@ impl Profiles {
                         profiles
                             .recordings
                             .lock()
-                            .expect("recordings lock")
+                            .unwrap_or_else(PoisonError::into_inner)
                             .remove(&id);
                     }
                     None => profiles.run_recording(&id, &name, command, &options, &stop, started),
@@ -288,7 +296,7 @@ impl Profiles {
             .map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
         self.recordings
             .lock()
-            .expect("recordings lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(id.clone(), Recorder { stop, thread });
         match starting.await {
             Ok(Ok(())) => Ok(id),
@@ -357,13 +365,16 @@ impl Profiles {
                 }
             }
         }
-        self.recordings.lock().expect("recordings lock").remove(id);
+        self.recordings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
     }
 
     fn entry(&self, id: &str) -> Result<Arc<Entry>, Failure> {
         self.entries
             .read()
-            .expect("profiles lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(id)
             .cloned()
             .ok_or_else(|| Failure::new(ErrorKind::Invalid, format!("no profile {id}")))
@@ -547,9 +558,13 @@ impl Profiles {
                 )))
             }
             request => {
-                let id = super::syscalls::profile_of(&request)
-                    .expect("only profile requests come here")
-                    .to_owned();
+                let Some(id) = super::syscalls::profile_of(&request) else {
+                    return Err(Failure::new(
+                        ErrorKind::Failed,
+                        "internal: only profile requests come here",
+                    ));
+                };
+                let id = id.to_owned();
                 let entry = self.entry(&id)?;
                 let trace = entry
                     .syscalls
@@ -1260,5 +1275,5 @@ fn json(value: &impl serde::Serialize) -> (Value, Vec<u8>) {
 }
 
 fn to_value(value: &impl serde::Serialize) -> Value {
-    serde_json::to_value(value).expect("answers serialize")
+    serde_json::to_value(value).unwrap_or_else(|error| json!({ "error": error.to_string() }))
 }

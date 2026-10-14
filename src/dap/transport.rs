@@ -48,7 +48,7 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
     loop {
         line.clear();
         let read = reader
-            .take(u64::try_from(MAX_HEADER + 1 - header_bytes).expect("header bound fits u64"))
+            .take((MAX_HEADER + 1 - header_bytes) as u64)
             .read_until(b'\n', &mut line)
             .await?;
         if read == 0 {

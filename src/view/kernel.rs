@@ -150,7 +150,8 @@ impl Kernel {
         let (store, memory, run, place) =
             catch_unwind(AssertUnwindSafe(|| self.instantiate(arguments)))
                 .map_err(|_| "the WebAssembly runtime failed starting it".to_owned())??;
-        let count = i32::try_from(arguments.len()).expect("arguments are few");
+        let count = i32::try_from(arguments.len())
+            .map_err(|_| "it is given too many arguments".to_owned())?;
         Ok(Run {
             store,
             memory,
@@ -182,7 +183,10 @@ impl Kernel {
     ) -> Result<(Store<StoreLimits>, Memory, TypedFunc<(i32, i32), i32>, i32), String> {
         let engine = self.module.engine();
         let limits = StoreLimitsBuilder::new()
-            .memory_size(usize::try_from(MAX_MEMORY_BYTES).expect("small"))
+            .memory_size(
+                usize::try_from(MAX_MEMORY_BYTES)
+                    .map_err(|_| "its memory limit does not fit this host".to_owned())?,
+            )
             .memories(1)
             .instances(1)
             .build();
@@ -191,7 +195,7 @@ impl Kernel {
         store
             .set_fuel(0)
             .map_err(|error| format!("its fuel could not be set: {error}"))?;
-        let linker = host_functions(engine);
+        let linker = host_functions(engine)?;
         let instance = linker
             .instantiate_and_start(&mut store, &self.module)
             .map_err(|error| format!("it could not be instantiated: {error}"))?;
@@ -213,14 +217,19 @@ impl Kernel {
             .flat_map(|argument| argument.to_le_bytes())
             .collect::<Vec<_>>();
         memory
-            .write(&mut store, usize::try_from(place).expect("small"), &bytes)
+            .write(
+                &mut store,
+                usize::try_from(place)
+                    .map_err(|_| "its arguments have no place in its memory".to_owned())?,
+                &bytes,
+            )
             .map_err(|error| format!("its arguments could not be written: {error}"))?;
         Ok((store, memory, run, place))
     }
 }
 
 /// The host functions, each of which stops the kernel with its call.
-fn host_functions(engine: &Engine) -> Linker<StoreLimits> {
+fn host_functions(engine: &Engine) -> Result<Linker<StoreLimits>, String> {
     let mut linker = Linker::new(engine);
     linker
         .func_wrap(
@@ -234,7 +243,7 @@ fn host_functions(engine: &Engine) -> Linker<StoreLimits> {
                 }))
             },
         )
-        .expect("one definition of read");
+        .map_err(|error| format!("its host functions could not be linked: {error}"))?;
     linker
         .func_wrap(
             ABI,
@@ -246,8 +255,8 @@ fn host_functions(engine: &Engine) -> Linker<StoreLimits> {
                 }))
             },
         )
-        .expect("one definition of yield");
-    linker
+        .map_err(|error| format!("its host functions could not be linked: {error}"))?;
+    Ok(linker)
 }
 
 /// Checks that a module imports only the host's functions, with their
@@ -462,8 +471,8 @@ impl Run {
                 "it read {length} bytes at once, and a kernel reads at most {MAX_READ}"
             )));
         }
-        let start = usize::try_from(buffer).expect("32 bits fit");
-        let size = usize::try_from(length).expect("32 bits fit");
+        let start = buffer as usize;
+        let size = length as usize;
         if start
             .checked_add(size)
             .is_none_or(|end| end > self.memory.data(&self.store).len())
@@ -483,18 +492,18 @@ impl Run {
         if let Some((recording, _)) = &mut self.recording {
             recording.events.push(Event::Read { address, bytes });
         }
-        Ok(i32::try_from(length).expect("reads are small"))
+        Ok(length.cast_signed())
     }
 
     /// The words of a yielded item.
     fn item<E>(&self, words: u32, count: u32) -> Result<Box<[u64]>, RunError<E>> {
-        let count = usize::try_from(count).expect("32 bits fit");
+        let count = count as usize;
         if count == 0 || count > MAX_WORDS {
             return Err(RunError::Kernel(format!(
                 "it yielded {count} words, and an item holds 1 to {MAX_WORDS}"
             )));
         }
-        let start = usize::try_from(words).expect("32 bits fit");
+        let start = words as usize;
         let bytes = self
             .memory
             .data(&self.store)
@@ -667,7 +676,7 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
                 "read" => {
                     let (address, bytes) = rest.split_once(' ').unwrap_or((rest, ""));
                     let address = hexadecimal(address).ok_or_else(bad)?;
-                    let most = usize::try_from(MAX_READ).expect("small") * 2;
+                    let most = MAX_READ as usize * 2;
                     if bytes.len() % 2 != 0 || bytes.len() > most {
                         return Err(bad());
                     }

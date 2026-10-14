@@ -227,6 +227,23 @@ pub(super) struct ClientSupport {
     pub start_debugging: bool,
 }
 
+impl ClientSupport {
+    /// What a client that declared nothing supports, as the protocol says:
+    /// lines and columns start at one.
+    const UNDECLARED: Self = Self {
+        lines_start_at1: true,
+        columns_start_at1: true,
+        progress: false,
+        variable_type: false,
+        memory_references: false,
+        ansi: false,
+        invalidated: false,
+        memory_events: false,
+        run_in_terminal: false,
+        start_debugging: false,
+    };
+}
+
 /// The program being debugged.
 struct Target {
     debugger: Option<Debugger>,
@@ -547,8 +564,13 @@ impl Session {
         Ok(capabilities())
     }
 
+    /// What the client supports. Requests wait for `initialize`, so only a
+    /// request that somehow came before it sees the protocol defaults.
     pub(super) const fn support(&self) -> ClientSupport {
-        self.support.expect("requests after initialize")
+        match self.support {
+            Some(support) => support,
+            None => ClientSupport::UNDECLARED,
+        }
     }
 
     async fn launch(
@@ -559,7 +581,9 @@ impl Session {
         self.check_unstarted()?;
         let configuration = config::launch(arguments).map_err(ErrorBody::shown)?;
         let Start::Launch(launch) = &configuration.start else {
-            unreachable!("launch configurations launch");
+            return Err(ErrorBody::new(
+                "internal: a launch configuration does not launch",
+            ));
         };
         let program = launch.program.clone();
         let title = format!("Loading {}", launch.program.display());
@@ -637,7 +661,11 @@ impl Session {
                     ErrorBody::shown(format!("failed to open the core dump {core}: {error}"))
                 })?
             }
-            Start::Launch(_) => unreachable!("attach configurations attach"),
+            Start::Launch(_) => {
+                return Err(ErrorBody::new(
+                    "internal: an attach configuration does not attach",
+                ));
+            }
         };
         self.adopt(debugger, configuration, header).await
     }
@@ -905,14 +933,25 @@ impl Session {
         else {
             return Ok(());
         };
-        let target = self.target.as_ref().expect("a started target");
+        let Some(target) = self.target.as_ref() else {
+            self.client
+                .important("internal: the started target is gone")
+                .await?;
+            return Ok(());
+        };
         match &target.start {
             Start::Core(_) => self.stopped(stop_id, thread_id, reason).await?,
             Start::Attach { .. } if target.stop_on_entry => {
                 self.stopped(stop_id, thread_id, StopReason::Entry).await?;
             }
             Start::Attach { .. } => {
-                let process = target.process.expect("an attached process");
+                let Some(process) = target.process else {
+                    self.client
+                        .important("internal: the attached process is unknown")
+                        .await?;
+                    self.stopped(stop_id, thread_id, StopReason::Attach).await?;
+                    return Ok(());
+                };
                 let resumed = target
                     .handle
                     .continue_execution(
@@ -943,7 +982,12 @@ impl Session {
         method: &'static str,
         pipes: Vec<(OwnedFd, &'static str)>,
     ) -> Result<Option<uscope::StateSnapshot>, Closed> {
-        let target = self.target.as_mut().expect("a started target");
+        let Some(target) = self.target.as_mut() else {
+            self.client
+                .important("internal: the started target is gone")
+                .await?;
+            return Ok(None);
+        };
         let snapshot = target.handle.snapshot().await.ok();
         let process = snapshot
             .as_ref()
@@ -998,7 +1042,9 @@ impl Session {
         if let Some(configuration) = arguments.get("arguments").filter(|value| value.is_object()) {
             let configuration = config::launch(configuration.clone()).map_err(ErrorBody::shown)?;
             let Start::Launch(new) = configuration.start else {
-                unreachable!("launch configurations launch");
+                return Err(ErrorBody::new(
+                    "internal: a launch configuration does not launch",
+                ));
             };
             if new.program != launch.program {
                 return Err(ErrorBody::shown(
@@ -1028,7 +1074,9 @@ impl Session {
     /// returning the `process` event's start method and output pipes.
     async fn begin(&mut self) -> Result<(&'static str, Vec<(OwnedFd, &'static str)>), ErrorBody> {
         let supported = self.support().run_in_terminal;
-        let target = self.target.as_mut().expect("a target to start");
+        let Some(target) = self.target.as_mut() else {
+            return Err(ErrorBody::new("internal: no target is ready to start"));
+        };
         let Start::Launch(launch) = &target.start else {
             return Ok(("attach", Vec::new()));
         };
@@ -2582,6 +2630,10 @@ fn exit_code(status: &ExitStatus) -> i64 {
     }
 }
 
+/// The description of a stop the session describes itself, which only
+/// reaches `describe_stop` by a bug.
+const DESCRIBED_ELSEWHERE: &str = "internal: the session describes this stop itself";
+
 /// The `stopped` event's reason, description, and text for a stop that
 /// needs nothing from the session to describe.
 /// The DAP reason for a stop.
@@ -2688,7 +2740,7 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         StopReason::Breakpoint { .. }
         | StopReason::Watchpoint { .. }
         | StopReason::WatchpointInvalidated { .. }
-        | StopReason::Exited(_) => unreachable!("the session describes these stops"),
+        | StopReason::Exited(_) => ("stopped", Some(DESCRIBED_ELSEWHERE.to_owned()), None),
     }
 }
 

@@ -110,12 +110,17 @@ pub(super) fn narrow(storage: ValueStorage, size: u64) -> ValueStorage {
             bit_offset,
         } if (bit_offset + within) % 8 == 0 => {
             // Pieces are validated to lie within their bytes.
-            let start = usize::try_from((bit_offset + within) / 8).expect("piece fits its bytes");
+            let Some((start, end)) = usize::try_from((bit_offset + within) / 8)
+                .ok()
+                .and_then(|start| Some((start, start.checked_add(byte_size)?)))
+            else {
+                return storage;
+            };
             ValueStorage::Bytes {
                 source: source.clone(),
                 raw: Arc::clone(raw),
                 start,
-                end: start + byte_size,
+                end,
                 address: None,
             }
         }
@@ -332,15 +337,17 @@ fn read_composite(
                     ))?;
                 budget.consume_memory(length)?;
                 let raw = runtime.read_memory(address, length)?;
-                copy_bits(&raw, first % 8, &mut value, destination, size);
+                copy_bits(&raw, first % 8, &mut value, destination, size)?;
             }
             PieceLocation::Bytes {
                 raw, bit_offset, ..
-            } => copy_bits(raw, bit_offset + within, &mut value, destination, size),
+            } => copy_bits(raw, bit_offset + within, &mut value, destination, size)?,
             PieceLocation::Undefined
             | PieceLocation::ImplicitPointer { .. }
             | PieceLocation::Unavailable(_) => {
-                unreachable!("pieces without bits were refused above")
+                return Err(EvaluateError::Fatal(
+                    "pieces without bits were not refused".into(),
+                ));
             }
         }
     }
@@ -348,16 +355,24 @@ fn read_composite(
 }
 
 /// Copies `size` bits, numbered from each byte's least significant bit.
-fn copy_bits(source: &[u8], from: u64, destination: &mut [u8], to: u64, size: u64) {
-    let index = |bit: u64| usize::try_from(bit / 8).expect("bit index fits usize");
+fn copy_bits(
+    source: &[u8],
+    from: u64,
+    destination: &mut [u8],
+    to: u64,
+    size: u64,
+) -> Result<(), EvaluateError> {
+    let index =
+        |bit: u64| usize::try_from(bit / 8).map_err(|_| VariableUnavailableReason::EvaluationLimit);
     if from.is_multiple_of(8) && to.is_multiple_of(8) && size.is_multiple_of(8) {
-        let (from, to, length) = (index(from), index(to), index(size));
+        let (from, to, length) = (index(from)?, index(to)?, index(size)?);
         destination[to..to + length].copy_from_slice(&source[from..from + length]);
-        return;
+        return Ok(());
     }
     for bit in 0..size {
         let (source_bit, destination_bit) = (from + bit, to + bit);
-        let value = (source[index(source_bit)] >> (source_bit % 8)) & 1;
-        destination[index(destination_bit)] |= value << (destination_bit % 8);
+        let value = (source[index(source_bit)?] >> (source_bit % 8)) & 1;
+        destination[index(destination_bit)?] |= value << (destination_bit % 8);
     }
+    Ok(())
 }

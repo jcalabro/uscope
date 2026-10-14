@@ -95,20 +95,20 @@ impl Glibc<'_> {
                  libpthread"
             )));
         };
-        let mut words = [0; 12];
-        self.read(address, &mut words)?;
-        let word = |index: usize| {
-            u32::from_le_bytes(
-                words[index * 4..index * 4 + 4]
-                    .try_into()
-                    .expect("four bytes"),
-            )
+        let mut bytes = [0; 12];
+        self.read(address, &mut bytes)?;
+        let (words, _) = bytes.as_chunks::<4>();
+        let word = |index: usize| -> Result<u32, TlsError> {
+            let word = words
+                .get(index)
+                .ok_or_else(|| failed("a TLS field descriptor is truncated"))?;
+            Ok(u32::from_le_bytes(*word))
         };
         let field = Field {
             name,
-            bits: word(0),
-            count: word(1),
-            offset: i32::from_le_bytes(word(2).to_le_bytes()),
+            bits: word(0)?,
+            count: word(1)?,
+            offset: i32::from_le_bytes(word(2)?.to_le_bytes()),
         };
         // A zero width marks a field this C library does not have. Element
         // widths are whole bytes, and x86-64 descriptors are never
@@ -134,7 +134,7 @@ impl Glibc<'_> {
         }
         let address = field.address(base, index)?;
         let mut bytes = [0; 8];
-        let width = usize::try_from(field.bits / 8).expect("field width fits usize");
+        let width = (field.bits / 8) as usize;
         self.read(address, &mut bytes[..width])?;
         Ok(u64::from_le_bytes(bytes))
     }

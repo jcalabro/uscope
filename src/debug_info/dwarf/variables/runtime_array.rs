@@ -170,7 +170,9 @@ impl DwarfVariableInfo {
             ..
         } = shape
         else {
-            unreachable!("only arrays bounded at run time resolve");
+            return Err(EvaluateError::Fatal(
+                "only arrays bounded at run time resolve here".into(),
+            ));
         };
         // Expressions find the array's parts from where it is, and from
         // the frame, whose base is its function's.
@@ -253,8 +255,13 @@ impl Parts<'_, '_, '_> {
             extent,
             byte_stride,
         } = dimension;
+        let Ok(dimension_index) = u32::try_from(index) else {
+            return Err(EvaluateError::Malformed(
+                "the array has too many dimensions".into(),
+            ));
+        };
         let bound = |part| LayoutChild::Bound {
-            dimension: u32::try_from(index).expect("a few dimensions"),
+            dimension: dimension_index,
             part,
         };
         let lower = self.bound(lower_bound, bound(BoundPart::Lower), runtime, budget)?;

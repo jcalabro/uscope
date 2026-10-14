@@ -230,34 +230,34 @@ impl Capture {
         };
         let capture = Self {
             strings: table(CaptureTable::Strings).to_vec(),
-            settings: rows_of(table(CaptureTable::Settings)),
-            modules: rows_of(table(CaptureTable::Modules)),
-            processes: rows_of(table(CaptureTable::Processes)),
-            threads: rows_of(table(CaptureTable::Threads)),
-            mappings: rows_of(table(CaptureTable::Mappings)),
-            frames: rows_of(table(CaptureTable::Frames)),
-            stacks: rows_of(table(CaptureTable::Stacks)),
-            samples: rows_of(table(CaptureTable::Samples)),
-            sample_ranges: rows_of(table(CaptureTable::SampleRanges)),
-            frame_symbols: rows_of(table(CaptureTable::FrameSymbols)),
-            lines: rows_of(table(CaptureTable::Lines)),
-            functions: rows_of(table(CaptureTable::Functions)),
-            accounting: rows_of(table(CaptureTable::Accounting)),
-            off_cpu: rows_of(table(CaptureTable::OffCpu)),
-            off_cpu_ranges: rows_of(table(CaptureTable::OffCpuRanges)),
-            sites: rows_of(table(CaptureTable::Sites)),
-            zones: rows_of(table(CaptureTable::Zones)),
-            zone_ranges: rows_of(table(CaptureTable::ZoneRanges)),
-            plots: rows_of(table(CaptureTable::Plots)),
-            markers: rows_of(table(CaptureTable::Markers)),
-            tasks: rows_of(table(CaptureTable::Tasks)),
-            task_waits: rows_of(table(CaptureTable::TaskWaits)),
-            gaps: rows_of(table(CaptureTable::Gaps)),
-            syscalls: rows_of(table(CaptureTable::Syscalls)),
+            settings: rows_of(table(CaptureTable::Settings))?,
+            modules: rows_of(table(CaptureTable::Modules))?,
+            processes: rows_of(table(CaptureTable::Processes))?,
+            threads: rows_of(table(CaptureTable::Threads))?,
+            mappings: rows_of(table(CaptureTable::Mappings))?,
+            frames: rows_of(table(CaptureTable::Frames))?,
+            stacks: rows_of(table(CaptureTable::Stacks))?,
+            samples: rows_of(table(CaptureTable::Samples))?,
+            sample_ranges: rows_of(table(CaptureTable::SampleRanges))?,
+            frame_symbols: rows_of(table(CaptureTable::FrameSymbols))?,
+            lines: rows_of(table(CaptureTable::Lines))?,
+            functions: rows_of(table(CaptureTable::Functions))?,
+            accounting: rows_of(table(CaptureTable::Accounting))?,
+            off_cpu: rows_of(table(CaptureTable::OffCpu))?,
+            off_cpu_ranges: rows_of(table(CaptureTable::OffCpuRanges))?,
+            sites: rows_of(table(CaptureTable::Sites))?,
+            zones: rows_of(table(CaptureTable::Zones))?,
+            zone_ranges: rows_of(table(CaptureTable::ZoneRanges))?,
+            plots: rows_of(table(CaptureTable::Plots))?,
+            markers: rows_of(table(CaptureTable::Markers))?,
+            tasks: rows_of(table(CaptureTable::Tasks))?,
+            task_waits: rows_of(table(CaptureTable::TaskWaits))?,
+            gaps: rows_of(table(CaptureTable::Gaps))?,
+            syscalls: rows_of(table(CaptureTable::Syscalls))?,
             syscall_blobs: table(CaptureTable::SyscallBlobs).to_vec(),
-            syscall_notes: rows_of(table(CaptureTable::SyscallNotes)),
-            syscall_stats: rows_of(table(CaptureTable::SyscallStats)),
-            syscall_errnos: rows_of(table(CaptureTable::SyscallErrnos)),
+            syscall_notes: rows_of(table(CaptureTable::SyscallNotes))?,
+            syscall_stats: rows_of(table(CaptureTable::SyscallStats))?,
+            syscall_errnos: rows_of(table(CaptureTable::SyscallErrnos))?,
         };
         capture.validate().map_err(ImageError::Malformed)?;
         Ok(capture)
@@ -582,8 +582,10 @@ fn rows<T>(rows: &[T], start: u32, count: u32) -> &[T] {
 }
 
 /// A table's rows, copied out of a chunk.
-fn rows_of<T: zerocopy::FromBytes + zerocopy::Immutable + Copy>(bytes: &[u8]) -> Vec<T> {
+fn rows_of<T: zerocopy::FromBytes + zerocopy::Immutable + Copy>(
+    bytes: &[u8],
+) -> Result<Vec<T>, ImageError> {
     <[T]>::ref_from_bytes(bytes)
         .map(<[T]>::to_vec)
-        .expect("the container checked every table's stride")
+        .map_err(|_| ImageError::Layout)
 }

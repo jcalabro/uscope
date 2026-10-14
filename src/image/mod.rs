@@ -55,6 +55,14 @@ use container::{Format, TableBytes, Tables};
 /// The index that stands for no row in any table's reference column.
 pub const NONE: u32 = u32::MAX;
 
+/// The ids of a table of `rows` rows, in order. Validation bounds every
+/// table below [`NONE`] rows, as ids are `u32`s.
+fn ids(rows: usize) -> Range<u32> {
+    let end = u32::try_from(rows).unwrap_or(NONE);
+    debug_assert!(end < NONE, "a table of {rows} rows passed validation");
+    0..end
+}
+
 /// The `count` rows of one table from row `first`, which a record owns.
 /// `T` is what the rows are, so a span reads only its own table.
 #[repr(C)]
@@ -180,6 +188,7 @@ pub fn revisions() -> [u64; 3] {
 pub struct Image {
     bytes: AlignedBytes,
     tables: [Option<Placed>; TableKind::COUNT],
+    target: crate::TargetDescription,
 }
 
 impl Image {
@@ -187,14 +196,19 @@ impl Image {
     /// problem found.
     pub fn from_bytes(bytes: AlignedBytes, limits: Limits) -> Result<Self, ImageError> {
         let tables = validate::structure(&bytes, limits)?;
-        let image = Self { bytes, tables };
+        let target = container::target(&bytes)?;
+        let image = Self {
+            bytes,
+            tables,
+            target,
+        };
         validate::contents(&image)?;
         Ok(image)
     }
 
     /// The target the image describes.
-    pub fn target(&self) -> crate::TargetDescription {
-        container::target(self.as_bytes())
+    pub const fn target(&self) -> crate::TargetDescription {
+        self.target
     }
 
     /// The whole image, as a cache writes it.
@@ -207,8 +221,7 @@ impl Image {
         let Some(placed) = self.tables[T::KIND.index()] else {
             return &[];
         };
-        <[T]>::ref_from_bytes(&self.bytes[placed.offset..placed.offset + placed.length])
-            .expect("validation checked every table's length and stride")
+        self.rows(placed)
     }
 
     /// The rows of the table of `kind`, which holds `T`s: empty when the
@@ -222,8 +235,19 @@ impl Image {
         let Some(placed) = self.tables[kind.index()] else {
             return &[];
         };
-        <[T]>::ref_from_bytes(&self.bytes[placed.offset..placed.offset + placed.length])
-            .expect("validation checked every table's length and stride")
+        self.rows(placed)
+    }
+
+    fn rows<T: FromBytes + Immutable + KnownLayout>(&self, placed: Placed) -> &[T] {
+        let rows = self
+            .bytes
+            .get(placed.offset..placed.offset + placed.length)
+            .and_then(|bytes| <[T]>::ref_from_bytes(bytes).ok());
+        debug_assert!(
+            rows.is_some(),
+            "validation checked every table's length and stride"
+        );
+        rows.unwrap_or_default()
     }
 
     /// The string pool.

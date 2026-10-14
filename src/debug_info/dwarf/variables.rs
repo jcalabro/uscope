@@ -16,7 +16,7 @@
 
 use crate::image::lines::Files;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use foldhash::{HashMap, HashMapExt};
 use gimli::RunTimeEndian;
@@ -92,9 +92,15 @@ const MAX_RECORD_CHILDREN: usize = 4_096;
 const MAX_VARIANT_METADATA: usize = 4_096;
 const MAX_AGGREGATE_DEPTH: usize = 64;
 
+/// Types past this many are the work limit's type, so that every type,
+/// with the few made once each, has a `u32` id.
+const MAX_BUILT_TYPES: usize = u32::MAX as usize - 4;
+
 /// The row `index` numbers, in a table no larger than a module's entries.
 fn row(index: usize) -> u32 {
-    u32::try_from(index).expect("a module's rows fit u32")
+    let row = u32::try_from(index);
+    debug_assert!(row.is_ok(), "row {index} is past a module's entries");
+    row.unwrap_or(u32::MAX)
 }
 
 const fn malformed_reason(
@@ -297,8 +303,7 @@ fn fused_block_ranges(
     let mut entries = unit.entries();
     while let Some(entry) = entries.next_dfs()? {
         let depth = entry.depth();
-        while stack.last().is_some_and(|open| open.depth >= depth) {
-            let open = stack.pop().expect("the stack is not empty");
+        while let Some(open) = stack.pop_if(|open| open.depth >= depth) {
             close(open, &mut stack, &mut fused);
         }
         let ranges = match entry.tag() {
@@ -359,13 +364,17 @@ pub(super) fn load_variable_info<'data>(
     let phase = crate::span!("variables.evaluation_units");
     // Every location is pooled once, in the tables the image will hold.
     let pool = std::sync::Mutex::new(LocationsBuilder::default());
-    load_evaluation_units(units, &mut pool.lock().expect("loading does not panic"))?;
-    let languages = (0..units.len())
+    load_evaluation_units(
+        units,
+        &mut pool.lock().unwrap_or_else(PoisonError::into_inner),
+    )?;
+    let unit_count = u32::try_from(units.len()).map_err(|_| DwarfError::TooMany("units"))?;
+    let languages = (0..unit_count)
         .map(|unit| {
             pool.lock()
-                .expect("loading does not panic")
+                .unwrap_or_else(PoisonError::into_inner)
                 .tables()
-                .unit_language(u32::try_from(unit).expect("unit counts fit u32"))
+                .unit_language(unit)
         })
         .collect::<Vec<_>>();
     drop(phase);
@@ -496,7 +505,7 @@ pub(super) fn load_variable_info<'data>(
             TypeNode::Malformed {
                 reference: TypeReference {
                     image: image_id,
-                    id: TypeId::new(u32::try_from(index).expect("type count fits u32")),
+                    id: TypeId::new(row(index)),
                 },
                 description,
             }
@@ -555,7 +564,7 @@ pub(super) fn load_variable_info<'data>(
             go_entries: go_function_entries,
             procedures,
         },
-        locations: pool.into_inner().expect("loading does not panic"),
+        locations: pool.into_inner().unwrap_or_else(PoisonError::into_inner),
         declarations: crate::image::declarations::Declarations {
             constants: constants.into_iter().collect(),
             vtables: vtables
@@ -718,11 +727,7 @@ fn walk_unit<'data>(
     while let Some(die) = walk.next()? {
         let depth = usize::try_from(die.depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
         scopes.truncate(depth);
-        while concrete
-            .last()
-            .is_some_and(|routine| routine.depth >= depth)
-        {
-            let routine = concrete.pop().expect("an open routine");
+        while let Some(routine) = concrete.pop_if(|routine| routine.depth >= depth) {
             add_abstract_only_variables(
                 dwarf,
                 units,
@@ -842,7 +847,7 @@ fn walk_unit<'data>(
                 });
                 let frame_base = copy_optional_location(
                     dwarf,
-                    &mut types.pool.lock().expect("loading does not panic"),
+                    &mut types.pool.lock().unwrap_or_else(PoisonError::into_inner),
                     unit_index,
                     unit,
                     entry.attr_value(gimli::DW_AT_frame_base),
@@ -994,7 +999,7 @@ fn walk_unit<'data>(
                 if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
                     calls.site(
                         dwarf,
-                        &mut types.pool.lock().expect("loading does not panic"),
+                        &mut types.pool.lock().unwrap_or_else(PoisonError::into_inner),
                         units,
                         unit_index,
                         entry,
@@ -1006,7 +1011,7 @@ fn walk_unit<'data>(
             gimli::DW_TAG_call_site_parameter | gimli::DW_TAG_GNU_call_site_parameter => {
                 calls.parameter(
                     dwarf,
-                    &mut types.pool.lock().expect("loading does not panic"),
+                    &mut types.pool.lock().unwrap_or_else(PoisonError::into_inner),
                     units,
                     unit_index,
                     entry,
@@ -1017,7 +1022,7 @@ fn walk_unit<'data>(
                 if let Some(offset) = debug_info_offset(units, unit_index, entry) {
                     let location = copy_optional_location(
                         dwarf,
-                        &mut types.pool.lock().expect("loading does not panic"),
+                        &mut types.pool.lock().unwrap_or_else(PoisonError::into_inner),
                         unit_index,
                         unit,
                         entry.attr_value(gimli::DW_AT_location),
@@ -1154,9 +1159,9 @@ fn walk_unit<'data>(
                             Some(error.to_string().into()),
                         ),
                     };
-                *order = order
-                    .checked_add(1)
-                    .expect("data-object DIE order overflow");
+                *order = order.checked_add(1).ok_or_else(|| {
+                    DwarfError::MalformedVariable("data-object DIE order overflows".into())
+                })?;
                 let declaration = die::declaration_remembering_files(
                     dwarf,
                     units,
@@ -1296,7 +1301,7 @@ fn walk_unit<'data>(
                     coroutine: None,
                     value: copy_data_object_value(
                         dwarf,
-                        &mut types.pool.lock().expect("loading does not panic"),
+                        &mut types.pool.lock().unwrap_or_else(PoisonError::into_inner),
                         unit_index,
                         unit,
                         entry,
@@ -1440,10 +1445,9 @@ fn add_abstract_only_variables<'data>(
         let type_info = targets
             .types
             .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type));
-        *targets.order = targets
-            .order
-            .checked_add(1)
-            .expect("data-object DIE order overflow");
+        *targets.order = targets.order.checked_add(1).ok_or_else(|| {
+            DwarfError::MalformedVariable("data-object DIE order overflows".into())
+        })?;
         let hidden = routine.scope.rust.is_some()
             && (rust_temporary(&name, false)
                 || (routine.scope.rust == Some(RustScope::AsyncCaptures)
@@ -1716,13 +1720,13 @@ impl VariableInfo for DwarfVariableInfo {
         name: &str,
     ) -> Result<ObjectKey> {
         self.visible_object(address, selected, name)
-            .map(|object| ObjectKey(object.id().0 as usize))
+            .map(|object| ObjectKey(object.id().0))
     }
 
     fn global_object(&self, id: GlobalVariableId) -> Result<ObjectKey> {
         self.catalog()
             .global(id.index())
-            .map(|object| ObjectKey(object.id().0 as usize))
+            .map(|object| ObjectKey(object.id().0))
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))
     }
 
@@ -2020,8 +2024,7 @@ impl DwarfVariableInfo {
     }
 
     fn object(&self, key: ObjectKey) -> Object<'_> {
-        self.catalog()
-            .object(ObjectId(u32::try_from(key.0).expect("keys name rows")))
+        self.catalog().object(ObjectId(key.0))
     }
 
     /// Whether `object` is visible at `address`: in its scope's code and,

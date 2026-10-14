@@ -733,7 +733,8 @@ const fn is_identifier(byte: u8) -> bool {
 pub fn lex(text: &str, language: Language) -> Vec<Vec<Span>> {
     let tokens = tokens(text.as_bytes(), language);
     // Each token is split at the lines it spans.
-    let mut lines = vec![Vec::new()];
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
     let mut line_start = 0;
     let mut tokens = tokens.into_iter().peekable();
     for (index, byte) in text.bytes().chain(std::iter::once(b'\n')).enumerate() {
@@ -748,10 +749,7 @@ pub fn lex(text: &str, language: Language) -> Vec<Vec<Span>> {
             let start = range.start.max(line.start);
             let end = range.end.min(line.end);
             if start < end {
-                lines
-                    .last_mut()
-                    .expect("there is a line")
-                    .push((start - line.start..end - line.start, kind));
+                spans.push((start - line.start..end - line.start, kind));
             }
             if range.end <= line.end {
                 tokens.next();
@@ -759,10 +757,9 @@ pub fn lex(text: &str, language: Language) -> Vec<Vec<Span>> {
                 break;
             }
         }
-        lines.push(Vec::new());
+        lines.push(std::mem::take(&mut spans));
         line_start = index + 1;
     }
-    lines.pop();
     lines
 }
 

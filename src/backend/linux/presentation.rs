@@ -716,7 +716,8 @@ impl<P: InspectionOps> Controller<P> {
             // Elements picked from another value's children come a page of
             // one each.
             while exhausted.is_none() && next < end.min(view.elements) {
-                let position = usize::try_from(next).expect("a picked element is in memory");
+                let position = usize::try_from(next)
+                    .map_err(|_| Error::internal("a picked element index fits usize"))?;
                 let page = self.value_children_with_budget(
                     inner,
                     &crate::ValueChildQuery {
@@ -2002,7 +2003,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         // drop flags, and moved captures are under `[raw]`.
         let picked = kept
             .iter()
-            .map(|(index, _)| u64::try_from(*index).expect("a member's index fits u64"))
+            .map(|(index, _)| *index as u64)
             .collect::<Arc<[u64]>>();
         let mut presentation = built_in_presentation(
             "Rust coroutines",

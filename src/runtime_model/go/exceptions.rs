@@ -369,8 +369,7 @@ impl Reader<'_> {
                 .ok_or_else(|| Arc::<str>::from("the panic's value is unreadable"))
         };
         let signed = |size: usize| -> Result<Option<Scalar>, Arc<str>> {
-            let bits = u32::try_from(size * 8).expect("a word's bits");
-            let shift = 64 - bits;
+            let shift = 64 - size * 8;
             #[expect(
                 clippy::cast_possible_wrap,
                 reason = "the bits are reinterpreted as the two's complement they are"
@@ -380,8 +379,11 @@ impl Reader<'_> {
         };
         let unsigned =
             |size: usize| Ok::<_, Arc<str>>(Some(Scalar::Number(read(size)?.to_string())));
-        let single =
-            |bits: u64| f64::from(f32::from_bits(u32::try_from(bits).expect("four bytes")));
+        let single = |bits: u64| {
+            u32::try_from(bits)
+                .map(|bits| f64::from(f32::from_bits(bits)))
+                .map_err(|_| Arc::<str>::from("the panic's value is unreadable"))
+        };
         Ok(match kind {
             kind if kind == kinds.boolean => Some(Scalar::Number((read(1)? != 0).to_string())),
             kind if kind == kinds.int || kind == kinds.int64 => signed(8)?,
@@ -394,15 +396,17 @@ impl Reader<'_> {
             kind if kind == kinds.uint8 => unsigned(1)?,
             kind if kind == kinds.uint16 => unsigned(2)?,
             kind if kind == kinds.uint32 => unsigned(4)?,
-            kind if kind == kinds.float32 => Some(Scalar::Number(go_float(single(read(4)?), true))),
+            kind if kind == kinds.float32 => {
+                Some(Scalar::Number(go_float(single(read(4)?)?, true)))
+            }
             kind if kind == kinds.float64 => {
                 Some(Scalar::Number(go_float(f64::from_bits(read(8)?), false)))
             }
             kind if kind == kinds.complex64 => {
                 let bits = read(8)?;
                 Some(Scalar::Number(go_complex(
-                    single(bits & u64::from(u32::MAX)),
-                    single(bits >> 32),
+                    single(bits & u64::from(u32::MAX))?,
+                    single(bits >> 32)?,
                     true,
                 )))
             }
@@ -520,11 +524,16 @@ fn indented(text: &str) -> String {
 /// bits)` does: the shortest decimal that reads back as the same value,
 /// in exponent form when its decimal exponent is below -4 or at least 6.
 fn go_float(value: f64, single: bool) -> String {
+    // Rust's `{:e}` always has an exponent; the value is shown as it is if not.
+    go_digits(value, single).unwrap_or_else(|| format!("{value:e}"))
+}
+
+fn go_digits(value: f64, single: bool) -> Option<String> {
     if value.is_nan() {
-        return "NaN".to_owned();
+        return Some("NaN".to_owned());
     }
     if value.is_infinite() {
-        return if value > 0.0 { "+Inf" } else { "-Inf" }.to_owned();
+        return Some(if value > 0.0 { "+Inf" } else { "-Inf" }.to_owned());
     }
     let negative = value.is_sign_negative();
     // Rust's `{:e}` prints the same shortest digits.
@@ -537,42 +546,40 @@ fn go_float(value: f64, single: bool) -> String {
     } else {
         format!("{:e}", value.abs())
     };
-    let (mantissa, exponent) = scientific
-        .split_once('e')
-        .expect("scientific notation has an exponent");
+    let (mantissa, exponent) = scientific.split_once('e')?;
     let digits = mantissa.replace('.', "");
-    let exponent: i64 = exponent.parse().expect("an exponent");
+    let exponent: i64 = exponent.parse().ok()?;
     let sign = if negative { "-" } else { "" };
     if digits == "0" {
-        return format!("{sign}0");
+        return Some(format!("{sign}0"));
     }
-    let count = i64::try_from(digits.len()).expect("few digits");
+    let count = i64::try_from(digits.len()).ok()?;
     if !(-4..6).contains(&exponent) {
         let (first, rest) = digits.split_at(1);
         let point = if rest.is_empty() { "" } else { "." };
         let exponent_sign = if exponent < 0 { '-' } else { '+' };
-        return format!(
+        return Some(format!(
             "{sign}{first}{point}{rest}e{exponent_sign}{:02}",
             exponent.unsigned_abs()
-        );
+        ));
     }
     // The decimal point falls after `exponent + 1` digits.
     let point = exponent + 1;
     let mut text = sign.to_owned();
     if point <= 0 {
         text.push_str("0.");
-        text.push_str(&"0".repeat(usize::try_from(-point).expect("a small exponent")));
+        text.push_str(&"0".repeat(usize::try_from(-point).ok()?));
         text.push_str(&digits);
     } else if point >= count {
         text.push_str(&digits);
-        text.push_str(&"0".repeat(usize::try_from(point - count).expect("a small exponent")));
+        text.push_str(&"0".repeat(usize::try_from(point - count).ok()?));
     } else {
-        let (whole, fraction) = digits.split_at(usize::try_from(point).expect("within the digits"));
+        let (whole, fraction) = digits.split_at(usize::try_from(point).ok()?);
         text.push_str(whole);
         text.push('.');
         text.push_str(fraction);
     }
-    text
+    Some(text)
 }
 
 /// A complex number as the runtime prints it: `strconv.FormatComplex`, its

@@ -676,7 +676,11 @@ impl<'a> Engine<'a> {
                     address: VirtualAddress::new(address),
                     reason,
                 },
-                SweepEnd::Counted => unreachable!("bounded sweeps never count"),
+                SweepEnd::Counted => {
+                    return Err(Error::internal(
+                        "a bounded sweep ended without its boundary",
+                    ));
+                }
             };
             blocks.push(DisassemblyBlock {
                 range: *range,
@@ -691,12 +695,12 @@ impl<'a> Engine<'a> {
     /// Decodes up to `before` instructions proven to precede `address` and
     /// `after` instructions beginning at it.
     pub fn window(&mut self, address: VirtualAddress, before: u32, after: u32) -> Result<Window> {
-        let leading = self.leading(address, usize::try_from(before).expect("u32 fits usize"))?;
+        let leading = self.leading(address, before as usize)?;
         let mut instructions = leading.instructions;
         let mut conflicts = Vec::new();
         let mut completion = BlockCompletion::Complete;
         if after != 0 {
-            let count = usize::try_from(after).expect("u32 fits usize");
+            let count = after as usize;
             let span = u64::try_from(count.saturating_mul(self.decoder.max_instruction_length()))
                 .unwrap_or(u64::MAX);
             let starts = self.source.instruction_starts(AddressRange {
@@ -793,7 +797,7 @@ impl<'a> Engine<'a> {
                     break;
                 }
                 SweepEnd::Counted | SweepEnd::Limited { .. } => {
-                    unreachable!("unlimited bounded sweeps end at their boundary")
+                    return Err(Error::internal("an unlimited bounded sweep ended early"));
                 }
             }
         }
@@ -873,9 +877,11 @@ impl<'a> Engine<'a> {
                 ),
                 RawDecode::Invalid => (InstructionContent::Invalid, 1),
                 RawDecode::Incomplete => {
-                    let reason = view
-                        .unreadable
-                        .expect("only unreadable memory leaves an instruction incomplete");
+                    let Some(reason) = view.unreadable else {
+                        return Err(Error::internal(
+                            "only unreadable memory leaves an instruction incomplete",
+                        ));
+                    };
                     if view.bytes.is_empty() {
                         break SweepEnd::Unreadable {
                             address: position,
@@ -940,9 +946,9 @@ impl<'a> Engine<'a> {
                     IndirectTarget::Unreadable {
                         slot,
                         address: VirtualAddress::new(address + view.bytes.len() as u64),
-                        reason: view
-                            .unreadable
-                            .expect("only unreadable memory shortens a view"),
+                        reason: view.unreadable.ok_or_else(|| {
+                            Error::internal("only unreadable memory shortens a view")
+                        })?,
                     }
                 } else {
                     let target = target_value(&view.bytes, self.decoder.byte_order());
@@ -987,11 +993,14 @@ impl<'a> Engine<'a> {
                 self.chunks.insert(chunk_start, chunk);
             }
             let chunk = &self.chunks[&chunk_start];
-            let offset = usize::try_from(current - chunk_start).expect("chunk offset fits usize");
+            let offset = usize::try_from(current - chunk_start)
+                .map_err(|_| Error::internal("a chunk offset is larger than READ_CHUNK"))?;
             if offset >= chunk.bytes.len() {
-                let reason = chunk
-                    .unreadable
-                    .expect("only an unreadable chunk is shorter than a chunk");
+                let Some(reason) = chunk.unreadable else {
+                    return Err(Error::internal(
+                        "only an unreadable chunk is shorter than a chunk",
+                    ));
+                };
                 if offset == chunk.bytes.len() {
                     return Ok(View {
                         bytes,
@@ -1022,9 +1031,10 @@ impl<'a> Engine<'a> {
     fn read_chunk(&mut self, start: u64) -> Result<Chunk> {
         // The final chunk of the address space is shortened rather than
         // wrapping; its remainder is unreadable.
-        let size = usize::try_from(READ_CHUNK.min(u64::MAX - start)).expect("chunk fits usize");
+        let size = usize::try_from(READ_CHUNK.min(u64::MAX - start))
+            .map_err(|_| Error::internal("a read chunk is larger than READ_CHUNK"))?;
         let read = self.source.read(VirtualAddress::new(start), size)?;
-        let unreadable = if read.bytes.len() < usize::try_from(READ_CHUNK).expect("chunk") {
+        let unreadable = if (read.bytes.len() as u64) < READ_CHUNK {
             Some(
                 read.unreadable
                     .unwrap_or(MemoryReadUnavailableReason::Inaccessible),

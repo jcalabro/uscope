@@ -323,7 +323,7 @@ impl Breakpoints {
         }
         ids.sort_unstable();
         let reason = match groups.len() {
-            1 => groups.pop_first().expect("one reason"),
+            1 => groups.pop_first().unwrap_or("breakpoint"),
             _ => "breakpoint",
         };
         (ids, reason)
@@ -348,9 +348,10 @@ impl Breakpoints {
             });
         }
         for change in &changes {
-            if let Change::Removed(entry) = change {
-                self.owners
-                    .remove(&entry.breakpoint().expect("removed entries were resolved"));
+            if let Change::Removed(entry) = change
+                && let Some(breakpoint) = entry.breakpoint()
+            {
+                self.owners.remove(&breakpoint);
             }
         }
         self.groups.retain(|_, entries| !entries.is_empty());

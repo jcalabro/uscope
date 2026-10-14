@@ -391,7 +391,7 @@ pub fn export(
     tree: &CallTree,
     unit: &str,
     duration: i64,
-) -> Vec<u8> {
+) -> std::io::Result<Vec<u8>> {
     let mut strings = Strings::default();
     let (kind, kind_unit) = match unit {
         "nanoseconds" => ("cpu", "nanoseconds"),
@@ -455,8 +455,8 @@ pub fn export(
     }
     profile.signed(10, duration);
     let mut out = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    std::io::Write::write_all(&mut out, &profile.bytes).expect("writing to memory cannot fail");
-    out.finish().expect("writing to memory cannot fail")
+    std::io::Write::write_all(&mut out, &profile.bytes)?;
+    out.finish()
 }
 
 /// A key's function name, file, and line, as pprof names a location.

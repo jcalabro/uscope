@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 
 /// The most workers the pool starts with when nothing says how many.
 pub const MAX_DEFAULT_JOBS: usize = 16;
+const DEFAULT_JOBS: NonZeroUsize = NonZeroUsize::new(MAX_DEFAULT_JOBS).expect("a positive default");
+const TEST_JOBS: NonZeroUsize = NonZeroUsize::new(2).expect("a positive default");
 
 /// The environment variable that sets the number of workers.
 pub const JOBS_VARIABLE: &str = "USCOPE_JOBS";
@@ -50,8 +52,8 @@ pub fn resolve(
     if let Some(jobs) = config {
         return Ok(jobs);
     }
-    let most = if under_test { 2 } else { MAX_DEFAULT_JOBS };
-    Ok(cpus.min(NonZeroUsize::new(most).expect("a positive default")))
+    let most = if under_test { TEST_JOBS } else { DEFAULT_JOBS };
+    Ok(cpus.min(most))
 }
 
 /// Resolves the number of workers from the process's environment.

@@ -91,14 +91,14 @@ impl<'a> Strings<'a> {
     /// The string `id` names. Validation checked that it is terminated
     /// UTF-8.
     pub fn get(self, id: StrId) -> &'a str {
-        std::str::from_utf8(self.bytes(id)).expect("validation checked every string is UTF-8")
+        let text = std::str::from_utf8(self.bytes(id));
+        debug_assert!(text.is_ok(), "validation checked string {} is UTF-8", id.0);
+        text.unwrap_or("\u{fffd}")
     }
 
     /// The bytes of the string `id` names, without its NUL.
     pub fn bytes(self, id: StrId) -> &'a [u8] {
-        let rest = &self.0[id.0 as usize..];
-        let end = memchr::memchr(0, rest).expect("validation checked every string is terminated");
-        &rest[..end]
+        terminated(self.0, id.0)
     }
 
     /// Whether `id` names a string of the pool.
@@ -149,11 +149,20 @@ pub struct Paths<'a>(pub &'a [u8]);
 impl<'a> Paths<'a> {
     /// The path `id` names. Validation checked that it is terminated.
     pub fn get(self, id: PathId) -> &'a Path {
-        let start = id.0 as usize;
-        let rest = &self.0[start..];
-        let end = memchr::memchr(0, rest).expect("validation checked every path is terminated");
-        Path::new(OsStr::from_bytes(&rest[..end]))
+        Path::new(OsStr::from_bytes(terminated(self.0, id.0)))
     }
+}
+
+/// The bytes from `start` in `pool` to the NUL that ends them, which
+/// validation checked is there.
+fn terminated(pool: &[u8], start: u32) -> &[u8] {
+    let rest = pool.get(start as usize..).unwrap_or_default();
+    let end = memchr::memchr(0, rest);
+    debug_assert!(
+        end.is_some(),
+        "validation checked the bytes at {start} are terminated"
+    );
+    rest.get(..end.unwrap_or(0)).unwrap_or_default()
 }
 
 /// Whether `pool` is NUL-terminated strings, each valid UTF-8 when `utf8`.

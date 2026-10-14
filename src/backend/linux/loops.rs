@@ -187,7 +187,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut provider = self.stack_unwinder(inferior, pid, native);
         let mut context = super::stepping::innermost_frame(native);
         for level in 0..DEFAULT_MAX_FRAMES {
-            let level = u32::try_from(level).expect("frame limit fits u32");
+            let level = u32::try_from(level)
+                .map_err(|_| crate::Error::internal("the frame limit fits u32"))?;
             if level > 0
                 && frame_lookup_address(level, &context)
                     .and_then(|address| inferior.loaded_module.image_address(address).ok())
@@ -258,9 +259,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             execution,
             &plan.union(&guards).copied().collect(),
         )?;
-        let start = self
-            .active_step_mut()
-            .expect("the step remained active while it followed its loop");
+        let start = self.active_step_mut().ok_or_else(|| {
+            crate::Error::internal("the step remained active while it followed its loop")
+        })?;
         start.plan_addresses = plan;
         start.panic_guards = guards;
         start.returned_to = None;
@@ -344,7 +345,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         )?;
         let start = self
             .active_step_mut()
-            .expect("the step remained active as it began again");
+            .ok_or_else(|| crate::Error::internal("the step remained active as it began again"))?;
         *start = restarted;
         Ok(())
     }

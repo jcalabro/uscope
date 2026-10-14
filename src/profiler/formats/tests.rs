@@ -93,13 +93,13 @@ proptest! {
         }
         prop_assert_eq!(&paths(&original), &expected);
 
-        let pprof = original.export(Format::Pprof, StackView::Native);
+        let pprof = original.export(Format::Pprof, StackView::Native).unwrap();
         let read = Profile::import(&pprof).expect("pprof").profile;
         prop_assert_eq!(&paths(&read), &expected);
         prop_assert_eq!(read.setting("weight"), Some("nanoseconds"));
         prop_assert!(!read.timed());
 
-        let folded = original.export(Format::Folded, StackView::Native);
+        let folded = original.export(Format::Folded, StackView::Native).unwrap();
         let read = Profile::import(&folded).expect("folded").profile;
         let unfolded: BTreeMap<Vec<String>, u64> = expected
             .into_iter()
@@ -131,7 +131,7 @@ fn weights_that_add_up_past_a_count_are_refused() {
 #[test]
 fn a_file_says_its_format_by_its_bytes_or_its_name() {
     use std::path::Path;
-    let usprof = profile(&[]).to_bytes();
+    let usprof = profile(&[]).to_bytes().unwrap();
     assert_eq!(
         Format::of_file(Path::new("x"), &usprof[..8]),
         Some(Format::Usprof)

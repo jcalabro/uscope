@@ -287,7 +287,8 @@ fn read_opened(
 /// Lowercase hexadecimal, as build-ids are conventionally written.
 pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut text, byte| {
-        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        // Writing to a String cannot fail.
+        let _ = write!(text, "{byte:02x}");
         text
     })
 }

@@ -145,8 +145,10 @@ const fn compound(punct: Punct) -> Option<BinaryOp> {
     })
 }
 
-pub fn assignment_text(op: Option<BinaryOp>) -> &'static str {
-    match op {
+/// The text of an assignment's operator, `None` for an operator that does
+/// not assign.
+pub const fn assignment_text(op: Option<BinaryOp>) -> Option<&'static str> {
+    Some(match op {
         None => "=",
         Some(BinaryOp::Add) => "+=",
         Some(BinaryOp::Sub) => "-=",
@@ -158,8 +160,8 @@ pub fn assignment_text(op: Option<BinaryOp>) -> &'static str {
         Some(BinaryOp::BitXor) => "^=",
         Some(BinaryOp::Shl) => "<<=",
         Some(BinaryOp::Shr) => ">>=",
-        Some(_) => unreachable!("only arithmetic and bit operators assign"),
-    }
+        Some(_) => return None,
+    })
 }
 
 /// One reading per combination of an expression's ambiguities.
@@ -192,11 +194,12 @@ pub fn parse(text: &str, dialect: Dialect) -> Result<(Vec<Ambiguity>, Readings),
     let readings: Vec<_> = (0..1_usize << starts.len())
         .map(|casts| Parser::new(text, &tokens, &starts, casts, dialect).expression_tree())
         .collect();
-    if readings.iter().all(Result::is_err) {
-        let first = readings.into_iter().next();
-        return Err(first
-            .and_then(Result::err)
-            .expect("there is at least one reading"));
+    let first_error = match readings.first() {
+        Some(Err(error)) if readings.iter().all(Result::is_err) => Some(error.clone()),
+        _ => None,
+    };
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok((ambiguity_list, readings))
 }
@@ -685,7 +688,9 @@ impl<'tokens> Parser<'tokens> {
                     return self.push(kind, span.to(close));
                 }
                 function if view_call && Builtin::parse(function).is_some() => {
-                    let function = Builtin::parse(function).expect("a built-in function");
+                    let Some(function) = Builtin::parse(function) else {
+                        return Err(self.unexpected("an operand"));
+                    };
                     self.advance();
                     self.advance();
                     let operand = self.expression(ASSIGN)?;

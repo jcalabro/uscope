@@ -200,7 +200,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         // The attach stop is presented from the leader when it survives.
-        let inferior = self.inferior.as_mut().expect("attached inferior exists");
+        let Some(inferior) = self.inferior.as_mut() else {
+            self.fail_inferior(Error::NotRunning);
+            return;
+        };
         let Some(triggering_thread) = inferior
             .threads
             .contains_key(&tgid)
@@ -316,7 +319,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.load_main_image(load_bias)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
-        let execution_id = inferior.active.as_ref().expect("launch is active").id;
+        let execution_id = inferior
+            .active
+            .as_ref()
+            .ok_or_else(|| Error::internal("launch is active"))?
+            .id;
         let process_id = process_id(inferior.tgid);
         let pause_requested = inferior.barrier.is_some();
         let generation = inferior.watch.generation;
@@ -377,11 +384,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// breakpoint in it.
     fn place_main_image(&mut self, load_bias: crate::LoadBias) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
-        self.modules
+        let main = self
+            .modules
             .get_mut(&crate::ModuleId::new(0))
-            .expect("main module is registered")
-            .loaded = inferior.loaded_module;
+            .ok_or_else(|| Error::internal("main module is registered"))?;
+        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
+        main.loaded = inferior.loaded_module;
         for breakpoint in self
             .breakpoints
             .iter()
@@ -928,19 +936,19 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Handles a status of a fork child that outlived the inferior.
     pub(super) fn handle_orphan_wait(&mut self, status: WaitEvent) -> bool {
         let pid = status.pid();
-        let orphans = self.orphans.as_mut().expect("orphans exist");
+        let Some(orphans) = self.orphans.as_mut() else {
+            // The caller routes here only with orphans, so none is left to wait for.
+            return self.inferior.is_some() || self.orphans.is_some();
+        };
         match status {
             WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
                 let parent = orphans.parent;
                 let sites = orphans.children.remove(&pid);
                 if let Some(sites) = sites
                     && !self.scrub_and_settle(parent, pid, &sites)
+                    && let Some(orphans) = self.orphans.as_mut()
                 {
-                    self.orphans
-                        .as_mut()
-                        .expect("orphans exist")
-                        .killed
-                        .insert(pid);
+                    orphans.killed.insert(pid);
                 }
             }
             WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT) => {
@@ -952,11 +960,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             _ => {}
         }
-        let orphans = self.orphans.as_ref().expect("orphans exist");
-        if !orphans.children.is_empty() || !orphans.killed.is_empty() {
+        if self
+            .orphans
+            .as_ref()
+            .is_some_and(|orphans| !orphans.children.is_empty() || !orphans.killed.is_empty())
+        {
             return true;
         }
-        let orphans = self.orphans.take().expect("orphans exist");
+        let Some(orphans) = self.orphans.take() else {
+            return self.inferior.is_some() || self.orphans.is_some();
+        };
         // The program is gone, so a failure has no one to report to.
         if orphans
             .waiter
@@ -1189,7 +1202,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.threads.is_empty() {
             self.discard_watchpoints();
             let pending = self.settle_stopped_fork_children();
-            let mut inferior = self.inferior.take().expect("inferior exists");
+            let mut inferior = self.inferior.take().ok_or(Error::NotRunning)?;
             let edits = inferior.take_pending_edits();
             let killed = std::mem::take(&mut inferior.killed_children);
             let waiter = inferior.waiter.take();
@@ -1801,6 +1814,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .disarm_for_detach()
             .err()
             .filter(|error| !is_vanished_tracee(error));
+        let Some(mut inferior) = self.inferior.take() else {
+            self.answer_kill();
+            self.finish_shutdown(first_error.map_or(Err(Error::NotRunning), Err));
+            return;
+        };
         let mut record = |result: Result<()>| {
             if let Err(error) = result
                 && !is_vanished_tracee(&error)
@@ -1808,7 +1826,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                 first_error.get_or_insert(error);
             }
         };
-        let mut inferior = self.inferior.take().expect("attached inferior exists");
         let installed = inferior
             .breakpoints
             .iter()

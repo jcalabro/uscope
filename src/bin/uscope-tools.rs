@@ -1,6 +1,20 @@
 //! Developer tools: dump every answer a program's debug information gives,
 //! summarize `--timings` reports, and benchmark loading a pinned corpus.
 
+// Production code returns errors instead of panicking; see dev/assertions.md.
+// Tests may unwrap.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -417,12 +431,11 @@ fn overhead_table(
         let rss = summary
             .recording_bytes
             .map_or_else(|| "-".to_owned(), |rss| format!("{} MiB", rss >> 20));
-        writeln!(
+        let _ = writeln!(
             table,
             "{:<9} {:<6} {:>12.1} {cost} {:>6.2}% {p99:>8} {cpu:>12} {rss:>10}",
             summary.workload, summary.setup, summary.rate, summary.noise_percent
-        )
-        .expect("writing to a string");
+        );
     }
     table
 }
@@ -653,10 +666,10 @@ fn corpus(kind: Corpus) -> Result<Vec<Program>> {
     }
     golden_programs.sort();
     for path in golden_programs {
-        let name = format!(
-            "golden/{}",
-            path.file_name().expect("a file name").to_string_lossy()
-        );
+        let Some(file) = path.file_name() else {
+            bail!("{} has no file name", path.display());
+        };
+        let name = format!("golden/{}", file.to_string_lossy());
         programs.push(Program { name, path });
     }
     let fixtures = [

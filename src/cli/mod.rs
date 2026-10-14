@@ -374,7 +374,10 @@ impl Cli {
             }
         }
         {
-            let mut views = self.views.lock().expect("the view sources are whole");
+            let mut views = self
+                .views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             views.discovered = discovered;
             views.session = session;
         }
@@ -423,7 +426,10 @@ impl Cli {
     /// them, and returns what kept parts of them out.
     async fn reload_views(&self) -> Vec<String> {
         let sources = {
-            let views = self.views.lock().expect("the view sources are whole");
+            let views = self
+                .views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             views
                 .session
                 .iter()
@@ -547,7 +553,9 @@ impl Cli {
     /// Applies the settings' `[signals]`, as `handle` would.
     async fn apply_signal_settings(&self) -> Result<()> {
         for (name, actions) in &self.settings.config.signals {
-            let code = uscope::signal_named(name).expect("checked when read");
+            let Some(code) = uscope::signal_named(name) else {
+                bail!("unknown signal '{name}' in [signals]");
+            };
             let mut policy = self.debugger.signal_policy(code).await?;
             for action in actions.actions() {
                 commands::apply_signal_action(&mut policy, action)?;
@@ -717,7 +725,7 @@ impl Cli {
                         Ok(_) => {
                             self.displays
                                 .lock()
-                                .expect("the displays are whole")
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .add(&display.format, &display.expression);
                             displays += 1;
                         }
@@ -800,7 +808,11 @@ impl Cli {
         let Some(kept) = self.kept.get() else {
             return;
         };
-        if kept.lock().expect("the kept state is whole").blocked {
+        if kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .blocked
+        {
             return;
         }
         let Ok(snapshot) = self.debugger.snapshot().await else {
@@ -809,7 +821,7 @@ impl Cli {
         let root = &self.settings.root;
         let source_paths = kept
             .lock()
-            .expect("the kept state is whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .source_paths
             .clone();
         let mut entries = Vec::new();
@@ -819,7 +831,7 @@ impl Cli {
             };
             let known = kept
                 .lock()
-                .expect("the kept state is whole")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .line_texts
                 .get(&location)
                 .cloned();
@@ -829,7 +841,7 @@ impl Cli {
                 let text = self.current_line_text(breakpoint, &source_paths).await;
                 if let Some(text) = &text {
                     kept.lock()
-                        .expect("the kept state is whole")
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .line_texts
                         .insert(location, text.clone());
                 }
@@ -838,14 +850,16 @@ impl Cli {
             entries.extend(saved::saved(breakpoint, root, line_text));
         }
         let (path, error) = {
-            let mut kept = kept.lock().expect("the kept state is whole");
+            let mut kept = kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             entries.extend(kept.unrestored.iter().cloned());
             let contents = saved::Contents {
                 breakpoints: entries,
                 displays: self
                     .displays
                     .lock()
-                    .expect("the displays are whole")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .list
                     .iter()
                     .map(|display| saved::SavedDisplay {
@@ -876,9 +890,12 @@ impl Cli {
 
     /// Whether this session keeps its breakpoints for the next one.
     fn keeps_breakpoints(&self) -> bool {
-        self.kept
-            .get()
-            .is_some_and(|kept| !kept.lock().expect("the kept state is whole").blocked)
+        self.kept.get().is_some_and(|kept| {
+            !kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .blocked
+        })
     }
 
     fn report_error(&self, error: &anyhow::Error) {

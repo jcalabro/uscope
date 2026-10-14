@@ -106,8 +106,7 @@ impl Profile {
     }
 
     /// The profile in `format`, its stacks as `view` shows them.
-    #[must_use]
-    pub fn export(&self, format: Format, view: StackView) -> Vec<u8> {
+    pub fn export(&self, format: Format, view: StackView) -> std::io::Result<Vec<u8>> {
         let unit = self.setting("weight").unwrap_or("nanoseconds");
         match format {
             Format::Usprof => self.to_bytes(),
@@ -119,9 +118,9 @@ impl Profile {
             }
             Format::Folded => {
                 let keys = self.keys(Granularity::Function);
-                folded::export(&keys, &keys.aggregate(&query(view))).into_bytes()
+                Ok(folded::export(&keys, &keys.aggregate(&query(view))).into_bytes())
             }
-            Format::Chrome => chrome::export(self).into_bytes(),
+            Format::Chrome => Ok(chrome::export(self).into_bytes()),
         }
     }
 

@@ -1976,7 +1976,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         WriteAttributeValue::Exprloc(location),
     );
     let debug_info = load_test_object(&mut written);
-    assert_eq!(debug_info.image.globals().len(), 1);
+    assert_eq!(debug_info.image.globals().count(), 1);
 
     let mut runtime = Runtime::new([]);
     runtime.memory = Some(Arc::from([0_u8; 0x20]));

@@ -241,7 +241,7 @@ impl Events {
 fn attr(options: &EventOptions, start: u64) -> sys::Attr {
     use sys::flag;
     let mut attr = sys::Attr {
-        size: u32::try_from(std::mem::size_of::<sys::Attr>()).expect("small"),
+        size: sys::ATTR_SIZE,
         sample_type: decode::SAMPLE_TYPE,
         flags: start
             | flag::INHERIT

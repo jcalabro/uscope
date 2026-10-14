@@ -12,6 +12,10 @@ use super::parser::{
 };
 use crate::eval::number::Float;
 
+/// Printed where a node has no text of its own, which no reading's node
+/// should lack.
+const UNPRINTABLE: &str = "<?>";
+
 pub fn print(tree: &Tree) -> String {
     let mut printer = Printer {
         tree,
@@ -155,7 +159,8 @@ impl Printer<'_> {
             NodeKind::Assign { op, target, value } => {
                 self.child(*target, CONDITIONAL);
                 self.out.push(' ');
-                self.out.push_str(assignment_text(*op));
+                self.out
+                    .push_str(assignment_text(*op).unwrap_or(UNPRINTABLE));
                 self.out.push(' ');
                 self.child(*value, ASSIGN);
             }
@@ -286,7 +291,7 @@ impl Printer<'_> {
             }
             NodeKind::Bool(value) => self.out.push_str(if *value { "true" } else { "false" }),
             NodeKind::Null => self.out.push_str("null"),
-            _ => unreachable!("every node with children is printed by `node`"),
+            _ => self.out.push_str(UNPRINTABLE),
         }
     }
 

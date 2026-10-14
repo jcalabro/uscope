@@ -1149,7 +1149,7 @@ impl LinuxTraceOps for FakeTrace {
     fn tracer_process(&self) -> i32 {
         i32::try_from(std::process::id()).expect("pid fits")
     }
-    fn allocate_stop_id(&self) -> StopId {
+    fn allocate_stop_id(&self) -> Result<StopId> {
         allocate_stop_id()
     }
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
@@ -1205,7 +1205,8 @@ impl LinuxTraceOps for FakeTrace {
                         end: ImageAddress::new(0x1000),
                     },
                     crate::model::ModuleMetadata::default(),
-                );
+                )
+                .unwrap();
                 let binding = crate::model::Binding {
                     path: Arc::new(path.clone()),
                     debug_path: None,

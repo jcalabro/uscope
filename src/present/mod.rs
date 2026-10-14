@@ -28,7 +28,7 @@ use uscope::{
 use crate::cli::value::summary;
 
 /// The most children one debugger request reads.
-pub const PAGE: u64 = 256;
+pub const PAGE: u32 = 256;
 
 /// One value to present.
 pub struct Item<'a> {
@@ -567,16 +567,10 @@ impl Presenter<'_> {
         let mut rows = Vec::new();
         let mut offset = start;
         while offset < end {
-            let limit = (end - offset).min(PAGE);
+            let limit = u32::try_from(end - offset).unwrap_or(PAGE).min(PAGE);
             let page = self
                 .handle
-                .value_children(
-                    reference.clone(),
-                    ValueChildQuery {
-                        offset,
-                        limit: u32::try_from(limit).expect("pages are small"),
-                    },
-                )
+                .value_children(reference.clone(), ValueChildQuery { offset, limit })
                 .await?;
             for child in page.children.iter().filter(|child| shown(child)) {
                 rows.push(self.listed(
@@ -644,7 +638,7 @@ impl Presenter<'_> {
                 children,
                 ValueChildQuery {
                     offset: 0,
-                    limit: u32::try_from(PAGE).expect("pages are small"),
+                    limit: PAGE,
                 },
             )
             .await

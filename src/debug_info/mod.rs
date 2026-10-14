@@ -98,7 +98,7 @@ pub struct ObjectStorage {
 
 /// One data object an image catalogs: a local, a parameter, or a global.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectKey(usize);
+pub struct ObjectKey(u32);
 
 /// A typed value's storage in one image, found at one stop.
 #[derive(Debug, Clone)]

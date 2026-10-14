@@ -464,6 +464,9 @@ async fn download(
     let Some((name, bytes)) = app.profiles.file(&id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let Ok(bytes) = bytes else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     // Only characters a file name and a header both take.
     let name: String = name
         .chars()

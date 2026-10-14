@@ -83,7 +83,7 @@ pub fn decode(bytes: &mut Vec<u8>, end: bool) -> String {
             }
             Err(error) => {
                 let (valid, after) = rest.split_at(error.valid_up_to());
-                text.push_str(std::str::from_utf8(valid).expect("validated prefix"));
+                text.push_str(&String::from_utf8_lossy(valid));
                 match error.error_len() {
                     Some(length) => {
                         text.push(char::REPLACEMENT_CHARACTER);

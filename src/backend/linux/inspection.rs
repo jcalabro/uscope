@@ -395,7 +395,8 @@ impl<P: InspectionOps> Controller<P> {
             reference,
             &crate::ValueChildQuery {
                 offset,
-                limit: u32::try_from(length).expect("validated range length fits u32"),
+                limit: u32::try_from(length)
+                    .map_err(|_| Error::internal("a validated range length fits u32"))?,
             },
             budget,
         )
@@ -518,12 +519,12 @@ impl<P: InspectionOps> Controller<P> {
                 .then_with(|| left.image.cmp(&right.image))
                 .then_with(|| left.variable.id.cmp(&right.variable.id))
         });
-        let total = u64::try_from(matches.len()).expect("global count fits u64");
+        let total = matches.len() as u64;
         let start = usize::try_from(query.offset)
             .unwrap_or(usize::MAX)
             .min(matches.len());
         let end = start
-            .saturating_add(usize::try_from(query.limit).expect("u32 fits usize"))
+            .saturating_add(query.limit as usize)
             .min(matches.len());
         let variables = matches[start..end].to_vec().into();
         Ok(GlobalVariablePage {

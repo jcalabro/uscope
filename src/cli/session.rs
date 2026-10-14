@@ -205,7 +205,7 @@ fn launch_target(
             chosen.name
         )
     };
-    Ok(match chosen.target(root) {
+    Ok(match chosen.target(root)? {
         LaunchTarget::Program(program) => {
             if args.arguments.is_empty() {
                 launch.arguments = chosen.args.iter().map(OsString::from).collect();
@@ -254,7 +254,7 @@ fn launch_target(
                     allow_module_mismatch: chosen.allow_module_mismatch,
                     debug_files: uscope::DebugFileOptions::default(),
                 }),
-                LaunchTarget::Program(_) => unreachable!("matched above"),
+                LaunchTarget::Program(_) => bail!("a launched program was matched above"),
             }
         }
     })
@@ -281,9 +281,10 @@ fn explicit_target(args: &Args) -> Result<Target> {
             executable: args.executable.clone(),
         });
     }
-    Ok(Target::Program(args.executable.clone().expect(
-        "an explicit target without a core or process is a program",
-    )))
+    let Some(executable) = args.executable.clone() else {
+        bail!("the command line names no program, process, or core");
+    };
+    Ok(Target::Program(executable))
 }
 
 /// The process an attach names: its id, or the one process of its name.

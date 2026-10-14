@@ -82,7 +82,7 @@ impl<P: InspectionOps> Controller<P> {
             )?;
             let mut offset = 0;
             while offset < read.bytes.len() {
-                let address = start.get() + u64::try_from(offset).expect("offset fits u64");
+                let address = start.get() + offset as u64;
                 let RawDecode::Instruction {
                     length,
                     flow,

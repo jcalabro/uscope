@@ -123,8 +123,8 @@ impl Interfaces {
             StoredValue::Memory(address) => read(address.get().wrapping_add(offset), what),
             StoredValue::Bytes(bytes) => usize::try_from(offset)
                 .ok()
-                .and_then(|offset| bytes.get(offset..offset.checked_add(8)?))
-                .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+                .and_then(|offset| bytes.get(offset..)?.first_chunk::<8>().copied())
+                .map(u64::from_le_bytes)
                 .ok_or_else(|| format!("{what} is past the interface's bytes").into()),
         };
         let (descriptor, data) = match representation {
