@@ -312,6 +312,12 @@ pub struct IntType {
 }
 
 impl IntType {
+    /// The 128-bit signed integer type.
+    pub const I128: Self = Self {
+        width: MAX_WIDTH,
+        signed: true,
+    };
+
     /// The type of this width and signedness; widths run from 1 to 128.
     pub const fn new(width: u8, signed: bool) -> Option<Self> {
         if width == 0 || width > MAX_WIDTH {
@@ -749,28 +755,20 @@ impl Float {
                 FloatOperator::Rem => left.c_fmod(right).value,
             }
         }
-        let format = wider(left.format(), right.format());
-        match (left.convert(format), right.convert(format)) {
-            (Self::Binary16(left), Self::Binary16(right)) => {
-                Self::Binary16(apply(operator, left, right))
-            }
-            (Self::BFloat16(left), Self::BFloat16(right)) => {
-                Self::BFloat16(apply(operator, left, right))
-            }
-            (Self::Binary128(left), Self::Binary128(right)) => {
-                Self::Binary128(apply(operator, left, right))
-            }
-            (Self::Binary32(left), Self::Binary32(right)) => {
-                Self::Binary32(apply(operator, left, right))
-            }
-            (Self::Binary64(left), Self::Binary64(right)) => {
-                Self::Binary64(apply(operator, left, right))
-            }
-            (Self::X87Extended(left), Self::X87Extended(right)) => {
-                Self::X87Extended(apply(operator, left, right))
-            }
-            _ => unreachable!("both operands were converted to one format"),
+        match wider(left.format(), right.format()) {
+            FloatFormat::Binary16 => Self::Binary16(apply(operator, left.to(), right.to())),
+            FloatFormat::BFloat16 => Self::BFloat16(apply(operator, left.to(), right.to())),
+            FloatFormat::Binary32 => Self::Binary32(apply(operator, left.to(), right.to())),
+            FloatFormat::Binary64 => Self::Binary64(apply(operator, left.to(), right.to())),
+            FloatFormat::X87Extended => Self::X87Extended(apply(operator, left.to(), right.to())),
+            FloatFormat::Binary128 => Self::Binary128(apply(operator, left.to(), right.to())),
         }
+    }
+
+    /// The value in the format of `IeeeFloat<S>`, rounded to nearest.
+    fn to<S: rustc_apfloat::ieee::Semantics>(self) -> rustc_apfloat::ieee::IeeeFloat<S> {
+        let mut loses_info = false;
+        each_format!(self, value => value.convert(&mut loses_info).value)
     }
 
     #[must_use]
@@ -795,15 +793,16 @@ impl Float {
 
     /// The IEEE order of two floats, in the wider format; `None` for NaN.
     pub fn compare(self, other: Self) -> Option<Ordering> {
-        let format = wider(self.format(), other.format());
-        match (self.convert(format), other.convert(format)) {
-            (Self::Binary16(left), Self::Binary16(right)) => left.partial_cmp(&right),
-            (Self::BFloat16(left), Self::BFloat16(right)) => left.partial_cmp(&right),
-            (Self::Binary128(left), Self::Binary128(right)) => left.partial_cmp(&right),
-            (Self::Binary32(left), Self::Binary32(right)) => left.partial_cmp(&right),
-            (Self::Binary64(left), Self::Binary64(right)) => left.partial_cmp(&right),
-            (Self::X87Extended(left), Self::X87Extended(right)) => left.partial_cmp(&right),
-            _ => unreachable!("both operands were converted to one format"),
+        fn compare<F: rustc_apfloat::Float>(left: F, right: F) -> Option<Ordering> {
+            left.partial_cmp(&right)
+        }
+        match wider(self.format(), other.format()) {
+            FloatFormat::Binary16 => compare::<Half>(self.to(), other.to()),
+            FloatFormat::BFloat16 => compare::<BFloat>(self.to(), other.to()),
+            FloatFormat::Binary32 => compare::<Single>(self.to(), other.to()),
+            FloatFormat::Binary64 => compare::<Double>(self.to(), other.to()),
+            FloatFormat::X87Extended => compare::<X87DoubleExtended>(self.to(), other.to()),
+            FloatFormat::Binary128 => compare::<Quad>(self.to(), other.to()),
         }
     }
 

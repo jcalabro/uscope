@@ -156,14 +156,17 @@ impl InspectionBudget {
     /// the inspection.
     pub fn consume_memory_up_to(&mut self, bytes: usize) -> Result<usize, InspectionExhaustion> {
         let wanted = u64::try_from(bytes).unwrap_or(u64::MAX);
-        let granted = self.remaining_memory_bytes().min(wanted);
-        if let Some(exhaustion) = self.memory_shortfall(if granted == 0 { wanted } else { granted })
+        let granted = usize::try_from(self.remaining_memory_bytes())
+            .unwrap_or(usize::MAX)
+            .min(bytes);
+        if let Some(exhaustion) =
+            self.memory_shortfall(if granted == 0 { wanted } else { granted as u64 })
         {
             return Err(exhaustion);
         }
         self.usage.memory_reads += 1;
-        self.usage.memory_bytes += granted;
-        Ok(usize::try_from(granted).expect("granted bytes never exceed the request"))
+        self.usage.memory_bytes += granted as u64;
+        Ok(granted)
     }
 
     pub fn consume_expression_work(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {

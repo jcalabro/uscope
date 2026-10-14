@@ -218,11 +218,11 @@ impl Session {
     ) -> Result<Decoded, ErrorBody> {
         let handle = self.target_handle()?;
         let view = handle.at(context);
-        let window = |address: u64, before: usize, after: usize| DisassemblyQuery {
+        let window = |address: u64, before: u32, after: u32| DisassemblyQuery {
             range: DisassemblyRange::Window {
                 address: VirtualAddress::new(address),
-                before: u32::try_from(before).expect("bounded by the window limit"),
-                after: u32::try_from(after).expect("bounded by the window limit"),
+                before,
+                after,
             },
             syntax: self.syntax(),
         };
@@ -234,13 +234,15 @@ impl Session {
         let disassembly = view
             .disassemble(window(
                 anchor,
-                plan.before.min(MAX_WINDOW_BEFORE as usize),
-                plan.after.min(MAX_WINDOW_AFTER as usize),
+                window_size(plan.before, MAX_WINDOW_BEFORE),
+                window_size(plan.after, MAX_WINDOW_AFTER),
             ))
             .await
             .map_err(error)?;
         let uscope::DisassemblyView::Window { block, .. } = disassembly.view else {
-            unreachable!("a window query returns a window");
+            return Err(ErrorBody::new(
+                "internal: a window query returned no window",
+            ));
         };
         decoded.anchor = block
             .instructions
@@ -258,12 +260,14 @@ impl Session {
                 .disassemble(window(
                     last.end().get(),
                     0,
-                    wanted.min(MAX_WINDOW_AFTER as usize),
+                    window_size(wanted, MAX_WINDOW_AFTER),
                 ))
                 .await
                 .map_err(error)?;
             let uscope::DisassemblyView::Window { block, .. } = more.view else {
-                unreachable!("a window query returns a window");
+                return Err(ErrorBody::new(
+                    "internal: a window query returned no window",
+                ));
             };
             if block.instructions.is_empty() {
                 break;
@@ -276,13 +280,15 @@ impl Session {
             let Some(first) = decoded.instructions.first() else {
                 break;
             };
-            let wanted = (plan.before - decoded.anchor).min(MAX_WINDOW_BEFORE as usize);
+            let wanted = window_size(plan.before - decoded.anchor, MAX_WINDOW_BEFORE);
             let more = view
                 .disassemble(window(first.address.get(), wanted, 0))
                 .await
                 .map_err(error)?;
             let uscope::DisassemblyView::Window { block, .. } = more.view else {
-                unreachable!("a window query returns a window");
+                return Err(ErrorBody::new(
+                    "internal: a window query returned no window",
+                ));
             };
             let earlier = block
                 .instructions
@@ -353,8 +359,11 @@ impl Plan {
         let first = self.first;
         (0..self.count).map(move |row| {
             let index = anchor + first + i64::try_from(row).unwrap_or(i64::MAX);
-            if (0..length).contains(&index) {
-                return Row::Instruction(&instructions[usize::try_from(index).expect("in range")]);
+            if let Some(instruction) = usize::try_from(index)
+                .ok()
+                .and_then(|index| instructions.get(index))
+            {
+                return Row::Instruction(instruction);
             }
             Row::Padding(padding_address(
                 instructions,
@@ -364,6 +373,12 @@ impl Plan {
             ))
         })
     }
+}
+
+/// `count` as a window size, held to `max`: a larger count gets the most a
+/// window holds.
+fn window_size(count: usize, max: u32) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX).min(max)
 }
 
 fn padding_address(

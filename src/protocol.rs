@@ -1330,9 +1330,10 @@ impl Default for ExceptionStops {
     fn default() -> Self {
         Self::filters()
             .iter()
-            .filter(|filter| filter.default)
-            .fold(Self::NONE, |stops, filter| {
-                stops.with(filter.id, true).expect("a listed filter")
+            .enumerate()
+            .filter(|(_, filter)| filter.default)
+            .fold(Self::NONE, |stops, (index, _)| Self {
+                stopping: stops.stopping | Self::bit_at(index),
             })
     }
 }
@@ -1365,7 +1366,12 @@ impl ExceptionStops {
         Self::filters()
             .iter()
             .position(|known| known.id == filter)
-            .map(|index| 1 << index)
+            .map(Self::bit_at)
+    }
+
+    /// The bit of the filter at `index` in [`Self::filters`].
+    const fn bit_at(index: usize) -> u64 {
+        1 << index
     }
 
     /// Whether exceptions the filter named `filter` passes stop.

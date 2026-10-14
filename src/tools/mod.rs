@@ -41,7 +41,7 @@ pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured>
         &crate::debug_info::DebugFileSearch::default(),
     );
     let retained = crate::timings::alloc::totals().since(&before).live_bytes;
-    let report = recording.finish();
+    let report = recording.finish()?;
     let counted = report.summary.allocations.is_some();
     let mut retained_parts = Vec::new();
     let outcome = loaded.map(|loaded| {

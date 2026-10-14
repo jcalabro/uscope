@@ -47,10 +47,20 @@ const GENERAL_REGISTERS: [(DwarfRegister, &str, Option<RegisterRole>); 18] = [
     (DwarfRegister::new(49), "rflags", None),
 ];
 
+/// The id of the register at `index` in one of this module's tables, which
+/// have a few dozen entries at most.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "register tables are far shorter than u32::MAX"
+)]
+const fn table_id(index: usize) -> u32 {
+    index as u32
+}
+
 fn general_descriptor(index: usize) -> RegisterDescriptor {
     let (_, name, role) = GENERAL_REGISTERS[index];
     RegisterDescriptor {
-        id: RegisterId::new(u32::try_from(index).expect("register index fits u32")),
+        id: RegisterId::new(table_id(index)),
         name: name.into(),
         bits: 64,
         role,
@@ -92,13 +102,27 @@ const fn special_values(native: &libc::user_regs_struct) -> [u64; 9] {
     ]
 }
 
-fn general_values(registers: &libc::user_regs_struct) -> [u64; 18] {
-    let mut registers = *registers;
-    std::array::from_fn(|index| {
-        let id = RegisterId::new(u32::try_from(index).expect("register index fits u32"));
-        *x86_64_general_register_slot(&mut registers, id)
-            .expect("every general register has a slot")
-    })
+const fn general_values(registers: &libc::user_regs_struct) -> [u64; 18] {
+    [
+        registers.rax,
+        registers.rbx,
+        registers.rcx,
+        registers.rdx,
+        registers.rsi,
+        registers.rdi,
+        registers.rbp,
+        registers.rsp,
+        registers.r8,
+        registers.r9,
+        registers.r10,
+        registers.r11,
+        registers.r12,
+        registers.r13,
+        registers.r14,
+        registers.r15,
+        registers.rip,
+        registers.eflags,
+    ]
 }
 
 pub(super) fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFile {
@@ -218,7 +242,7 @@ pub(super) fn x86_64_xmm_variable_register(
     let bytes = registers[start..start + 16].to_vec();
     VariableRegister {
         descriptor: RegisterDescriptor {
-            id: RegisterId::new(27 + u32::try_from(index).expect("XMM index fits u32")),
+            id: RegisterId::new(27 + u32::from(dwarf.number() - 17)),
             name: format!("xmm{index}").into(),
             bits: 128,
             role: None,
@@ -238,7 +262,7 @@ pub(super) fn x86_64_x87_variable_register(
     let start = FXSAVE_X87_OFFSET + index * 16;
     VariableRegister {
         descriptor: RegisterDescriptor {
-            id: RegisterId::new(43 + u32::try_from(index).expect("x87 index fits u32")),
+            id: RegisterId::new(43 + u32::from(dwarf.number() - 33)),
             name: format!("st{index}").into(),
             bits: 80,
             role: None,
@@ -276,9 +300,7 @@ pub(super) fn x86_64_register_snapshot(
             |(offset, (name, bits, every_frame))| {
                 RegisterValue {
                     register: RegisterDescriptor {
-                        id: RegisterId::new(
-                            18 + u32::try_from(offset).expect("x86-64 register ID fits u32"),
-                        ),
+                        id: RegisterId::new(18 + table_id(offset)),
                         name: name.into(),
                         bits,
                         role: None,

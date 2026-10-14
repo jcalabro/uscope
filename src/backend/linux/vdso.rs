@@ -84,7 +84,8 @@ pub(super) fn read_memory_image(
         if length > limit {
             return Err(Malformed("the image extends past its memory"));
         }
-        let mut data = vec![0; usize::try_from(length).expect("the image bound fits usize")];
+        let mut data =
+            vec![0; usize::try_from(length).map_err(|_| Malformed("the image is too large"))?];
         if read(start, &mut data) {
             Ok(data)
         } else {

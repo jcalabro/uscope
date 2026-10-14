@@ -380,10 +380,7 @@ impl Collector {
         let skipped = first.min(span.end) - span.start;
         overwritten += skipped;
         let skip = probes::record_bytes(skipped);
-        let ring = self.instances[index]
-            .rings
-            .get_mut(&address)
-            .expect("the ring was just found");
+        let ring = self.instances[index].rings.entry(address).or_default();
         ring.tail = span.end;
         let before = std::mem::take(&mut ring.before);
         if copied < records.len() {

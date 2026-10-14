@@ -57,8 +57,11 @@ fn children(tree: &CallTree, node: u32) -> Vec<u32> {
     found
 }
 
-/// One node of the merged tree: its node in each tree, if any.
+/// One node of the merged tree: its node in each tree, if any, and the key
+/// and side it shows.
 struct Pair {
+    key: u32,
+    side: Side,
     current: Option<u32>,
     base: Option<u32>,
     parent: u32,
@@ -83,13 +86,8 @@ pub fn diff_trees(current: (&Keys<'_>, &CallTree), base: (&Keys<'_>, &CallTree))
         };
         let (own, total) = weights(current.1, pair.current);
         let (base_own, base_total) = weights(base.1, pair.base);
-        let (key, side) = match (pair.current, pair.base) {
-            (Some(at), _) => (current.1.key[at as usize], Side::Current),
-            (None, Some(at)) => (base.1.key[at as usize], Side::Base),
-            (None, None) => unreachable!("every pair has a node"),
-        };
-        out.key.push(key);
-        out.side.push(side);
+        out.key.push(pair.key);
+        out.side.push(pair.side);
         out.parent.push(pair.parent);
         out.depth.push(pair.depth);
         out.end.push(node + 1);
@@ -144,6 +142,8 @@ fn pairs(
         let name = names.of(Side::Current, current, node);
         let matched = unmatched.get_mut(&name).and_then(VecDeque::pop_front);
         paired.push(Pair {
+            key: current.1.key[node as usize],
+            side: Side::Current,
             current: Some(node),
             base: matched,
             parent,
@@ -156,6 +156,8 @@ fn pairs(
             .into_iter()
             .filter(|node| left.contains(node))
             .map(|node| Pair {
+                key: base.1.key[node as usize],
+                side: Side::Base,
                 current: None,
                 base: Some(node),
                 parent,

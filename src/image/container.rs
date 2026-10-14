@@ -339,8 +339,8 @@ pub const fn target_of(header: &Header) -> Option<TargetDescription> {
     })
 }
 
-/// The target an image's header describes; validation has checked it.
-pub fn target(bytes: &[u8]) -> TargetDescription {
-    let (header, _) = Header::ref_from_prefix(bytes).expect("validation checked the header");
-    target_of(header).expect("validation checked the target")
+/// The target an image's header describes.
+pub fn target(bytes: &[u8]) -> Result<TargetDescription, ImageError> {
+    let (header, _) = Header::ref_from_prefix(bytes).map_err(|_| ImageError::Truncated)?;
+    target_of(header).ok_or_else(|| malformed("the header names no target"))
 }

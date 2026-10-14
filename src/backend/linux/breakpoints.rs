@@ -160,7 +160,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         if breakpoint.enabled && self.sites_live() {
-            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
+            let inferior = self
+                .inferior
+                .as_mut()
+                .ok_or_else(|| Error::internal("live sites have an inferior"))?;
             install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
             self.step_over_where_threads_trapped(&breakpoint)?;
         }
@@ -308,7 +311,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         if locations.is_empty() && !known {
-            return Err(failure.expect("the program itself was searched"));
+            return Err(
+                failure.unwrap_or_else(|| Error::internal("the program itself was searched"))
+            );
         }
         Ok(locations.into())
     }
@@ -361,7 +366,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::BreakpointNotFound(id.get()))?;
         let breakpoint = self.breakpoints[index].clone();
         if breakpoint.enabled && self.sites_live() {
-            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
+            let inferior = self
+                .inferior
+                .as_mut()
+                .ok_or_else(|| Error::internal("live sites have an inferior"))?;
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
         self.breakpoints.remove(index);
@@ -405,7 +413,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .locations;
         }
         if self.sites_live() {
-            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
+            let inferior = self
+                .inferior
+                .as_mut()
+                .ok_or_else(|| Error::internal("live sites have an inferior"))?;
             if enabled {
                 install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
                 self.step_over_where_threads_trapped(&breakpoint)?;
@@ -425,7 +436,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// publishing that stop, and returns whether any was. The hits stay in
     /// the threads' stop reasons.
     pub(super) fn remove_stopped_temporaries(&mut self) -> Result<bool> {
-        let Some(inferior) = self.inferior.as_ref() else {
+        let Some(inferior) = self.inferior.as_mut() else {
             return Ok(false);
         };
         let hit = inferior
@@ -442,7 +453,6 @@ impl<P: LinuxTraceOps> Controller<P> {
             |breakpoint: &Breakpoint| breakpoint.temporary && hit.contains(&breakpoint.id);
         // Every trap is lifted before any breakpoint is forgotten, so one
         // that fails to lift leaves them all.
-        let inferior = self.inferior.as_mut().expect("inferior exists");
         for breakpoint in self
             .breakpoints
             .iter()
@@ -463,7 +473,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(Arc::from([]));
         }
         if self.sites_live() {
-            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
+            let inferior = self
+                .inferior
+                .as_mut()
+                .ok_or_else(|| Error::internal("live sites have an inferior"))?;
             let stopped_at = inferior
                 .threads
                 .iter()
@@ -917,8 +930,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             for &(address, original_byte) in sites {
                 let byte = match &block {
                     Some(bytes) => Some(
-                        bytes[usize::try_from(address.get() - first)
-                            .expect("an offset within a page fits usize")],
+                        usize::try_from(address.get() - first)
+                            .ok()
+                            .and_then(|offset| bytes.get(offset).copied())
+                            .ok_or_else(|| {
+                                Error::internal("a site lies within the block read over it")
+                            })?,
                     ),
                     None => memory_byte(&self.ptrace, pid, address.get())?,
                 };
@@ -933,10 +950,10 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         let mut lost_locations = Vec::new();
         for address in lost {
-            let site = inferior
-                .breakpoints
-                .remove(&address)
-                .expect("lost site existed");
+            // Each address is lost once, so a site that is gone has nothing left to forget.
+            let Some(site) = inferior.breakpoints.remove(&address) else {
+                continue;
+            };
             forget_removed_site(inferior, address, site.original_byte);
             for owner in site.owners {
                 match owner {
@@ -1398,15 +1415,14 @@ pub(super) fn remove_breakpoint_owner_from(
         let removed = inferior
             .breakpoints
             .remove(&address)
-            .expect("empty breakpoint site existed");
+            .ok_or_else(|| backend_error(LinuxError::BreakpointSiteMissing(address)))?;
         forget_removed_site(inferior, address, removed.original_byte);
     } else {
-        let removed = inferior
+        let site = inferior
             .breakpoints
             .get_mut(&address)
-            .expect("known breakpoint site")
-            .owners
-            .remove(&owner);
+            .ok_or_else(|| backend_error(LinuxError::BreakpointSiteMissing(address)))?;
+        let removed = site.owners.remove(&owner);
         debug_assert!(
             removed,
             "{owner:?} owned the site at {address}, then did not"

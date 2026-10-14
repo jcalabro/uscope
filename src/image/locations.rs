@@ -215,7 +215,7 @@ impl LocationsBuilder {
                 .ok_or(TooLarge)?;
             self.base_types.push(BaseTypeRecord {
                 offset: (*offset).into(),
-                value_type: u8::try_from(code + 1).expect("ten types"),
+                value_type: u8::try_from(code + 1).map_err(|_| TooLarge)?,
             });
         }
         let mut flags = 0;

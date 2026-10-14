@@ -990,10 +990,12 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
 static SPECS: LazyLock<BTreeMap<&'static str, Spec>> = LazyLock::new(|| {
     SIGNATURES
         .iter()
-        .map(|&(name, signature, classes)| {
-            let spec =
-                parse(signature, classes).unwrap_or_else(|error| panic!("{name}: {error:?}"));
-            (name, spec)
+        .filter_map(|&(name, signature, classes)| {
+            // A test parses every signature; a call without one prints its
+            // arguments as raw words.
+            let spec = parse(signature, classes);
+            debug_assert!(spec.is_ok(), "{name}: {spec:?}");
+            Some((name, spec.ok()?))
         })
         .collect()
 });

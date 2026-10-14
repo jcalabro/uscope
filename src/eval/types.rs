@@ -338,7 +338,7 @@ const POINTER_DEPTHS: u32 = 512;
 
 /// A stable identity within [`LANGUAGE_IMAGE`] for a type the language
 /// defines, `depth` pointers to `leaf`. Each pointer level adds `1 << 20`.
-fn language_type_id(leaf: &Ty, depth: u32) -> u32 {
+fn language_type_id(leaf: &Ty, depth: u32) -> Option<u32> {
     let leaf = match leaf {
         Ty::Exact => 0,
         Ty::Bool => 1,
@@ -353,9 +353,9 @@ fn language_type_id(leaf: &Ty, depth: u32) -> u32 {
         Ty::Float(FloatFormat::Binary128) => 10,
         Ty::Int(int) => 16 + u32::from(int.width()) * 2 + u32::from(int.is_signed()),
         Ty::C(c) => 512 + *c as u32,
-        Ty::Program(_) | Ty::Pointer(_) => unreachable!("{leaf:?} is not a language leaf"),
+        Ty::Program(_) | Ty::Pointer(_) => return None,
     };
-    (depth << 20) + leaf
+    Some((depth << 20) + leaf)
 }
 
 /// The reference a type is identified by: its own for a program type.
@@ -367,22 +367,22 @@ pub fn type_reference(ty: &Ty) -> TypeReference {
         leaf = pointee;
     }
     debug_assert!(depth < POINTER_DEPTHS, "a pointer {depth} deep");
+    // A type without an identity of its own claims one no language or program
+    // type has.
+    let unidentified = TypeReference {
+        image: LANGUAGE_IMAGE,
+        id: TypeId::new(u32::MAX),
+    };
     let Ty::Program(reference) = leaf else {
-        return TypeReference {
+        return language_type_id(leaf, depth).map_or(unidentified, |id| TypeReference {
             image: LANGUAGE_IMAGE,
-            id: TypeId::new(language_type_id(leaf, depth)),
-        };
+            id: TypeId::new(id),
+        });
     };
     if depth == 0 {
         return *reference;
     }
     let image = u64::from(reference.image.get()) * u64::from(POINTER_DEPTHS) + u64::from(depth);
-    // Too many images to give each its own: claim an identity no language
-    // or program type has.
-    let unidentified = TypeReference {
-        image: LANGUAGE_IMAGE,
-        id: TypeId::new(u32::MAX),
-    };
     u32::try_from(image)
         .ok()
         .and_then(|image| LANGUAGE_IMAGE.get().checked_sub(image))

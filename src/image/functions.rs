@@ -45,9 +45,12 @@ impl LocationRecord {
     }
 
     pub(super) fn get(&self) -> Option<SourceLocation> {
-        (self.file.get() != NONE).then(|| SourceLocation {
+        if self.file.get() == NONE {
+            return None;
+        }
+        Some(SourceLocation {
             file: SourceFileId::new(self.file.get()),
-            line: LineNumber::new(self.line.get()).expect("validation checked the line"),
+            line: LineNumber::new(self.line.get())?,
             column: ColumnNumber::new(self.column.get()),
         })
     }
@@ -234,21 +237,18 @@ const LANGUAGES: [SourceLanguage; 12] = [
 ];
 const OTHER_LANGUAGE: u8 = 5;
 
-pub(super) fn code_of<T: PartialEq>(known: &[T], value: &T) -> u8 {
-    u8::try_from(
-        known
-            .iter()
-            .position(|candidate| candidate == value)
-            .expect("every value has a code"),
-    )
-    .expect("few values")
+pub(super) fn code_of<T: PartialEq>(known: &[T], value: &T) -> Option<u8> {
+    known
+        .iter()
+        .position(|candidate| candidate == value)
+        .and_then(|code| u8::try_from(code).ok())
 }
 
-pub(super) fn language_code(language: SourceLanguage) -> (u8, u16) {
-    match language {
+pub(super) fn language_code(language: SourceLanguage) -> Option<(u8, u16)> {
+    Some(match language {
         SourceLanguage::Other(code) => (OTHER_LANGUAGE, code),
-        language => (code_of(&LANGUAGES, &language), 0),
-    }
+        language => (code_of(&LANGUAGES, &language)?, 0),
+    })
 }
 
 /// The language [`language_code`] encodes, once validated.
@@ -308,14 +308,13 @@ pub fn add_functions_to(
 /// them while strings are pooled.
 pub fn add_code_to(builder: &mut Builder<'_>, code: &Code<'_>) -> Result<(), TooMany> {
     add_instances(builder, code.instances, code.prologue_ends)?;
-    let starts = code
-        .instruction_starts
-        .iter()
-        .map(|(address, evidence)| StartRecord {
+    let mut starts = Vec::with_capacity(code.instruction_starts.len());
+    for (address, evidence) in code.instruction_starts {
+        starts.push(StartRecord {
             address: address.get().into(),
-            evidence: code_of(&EVIDENCE, evidence),
-        })
-        .collect::<Vec<_>>();
+            evidence: code_of(&EVIDENCE, evidence).ok_or(TooMany)?,
+        });
+    }
     builder.owned_table(starts);
     Ok(())
 }
@@ -368,7 +367,7 @@ fn add_functions(
         }
         let instance_count =
             by_function[first_instance..].partition_point(|(owner, _)| *owner == function.id.get());
-        let (language, other_language) = language_code(function.language);
+        let (language, other_language) = language_code(function.language).ok_or(TooMany)?;
         records.push(FunctionRecord {
             name: name.0.into(),
             linkage_name: match &function.linkage_name {
@@ -382,7 +381,7 @@ fn add_functions(
             instances: Span::new(number(first_instance)?, number(instance_count)?),
             other_language: other_language.into(),
             language,
-            role: role_code(function.role),
+            role: role_code(function.role).ok_or(TooMany)?,
             main_subprogram: function.main_subprogram.into(),
         });
         first_instance += instance_count;
@@ -426,19 +425,22 @@ fn add_instances(
                 .breakpoint_entry
                 .map_or(0, |entry| entry.address.get())
                 .into(),
-            provenance: instance.breakpoint_entry.map_or(NONE_PROVENANCE, |entry| {
-                code_of(&PROVENANCES, &entry.provenance)
-            }),
+            provenance: match instance.breakpoint_entry {
+                Some(entry) => code_of(&PROVENANCES, &entry.provenance).ok_or(TooMany)?,
+                None => NONE_PROVENANCE,
+            },
             inline,
         });
         ranges.extend(instance.ranges.iter().map(|range| RangeRecord {
             start: range.start.get().into(),
             end: range.end.get().into(),
         }));
-        entry_records.extend(recommended.iter().map(|entry| EntryRecord {
-            address: entry.address.get().into(),
-            provenance: code_of(&PROVENANCES, &entry.provenance),
-        }));
+        for entry in recommended {
+            entry_records.push(EntryRecord {
+                address: entry.address.get().into(),
+                provenance: code_of(&PROVENANCES, &entry.provenance).ok_or(TooMany)?,
+            });
+        }
     }
     number(ranges.len())?;
     number(entry_records.len())?;
@@ -525,21 +527,21 @@ impl<'a> FunctionView<'a> {
     }
 
     pub fn functions(self) -> impl ExactSizeIterator<Item = Function<'a>> + DoubleEndedIterator {
-        (0..self.functions.len()).map(move |index| {
-            self.function(FunctionId::new(
-                u32::try_from(index).expect("function counts fit u32"),
-            ))
-            .expect("in range")
-        })
+        self.functions
+            .iter()
+            .zip(super::ids(self.functions.len()))
+            .map(move |(record, id)| Function {
+                view: self,
+                id: FunctionId::new(id),
+                record,
+            })
     }
 
     /// The functions named `name`, in identifier order.
     pub fn named(self, name: &str) -> impl Iterator<Item = Function<'a>> + 'a {
         let found = |name| {
-            index::named(self.strings, self.names, name).map(move |id| {
-                self.function(FunctionId::new(id))
-                    .expect("validation checked the name index")
-            })
+            index::named(self.strings, self.names, name)
+                .filter_map(move |id| self.indexed_function(id))
         };
         // `main` names a program's main subprogram rather than the C
         // `main` its runtime calls it from.
@@ -555,11 +557,18 @@ impl<'a> FunctionView<'a> {
         ids.dedup();
         let name = name.to_owned();
         ids.into_iter()
-            .map(move |id| {
-                self.function(FunctionId::new(id))
-                    .expect("validation checked the name index")
-            })
+            .filter_map(move |id| self.indexed_function(id))
             .filter(move |function| function.name() == name)
+    }
+
+    /// The function a validated index names by `id`.
+    fn indexed_function(self, id: u32) -> Option<Function<'a>> {
+        let function = self.function(FunctionId::new(id));
+        debug_assert!(
+            function.is_some(),
+            "validation checked indexed function {id}"
+        );
+        function
     }
 
     pub fn instance(self, id: CodeInstanceId) -> Option<CodeInstance<'a>> {
@@ -573,12 +582,14 @@ impl<'a> FunctionView<'a> {
     pub fn instances(
         self,
     ) -> impl ExactSizeIterator<Item = CodeInstance<'a>> + DoubleEndedIterator {
-        (0..self.instances.len()).map(move |index| {
-            self.instance(CodeInstanceId::new(
-                u32::try_from(index).expect("instance counts fit u32"),
-            ))
-            .expect("in range")
-        })
+        self.instances
+            .iter()
+            .zip(super::ids(self.instances.len()))
+            .map(move |(record, id)| CodeInstance {
+                view: self,
+                id: CodeInstanceId::new(id),
+                record,
+            })
     }
 
     /// The instances whose code contains `address`, latest start first.
@@ -586,9 +597,13 @@ impl<'a> FunctionView<'a> {
         self,
         address: ImageAddress,
     ) -> impl Iterator<Item = CodeInstance<'a>> + 'a {
-        index::containing(self.code_ranges, address).map(move |id| {
-            self.instance(CodeInstanceId::new(id))
-                .expect("validation checked the code ranges")
+        index::containing(self.code_ranges, address).filter_map(move |id| {
+            let instance = self.instance(CodeInstanceId::new(id));
+            debug_assert!(
+                instance.is_some(),
+                "validation checked code range instance {id}"
+            );
+            instance
         })
     }
 
@@ -712,16 +727,16 @@ impl<'a> Function<'a> {
     }
 
     /// The function's concrete instances, in order.
-    #[must_use]
-    pub fn instances(self) -> impl ExactSizeIterator<Item = CodeInstance<'a>> + 'a {
+    pub fn instances(self) -> impl Iterator<Item = CodeInstance<'a>> + 'a {
         let view = self.view;
         self.record
             .instances
             .rows(self.view.members)
             .iter()
-            .map(move |member| {
-                view.instance(CodeInstanceId::new(member.value.get()))
-                    .expect("validation checked the instance index")
+            .filter_map(move |member| {
+                let instance = view.instance(CodeInstanceId::new(member.value.get()));
+                debug_assert!(instance.is_some(), "validation checked the instance index");
+                instance
             })
     }
 

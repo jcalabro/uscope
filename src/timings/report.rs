@@ -281,9 +281,8 @@ impl Report {
         Ok(report)
     }
 
-    #[must_use]
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("a report serializes")
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
     }
 
     /// The report as text: its summary, then its phases, the longest first.

@@ -40,10 +40,7 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
         validate_stopped_thread(inferior, pid)?;
-        let stop = inferior
-            .public_stop
-            .as_ref()
-            .expect("public stop was validated");
+        let stop = inferior.public_stop.as_ref().ok_or(Error::NotStopped)?;
 
         // The triggering thread's presentation is cached when the stop is
         // published. Another thread is presented by its own stop reason, or
@@ -275,7 +272,7 @@ impl<P: InspectionOps> Controller<P> {
             presentation,
             &mut |activation, code| callers.tail_jumps(activation, code),
         )?;
-        Ok(self.splice_driven(inferior, root, stack, modules, expanded))
+        self.splice_driven(inferior, root, stack, modules, expanded)
     }
 
     /// The inferior, once `stop_id` is its current stop and `root` begins in
@@ -443,7 +440,7 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(resolved) = self.resolve_async_frame(inferior, root, frame)? {
             return Ok(resolved);
         }
-        let level = usize::try_from(frame.get()).expect("u32 fits usize");
+        let level = frame.get() as usize;
         // Every activation presents at least one logical frame, so unwinding
         // one activation per level always reaches the requested frame.
         let max_frames = level.saturating_add(1).min(DEFAULT_MAX_FRAMES);
@@ -488,11 +485,11 @@ impl<P: InspectionOps> Controller<P> {
         expanded: &Expanded,
         frame: StackFrameId,
     ) -> Result<ResolvedFrame> {
-        let level = usize::try_from(frame.get()).expect("u32 fits usize");
+        let level = frame.get() as usize;
         let Some(selected) = expanded.trace.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame,
-                frames: u32::try_from(expanded.trace.frames.len()).expect("frame count fits u32"),
+                frames: frame_level(expanded.trace.frames.len())?,
             });
         };
         let FrameOrigin {
@@ -514,7 +511,7 @@ impl<P: InspectionOps> Controller<P> {
             FrameKind::Inline => PresentedFrame::Inline(
                 selected
                     .code_instance
-                    .expect("inline frames name their code instance"),
+                    .ok_or_else(|| Error::internal("inline frames name their code instance"))?,
             ),
             // A thread's stack has no suspended frames.
             FrameKind::Physical
@@ -732,7 +729,7 @@ impl<P: InspectionOps> Controller<P> {
         inferior
             .public_stop
             .as_mut()
-            .expect("public stop was validated")
+            .ok_or(Error::NotStopped)?
             .selected_frames
             .insert(context, frame);
         self.bump_revision();
@@ -752,10 +749,7 @@ impl<P: InspectionOps> Controller<P> {
         let thread = root.thread();
         let presentation = self.root_presentation(&root)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        let stop = inferior
-            .public_stop
-            .as_mut()
-            .expect("public stop was validated");
+        let stop = inferior.public_stop.as_mut().ok_or(Error::NotStopped)?;
         if let (Some(pid), Some(presentation)) = (thread, presentation) {
             stop.presentations.insert(pid, presentation);
         }
@@ -874,7 +868,7 @@ pub(super) fn presentation_visible_count(
             .position(|instance| *instance == selected)
             .map(|index| index + 1)
             .ok_or(Error::LocationUnavailable)?,
-        PresentedFrame::Ambiguous(_) => unreachable!("rejected above"),
+        PresentedFrame::Ambiguous(_) => return Err(Error::AmbiguousInlineFrame),
     };
     let hidden =
         u32::try_from(chain.instances.len() - visible).map_err(|_| Error::LocationUnavailable)?;
@@ -1164,7 +1158,7 @@ fn expand_activation<'a>(
     let lookup = stack.lookup_address(activation);
     let located = lookup.and_then(|address| unwind_module_for(modules, address));
     let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
-        let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+        let level = frame_level(frames.len())?;
         frames.push(StackFrame::new(level, kind, None, context.instruction));
         return Ok(None);
     };
@@ -1188,6 +1182,11 @@ fn expand_activation<'a>(
 /// frame's instruction or the byte before its return address: the inline
 /// frames `presentation` shows, or else all of them, innermost first, then
 /// a frame of `kind` for the function.
+/// The level of the next frame pushed onto a stack of `len` frames.
+fn frame_level(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| Error::internal("frame count fits in u32"))
+}
+
 fn push_code_frames(
     frames: &mut Vec<StackFrame>,
     kind: FrameKind,
@@ -1210,11 +1209,11 @@ fn push_code_frames(
         for &instance_id in chain.instances[..visible].iter().rev() {
             let instance = module_image
                 .code_instance(instance_id)
-                .expect("inline chain references a known instance");
+                .ok_or_else(|| Error::internal("inline chain references a known instance"))?;
             let function = module_image
                 .function(instance.function())
                 .map(crate::Function::info);
-            let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+            let level = frame_level(frames.len())?;
             let role = function
                 .as_ref()
                 .map_or(CodeRole::Ordinary, |function| function.role);
@@ -1245,7 +1244,7 @@ fn push_code_frames(
     let function = physical_instance
         .and_then(|instance| module_image.function(instance.function()))
         .map(crate::Function::info);
-    let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+    let level = frame_level(frames.len())?;
 
     frames.push(StackFrame::from_parts(
         level,

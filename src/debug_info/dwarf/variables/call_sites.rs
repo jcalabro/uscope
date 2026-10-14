@@ -523,10 +523,10 @@ fn passed(site: Site<'_>, parameter: EntryParameter) -> Result<ExpressionId, Var
 
 /// The function a tail call enters, which a chain was checked to stay in
 /// the module for.
-fn entered(view: CallView<'_>, site: SiteId) -> u32 {
+fn entered(view: CallView<'_>, site: SiteId) -> Result<u32, VariableRuntimeError> {
     view.site(site)
         .and_then(Site::enters)
-        .expect("checked above")
+        .ok_or_else(|| VariableRuntimeError::Fatal("unchecked tail call site".into()))
 }
 
 /// The chain of tail calls from function `from`, entered by a call, to
@@ -565,7 +565,7 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
     for &function in &reached {
         for site in view.function(function).tail_calls() {
             callers
-                .entry(entered(view, site))
+                .entry(entered(view, site)?)
                 .or_default()
                 .push(function);
         }
@@ -591,13 +591,21 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
     let mut path = Vec::new();
     let mut function = from;
     while function != to {
-        let site = view
-            .function(function)
-            .tail_calls()
-            .find(|site| chains.get(&entered(view, *site)) == Some(&1))
-            .expect("the one chain continues");
+        let mut next = None;
+        for site in view.function(function).tail_calls() {
+            let enters = entered(view, site)?;
+            if chains.get(&enters) == Some(&1) {
+                next = Some((site, enters));
+                break;
+            }
+        }
+        let Some((site, enters)) = next else {
+            return Err(VariableRuntimeError::Fatal(
+                "the chain to the target does not continue".into(),
+            ));
+        };
         path.push(site);
-        function = entered(view, site);
+        function = enters;
     }
     Ok(path)
 }
@@ -618,7 +626,7 @@ fn count_chains(
     }
     let mut count = u64::from(function == to);
     for site in view.function(function).tail_calls() {
-        let enters = entered(view, site);
+        let enters = entered(view, site)?;
         if leads.contains(&enters) {
             count = count.saturating_add(count_chains(view, enters, to, leads, chains, active)?);
         }
@@ -650,7 +658,11 @@ impl DwarfVariableInfo {
                 format!("several call sites return to {return_address}").into(),
             ));
         }
-        let site = calls.site(id).expect("validation checked the index");
+        let Some(site) = calls.site(id) else {
+            return Err(VariableRuntimeError::Fatal(
+                "a call site index is out of range".into(),
+            ));
+        };
         if let Some(description) = site.malformed() {
             return Err(VariableRuntimeError::Malformed(description));
         }
@@ -694,7 +706,10 @@ impl DwarfVariableInfo {
         let (from, to) = (function(from)?, function(to)?);
         let calls = self.calls();
         let links = tail_path(calls, from, to)?;
-        let entered = links.iter().map(|site| entered(calls, *site));
+        let entered = links
+            .iter()
+            .map(|site| entered(calls, *site))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(TailCallChain {
             functions: std::iter::once(from)
                 .chain(entered)

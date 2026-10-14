@@ -2,7 +2,7 @@
 
 use crate::image::lines::Files;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use rayon::prelude::*;
@@ -39,7 +39,7 @@ use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
     validate_variant_selections,
 };
-use super::{MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
+use super::{MAX_BUILT_TYPES, MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
 use crate::image::locations::ExpressionId;
 
 pub(super) use crate::image::variables::TypeResolution;
@@ -110,6 +110,7 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
 }
 
 /// What the type arena's prepass found in every unit.
+#[derive(Clone)]
 pub(super) struct TypeContext {
     pub(super) type_definitions: DieMap<DieKey>,
     pub(super) ambiguous_type_declarations: DieMap<()>,
@@ -574,7 +575,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .par_iter()
             .map(|segments| builder.scope_path(segments, &inline_namespaces))
             .collect::<Vec<_>>();
-        let context = Arc::get_mut(&mut builder.context).expect("the context is not shared yet");
+        let context = Arc::make_mut(&mut builder.context);
         for (key, index) in scoped_types {
             let path = &paths[index];
             if !path.is_empty() {
@@ -694,8 +695,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.produced_language(unit_index) == Some(SourceLanguage::Zig)
     }
 
-    fn next_id(&self) -> TypeId {
-        TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"))
+    /// The id of the next type, unless the types fill every id but those
+    /// [`Self::reserved_id`] gives.
+    fn next_id(&self) -> Option<TypeId> {
+        (self.entries.len() < MAX_BUILT_TYPES).then(|| self.reserved_id())
+    }
+
+    /// The id of the next type, for the few types made once each: void,
+    /// the character, and the type past the work limit.
+    fn reserved_id(&self) -> TypeId {
+        TypeId::new(super::row(self.entries.len()))
     }
 
     /// A built type through the names typedefs give it.
@@ -745,10 +754,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             return id;
         }
+        let Some(id) = self.next_id() else {
+            return self.type_limit(key);
+        };
         if self.budget.charge("types", size_of::<TypeEntry>()).is_err() {
             return self.type_limit(key);
         }
-        let id = self.next_id();
         self.by_die.insert(key, id);
         self.entries.push(TypeEntry::Building);
         let entry = match canonical {
@@ -771,7 +782,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let id = if let Some(id) = self.limit_type {
             id
         } else {
-            let id = self.next_id();
+            let id = self.reserved_id();
             self.entries.push(TypeEntry::Malformed(
                 "type graph exceeds its work limit".into(),
             ));
@@ -787,7 +798,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     pub(super) fn void_type(&mut self) -> TypeReference {
         let reference = TypeReference {
             image: self.image,
-            id: self.void_type.unwrap_or_else(|| self.next_id()),
+            id: self.void_type.unwrap_or_else(|| self.reserved_id()),
         };
         if self.void_type.is_none() {
             self.entries.push(resolved(
@@ -805,7 +816,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     fn character_type(&mut self) -> TypeReference {
         let reference = TypeReference {
             image: self.image,
-            id: self.character_type.unwrap_or_else(|| self.next_id()),
+            id: self.character_type.unwrap_or_else(|| self.reserved_id()),
         };
         if self.character_type.is_none() {
             let name: Arc<str> = "character".into();
@@ -1786,7 +1797,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut visiting = HashSet::new();
         let names = (0..self.entries.len())
             .map(|index| {
-                let id = TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
+                let id = TypeId::new(super::row(index));
                 if self.explicit_names.contains(id.index()) {
                     return None;
                 }
@@ -1848,8 +1859,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             };
             match base.encoding {
                 BaseTypeEncoding::Floating => {
-                    let id =
-                        TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
+                    let id = TypeId::new(super::row(index));
                     self.complex_parts
                         .entry((Arc::clone(&base.base_name), base.byte_size))
                         .or_insert(id);
@@ -1860,6 +1870,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         for part in parts {
             let key = (Arc::clone(&part.base_name), part.byte_size);
+            let Some(id) = self.next_id() else {
+                continue;
+            };
             if self.complex_parts.contains_key(&key)
                 || self.budget.charge("types", size_of::<TypeEntry>()).is_err()
             {
@@ -1867,7 +1880,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             let reference = TypeReference {
                 image: self.image,
-                id: self.next_id(),
+                id,
             };
             self.entries.push(resolved(
                 reference,
@@ -2051,16 +2064,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     None => join("void", inner),
                 }
             }
-            TypeKind::Modified { modifier, target } => {
-                let keyword = modifier_keyword(*modifier).expect("a qualifier's keyword");
-                let inner = if inner.starts_with(['*', '&']) {
-                    format!(" {keyword} {inner}")
-                } else {
-                    format!(" {keyword}{inner}")
-                };
-                self.declare(target.id, inner, visiting)
-            }
-            _ => unreachable!("only declarators are declared"),
+            TypeKind::Modified { modifier, target } => match modifier_keyword(*modifier) {
+                Some(keyword) => {
+                    let inner = if inner.starts_with(['*', '&']) {
+                        format!(" {keyword} {inner}")
+                    } else {
+                        format!(" {keyword}{inner}")
+                    };
+                    self.declare(target.id, inner, visiting)
+                }
+                None => join(&format!("<type #{}>", id.get()), inner),
+            },
+            _ => join(&format!("<type #{}>", id.get()), inner),
         };
         visiting.remove(&id);
         declared
@@ -2197,8 +2212,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         // Only a declaration keeps an absent target; a qualifier cannot be one.
         let target = target.ok_or("type modifier has no target")?;
-        let modifier =
-            type_modifier(entry.tag()).expect("modifier wrapper tags were matched by caller");
+        let Some(modifier) = type_modifier(entry.tag()) else {
+            return Err("type modifier has no modifier kind".into());
+        };
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("{modifier:?} {}", self.target_name(target))));
         Ok(resolved(
@@ -2721,7 +2737,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let unit = &self.units[unit_index];
         let expression = copy_expression(
             self.dwarf,
-            &mut self.pool.lock().expect("loading does not panic"),
+            &mut self.pool.lock().unwrap_or_else(PoisonError::into_inner),
             unit_index,
             unit,
             expression,
@@ -3329,21 +3345,25 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             ));
         }
-        for metadata in &mut self.record_member_declarations {
+        // Every member's path is found before any is changed, so a union
+        // that cannot be normalized keeps its declarations as they were.
+        let mut paths = Vec::new();
+        for (position, metadata) in self.record_member_declarations.iter().enumerate() {
             if metadata.aggregate != aggregate {
                 continue;
             }
             if let AggregateMemberPath::Direct(index) = metadata.member {
-                metadata.member = if index == tag_index {
+                let path = if index == tag_index {
                     AggregateMemberPath::Discriminant
                 } else {
-                    let variant = variants
-                        .iter()
-                        .position(|(member, _)| *member == index)
-                        .expect("every member but the tag is a variant");
+                    let variant = variants.iter().position(|(member, _)| *member == index)?;
                     AggregateMemberPath::Variant { variant, member: 0 }
                 };
+                paths.push((position, path));
             }
+        }
+        for (position, path) in paths {
+            self.record_member_declarations[position].member = path;
         }
         let mut variants = variants
             .into_iter()
@@ -3763,7 +3783,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         for (child, expression) in expressions {
             let expression = copy_expression(
                 self.dwarf,
-                &mut self.pool.lock().expect("loading does not panic"),
+                &mut self.pool.lock().unwrap_or_else(PoisonError::into_inner),
                 unit_index,
                 unit,
                 expression,
@@ -4080,9 +4100,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if fields.len() != field_names.len()
             || fields.iter().zip(field_names).enumerate().any(
                 |(index, ((name, offset, _), expected_name))| {
-                    name.as_ref() != *expected_name
-                        || *offset
-                            != u64::try_from(index).expect("field index fits u64") * word_size
+                    name.as_ref() != *expected_name || *offset != index as u64 * word_size
                 },
             )
         {
@@ -4770,13 +4788,16 @@ impl<'data> DieBuffers<'data> {
     fn take(&self) -> gimli::DebuggingInformationEntry<Reader<'data>> {
         self.0
             .lock()
-            .expect("loading does not panic")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop()
             .unwrap_or_else(gimli::DebuggingInformationEntry::null)
     }
 
     fn give_back(&self, entry: gimli::DebuggingInformationEntry<Reader<'data>>) {
-        self.0.lock().expect("loading does not panic").push(entry);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(entry);
     }
 
     /// The DIE at `offset`, which `raw` starts at, read into a spare as

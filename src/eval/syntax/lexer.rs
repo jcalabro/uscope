@@ -263,7 +263,7 @@ impl Lexer<'_> {
     fn token(&mut self, after_dot: bool) -> Result<TokenKind, ExpressionError> {
         let start = self.cursor;
         let Some(byte) = self.peek() else {
-            unreachable!("the caller stops at the end of the text");
+            return Err(self.error(start, "the text ends where a token should begin"));
         };
         if is_name_start(byte) {
             return Ok(TokenKind::Ident(

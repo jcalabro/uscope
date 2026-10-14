@@ -473,7 +473,7 @@ mod tests {
             }
         }
         recorder.counted(&counted);
-        let bytes = recorder.finish().to_bytes();
+        let bytes = recorder.finish().to_bytes().unwrap();
         let read = Profile::from_bytes(&bytes).expect("the file reads").profile;
         assert_eq!(events(&read), trace());
         let syscalls = read.syscalls();

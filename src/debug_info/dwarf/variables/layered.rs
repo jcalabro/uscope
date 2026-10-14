@@ -126,13 +126,18 @@ impl<T> std::ops::Index<usize> for Rows<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &T {
-        self.get(index).expect("a row of the table")
+        index
+            .checked_sub(self.base.len())
+            .map_or_else(|| &self.base[index], |own| &self.own[own])
     }
 }
 
 impl<T: Clone> std::ops::IndexMut<usize> for Rows<T> {
     fn index_mut(&mut self, index: usize) -> &mut T {
-        self.get_mut(index).expect("a row of the table")
+        match index.checked_sub(self.base.len()) {
+            None => &mut Arc::make_mut(&mut self.base)[index],
+            Some(own) => &mut self.own[own],
+        }
     }
 }
 

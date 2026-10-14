@@ -82,7 +82,7 @@ impl Cli {
             displays: self
                 .displays
                 .lock()
-                .expect("the displays are whole")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .list
                 .iter()
                 .map(|display| display.id.to_string())
@@ -105,7 +105,7 @@ impl Cli {
         let cached = self
             .completion_code
             .lock()
-            .expect("the completion cache is whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .filter(|code| code.modules == modules);
         if let Some(code) = cached {
@@ -115,7 +115,7 @@ impl Cli {
         *self
             .completion_code
             .lock()
-            .expect("the completion cache is whole") = Some(code.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(code.clone());
         code
     }
 
@@ -127,7 +127,7 @@ impl Cli {
         let cached = self
             .completion_names
             .lock()
-            .expect("the completion cache is whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .filter(|names| names.frame == frame);
         if let Some(names) = cached {
@@ -146,7 +146,7 @@ impl Cli {
         *self
             .completion_names
             .lock()
-            .expect("the completion cache is whole") = Some(Names {
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Names {
             frame,
             names: names.clone(),
         });

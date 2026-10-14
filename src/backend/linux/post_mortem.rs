@@ -852,7 +852,7 @@ impl Controller<CoreTarget> {
         let main_module = self
             .modules
             .get_mut(&main.id)
-            .expect("main module is registered");
+            .ok_or_else(|| Error::internal("the main module is registered"))?;
         main_module.loaded = main;
         for (loaded, debug) in modules {
             self.modules.insert(
@@ -884,7 +884,7 @@ impl Controller<CoreTarget> {
             .collect();
         self.inferior = Some(Inferior {
             public_stop: Some(PublicStop::new(
-                allocate_stop_id(),
+                allocate_stop_id()?,
                 selected,
                 reason.clone(),
                 BTreeMap::new(),
@@ -895,7 +895,7 @@ impl Controller<CoreTarget> {
         self.inferior
             .as_mut()
             .and_then(|inferior| inferior.public_stop.as_mut())
-            .expect("post-mortem stop exists")
+            .ok_or_else(|| Error::internal("the post-mortem stop exists"))?
             .presentations
             .insert(selected, presentation);
         self.bump_revision();

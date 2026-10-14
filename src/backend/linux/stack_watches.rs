@@ -483,7 +483,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .watch
                 .watchpoints
                 .get_mut(id)
-                .expect("a moved watchpoint exists");
+                .ok_or_else(|| Error::internal("a moved watchpoint exists"))?;
             record!(
                 "watchpoint {id} follows its stack from {} to {address}",
                 record.watchpoint.address

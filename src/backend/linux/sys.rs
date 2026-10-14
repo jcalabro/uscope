@@ -154,9 +154,10 @@ pub(super) fn ptrace_with_signal(
     pid: Pid,
     signal: Option<i32>,
 ) -> Result<(), Errno> {
-    let data = signal.map_or(0, |signal| {
-        usize::try_from(signal).expect("signal numbers are positive")
-    });
+    let data = match signal {
+        None => 0,
+        Some(signal) => usize::try_from(signal).map_err(|_| Errno::EINVAL)?,
+    };
     // SAFETY: continuing, single-stepping, and detaching ignore `addr` and
     // read no memory; `data` carries only the signal number to deliver.
     let result = unsafe {

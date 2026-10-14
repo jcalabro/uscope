@@ -427,11 +427,10 @@ impl Profile {
     }
 
     /// The profile as a file holds it.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        file::write(&self.capture, &mut bytes).expect("writing to memory cannot fail");
-        bytes
+        file::write(&self.capture, &mut bytes)?;
+        Ok(bytes)
     }
 
     /// Writes the profile to a file.

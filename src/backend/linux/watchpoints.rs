@@ -112,7 +112,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         self.inferior
             .as_mut()
-            .expect("armed inferior exists")
+            .ok_or(Error::NotRunning)?
             .watch
             .watchpoints
             .insert(
@@ -309,7 +309,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.watch.watchpoints.get_mut(&id))
-            .expect("armed watchpoint is recorded");
+            .ok_or_else(|| Error::internal("armed watchpoint is recorded"))?;
         record.watchpoint.enabled = enabled;
         if let Some(observed) = observed {
             record.observed = observed;
@@ -331,7 +331,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.watch.watchpoints.remove(&id))
-            .expect("removed watchpoint was recorded");
+            .ok_or_else(|| Error::internal("removed watchpoint was recorded"))?;
         self.publish_watchpoints_changed();
         self.sync_stack_movers()?;
         Ok(record.watchpoint)
@@ -350,7 +350,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             &mut self
                 .inferior
                 .as_mut()
-                .expect("disarmed inferior exists")
+                .ok_or(Error::NotRunning)?
                 .watch
                 .watchpoints,
         );
@@ -534,13 +534,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .map(|bytes| (id, bytes))
             })
             .collect::<Result<Vec<_>>>()?;
-        let inferior = self.inferior.as_mut().expect("inferior exists");
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for (id, bytes) in observed {
             inferior
                 .watch
                 .watchpoints
                 .get_mut(&id)
-                .expect("watchpoint exists")
+                .ok_or_else(|| Error::internal("watchpoint exists"))?
                 .observed = bytes;
         }
         Ok(())
@@ -597,7 +597,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
             .collect::<Vec<_>>();
 
-        let inferior = self.inferior.as_mut().expect("inferior exists");
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for (&pid, thread) in &mut inferior.threads {
             let owners = std::mem::take(&mut thread.watch_hits);
             if owners.is_empty() {
@@ -659,7 +659,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 plan.without_watchpoint(entry.watchpoint.id)
             });
         self.arm_all_threads(plan)?;
-        let inferior = self.inferior.as_mut().expect("inferior exists");
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for entry in &invalidated {
             inferior.watch.watchpoints.remove(&entry.watchpoint.id);
         }
@@ -770,10 +770,9 @@ impl<P: InspectionOps> Controller<P> {
             WatchScope::Frame { thread, activation } => {
                 let pid = debug_pid(*thread)?;
                 if inferior.threads.contains_key(&pid) {
-                    let evidence = record
-                        .frame
-                        .as_ref()
-                        .expect("frame-scoped watchpoints carry scope evidence");
+                    let evidence = record.frame.as_ref().ok_or_else(|| {
+                        Error::internal("frame-scoped watchpoints carry scope evidence")
+                    })?;
                     (!self.frame_scope_is_live(inferior, pid, *activation, evidence)?)
                         .then_some(WatchpointInvalidation::ScopeExited)
                 } else {
@@ -781,10 +780,9 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
             WatchScope::Task { task, activation } => {
-                let evidence = record
-                    .frame
-                    .as_ref()
-                    .expect("frame-scoped watchpoints carry scope evidence");
+                let evidence = record.frame.as_ref().ok_or_else(|| {
+                    Error::internal("frame-scoped watchpoints carry scope evidence")
+                })?;
                 self.task_watch_invalidation(inferior, record, *task, *activation, evidence)?
             }
         })
@@ -837,7 +835,8 @@ impl<P: InspectionOps> Controller<P> {
             };
             let frame = caller.cfa.map(|cfa| view.activation(cfa));
             if frame == Some(activation) {
-                let level = u32::try_from(level).expect("frame limit fits u32");
+                let level =
+                    u32::try_from(level).map_err(|_| Error::internal("frame limit fits u32"))?;
                 let Some(image_address) = frame_lookup_address(level, &context)
                     .and_then(|address| module.loaded.image_address(address).ok())
                     .filter(|address| module.image.contains_address(*address))
@@ -1011,8 +1010,8 @@ fn planned_with(
 ) -> Result<DebugRegisterPlan> {
     plan.with_watchpoint(id, chunks, access)
         .map_err(|error| Error::WatchpointCapacity {
-            required: u64::try_from(error.required).expect("slot count fits u64"),
-            available: u64::try_from(error.available).expect("slot count fits u64"),
+            required: error.required as u64,
+            available: error.available as u64,
         })
 }
 
@@ -1031,7 +1030,7 @@ fn watch_range_error(
         debug_registers::RangeError::TooLarge { required } => {
             return Error::WatchpointCapacity {
                 required,
-                available: u64::try_from(available).expect("slot count fits u64"),
+                available: available as u64,
             };
         }
     };

@@ -492,9 +492,9 @@ fn nested_value_shape(
                 address_class: *address_class,
             })
         }
-        TypeKind::Modified { .. } | TypeKind::Named { .. } => {
-            unreachable!("transparent_type_from strips every wrapper")
-        }
+        TypeKind::Modified { .. } | TypeKind::Named { .. } => Err(ValueShapeError::Malformed(
+            "a type wrapper was not stripped before its shape was computed".into(),
+        )),
         TypeKind::Function => Ok(ValueShape::Function {
             byte_size: info.byte_size.ok_or_else(|| {
                 ValueShapeError::Malformed("function value type has no byte size".into())

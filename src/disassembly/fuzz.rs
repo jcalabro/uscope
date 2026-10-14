@@ -1,5 +1,10 @@
 //! Fuzzes decoding from known instruction starts over arbitrary bytes,
 //! known starts, unreadable memory, and a thread stopped at a known start.
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 
 use super::fake::FakeSource;
 use super::{

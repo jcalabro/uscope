@@ -500,8 +500,26 @@ impl Encoder {
 
     fn constant(&mut self, constant: &ConstantValue) -> Result<U32, TooMany> {
         let split = |value: u128| {
-            let low = u64::try_from(value & u128::from(u64::MAX)).expect("masked to 64 bits");
-            let high = u64::try_from(value >> 64).expect("shifted to 64 bits");
+            let [
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                b8,
+                b9,
+                b10,
+                b11,
+                b12,
+                b13,
+                b14,
+                b15,
+            ] = value.to_le_bytes();
+            let low = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+            let high = u64::from_le_bytes([b8, b9, b10, b11, b12, b13, b14, b15]);
             (low.into(), high.into())
         };
         let record = match constant {
@@ -747,7 +765,7 @@ fn encode_function(
         Some(ReturnConvention::GoRegisters) => record.returns = returns::GO_REGISTERS,
         Some(ReturnConvention::SystemV(convention)) => {
             let (ty, malformed) = resolution(strings, &convention.ty)?;
-            let (language, other) = language_code(convention.language);
+            let (language, other) = language_code(convention.language).ok_or(TooMany)?;
             record.returns = returns::SYSTEM_V;
             record.returned_name = text(strings, &convention.name)?;
             record.returned_type = ty;
@@ -1074,17 +1092,15 @@ impl<'a> VariableView<'a> {
         decode_location(self.strings, kind, value)
     }
 
-    fn constant(self, id: U32) -> ConstantValue {
+    fn constant(self, id: U32) -> Option<ConstantValue> {
         let record = &self.constants[id.get() as usize];
         let value = u128::from(record.low.get()) | (u128::from(record.high.get()) << 64);
-        match record.kind {
+        Some(match record.kind {
             constant_kinds::UNSIGNED => ConstantValue::Unsigned(value),
             constant_kinds::SIGNED => ConstantValue::Signed(value.cast_signed()),
             constant_kinds::FIXED => ConstantValue::Fixed(value),
-            _ => ConstantValue::Bytes(
-                self.constant_bytes[block(record).expect("validation checked the block")].into(),
-            ),
-        }
+            _ => ConstantValue::Bytes(self.constant_bytes.get(block(record)?)?.into()),
+        })
     }
 
     fn ranges(self, ranges: Span<CodeRange>) -> &'a [CodeRange] {
@@ -1178,9 +1194,10 @@ impl<'a> Object<'a> {
 
     pub fn value(self) -> Metadata<ValueDescription> {
         match self.record.value_kind {
-            value_kinds::CONSTANT => Metadata::Value(ValueDescription::Constant(Box::new(
-                self.view.constant(self.record.value),
-            ))),
+            value_kinds::CONSTANT => self.view.constant(self.record.value).map_or_else(
+                || Metadata::Malformed("the constant's bytes lie outside the image".into()),
+                |value| Metadata::Value(ValueDescription::Constant(Box::new(value))),
+            ),
             kind => match self.view.location(kind, self.record.value) {
                 Metadata::Value(list) => Metadata::Value(ValueDescription::Location(list)),
                 Metadata::Absent(absence) => Metadata::Absent(absence),

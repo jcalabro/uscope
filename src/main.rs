@@ -432,7 +432,7 @@ async fn async_main() -> ExitCode {
 
     let result = run(session, renderers).await;
     if let (Some(recording), Some(path)) = (recording, &args.timings)
-        && let Err(error) = std::fs::write(path, recording.finish().to_json())
+        && let Err(error) = write_timings(recording, path)
     {
         eprintln!(
             "{}: cannot write the timings to {}: {error}",
@@ -479,6 +479,12 @@ fn project_launches() -> bool {
     cli::config::Files::read(&start, &user)
         .and_then(|files| files.settings(true))
         .is_ok_and(|settings| !settings.config.launch.is_empty())
+}
+
+/// Ends `recording` and writes what it collected to `path`.
+fn write_timings(recording: uscope::timings::Recording, path: &std::path::Path) -> Result<()> {
+    std::fs::write(path, recording.finish()?.to_json()?)?;
+    Ok(())
 }
 
 async fn run(session: Session, renderers: Renderers) -> Result<()> {
@@ -626,7 +632,7 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
                 println!("{report}");
                 !failed
             }
-            ViewsCommand::Replay { .. } => unreachable!("a replay needs no program"),
+            ViewsCommand::Replay { .. } => anyhow::bail!("internal: a replay needs no program"),
             ViewsCommand::Explain { name, .. } => {
                 let types = handle.explain_type(name).await?;
                 println!(

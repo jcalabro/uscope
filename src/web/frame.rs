@@ -10,6 +10,7 @@
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
+use serde_json::json;
 use std::sync::Arc;
 
 use super::App;
@@ -56,7 +57,7 @@ fn page(nonce: &str) -> String {
 /// `text` as a JavaScript string that cannot end the script it is in.
 fn script_string(text: &str) -> String {
     serde_json::to_string(text)
-        .expect("a string serializes")
+        .unwrap_or_else(|error| json!(format!("the worker did not encode: {error}")).to_string())
         .replace('<', "\\u003c")
 }
 

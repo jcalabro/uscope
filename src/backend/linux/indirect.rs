@@ -118,7 +118,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// and `adding`, name were resolved to.
     pub(super) fn learn_from_got(&mut self, adding: Option<&BreakpointSpec>) {
         let wanted = self.wanted_resolvers(adding);
-        let Some(inferior) = self.inferior.as_ref() else {
+        let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
         if wanted.is_empty() {
@@ -165,7 +165,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
-        let inferior = self.inferior.as_mut().expect("checked above");
         inferior.indirect.chosen.extend(learned);
     }
 

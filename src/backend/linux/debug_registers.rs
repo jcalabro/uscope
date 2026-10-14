@@ -55,21 +55,35 @@ impl SlotAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Chunk {
     pub address: u64,
-    pub length: u8,
+    pub length: ChunkLength,
+}
+
+/// The lengths a debug register watches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ChunkLength {
+    One = 1,
+    Two = 2,
+    Four = 4,
+    Eight = 8,
+}
+
+impl ChunkLength {
+    pub const fn bytes(self) -> u64 {
+        self as u64
+    }
 }
 
 impl Chunk {
-    pub fn end(self) -> u64 {
-        self.address + u64::from(self.length)
+    pub const fn end(self) -> u64 {
+        self.address + self.length.bytes()
     }
 
     const fn length_bits(self) -> u64 {
         match self.length {
-            1 => 0b00,
-            2 => 0b01,
-            4 => 0b11,
-            8 => 0b10,
-            _ => panic!("chunk lengths are 1, 2, 4, or 8 bytes"),
+            ChunkLength::One => 0b00,
+            ChunkLength::Two => 0b01,
+            ChunkLength::Four => 0b11,
+            ChunkLength::Eight => 0b10,
         }
     }
 }
@@ -111,9 +125,9 @@ pub fn split_range(address: u64, length: u64) -> Result<Vec<Chunk>, RangeError> 
         let length = widest_chunk(cursor, end);
         chunks.push(Chunk {
             address: cursor,
-            length: u8::try_from(length).expect("chunk length fits u8"),
+            length,
         });
-        cursor += length;
+        cursor += length.bytes();
     }
     if cfg!(debug_assertions) {
         check_exact_cover(address, length, &chunks);
@@ -121,11 +135,13 @@ pub fn split_range(address: u64, length: u64) -> Result<Vec<Chunk>, RangeError> 
     Ok(chunks)
 }
 
-fn widest_chunk(cursor: u64, end: u64) -> u64 {
-    [8, 4, 2, 1]
+/// The widest aligned chunk at `cursor`. Callers only ask while `cursor` is
+/// below `end`, so a single byte always fits.
+fn widest_chunk(cursor: u64, end: u64) -> ChunkLength {
+    [ChunkLength::Eight, ChunkLength::Four, ChunkLength::Two]
         .into_iter()
-        .find(|&length| cursor.is_multiple_of(length) && end - cursor >= length)
-        .expect("a one-byte chunk always fits")
+        .find(|length| cursor.is_multiple_of(length.bytes()) && end - cursor >= length.bytes())
+        .unwrap_or(ChunkLength::One)
 }
 
 /// Counts greedy chunks without materializing an arbitrarily large range.
@@ -133,7 +149,7 @@ fn chunk_count(address: u64, end: u64) -> u64 {
     let mut count = 0;
     let mut cursor = address;
     while cursor < end && !cursor.is_multiple_of(MAX_SLOT_BYTES) {
-        cursor += widest_chunk(cursor, end);
+        cursor += widest_chunk(cursor, end).bytes();
         count += 1;
     }
     let aligned_end = end & !(MAX_SLOT_BYTES - 1);
@@ -142,7 +158,7 @@ fn chunk_count(address: u64, end: u64) -> u64 {
         cursor = aligned_end;
     }
     while cursor < end {
-        cursor += widest_chunk(cursor, end);
+        cursor += widest_chunk(cursor, end).bytes();
         count += 1;
     }
     count
@@ -265,12 +281,10 @@ impl DebugRegisterPlan {
             if let Some(slot) = slot {
                 debug_assert!(!slot.owners.is_empty(), "slot {index} has no owner");
                 debug_assert!(
-                    slot.chunk
-                        .address
-                        .is_multiple_of(u64::from(slot.chunk.length)),
+                    slot.chunk.address.is_multiple_of(slot.chunk.length.bytes()),
                     "slot {index} watches {:#x}, not aligned to its {} bytes",
                     slot.chunk.address,
-                    slot.chunk.length
+                    slot.chunk.length.bytes()
                 );
                 debug_assert!(enabled, "slot {index} is not enabled in DR7");
                 debug_assert_eq!(
@@ -409,15 +423,10 @@ fn check_exact_cover(address: u64, length: u64, chunks: &[Chunk]) {
     for chunk in chunks {
         debug_assert_eq!(chunk.address, cursor, "chunks are contiguous");
         debug_assert!(
-            matches!(chunk.length, 1 | 2 | 4 | 8),
-            "a chunk of {} bytes",
-            chunk.length
-        );
-        debug_assert!(
-            chunk.address.is_multiple_of(u64::from(chunk.length)),
+            chunk.address.is_multiple_of(chunk.length.bytes()),
             "the chunk at {:#x} is not aligned to its {} bytes",
             chunk.address,
-            chunk.length
+            chunk.length.bytes()
         );
         cursor = chunk.end();
     }
@@ -429,6 +438,10 @@ fn check_exact_cover(address: u64, length: u64, chunks: &[Chunk]) {
 }
 
 #[cfg(any(test, feature = "fuzzing"))]
+#[allow(
+    clippy::expect_used,
+    reason = "a fuzz harness reports a bug by panicking"
+)]
 fn assert_plan_invariants(
     plan: &DebugRegisterPlan,
     armed: &std::collections::BTreeMap<WatchpointId, (Vec<Chunk>, SlotAccess)>,
@@ -507,19 +520,19 @@ mod tests {
             Ok(vec![
                 Chunk {
                     address: 0x1003,
-                    length: 1
+                    length: ChunkLength::One
                 },
                 Chunk {
                     address: 0x1004,
-                    length: 4
+                    length: ChunkLength::Four
                 },
                 Chunk {
                     address: 0x1008,
-                    length: 2
+                    length: ChunkLength::Two
                 },
                 Chunk {
                     address: 0x100a,
-                    length: 1
+                    length: ChunkLength::One
                 },
             ])
         );
@@ -552,7 +565,10 @@ mod tests {
 
     #[test]
     fn control_words_match_values_the_kernel_accepted() {
-        let chunk = |address| Chunk { address, length: 8 };
+        let chunk = |address| Chunk {
+            address,
+            length: ChunkLength::Eight,
+        };
         let mut plan = DebugRegisterPlan::default();
         plan = plan
             .with_watchpoint(WatchpointId::new(1), &[chunk(0x1000)], SlotAccess::Write)
@@ -571,7 +587,7 @@ mod tests {
                 WatchpointId::new(1),
                 &[Chunk {
                     address: 0x1003,
-                    length: 1,
+                    length: ChunkLength::One,
                 }],
                 SlotAccess::ReadWrite,
             )
@@ -583,11 +599,11 @@ mod tests {
                 &[
                     Chunk {
                         address: 0x1000,
-                        length: 2,
+                        length: ChunkLength::Two,
                     },
                     Chunk {
                         address: 0x1004,
-                        length: 4,
+                        length: ChunkLength::Four,
                     },
                 ],
                 SlotAccess::Write,
@@ -646,7 +662,12 @@ mod tests {
 
     #[test]
     fn freed_slots_are_reused_from_the_lowest_index() {
-        let chunk = |address| [Chunk { address, length: 8 }];
+        let chunk = |address| {
+            [Chunk {
+                address,
+                length: ChunkLength::Eight,
+            }]
+        };
         let mut plan = DebugRegisterPlan::default();
         for id in 1..=4 {
             plan = plan

@@ -31,14 +31,16 @@ fn thread_name(
     snapshot: &uscope::StateSnapshot,
     context: ExecutionContext,
     stopped: Option<String>,
-) -> String {
-    let thread = context
-        .as_thread()
-        .expect("an entry without a task is a thread");
+) -> Result<String, ErrorBody> {
+    let Some(thread) = context.as_thread() else {
+        return Err(ErrorBody::new(
+            "internal: an entry without a task is a thread",
+        ));
+    };
     let detail = stopped
         .map(|detail| format!(" — {detail}"))
         .unwrap_or_default();
-    snapshot
+    Ok(snapshot
         .threads
         .iter()
         .find(|listed| listed.id == thread)
@@ -46,7 +48,7 @@ fn thread_name(
         .map_or_else(
             || format!("Thread {thread}{detail}"),
             |name| format!("{name} ({thread}){detail}"),
-        )
+        ))
 }
 
 impl Session {
@@ -75,7 +77,7 @@ impl Session {
                 let context = ExecutionContext::Thread(thread.id);
                 threads.push(json!({
                     "id": self.thread_ids.id(context)?,
-                    "name": thread_name(snapshot, context, stopped),
+                    "name": thread_name(snapshot, context, stopped)?,
                 }));
             }
         }
@@ -183,7 +185,7 @@ impl Session {
                 .map(|reason| self.stopped_detail(&reason));
             let name = match task {
                 Some(task) => self.task_name(stop, task, reason).await,
-                None => thread_name(&snapshot, context, reason),
+                None => thread_name(&snapshot, context, reason)?,
             };
             threads.push(json!({"id": self.thread_ids.id(context)?, "name": name}));
         }

@@ -371,11 +371,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) {
         match result {
             Ok(execution_id) => {
-                let process_id = self
+                let Some(process_id) = self
                     .inferior
                     .as_ref()
                     .map(|inferior| process_id(inferior.tgid))
-                    .expect("successful execution has an inferior");
+                else {
+                    let _ =
+                        reply.send(Err(Error::internal("successful execution has an inferior")));
+                    return;
+                };
                 let _ = reply.send(Ok(execution_id));
                 let _ = self.events.send(DebuggerEvent::InferiorContinued {
                     revision: self.revision,
@@ -545,7 +549,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .get(pid)
                     .is_none_or(|thread| !matches!(thread.state, NativeThreadState::Stopped))
             };
-            let group = inferior.repairs.front().expect("repair group exists");
+            let group = inferior
+                .repairs
+                .front()
+                .ok_or_else(|| Error::internal("repair group exists"))?;
             if group.current.is_some() {
                 return Ok(());
             }
@@ -555,7 +562,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .copied()
                 .filter(|pid| !exiting(inferior, pid))
                 .collect::<VecDeque<_>>();
-            let group = inferior.repairs.front_mut().expect("repair group exists");
+            let group = inferior
+                .repairs
+                .front_mut()
+                .ok_or_else(|| Error::internal("repair group exists"))?;
             group.remaining = remaining;
             group.remaining.pop_front().map(|pid| {
                 group.current = Some(pid);
@@ -584,16 +594,14 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         if remove_site {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-            self.ptrace.remove_breakpoint(
-                inferior.memory_thread(),
-                &mut inferior.breakpoints,
-                address,
-            )?;
-            inferior
+            let pid = inferior.memory_thread();
+            let group = inferior
                 .repairs
                 .front_mut()
-                .expect("repair group exists")
-                .site_removed = true;
+                .ok_or_else(|| Error::internal("repair group exists"))?;
+            self.ptrace
+                .remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
+            group.site_removed = true;
         }
         // Stepping over the trap of a call that a step into another passes
         // enters it, to run to its return.
@@ -609,7 +617,10 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     pub(super) fn finish_repair_group(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        let group = inferior.repairs.pop_front().expect("repair group exists");
+        let group = inferior
+            .repairs
+            .pop_front()
+            .ok_or_else(|| Error::internal("repair group exists"))?;
         if group.site_removed {
             self.ptrace.reinstall_breakpoint(
                 inferior.memory_thread(),
@@ -627,7 +638,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::NotRunning)?
             .thread(pid)?
             .awaiting_breakpoint
-            .expect("breakpoint is awaited");
+            .ok_or_else(|| Error::internal("breakpoint is awaited"))?;
         self.resume_native(
             pid,
             Resume::Continue,
@@ -815,7 +826,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             awaited
         };
         if awaited {
-            self.queue_repair(pid, address);
+            self.queue_repair(pid, address)?;
             return self.start_next_repair();
         }
 
@@ -1426,8 +1437,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.start_next_repair()
     }
 
-    pub(super) fn queue_repair(&mut self, pid: Pid, address: VirtualAddress) {
-        let inferior = self.inferior.as_mut().expect("inferior exists");
+    pub(super) fn queue_repair(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         debug_assert!(
             !inferior
                 .repairs
@@ -1450,6 +1461,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 site_removed: false,
             });
         }
+        Ok(())
     }
 
     /// Records a stop the client must see and begins stopping every other
@@ -1637,7 +1649,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .and_then(|inferior| inferior.barrier.as_ref())
             .and_then(|barrier| Some((barrier.triggering_thread, barrier.reason.clone()?)))
-            .expect("ready barrier publishes a reason");
+            .ok_or_else(|| Error::internal("ready barrier publishes a reason"))?;
         self.publish_stop(triggering_thread, reason)
     }
 
@@ -1650,7 +1662,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Last, so that a process ending while the stop forms keeps the
         // temporary breakpoints of a stop never published.
         let temporaries_removed = self.remove_stopped_temporaries()?;
-        let stop_id = self.ptrace.allocate_stop_id();
+        let stop_id = self.ptrace.allocate_stop_id()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         check_publishable(inferior, stop_id);
         for thread in inferior.threads.values_mut() {
@@ -1741,7 +1753,10 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 pub(super) fn collect_repairs(inferior: &Inferior) -> VecDeque<RepairGroup> {
-    let active = inferior.active.as_ref().expect("execution is active");
+    let Some(active) = inferior.active.as_ref() else {
+        // Without an execution no thread resumes, so none steps over a trap.
+        return VecDeque::new();
+    };
     let mut grouped: BTreeMap<VirtualAddress, VecDeque<Pid>> = BTreeMap::new();
     for &pid in &active.resume_threads {
         if let Some(address) = inferior

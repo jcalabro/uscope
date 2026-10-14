@@ -124,14 +124,11 @@ const ROLES: [CodeRole; 9] = [
 ];
 
 /// A code role's number in a table.
-pub(super) fn role_code(role: CodeRole) -> u8 {
-    u8::try_from(
-        ROLES
-            .iter()
-            .position(|known| *known == role)
-            .expect("every role has a code"),
-    )
-    .expect("few roles")
+pub(super) fn role_code(role: CodeRole) -> Option<u8> {
+    ROLES
+        .iter()
+        .position(|known| *known == role)
+        .and_then(|code| u8::try_from(code).ok())
 }
 
 /// The code role a number names; validation checked it names one.
@@ -144,14 +141,11 @@ pub(super) const fn valid_role(code: u8) -> bool {
     (code as usize) < ROLES.len()
 }
 
-fn code_of<T: PartialEq>(known: &[T], value: &T) -> u8 {
-    u8::try_from(
-        known
-            .iter()
-            .position(|candidate| candidate == value)
-            .expect("every value has a code"),
-    )
-    .expect("few values")
+fn code_of<T: PartialEq>(known: &[T], value: &T) -> Option<u8> {
+    known
+        .iter()
+        .position(|candidate| candidate == value)
+        .and_then(|code| u8::try_from(code).ok())
 }
 
 /// Why symbols could not be encoded.
@@ -235,9 +229,9 @@ fn add_symbols(
             end: end.get().into(),
             extent_rank: extent_ranks[index].into(),
             storage_rank: storage_ranks[index].into(),
-            kind: code_of(&SYMBOL_KINDS, &symbol.kind),
-            binding: code_of(&BINDINGS, &symbol.binding),
-            role: role_code(symbol.role),
+            kind: code_of(&SYMBOL_KINDS, &symbol.kind).ok_or(BadName)?,
+            binding: code_of(&BINDINGS, &symbol.binding).ok_or(BadName)?,
+            role: role_code(symbol.role).ok_or(BadName)?,
             flags,
         });
     }
@@ -344,8 +338,8 @@ fn ranks<K: Ord>(symbols: &[SymbolInfo], key: impl Fn(&SymbolInfo) -> Option<K>)
         .collect::<Vec<_>>();
     keyed.sort_unstable();
     let mut ranks = vec![NONE; symbols.len()];
-    for (rank, (_, index)) in keyed.into_iter().enumerate() {
-        ranks[index] = u32::try_from(rank).expect("symbol counts fit u32");
+    for (rank, (_, index)) in (0u32..).zip(keyed) {
+        ranks[index] = rank;
     }
     ranks
 }
@@ -544,19 +538,20 @@ impl<'a> SymbolView<'a> {
     pub fn all(self) -> impl ExactSizeIterator<Item = Symbol<'a>> + DoubleEndedIterator {
         self.symbols
             .iter()
-            .enumerate()
-            .map(move |(index, record)| Symbol {
+            .zip(super::ids(self.symbols.len()))
+            .map(move |(record, id)| Symbol {
                 strings: self.strings,
-                id: SymbolId::new(u32::try_from(index).expect("symbol counts fit u32")),
+                id: SymbolId::new(id),
                 record,
             })
     }
 
     /// The symbols named `name`, in identifier order.
     pub fn named(self, name: &str) -> impl Iterator<Item = Symbol<'a>> + 'a {
-        index::named(self.strings, self.names, name).map(move |id| {
-            self.get(SymbolId::new(id))
-                .expect("validation checked the name index")
+        index::named(self.strings, self.names, name).filter_map(move |id| {
+            let symbol = self.get(SymbolId::new(id));
+            debug_assert!(symbol.is_some(), "validation checked indexed symbol {id}");
+            symbol
         })
     }
 
@@ -590,9 +585,9 @@ pub fn sections(image: &Image) -> Vec<SectionInfo> {
     image
         .table::<SectionRecord>()
         .iter()
-        .enumerate()
-        .map(|(index, record)| SectionInfo {
-            id: SectionId::new(u32::try_from(index).expect("section counts fit u32")),
+        .zip(0u32..)
+        .map(|(record, index)| SectionInfo {
+            id: SectionId::new(index),
             name: strings.get(StrId(record.name.get())).into(),
             range: AddressRange {
                 start: ImageAddress::new(record.start.get()),

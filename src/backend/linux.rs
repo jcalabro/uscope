@@ -180,10 +180,14 @@ pub fn fuzz_glibc_tls(data: &[u8]) {
     tls::fuzz_glibc(data);
 }
 
+/// The debug register slots, which the `u32` capability reports.
+const WATCH_SLOTS: u32 = 4;
+const _: () = assert!(WATCH_SLOTS as usize == debug_registers::SLOT_COUNT);
+
 /// x86-64 debug registers report writes or any access, but never reads alone.
 pub fn watchpoint_capabilities() -> WatchpointCapabilities {
     WatchpointCapabilities {
-        slots: u32::try_from(debug_registers::SLOT_COUNT).expect("slot count fits u32"),
+        slots: WATCH_SLOTS,
         max_slot_bytes: debug_registers::MAX_SLOT_BYTES,
         access: Arc::from([
             WatchAccess::Change,
@@ -784,22 +788,20 @@ struct PublicStop {
 /// authenticate against a later session's stop.
 static NEXT_STOP_ID: AtomicU64 = AtomicU64::new(1);
 
-fn allocate_stop_id() -> StopId {
+fn allocate_stop_id() -> Result<StopId> {
     // On exhaustion the counter stays put rather than wrap and reissue ids.
     #[allow(
         deprecated,
         reason = "try_update is not yet stable on the pinned toolchain"
     )]
-    let previous = NEXT_STOP_ID
+    let issued = NEXT_STOP_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
-        .expect("stop identifiers exhausted");
-    StopId::new(
-        previous
-            .checked_add(1)
-            .expect("successful atomic update proved the increment fits"),
-    )
+        .ok()
+        .and_then(|previous| previous.checked_add(1));
+    let issued = issued.ok_or_else(|| Error::internal("stop identifiers are exhausted"))?;
+    Ok(StopId::new(issued))
 }
 
 /// A vforked child running in its parent's memory, from the parent's vfork
@@ -1445,7 +1447,8 @@ impl<P: InspectionOps> Controller<P> {
                 .iter()
                 .take(preempting + 1)
                 .position(|message| !message.reads_one_stop())
-                .expect("the preempting message does not wait");
+                // The preempting message is itself one that does not wait.
+                .unwrap_or(preempting);
             return pending.remove(index);
         }
         if let Some(message) = pending.pop_front() {
@@ -2163,7 +2166,12 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Terminate { .. }
             | Request::HoldForks { .. }
             | Request::Shutdown { .. } => {
-                unreachable!("run-control requests are routed by the session dispatcher")
+                // Their replies differ by variant, so this arm cannot answer
+                // them. Dropping the request cancels it at the client.
+                debug_assert!(
+                    false,
+                    "run-control requests are routed by the session dispatcher"
+                );
             }
         }
     }

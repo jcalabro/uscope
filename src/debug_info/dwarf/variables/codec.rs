@@ -92,7 +92,7 @@ pub(super) fn decode_integer_value(
     }
     let bits = integer_bit_width(base)?;
     let raw = unsigned_value(bytes, byte_order).map_err(|reason| Arc::from(reason.to_string()))?
-        & low_bits_mask(usize::try_from(bits).expect("bit width fits usize"));
+        & low_bits_mask(bits as usize);
     let value = match base.encoding {
         BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
             let signed = if bits == 128 {
@@ -208,7 +208,7 @@ pub(super) fn read_sleb128_i128(
         let payload = u128::from(byte & 0x7f);
         if shift < 128 {
             let available = 128 - shift;
-            value |= (payload & low_bits_mask(usize::try_from(available.min(7)).unwrap())) << shift;
+            value |= (payload & low_bits_mask(available.min(7) as usize)) << shift;
         }
         if byte & 0x80 == 0 {
             let negative = byte & 0x40 != 0;
@@ -229,7 +229,7 @@ pub(super) fn read_sleb128_i128(
                     let used = 128 - shift;
                     let high = payload >> used;
                     let expected = if negative {
-                        low_bits_mask(usize::try_from(7 - used).unwrap())
+                        low_bits_mask((7 - used) as usize)
                     } else {
                         0
                     };
@@ -279,8 +279,11 @@ pub(super) fn extract_bit_field(
     let mut value = 0_u128;
     for field_bit in 0..bit_size {
         let source = bit_offset + field_bit;
-        let byte = bytes[usize::try_from(source / 8).expect("validated bit index fits usize")];
-        let within = u32::try_from(source % 8).expect("bit index is below eight");
+        let byte = usize::try_from(source / 8)
+            .ok()
+            .and_then(|index| bytes.get(index).copied())
+            .ok_or_else(|| Arc::from("bit-field range is outside its containing object"))?;
+        let within = source % 8;
         let bit = match byte_order {
             ByteOrder::Little => (byte >> within) & 1,
             ByteOrder::Big => (byte >> (7 - within)) & 1,
@@ -343,9 +346,9 @@ pub(super) fn decode_address(
         ));
     }
     let value = unsigned_value(raw, target.byte_order).map_err(EvaluateError::Malformed)?;
-    Ok(VirtualAddress::new(
-        u64::try_from(value).expect("at most eight bytes fit u64"),
-    ))
+    Ok(VirtualAddress::new(u64::try_from(value).map_err(|_| {
+        EvaluateError::Malformed("pointer value exceeds 64 bits".into())
+    })?))
 }
 
 pub(super) fn integer_bytes(
@@ -374,7 +377,9 @@ pub(super) fn signed_integer_bytes(
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
     let bits = size * 8;
-    if !fits_signed(value, u32::try_from(bits).expect("at most 128 bits")) {
+    let signed_bits =
+        u32::try_from(bits).map_err(|_| crate::UnsupportedVariableFeature::ScalarRepresentation)?;
+    if !fits_signed(value, signed_bits) {
         return Err(EvaluateError::Malformed(
             "signed constant value does not fit its scalar type".into(),
         ));
@@ -433,7 +438,9 @@ pub(super) fn decode_scalar(
     bytes: &[u8],
     target: TargetDescription,
 ) -> std::result::Result<ScalarValue, ScalarDecodeError> {
-    let expected = usize::try_from(type_info.byte_size).expect("scalar byte size fits usize");
+    let expected = usize::try_from(type_info.byte_size).map_err(|_| {
+        ScalarDecodeError::Malformed("scalar byte size does not fit host usize".into())
+    })?;
     if bytes.len() != expected {
         return Err(ScalarDecodeError::Malformed(
             "scalar storage size mismatch".into(),
@@ -444,7 +451,7 @@ pub(super) fn decode_scalar(
             let bits = integer_bit_width(type_info).map_err(ScalarDecodeError::Malformed)?;
             let value = unsigned_value(bytes, target.byte_order)
                 .map_err(ScalarDecodeError::Malformed)?
-                & low_bits_mask(usize::try_from(bits).expect("bit width fits usize"));
+                & low_bits_mask(bits as usize);
             match value {
                 0 => Ok(ScalarValue::Boolean(false)),
                 1 => Ok(ScalarValue::Boolean(true)),
@@ -458,7 +465,9 @@ pub(super) fn decode_scalar(
                 decode_integer_value(type_info, bytes, target.byte_order)
                     .map_err(ScalarDecodeError::Malformed)?
             else {
-                unreachable!("signed encoding returns a signed integer");
+                return Err(ScalarDecodeError::Malformed(
+                    "signed encoding decoded as an unsigned integer".into(),
+                ));
             };
             Ok(ScalarValue::Signed(value))
         }
@@ -467,7 +476,9 @@ pub(super) fn decode_scalar(
                 decode_integer_value(type_info, bytes, target.byte_order)
                     .map_err(ScalarDecodeError::Malformed)?
             else {
-                unreachable!("unsigned encoding returns an unsigned integer");
+                return Err(ScalarDecodeError::Malformed(
+                    "unsigned encoding decoded as a signed integer".into(),
+                ));
             };
             Ok(ScalarValue::Unsigned(value))
         }
@@ -557,30 +568,33 @@ fn decode_float(
 ) -> std::result::Result<FloatValue, ScalarDecodeError> {
     let layout = type_info.float_layout();
     let word = || unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed);
+    let narrow = |error: &str| ScalarDecodeError::Malformed(error.into());
     match bytes.len() {
         2 if layout == Some(FloatLayout::Binary16) => Ok(FloatValue::Binary16(
-            u16::try_from(word()?).expect("two bytes fit u16"),
+            u16::try_from(word()?).map_err(|_| narrow("binary16 value exceeds 16 bits"))?,
         )),
         2 if layout == Some(FloatLayout::BFloat16) => Ok(FloatValue::BFloat16(
-            u16::try_from(word()?).expect("two bytes fit u16"),
+            u16::try_from(word()?).map_err(|_| narrow("bfloat16 value exceeds 16 bits"))?,
         )),
         16 if layout == Some(FloatLayout::Binary128) => Ok(FloatValue::Binary128(word()?)),
         4 => Ok(FloatValue::Binary32(
-            u32::try_from(
-                unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed)?,
-            )
-            .expect("four bytes fit u32"),
+            u32::try_from(word()?).map_err(|_| narrow("binary32 value exceeds 32 bits"))?,
         )),
         8 => Ok(FloatValue::Binary64(
-            u64::try_from(
-                unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed)?,
-            )
-            .expect("eight bytes fit u64"),
+            u64::try_from(word()?).map_err(|_| narrow("binary64 value exceeds 64 bits"))?,
         )),
-        16 if is_x87_extended(type_info, target) => Ok(FloatValue::X87Extended {
-            significand: u64::from_le_bytes(bytes[..8].try_into().expect("eight-byte slice")),
-            sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
-        }),
+        16 if is_x87_extended(type_info, target) => {
+            let Some((significand, rest)) = bytes.split_first_chunk::<8>() else {
+                return Err(narrow("x87 extended significand is truncated"));
+            };
+            let Some(sign_exponent) = rest.first_chunk::<2>() else {
+                return Err(narrow("x87 extended sign and exponent are truncated"));
+            };
+            Ok(FloatValue::X87Extended {
+                significand: u64::from_le_bytes(*significand),
+                sign_exponent: u16::from_le_bytes(*sign_exponent),
+            })
+        }
         _ => Err(ScalarDecodeError::Unavailable(
             crate::UnsupportedVariableFeature::ScalarRepresentation.into(),
         )),

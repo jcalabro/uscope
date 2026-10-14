@@ -1777,7 +1777,8 @@ impl<'a> Parser<'a> {
         if raw.trim().is_empty() {
             return Err(self.error_at(start, "expected an expression"));
         }
-        let text = blank_comments(raw);
+        let text = blank_comments(raw)
+            .ok_or_else(|| self.error_at(start, "the text has no character here"))?;
         let line = self.location(start).0;
         Expression::parse_view(&text)
             .map(|expression| Expr { expression, line })
@@ -1909,7 +1910,7 @@ fn skip_literal(text: &str, start: usize, quote: u8) -> usize {
 }
 
 /// The text with every comment replaced by spaces, so its offsets stay.
-fn blank_comments(text: &str) -> String {
+fn blank_comments(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
@@ -1935,13 +1936,13 @@ fn blank_comments(text: &str) -> String {
                 index = end;
             }
             _ => {
-                let character = text[index..].chars().next().expect("a character");
+                let character = text[index..].chars().next()?;
                 out.push(character);
                 index += character.len_utf8();
             }
         }
     }
-    out
+    Some(out)
 }
 
 /// Parses a type with arguments, written as a pattern is.

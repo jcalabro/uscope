@@ -29,5 +29,10 @@ pub use zones::{
 
 /// A position in a capture's tables, which validation keeps within `u32`.
 fn index(position: usize) -> u32 {
-    u32::try_from(position).expect("a capture's tables are indexed by u32")
+    let index = u32::try_from(position);
+    debug_assert!(
+        index.is_ok(),
+        "a capture's tables are indexed by u32, not {position}"
+    );
+    index.unwrap_or(u32::MAX)
 }

@@ -648,7 +648,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         let built = (0..self.entries.len())
             .into_par_iter()
             .map(|index| {
-                let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                let id = TypeId::new(super::row(index));
                 if !self.explicit_names.contains(id.index()) {
                     return None;
                 }
@@ -1015,9 +1015,7 @@ impl<'a> Alike<'a> {
             if class >= members.len() {
                 members.resize_with(class + 1, Vec::new);
             }
-            members[class].push(TypeId::new(
-                u32::try_from(index).expect("type count fits u32"),
-            ));
+            members[class].push(TypeId::new(super::row(index)));
         }
         Self { classes, members }
     }

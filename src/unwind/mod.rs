@@ -242,7 +242,10 @@ pub fn collect_frames<P: CallerProvider, F>(
         if !visited.insert((current.cfa, current.instruction)) {
             break UnwindTermination::CycleDetected;
         }
-        let level = u32::try_from(frames.len()).expect("frame limit fits in u32");
+        // Levels are numbered in 32 bits, so a stack deeper than that stops here.
+        let Ok(level) = u32::try_from(frames.len()) else {
+            break UnwindTermination::DepthLimit;
+        };
         frames.push(make_frame(level, &current, provider));
         if frames.len() >= max_frames {
             break UnwindTermination::DepthLimit;

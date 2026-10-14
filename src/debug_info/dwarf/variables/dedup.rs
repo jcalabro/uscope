@@ -41,8 +41,8 @@ impl Remap {
     /// types stays past them.
     pub(super) fn id(&self, id: TypeId) -> TypeId {
         self.ids.get(id.index()).copied().unwrap_or_else(|| {
-            let beyond = id.get() - u32::try_from(self.ids.len()).expect("type count fits u32");
-            TypeId::new(u32::try_from(self.retained).expect("type count fits u32") + beyond)
+            let beyond = id.get() - super::row(self.ids.len());
+            TypeId::new(super::row(self.retained) + beyond)
         })
     }
 
@@ -141,7 +141,7 @@ impl BuiltTypes {
             .enumerate()
             .map(|(index, (entry, mergeable))| match entry {
                 TypeEntry::Resolved(info) if *mergeable => {
-                    let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                    let id = TypeId::new(super::row(index));
                     Some(Fields {
                         info,
                         go_dict_index: self.go_dict_indices.get(&id).copied(),
@@ -188,7 +188,7 @@ impl BuiltTypes {
             .par_iter_mut()
             .enumerate()
             .map_init(Vec::new, |scratch, (index, entry)| {
-                let id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                let id = TypeId::new(super::row(index));
                 let TypeEntry::Resolved(info) = entry else {
                     return (false, Vec::new());
                 };
@@ -207,7 +207,11 @@ impl BuiltTypes {
                     reference.image != info.reference.image || reference.id.index() >= count
                 }) {
                     let mut original = scratch.iter().copied();
-                    map_references(info, &mut |_| original.next().expect("as many references"));
+                    map_references(info, &mut |zeroed| {
+                        let reference = original.next();
+                        debug_assert!(reference.is_some(), "a type has as many references again");
+                        reference.unwrap_or(zeroed)
+                    });
                     return (false, Vec::new());
                 }
                 debug_assert_eq!(info.reference.id, id, "a type's own reference names it");
@@ -241,12 +245,16 @@ impl BuiltTypes {
                 if !mergeable[index] {
                     return;
                 }
-                info.reference.id = TypeId::new(u32::try_from(index).expect("type count fits u32"));
+                info.reference.id = TypeId::new(super::row(index));
                 let image = info.reference.image;
                 let mut original = edges[offsets[index]..offsets[index + 1]].iter();
-                map_references(info, &mut |_| TypeReference {
-                    image,
-                    id: TypeId::new(*original.next().expect("as many references")),
+                map_references(info, &mut |zeroed| {
+                    let id = original.next();
+                    debug_assert!(id.is_some(), "a type has as many references again");
+                    id.map_or(zeroed, |id| TypeReference {
+                        image,
+                        id: TypeId::new(*id),
+                    })
                 });
             });
     }
@@ -461,12 +469,12 @@ fn split<H: std::hash::BuildHasher + Clone>(
                 firsts
                     .iter()
                     .position(|first| key(*first) == own)
-                    .map(|found| u32::try_from(found).expect("type count fits u32"))
+                    .map(super::row)
             },
             |seen| seen.get(own).copied(),
         );
         let found = found.unwrap_or_else(|| {
-            let next = u32::try_from(firsts.len()).expect("type count fits u32");
+            let next = super::row(firsts.len());
             firsts.push(member);
             if let Some(seen) = &mut seen {
                 seen.insert(own, next);
@@ -510,7 +518,7 @@ impl Members {
         let mut order = vec![0_u32; classes.len()];
         for (index, class) in classes.iter().enumerate() {
             let range = &mut ranges[*class as usize];
-            order[range.end] = u32::try_from(index).expect("type count fits u32");
+            order[range.end] = super::row(index);
             range.end += 1;
         }
         Self { order, ranges }
@@ -561,8 +569,7 @@ impl Members {
             self.order[starts[group]] = member;
             starts[group] += 1;
             if group > 0 {
-                classes[member as usize] =
-                    u32::try_from(first_new + group - 1).expect("type count fits u32");
+                classes[member as usize] = super::row(first_new + group - 1);
                 moved.push(member);
             }
         }
@@ -588,8 +595,7 @@ impl Referrers {
         let mut referrers = vec![0_u32; edges.len()];
         for referrer in 0..count {
             for edge in &edges[offsets[referrer]..offsets[referrer + 1]] {
-                referrers[cursor[*edge as usize]] =
-                    u32::try_from(referrer).expect("type count fits u32");
+                referrers[cursor[*edge as usize]] = super::row(referrer);
                 cursor[*edge as usize] += 1;
             }
         }

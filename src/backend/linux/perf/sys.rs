@@ -37,7 +37,9 @@ pub struct Attr {
     pub config3: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<Attr>() == 136);
+/// The size `perf_event_open` takes for [`Attr`].
+pub const ATTR_SIZE: u32 = 136;
+const _: () = assert!(std::mem::size_of::<Attr>() == ATTR_SIZE as usize);
 
 pub const TYPE_SOFTWARE: u32 = 1;
 pub const TYPE_BREAKPOINT: u32 = 5;
@@ -100,9 +102,28 @@ pub fn counts(fd: &OwnedFd) -> std::io::Result<(u64, u64)> {
             format!("a perf event's counts read {read} of 16 bytes"),
         ));
     }
-    let (count, lost) = bytes.split_at(8);
-    let word = |bytes: &[u8]| u64::from_ne_bytes(bytes.try_into().expect("eight bytes"));
-    Ok((word(count), word(lost)))
+    let [
+        c0,
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        l0,
+        l1,
+        l2,
+        l3,
+        l4,
+        l5,
+        l6,
+        l7,
+    ] = bytes;
+    Ok((
+        u64::from_ne_bytes([c0, c1, c2, c3, c4, c5, c6, c7]),
+        u64::from_ne_bytes([l0, l1, l2, l3, l4, l5, l6, l7]),
+    ))
 }
 
 /// Opens an event for `pid` on `cpu`.
@@ -286,7 +307,9 @@ impl RingMemory {
         if available == 0 || available > size {
             return 0;
         }
-        let start = usize::try_from(tail % size as u64).expect("an offset inside the ring");
+        let Ok(start) = usize::try_from(tail % size as u64) else {
+            return 0;
+        };
         let first = available.min(size - start);
         out.reserve(available);
         // SAFETY: [tail, head) lies inside the data, which the kernel does

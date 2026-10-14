@@ -88,7 +88,10 @@ impl<P: InspectionOps> Controller<P> {
     }
 
     pub(super) fn unregister_module(&mut self, id: crate::ModuleId) {
-        let module = self.modules.remove(&id).expect("registered module exists");
+        // An unregistered module has nothing to unregister.
+        let Some(module) = self.modules.remove(&id) else {
+            return;
+        };
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::ModuleUnloaded {
             revision: self.revision,
@@ -109,10 +112,11 @@ impl<P: InspectionOps> Controller<P> {
         for id in dynamic {
             self.unregister_module(id);
         }
-        let main = self
-            .modules
-            .get_mut(&crate::ModuleId::new(0))
-            .expect("main module is registered");
+        // Without the main module there is nothing to reset. Launches register
+        // it before any stop, so this only guards a state that cannot arise.
+        let Some(main) = self.modules.get_mut(&crate::ModuleId::new(0)) else {
+            return;
+        };
         main.loaded = LoadedModule::main(main.image.id(), LoadBias::default());
         main.tls = None;
         if self.drop_library_locations() {
@@ -168,7 +172,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         for (path, load_bias, module_id, image_id) in new {
             // A file that is no module the debugger can describe leaves its
             // frames unnamed.
-            let debug = match loads.next().expect("a load for each new module") {
+            let debug = match loads
+                .next()
+                .ok_or_else(|| Error::internal("a load for each new module"))?
+            {
                 Ok(debug) => debug,
                 #[cfg_attr(
                     not(debug_assertions),
@@ -206,7 +213,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let main = self
             .modules
             .get_mut(&main_loaded.id)
-            .expect("main module is registered");
+            .ok_or_else(|| Error::internal("the main module is registered"))?;
         main.loaded = main_loaded;
         self.locate_tls_modules(&link_maps);
         Ok(lost_locations)
@@ -383,7 +390,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         (0..new.len())
             .map(|index| match vdso.take_if(|(at, _)| *at == index) {
                 Some((_, load)) => load,
-                None => files.next().expect("a load for each file"),
+                None => files
+                    .next()
+                    .unwrap_or_else(|| Err(Error::internal("a load for each file"))),
             })
             .collect()
     }

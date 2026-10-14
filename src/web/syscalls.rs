@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use uscope::profiler::{Profile, RecordedEvent, StackEnding};
 use uscope::syscalls::fds::{FdTable, Kind as FdKind};
 use uscope::syscalls::filter::{self, Filter};
@@ -141,14 +141,15 @@ pub fn answer(profile: &Profile, trace: &Trace, request: Request) -> Result<Valu
         Request::SyscallFiles(query) => Ok(json(&files(trace, &query)?)),
         Request::SyscallNetwork(query) => Ok(json(&network(trace, &query)?)),
         Request::SyscallProcesses(query) => Ok(json(&processes(trace, &query)?)),
-        _ => unreachable!(
-            "only syscall requests come here, and in-flight ones go to their recording"
-        ),
+        _ => Err(Failure::new(
+            ErrorKind::Failed,
+            "internal: only syscall requests come here, and in-flight ones go to their recording",
+        )),
     }
 }
 
 fn json(value: &impl serde::Serialize) -> Value {
-    serde_json::to_value(value).expect("answers serialize")
+    serde_json::to_value(value).unwrap_or_else(|error| json!({ "error": error.to_string() }))
 }
 
 /// How a process ended, as strace's last line says it.

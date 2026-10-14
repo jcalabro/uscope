@@ -62,7 +62,10 @@ fn qualified(view: PackageView<'_>, plain: &str) -> Vec<FunctionId> {
     for (dot, _) in plain.match_indices('.') {
         let (qualifier, local) = (&plain[..dot], &plain[dot + 1..]);
         for function in view.with_local_name(local) {
-            let (package, _) = view.packaged_name(function).expect("indexed by name");
+            let Some((package, _)) = view.packaged_name(function) else {
+                debug_assert!(false, "validation checked {function:?} is packaged");
+                continue;
+            };
             if package == qualifier || view.package_name(package) == Some(qualifier) {
                 found.push(function);
             }
@@ -214,7 +217,7 @@ impl ModuleImage {
     /// Whether a location can name a function: it has code, and is not a
     /// wrapper, which only forwards to the function a location means.
     fn locatable(function: Function<'_>) -> bool {
-        function.role() != CodeRole::Wrapper && function.instances().len() != 0
+        function.role() != CodeRole::Wrapper && function.instances().next().is_some()
     }
 
     /// Whether a line breakpoint in a file stays at the line it asks for:

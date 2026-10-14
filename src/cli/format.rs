@@ -75,26 +75,24 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
         } else {
             renderer.paint(Role::Alias, &aliases).to_string()
         };
-        write!(
+        let _ = write!(
             output,
             "\n  {}{}  {rendered_aliases}{}  {}",
             renderer.paint(Role::Command, command.name),
             " ".repeat(name_width - command.name.len()),
             " ".repeat(alias_width - aliases.len()),
             command.summary
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     if !aliases.is_empty() {
         let width = aliases.keys().map(String::len).max().unwrap_or(0);
         output.push_str("\n\naliases from the settings:");
         for (alias, expansion) in aliases {
-            write!(
+            let _ = write!(
                 output,
                 "\n  {}  {expansion}",
                 renderer.paint(Role::Alias, format_args!("{alias:<width$}"))
-            )
-            .expect("writing to a String cannot fail");
+            );
         }
     }
     output.push_str("\n\nUse `help <command>` for aliases and usage.");
@@ -110,22 +108,20 @@ pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
     let mut output = format!("  {}", command.summary);
     let aliases = alias_list(command);
     if !aliases.is_empty() {
-        write!(
+        let _ = write!(
             output,
             "\n  {}: {}",
             renderer.paint(Role::Muted, "aliases"),
             renderer.paint(Role::Alias, aliases)
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     if command.takes_arguments() {
-        write!(
+        let _ = write!(
             output,
             "\n  {}: {}",
             renderer.paint(Role::Muted, "usage"),
             command.usage
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     output
 }
@@ -275,27 +271,31 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
     let mut options = String::new();
     let stops = hit_condition(breakpoint.hit_condition, breakpoint.hit_count, renderer);
     match (stops, &breakpoint.condition) {
-        (Some(stops), Some(condition)) => write!(
-            options,
-            ", {stops} where {}",
-            renderer.paint(Role::Value, condition)
-        ),
-        (Some(stops), None) => write!(options, ", {stops}"),
-        (None, Some(condition)) => write!(
-            options,
-            ", stops where {}",
-            renderer.paint(Role::Value, condition)
-        ),
-        (None, None) => Ok(()),
+        (Some(stops), Some(condition)) => {
+            let _ = write!(
+                options,
+                ", {stops} where {}",
+                renderer.paint(Role::Value, condition)
+            );
+        }
+        (Some(stops), None) => {
+            let _ = write!(options, ", {stops}");
+        }
+        (None, Some(condition)) => {
+            let _ = write!(
+                options,
+                ", stops where {}",
+                renderer.paint(Role::Value, condition)
+            );
+        }
+        (None, None) => {}
     }
-    .expect("writing to a String cannot fail");
     if let Some(message) = &breakpoint.log_message {
-        write!(
+        let _ = write!(
             options,
             ", logs \"{}\"",
             renderer.paint(Role::Value, message)
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     if let [only] = placed {
         return format!("{heading} at {}{options}", self::placed(only, renderer));
@@ -309,15 +309,14 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
         let described = self::placed(location, renderer);
         // A location without a source line already says its address.
         if location.source.is_none() {
-            write!(output, "\n  {described}")
+            let _ = write!(output, "\n  {described}");
         } else {
-            write!(
+            let _ = write!(
                 output,
                 "\n  {}  {described}",
                 breakpoint_address(location.location, renderer)
-            )
+            );
         }
-        .expect("writing to a String cannot fail");
     }
     output
 }
@@ -357,8 +356,7 @@ pub fn placed(placed: &Placed, renderer: Renderer) -> String {
             || module.display().to_string(),
             |name| name.display().to_string(),
         );
-        write!(output, " in {}", renderer.paint(Role::Name, name))
-            .expect("writing to a String cannot fail");
+        let _ = write!(output, " in {}", renderer.paint(Role::Name, name));
     }
     output
 }
@@ -652,12 +650,11 @@ pub fn watchpoint_set(watchpoint: &Watchpoint, renderer: Renderer) -> String {
         watch_scope_suffix(&watchpoint.scope),
     );
     if let Some(condition) = &watchpoint.condition {
-        write!(
+        let _ = write!(
             output,
             ", stops where {}",
             renderer.paint(Role::Value, condition)
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     output
 }
@@ -844,34 +841,8 @@ const fn exception_kind(kind: LanguageExceptionKind) -> &'static str {
     }
 }
 
-/// How a stop that ends a step says why it stopped.
-fn step_stop(reason: &StopReason, renderer: Renderer) -> String {
-    let stopped = |role| renderer.paint(role, "stopped");
-    match reason {
-        StopReason::Step { kind } => {
-            format!("{} after {}", stopped(Role::Current), step_name(*kind))
-        }
-        StopReason::StepIncomplete { kind, description } => format!(
-            "{} before the {} completed: {description}",
-            stopped(Role::Warning),
-            step_name(*kind)
-        ),
-        StopReason::TaskEnded { kind, task, ending } => format!(
-            "{} as task {task} {}, after {}",
-            stopped(Role::Current),
-            task_ending(*ending),
-            step_name(*kind)
-        ),
-        StopReason::FutureDropped { kind } => format!(
-            "{} after {}, whose future was dropped,",
-            stopped(Role::Current),
-            step_name(*kind)
-        ),
-        _ => unreachable!("{reason:?} ends no step"),
-    }
-}
-
 /// Summarizes a stop on one line, without watched values or source.
+#[expect(clippy::too_many_lines, reason = "one arm per stop reason")]
 pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
     match reason {
@@ -907,10 +878,25 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             renderer.paint(Role::Metadata, thread_id)
         ),
-        StopReason::Step { .. }
-        | StopReason::StepIncomplete { .. }
-        | StopReason::TaskEnded { .. }
-        | StopReason::FutureDropped { .. } => step_stop(reason, renderer),
+        StopReason::Step { kind } => {
+            format!("{} after {}", stopped(Role::Current), step_name(*kind))
+        }
+        StopReason::StepIncomplete { kind, description } => format!(
+            "{} before the {} completed: {description}",
+            stopped(Role::Warning),
+            step_name(*kind)
+        ),
+        StopReason::TaskEnded { kind, task, ending } => format!(
+            "{} as task {task} {}, after {}",
+            stopped(Role::Current),
+            task_ending(*ending),
+            step_name(*kind)
+        ),
+        StopReason::FutureDropped { kind } => format!(
+            "{} after {}, whose future was dropped,",
+            stopped(Role::Current),
+            step_name(*kind)
+        ),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Jump => format!(
             "{} where the thread was moved to resume",
@@ -1234,7 +1220,7 @@ pub fn registers(registers: &RegisterSnapshot, renderer: Renderer) -> String {
 pub fn register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
     let digits = |bytes: &mut dyn Iterator<Item = &u8>| {
         bytes.fold(String::new(), |mut output, byte| {
-            write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            let _ = write!(output, "{byte:02x}");
             output
         })
     };
@@ -1256,10 +1242,9 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
                 hexadecimal.push(' ');
             }
             match bytes.get(index) {
-                Some(byte) => write!(hexadecimal, "{byte:02x} "),
-                None => hexadecimal.write_str("   "),
+                Some(byte) => _ = write!(hexadecimal, "{byte:02x} "),
+                None => _ = hexadecimal.write_str("   "),
             }
-            .expect("writing to a String cannot fail");
         }
         let ascii = (0..HEX_DUMP_BYTES_PER_LINE)
             .map(|index| match bytes.get(index) {
@@ -1481,7 +1466,7 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
 
 fn build_id_text(build_id: &[u8]) -> String {
     build_id.iter().fold(String::new(), |mut text, byte| {
-        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(text, "{byte:02x}");
         text
     })
 }
@@ -1532,7 +1517,7 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
         .demangled_name()
         .unwrap_or_else(|| symbol.name.to_string());
     if symbol.offset != 0 {
-        write!(name, "+{:#x}", symbol.offset).expect("writing to a String cannot fail");
+        let _ = write!(name, "+{:#x}", symbol.offset);
     }
     if symbol.provenance == SymbolExtentProvenance::Inferred {
         name.push_str(" (unsized symbol)");
@@ -1558,12 +1543,11 @@ pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> Strin
             },
             |callee| renderer.paint(Role::Name, callee).to_string(),
         );
-        write!(
+        let _ = write!(
             text,
             "\n  {}  {callee}",
             renderer.paint(Role::Metadata, format!("{:#018x}", target.call.get()))
-        )
-        .expect("writing to a String cannot fail");
+        );
     }
     text
 }
@@ -1850,7 +1834,7 @@ fn instruction_bytes(bytes: &[u8], width: Option<usize>) -> String {
         return String::new();
     };
     let text = bytes.iter().fold(String::new(), |mut text, byte| {
-        write!(text, "{byte:02x} ").expect("writing to a String cannot fail");
+        let _ = write!(text, "{byte:02x} ");
         text
     });
     format!(" {text:<width$}")
@@ -1873,10 +1857,9 @@ pub fn instruction_text(
             _ => None,
         };
         match role {
-            Some(role) => write!(text, "{}", renderer.paint(role, &token.text)),
-            None => write!(text, "{}", token.text),
+            Some(role) => _ = write!(text, "{}", renderer.paint(role, &token.text)),
+            None => _ = write!(text, "{}", token.text),
         }
-        .expect("writing to a String cannot fail");
     }
     let slot = match decoded.indirect_target.as_deref() {
         Some(IndirectTarget::Memory { slot, .. } | IndirectTarget::Unreadable { slot, .. }) => {
@@ -1896,14 +1879,15 @@ pub fn instruction_text(
         };
         let name = renderer.paint(Role::Name, format!("<{name}>"));
         match reference.kind {
-            InstructionReferenceKind::BranchTarget => write!(text, " {name}"),
-            InstructionReferenceKind::MemoryOperand => write!(
-                text,
-                "  {} {name}",
-                renderer.paint(Role::Muted, format_args!("# {}", reference.address))
-            ),
+            InstructionReferenceKind::BranchTarget => _ = write!(text, " {name}"),
+            InstructionReferenceKind::MemoryOperand => {
+                _ = write!(
+                    text,
+                    "  {} {name}",
+                    renderer.paint(Role::Muted, format_args!("# {}", reference.address))
+                );
+            }
         }
-        .expect("writing to a String cannot fail");
     }
     if let Some(target) = decoded.indirect_target.as_deref() {
         indirect_target_text(&mut text, target, stopped, module, modules, renderer);
@@ -1927,57 +1911,63 @@ fn indirect_target_text(
     let described = |description: &AddressDescription| {
         let mut text = renderer.paint(Role::Muted, description.address).to_string();
         if let Some(name) = reference_name(description, module, modules) {
-            write!(text, " {}", renderer.paint(Role::Name, format!("<{name}>")))
-                .expect("writing to a String cannot fail");
+            let _ = write!(text, " {}", renderer.paint(Role::Name, format!("<{name}>")));
         }
         text
     };
     let arrow = renderer.paint(Role::Muted, "->");
     match target {
         IndirectTarget::Register { target } => {
-            write!(
+            _ = write!(
                 text,
                 "  {} {arrow} {}",
                 renderer.paint(Role::Muted, "#"),
                 described(target)
-            )
+            );
         }
-        IndirectTarget::Memory { slot, target } => write!(
-            text,
-            "  {} {} {arrow} {}",
-            renderer.paint(Role::Muted, "#"),
-            described(slot),
-            described(target)
-        ),
+        IndirectTarget::Memory { slot, target } => {
+            _ = write!(
+                text,
+                "  {} {} {arrow} {}",
+                renderer.paint(Role::Muted, "#"),
+                described(slot),
+                described(target)
+            );
+        }
         IndirectTarget::Unreadable {
             slot,
             address,
             reason,
-        } => write!(
-            text,
-            "  {} {} {arrow} {}",
-            renderer.paint(Role::Muted, "#"),
-            described(slot),
-            renderer.paint(Role::Warning, format!("{reason} at {address}"))
-        ),
-        IndirectTarget::NeedsRegisters if stopped => write!(
-            text,
-            "  {} {arrow} {}",
-            renderer.paint(Role::Muted, "#"),
-            renderer.paint(
-                Role::Warning,
-                "unknown: a restarted system call replaces a register it uses"
-            )
-        ),
-        IndirectTarget::Unsupported => write!(
-            text,
-            "  {} {arrow} {}",
-            renderer.paint(Role::Muted, "#"),
-            renderer.paint(Role::Warning, "not computed for this form of branch")
-        ),
-        _ => Ok(()),
+        } => {
+            _ = write!(
+                text,
+                "  {} {} {arrow} {}",
+                renderer.paint(Role::Muted, "#"),
+                described(slot),
+                renderer.paint(Role::Warning, format!("{reason} at {address}"))
+            );
+        }
+        IndirectTarget::NeedsRegisters if stopped => {
+            _ = write!(
+                text,
+                "  {} {arrow} {}",
+                renderer.paint(Role::Muted, "#"),
+                renderer.paint(
+                    Role::Warning,
+                    "unknown: a restarted system call replaces a register it uses"
+                )
+            );
+        }
+        IndirectTarget::Unsupported => {
+            _ = write!(
+                text,
+                "  {} {arrow} {}",
+                renderer.paint(Role::Muted, "#"),
+                renderer.paint(Role::Warning, "not computed for this form of branch")
+            );
+        }
+        _ => {}
     }
-    .expect("writing to a String cannot fail");
 }
 
 /// Names an encoded address by its symbol or, failing that, its section,
@@ -1996,7 +1986,7 @@ pub fn reference_name(
     if Some(module.module) != from
         && let Some(file) = module_name(modules, module.module)
     {
-        write!(name, " in {file}").expect("writing to a String cannot fail");
+        let _ = write!(name, " in {file}");
     }
     Some(name)
 }

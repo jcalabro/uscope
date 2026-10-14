@@ -6,6 +6,11 @@
 //! message at a time, and which reports the ground truth oracles check.
 //! Everything here translates between the backend's types and the
 //! simulator's; the semantics live in `crate::sim::kernel`.
+#![allow(
+    clippy::expect_used,
+    clippy::unreachable,
+    reason = "the simulator is a test harness"
+)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -542,10 +547,10 @@ impl LinuxTraceOps for SimTrace {
         self.tracer
     }
 
-    fn allocate_stop_id(&self) -> StopId {
+    fn allocate_stop_id(&self) -> Result<StopId> {
         let next = self.last_stop_id.get() + 1;
         self.last_stop_id.set(next);
-        StopId::new(next)
+        Ok(StopId::new(next))
     }
 
     fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {

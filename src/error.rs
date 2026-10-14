@@ -313,6 +313,10 @@ pub enum Error {
 
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
+    /// A fact uscope relies on did not hold: a defect in uscope, reported
+    /// instead of panicking.
+    #[error("internal debugger error: {0}")]
+    Internal(Arc<str>),
     #[error("debugger request was cancelled")]
     RequestCancelled,
     #[error("the view failed: {0}")]
@@ -340,6 +344,11 @@ impl Error {
 
     pub(crate) fn backend(error: impl StdError + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(error))
+    }
+
+    /// An internal error, which names the fact that did not hold.
+    pub(crate) fn internal(fact: impl Into<Arc<str>>) -> Self {
+        Self::Internal(fact.into())
     }
 }
 

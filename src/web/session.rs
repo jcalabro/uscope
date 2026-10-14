@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -269,22 +269,25 @@ impl Session {
             Role::View => format!("guest-{connection}"),
         };
         let (history, messages) = {
-            let history = self.history.lock().expect("history lock");
+            let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
             (
                 history.pieces.iter().cloned().collect(),
                 self.messages.subscribe(),
             )
         };
         let state = self.state.subscribe();
-        self.people.lock().expect("people lock").insert(
-            connection,
-            Person {
+        self.people
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
                 connection,
-                name: name.clone(),
-                role,
-                focus: None,
-            },
-        );
+                Person {
+                    connection,
+                    name: name.clone(),
+                    role,
+                    focus: None,
+                },
+            );
         self.announce_presence();
         Joined {
             connection,
@@ -297,7 +300,10 @@ impl Session {
 
     pub fn leave(&self, connection: u32) {
         self.handles.forget(connection);
-        self.people.lock().expect("people lock").remove(&connection);
+        self.people
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&connection);
         self.announce_presence();
     }
 
@@ -305,7 +311,7 @@ impl Session {
         let people = self
             .people
             .lock()
-            .expect("people lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .cloned()
             .collect();
@@ -313,14 +319,14 @@ impl Session {
     }
 
     fn broadcast(&self, message: &ServerMessage) {
-        let text = serde_json::to_string(message).expect("messages serialize");
+        let text = encode(message);
         let _ = self.messages.send(text.into());
     }
 
     fn name_of(&self, connection: u32) -> String {
         self.people
             .lock()
-            .expect("people lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(&connection)
             .map(|person| person.name.clone())
             .unwrap_or_default()
@@ -351,7 +357,10 @@ impl Session {
             Request::Renderers => Ok(to_value(
                 &draw::renderers(&self.current_handle().await?).await?,
             )),
-            _ => unreachable!("only reads are read"),
+            _ => Err(Failure::new(
+                ErrorKind::Failed,
+                "internal: only reads are read",
+            )),
         }
     }
 
@@ -492,7 +501,7 @@ impl Session {
             }
             Request::Functions(query) => {
                 let (_, images) = self.current_images().await?;
-                Ok(to_value(&inspect::functions(&images, &query).await))
+                Ok(to_value(&inspect::functions(&images, &query).await?))
             }
             Request::Source(protocol::SourcePath { path }) => {
                 let (handle, images) = self.current_images().await?;
@@ -607,7 +616,12 @@ impl Session {
                 format!("opened {core}")
             }
             Request::End => self.end_current().await?,
-            _ => unreachable!("only the picker's requests choose"),
+            _ => {
+                return Err(Failure::new(
+                    ErrorKind::Failed,
+                    "internal: only the picker's requests choose",
+                ));
+            }
         }))
     }
 
@@ -656,7 +670,12 @@ impl Session {
                 self.input(input).await?;
                 return Ok(None);
             }
-            _ => unreachable!("only run control controls"),
+            _ => {
+                return Err(Failure::new(
+                    ErrorKind::Failed,
+                    "internal: only run control controls",
+                ));
+            }
         }))
     }
 
@@ -686,7 +705,12 @@ impl Session {
                     .await?;
                 self.notice(connection, format!("removed breakpoint {id}"));
             }
-            _ => unreachable!("only breakpoint requests change breakpoints"),
+            _ => {
+                return Err(Failure::new(
+                    ErrorKind::Failed,
+                    "internal: only breakpoint requests change breakpoints",
+                ));
+            }
         }
         Ok(Value::Null)
     }
@@ -725,7 +749,12 @@ impl Session {
                 .await;
                 format!("changed how {name} is handled")
             }
-            _ => unreachable!("only low-level requests change the program below its source"),
+            _ => {
+                return Err(Failure::new(
+                    ErrorKind::Failed,
+                    "internal: only low-level requests change the program below its source",
+                ));
+            }
         };
         self.notice(connection, notice);
         Ok(Value::Null)
@@ -733,7 +762,7 @@ impl Session {
 
     /// Records who runs the program next, and how.
     fn caused(&self, connection: u32, action: &str) {
-        *self.cause.lock().expect("cause lock") = Some(Cause {
+        *self.cause.lock().unwrap_or_else(PoisonError::into_inner) = Some(Cause {
             name: self.name_of(connection),
             action: action.to_owned(),
         });
@@ -868,7 +897,7 @@ impl Session {
         if let Some(person) = self
             .people
             .lock()
-            .expect("people lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .get_mut(&connection)
         {
             name.clone_into(&mut person.name);
@@ -889,7 +918,7 @@ impl Session {
         let changed = self
             .people
             .lock()
-            .expect("people lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .get_mut(&connection)
             .is_some_and(|person| {
                 let changed = person.focus != focus;
@@ -1264,7 +1293,10 @@ impl Session {
     }
 
     async fn open_target(&self, target: &mut Option<Target>, start: Start) -> Result<(), Failure> {
-        self.history.lock().expect("history lock").clear();
+        self.history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.loading(&start);
         let opened = open(&start, &self.debug_files).await;
         let debugger = match opened {
@@ -1287,7 +1319,10 @@ impl Session {
         // so a page can open it; the pump takes every later change.
         let events = handle.subscribe();
         let snapshot = handle.snapshot().await?;
-        self.cause.lock().expect("cause lock").take();
+        self.cause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let mut describer = Describer::new(id, info, handle.clone(), Arc::clone(&self.cause));
         self.state
             .send_replace(Arc::new(describer.describe(&snapshot).await));
@@ -1575,6 +1610,12 @@ fn options(
     })
 }
 
+/// Encodes a message. One that cannot encode goes out as an error.
+pub(super) fn encode(message: &impl serde::Serialize) -> String {
+    serde_json::to_string(message)
+        .unwrap_or_else(|error| json!({ "error": error.to_string() }).to_string())
+}
+
 fn to_value<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or_else(|error| json!({ "error": error.to_string() }))
 }
@@ -1623,12 +1664,10 @@ impl Outlet {
                 stream,
                 text: piece.to_owned(),
             });
-            let text: Arc<str> = serde_json::to_string(&message)
-                .expect("messages serialize")
-                .into();
+            let text: Arc<str> = encode(&message).into();
             // Publishing under the lock keeps joining tabs from missing or
             // repeating a piece.
-            let mut history = self.history.lock().expect("history lock");
+            let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
             history.push(Arc::clone(&text));
             let _ = self.messages.send(text);
             drop(history);

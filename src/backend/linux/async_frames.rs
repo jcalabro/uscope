@@ -111,11 +111,8 @@ impl<P: InspectionOps> Controller<P> {
             .frames
             .iter()
             .enumerate()
-            .map(|(level, frame)| {
-                let level = u32::try_from(level).expect("an await chain's depth fits u32");
-                async_frame(image, module, level, frame)
-            })
-            .collect();
+            .map(|(level, frame)| Ok(async_frame(image, module, frame_u32(level)?, frame)))
+            .collect::<Result<_>>()?;
         let termination = termination(chain.end.clone());
         Ok(Some(AsyncStack {
             frames,
@@ -149,11 +146,11 @@ impl<P: InspectionOps> Controller<P> {
         let Some(stack) = self.async_stack(inferior, root)? else {
             return Ok(None);
         };
-        let level = usize::try_from(id.get()).expect("u32 fits usize");
+        let level = id.get() as usize;
         let Some(frame) = stack.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame: id,
-                frames: u32::try_from(stack.frames.len()).expect("frame count fits u32"),
+                frames: frame_u32(stack.frames.len())?,
             });
         };
         Ok(Some(self.suspended_frame(id, frame, &stack.futures[level])))
@@ -297,7 +294,7 @@ impl<P: InspectionOps> Controller<P> {
         stack: &PhysicalStack,
         modules: &[UnwindModule<'_>],
         expanded: Expanded,
-    ) -> Expanded {
+    ) -> Result<Expanded> {
         let runtimes = self.runtimes(inferior);
         let variable_of = |frame: &StackFrame| {
             let function = frame.function.as_ref()?;
@@ -318,7 +315,7 @@ impl<P: InspectionOps> Controller<P> {
                 .is_some_and(|function| function.coroutine.is_some());
         }
         if drivers.is_empty() {
-            return expanded;
+            return Ok(expanded);
         }
         // The notes' frame identifiers would be the unspliced trace's.
         debug_assert!(
@@ -340,11 +337,9 @@ impl<P: InspectionOps> Controller<P> {
         let mut unread = None;
         let mut lost = Vec::new();
         for (index, frame) in expanded.trace.frames.iter().enumerate() {
-            let here = |frames: &Vec<StackFrame>| {
-                StackFrameId::new(u32::try_from(frames.len()).expect("frame count fits u32"))
-            };
+            let here = |frames: &Vec<StackFrame>| frame_u32(frames.len()).map(StackFrameId::new);
             if let Some((_, variable)) = drivers.next_if(|(driver, _)| *driver == index) {
-                let driver = StackFrameId::new(u32::try_from(index).expect("frame count fits u32"));
+                let driver = StackFrameId::new(frame_u32(index)?);
                 match self.driven_chain(inferior, root, stack, modules, &expanded, driver, variable)
                 {
                     Ok((module, chain)) => {
@@ -364,17 +359,19 @@ impl<P: InspectionOps> Controller<P> {
                             }
                             if let Some(reason) = end_reason(&chain.end) {
                                 unfollowed.push(UnfollowedFuture {
-                                    driver: here(&frames),
+                                    driver: here(&frames)?,
                                     reason,
                                 });
                             }
                         }
                     }
                     Err(Unread { reason, declared }) => {
-                        unread.get_or_insert_with(|| UnfollowedFuture {
-                            driver: here(&frames),
-                            reason,
-                        });
+                        if unread.is_none() {
+                            unread = Some(UnfollowedFuture {
+                                driver: here(&frames)?,
+                                reason,
+                            });
+                        }
                         lost.extend(declared);
                     }
                 }
@@ -388,7 +385,7 @@ impl<P: InspectionOps> Controller<P> {
             lost.clear();
         }
         for (level, frame) in frames.iter_mut().enumerate() {
-            let level = u32::try_from(level).expect("frame count fits u32");
+            let level = frame_u32(level)?;
             frame.level = level;
             frame.id = StackFrameId::new(level);
         }
@@ -403,7 +400,7 @@ impl<P: InspectionOps> Controller<P> {
             lost,
         };
         spliced.check_invariants(stack.frames.len());
-        spliced
+        Ok(spliced)
     }
 
     /// The chain of awaits of the future the frame `driver` drives through
@@ -624,6 +621,12 @@ fn saved<'a>(
             })
         })
         .collect()
+}
+
+/// A frame level or count as `u32`. No unwound stack comes near `u32::MAX`
+/// frames, but a longer one must not wrap into duplicate levels.
+fn frame_u32(value: usize) -> Result<u32> {
+    u32::try_from(value).map_err(|_| Error::internal("a stack has more frames than u32 levels"))
 }
 
 /// A frame of a suspended task's chain of awaits.

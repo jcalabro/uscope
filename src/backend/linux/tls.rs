@@ -120,7 +120,7 @@ impl CLibrary {
                     link_maps.iter().map(|&(load_bias, _)| load_bias).collect()
                 };
                 let mut modules = BTreeMap::new();
-                let mut id = 0;
+                let mut id = NonZeroU64::MIN;
                 for load_bias in order {
                     // Whether a module the debugger could not load has TLS is
                     // unknown, and so is every later module's number.
@@ -128,9 +128,11 @@ impl CLibrary {
                         None => break,
                         Some(false) => {}
                         Some(true) => {
-                            id += 1;
-                            let id = NonZeroU64::new(id).expect("module numbers start at one");
                             modules.insert(load_bias, TlsModule::Musl { id });
+                            let Some(next) = id.checked_add(1) else {
+                                break;
+                            };
+                            id = next;
                         }
                     }
                 }

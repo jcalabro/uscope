@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use uscope::{
     DebuggerHandle, DereferenceReference, Evaluation, EvaluationMode, Expression, InspectionLimits,
@@ -70,7 +70,7 @@ impl Handles {
     pub fn forget(&self, connection: u32) {
         self.tables
             .lock()
-            .expect("handles lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(&connection);
     }
 
@@ -81,7 +81,7 @@ impl Handles {
         stop: StopId,
         node: Node,
     ) -> Result<u64, Failure> {
-        let mut tables = self.tables.lock().expect("handles lock");
+        let mut tables = self.tables.lock().unwrap_or_else(PoisonError::into_inner);
         let table = tables.entry(connection).or_insert_with(|| Table {
             session: session.to_owned(),
             stop,
@@ -110,7 +110,7 @@ impl Handles {
     fn get(&self, connection: u32, session: &str, handle: u64) -> Result<Node, Failure> {
         self.tables
             .lock()
-            .expect("handles lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(&connection)
             .filter(|table| table.session == session)
             .and_then(|table| table.nodes.get(&handle).cloned())

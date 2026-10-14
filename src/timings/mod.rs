@@ -204,7 +204,7 @@ impl Recording {
     }
 
     /// Stops recording and reports what it collected.
-    pub fn finish(self) -> Report {
+    pub fn finish(self) -> crate::Result<Report> {
         ENABLED.store(false, Ordering::Release);
         let wall_ns = elapsed_ns(self.started);
         let cpu_ns = process_cpu_ns().saturating_sub(self.cpu);
@@ -217,7 +217,7 @@ impl Recording {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
             .filter(|collected| collected.generation == self.generation)
-            .expect("the recording's collection is its own");
+            .ok_or_else(|| crate::Error::internal("the recording's collection is another's"))?;
         let unavailable = INSTRUCTIONS_UNAVAILABLE
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -231,7 +231,7 @@ impl Recording {
         } else {
             report::CounterStatus::Counted
         };
-        Report::new(report::Raw {
+        Ok(Report::new(report::Raw {
             wall_ns,
             cpu_ns,
             peak_rss_bytes: peak_rss_bytes(),
@@ -241,7 +241,7 @@ impl Recording {
             loose: collected.loose,
             dropped: collected.dropped,
             instructions,
-        })
+        }))
     }
 }
 
@@ -328,41 +328,40 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
     THREAD.with(|thread| {
         let mut thread = thread.borrow_mut();
         let generation = GENERATION.load(Ordering::Relaxed);
-        if thread
-            .as_ref()
-            .is_none_or(|state| state.generation != generation)
-        {
-            // The recording this thread last saw has ended.
-            let Some((current, epoch, instructions_wanted)) = COLLECTED
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .map(|collected| {
-                    (
-                        collected.generation,
-                        collected.epoch,
-                        collected.instructions,
-                    )
+        let state = match thread.as_mut() {
+            Some(state) if state.generation == generation => state,
+            _ => {
+                // The recording this thread last saw has ended.
+                let Some((current, epoch, instructions_wanted)) = COLLECTED
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .map(|collected| {
+                        (
+                            collected.generation,
+                            collected.epoch,
+                            collected.instructions,
+                        )
+                    })
+                else {
+                    return false;
+                };
+                let number = thread.as_ref().map_or_else(
+                    || NEXT_THREAD.fetch_add(1, Ordering::Relaxed),
+                    |state| state.number,
+                );
+                let instructions = thread.take().and_then(|state| state.instructions);
+                thread.insert(ThreadState {
+                    number,
+                    generation: current,
+                    epoch,
+                    instructions_wanted,
+                    open: Vec::new(),
+                    finished: Vec::new(),
+                    instructions,
                 })
-            else {
-                return false;
-            };
-            let number = thread.as_ref().map_or_else(
-                || NEXT_THREAD.fetch_add(1, Ordering::Relaxed),
-                |state| state.number,
-            );
-            let instructions = thread.take().and_then(|state| state.instructions);
-            *thread = Some(ThreadState {
-                number,
-                generation: current,
-                epoch,
-                instructions_wanted,
-                open: Vec::new(),
-                finished: Vec::new(),
-                instructions,
-            });
-        }
-        let state = thread.as_mut().expect("the thread's state was just made");
+            }
+        };
         if state.instructions_wanted && state.instructions.is_none() {
             state.instructions = Some(Instructions::open());
         }

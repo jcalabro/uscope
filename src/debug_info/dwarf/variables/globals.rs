@@ -2,7 +2,7 @@
 
 use crate::image::lines::Files;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use foldhash::HashMap;
 use rayon::prelude::*;
@@ -68,7 +68,7 @@ impl<'data> ScopeTable<'data> {
     /// A scope's index once it is in the table.
     fn add(&mut self, scope: GlobalScope<'data>) -> u32 {
         self.scopes.push(scope);
-        u32::try_from(self.scopes.len() - 1).expect("scope count fits u32")
+        super::row(self.scopes.len() - 1)
     }
 
     /// The names of a scope's path, outermost first, joined by `::`.
@@ -166,7 +166,7 @@ pub(super) fn load_globals<'data>(
     for unit_table in unit_tables {
         let (scopes, mut unit_scopes) = unit_table?;
         // A unit's scope `n` past its root is the table's `first + n - 1`.
-        let first = u32::try_from(table.scopes.len()).expect("scope count fits u32");
+        let first = super::row(table.scopes.len());
         let global = |local: u32| if local == 0 { 0 } else { first + local - 1 };
         for scope in scopes.into_iter().skip(1) {
             table.add(GlobalScope {
@@ -243,7 +243,7 @@ pub(super) fn load_globals<'data>(
             let type_info = types.variable_type(type_unit, type_value);
             let value = copy_data_object_value_with_origins(
                 dwarf,
-                &mut pool.lock().expect("loading does not panic"),
+                &mut pool.lock().unwrap_or_else(PoisonError::into_inner),
                 units,
                 unit_index,
                 unit,
@@ -257,9 +257,9 @@ pub(super) fn load_globals<'data>(
                 continue;
             }
             let external = flag_with_origins(entry, &chain, gimli::DW_AT_external).unwrap_or(false);
-            *order = order
-                .checked_add(1)
-                .expect("data-object DIE order overflow");
+            *order = order.checked_add(1).ok_or_else(|| {
+                DwarfError::MalformedVariable("data-object DIE order overflows".into())
+            })?;
             let malformed = declaration
                 .as_ref()
                 .err()
@@ -361,7 +361,7 @@ fn unit_scopes<'data>(
                         depth,
                         routine: true,
                     });
-                    u32::try_from(table.len() - 1).expect("scope count fits u32")
+                    super::row(table.len() - 1)
                 }
                 gimli::DW_TAG_namespace
                 | gimli::DW_TAG_module
@@ -383,7 +383,7 @@ fn unit_scopes<'data>(
                         depth,
                         routine,
                     });
-                    u32::try_from(table.len() - 1).expect("scope count fits u32")
+                    super::row(table.len() - 1)
                 }
                 _ => parent,
             };

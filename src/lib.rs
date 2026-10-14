@@ -35,8 +35,15 @@ pub mod pool;
 pub mod profiler;
 mod protocol;
 mod runtime_model;
+// The simulator is a test harness, which may panic.
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::unwrap_used
+)]
 pub mod sim;
 mod source_map;
 pub mod syscalls;
@@ -353,6 +360,7 @@ pub fn fuzz_views(data: &[u8]) {
 /// harness, panicking when one fails.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
+#[allow(clippy::panic, reason = "a fuzz harness reports a bug by panicking")]
 pub fn fuzz_expression_parse(text: &str) {
     if let Err(failure) = eval::syntax::check_invariants(text) {
         panic!("{failure}");
@@ -593,7 +601,7 @@ impl Debugger {
         let shutdown_permit = requests
             .clone()
             .try_reserve_owned()
-            .expect("new request channel has shutdown capacity");
+            .map_err(|_| Error::internal("a new request channel has no shutdown capacity"))?;
         let (events, _) = broadcast::channel(event_capacity());
         let (module_image, core_dump, controller) = spawn(backend::ControllerChannels {
             sender: requests.clone(),
@@ -626,7 +634,7 @@ impl Debugger {
         let (send, mut receive) = oneshot::channel();
         self.shutdown_permit
             .take()
-            .expect("shutdown permit is present")
+            .ok_or_else(|| Error::internal("the shutdown permit is present"))?
             .send(ControllerMessage::Request(Request::Shutdown {
                 reply: send,
             }));
@@ -1359,12 +1367,14 @@ impl DebuggerHandle {
     pub async fn read_word(&self, address: VirtualAddress) -> Result<u64> {
         let read = self.read_memory(address, 8).await?;
         match read.completion {
-            MemoryReadCompletion::Complete => Ok(u64::from_le_bytes(
-                read.bytes
+            MemoryReadCompletion::Complete => {
+                let word = read
+                    .bytes
                     .as_ref()
-                    .try_into()
-                    .expect("a complete read has 8 bytes"),
-            )),
+                    .first_chunk::<8>()
+                    .ok_or_else(|| Error::internal("a complete read has 8 bytes"))?;
+                Ok(u64::from_le_bytes(*word))
+            }
             MemoryReadCompletion::Incomplete { next_address, .. } => {
                 Err(Error::MemoryNotReadable(next_address))
             }
@@ -1525,7 +1535,7 @@ impl DebuggerHandle {
                 line,
             })?;
 
-        let radius = usize::try_from(radius).expect("u32 fits in usize");
+        let radius = radius as usize;
         let start = target.saturating_sub(radius);
         let end = target
             .saturating_add(radius)
@@ -1535,14 +1545,14 @@ impl DebuggerHandle {
         let lines = all_lines[start..end]
             .iter()
             .enumerate()
-            .map(|(offset, text)| SourceLine {
-                number: LineNumber::new(
-                    u64::try_from(start + offset + 1).expect("source line number fits u64"),
-                )
-                .expect("source line number is nonzero"),
-                text: Arc::from(*text),
+            .map(|(offset, text)| {
+                Some(SourceLine {
+                    number: LineNumber::new((start + offset + 1) as u64)?,
+                    text: Arc::from(*text),
+                })
             })
-            .collect::<Vec<_>>()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| Error::internal("source line numbers are nonzero"))?
             .into();
 
         Ok(SourceContext {

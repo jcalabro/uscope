@@ -486,15 +486,21 @@ impl Launch {
     }
 
     /// What the configuration starts.
-    pub fn target(&self, root: &Path) -> LaunchTarget {
+    pub fn target(&self, root: &Path) -> Result<LaunchTarget, ConfigError> {
         let program = self.program.as_ref().map(|path| root.join(path));
-        match (&self.attach, &self.core) {
+        Ok(match (&self.attach, &self.core) {
             (Some(attach), _) => LaunchTarget::Attach(attach.clone(), program),
             (None, Some(core)) => LaunchTarget::Core(root.join(core), program),
-            (None, None) => {
-                LaunchTarget::Program(program.expect("checked: a launch names a program"))
-            }
-        }
+            (None, None) => LaunchTarget::Program(program.ok_or_else(|| {
+                ConfigError::new(
+                    None,
+                    format!(
+                        "launch configuration '{}' names no program, process, or core",
+                        self.name
+                    ),
+                )
+            })?),
+        })
     }
 }
 
@@ -968,7 +974,10 @@ impl Files {
                 acting.insert(file.kind.name().to_owned(), toml::Value::Table(subset));
             }
         }
-        (!acting.is_empty()).then(|| toml::to_string(&acting).expect("a table serializes"))
+        (!acting.is_empty()).then(|| {
+            toml::to_string(&acting)
+                .unwrap_or_else(|error| format!("the acting settings cannot be shown: {error}"))
+        })
     }
 
     /// The policy for a project's acting settings, which only the user's
@@ -1000,7 +1009,10 @@ impl Files {
                 .and_then(toml::Value::as_table_mut)
                 .and_then(|startup| startup.remove("commands"))
             {
-                let commands: Vec<String> = commands.try_into().expect("checked when read");
+                let commands: Vec<String> =
+                    commands.try_into().map_err(|error: toml::de::Error| {
+                        ConfigError::new(Some(file.path.as_path()), error.message())
+                    })?;
                 for (index, text) in commands.into_iter().enumerate() {
                     startup.push(StartupCommand {
                         label: format!("{} [startup] command {}", file.path.display(), index + 1),
@@ -1010,7 +1022,7 @@ impl Files {
                 }
             }
             if let Some(toml::Value::Array(launches)) = table.remove("launch") {
-                merge_launches(&mut merged, launches, &origin, &mut origins);
+                merge_launches(&mut merged, launches, &origin, &mut origins)?;
             }
             merge_table(&mut merged, &table, "", &origin, &mut origins);
         }
@@ -1094,12 +1106,17 @@ fn merge_launches(
     launches: Vec<toml::Value>,
     origin: &Origin,
     origins: &mut BTreeMap<String, Origin>,
-) {
-    let existing = merged
+) -> Result<(), ConfigError> {
+    let Some(existing) = merged
         .entry("launch")
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
-        .expect("launch is an array");
+    else {
+        return Err(ConfigError::new(
+            None,
+            "launch must be an array of tables, as in [[launch]]",
+        ));
+    };
     for launch in launches {
         let toml::Value::Table(launch) = launch else {
             continue;
@@ -1131,6 +1148,7 @@ fn merge_launches(
         }
         origins.extend(scratch);
     }
+    Ok(())
 }
 
 impl File {
@@ -1342,11 +1360,11 @@ impl Settings {
     /// Every setting in effect, one per line, with where it came from, as
     /// `uscope config show` prints it.
     pub fn show(&self) -> String {
-        let mut table = toml::Value::try_from(&self.config)
-            .expect("settings serialize")
-            .as_table()
-            .cloned()
-            .unwrap_or_default();
+        let mut table = match toml::Value::try_from(&self.config) {
+            Ok(toml::Value::Table(table)) => table,
+            Ok(_) => return "the settings are not a table".to_owned(),
+            Err(error) => return format!("the settings cannot be shown: {error}"),
+        };
         // Startup commands are listed one by one, each from its own file.
         table.remove("startup");
         let mut lines = Vec::new();

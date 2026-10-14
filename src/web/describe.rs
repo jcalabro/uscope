@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use uscope::{
     BreakpointLocation, BreakpointSpec, DebuggerHandle, ImageAddress, InferiorState, LoadBias,
@@ -34,17 +34,25 @@ impl Images {
 
     /// Forgets every image: a new process numbers its modules again.
     pub fn clear(&self) {
-        self.cache.lock().expect("images lock").clear();
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     pub async fn get(&self, module: ModuleId) -> Option<Arc<ModuleImage>> {
-        if let Some(image) = self.cache.lock().expect("images lock").get(&module) {
+        if let Some(image) = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&module)
+        {
             return Some(Arc::clone(image));
         }
         let image = self.handle.loaded_module_image(module).await.ok()?;
         self.cache
             .lock()
-            .expect("images lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(module, Arc::clone(&image));
         Some(image)
     }
@@ -282,7 +290,11 @@ impl Describer {
             },
             Err(_) => None,
         };
-        let cause = self.cause.lock().expect("cause lock").take();
+        let cause = self
+            .cause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let entry = StopEntry {
             stop,
             thread,

@@ -1114,7 +1114,7 @@ impl CaptureBuilder {
         if cfg!(debug_assertions)
             && let Err(error) = capture.validate()
         {
-            panic!("the builder made a capture that fails validation: {error}");
+            debug_assert!(false, "the builder's capture is invalid: {error}");
         }
         capture
     }
@@ -1152,8 +1152,16 @@ fn depths(zones: Vec<Zone>) -> Vec<Vec<Zone>> {
     depths
 }
 
+/// A row's position as an id. Each of a capture's tables would need more
+/// memory than any machine recording it has to pass `u32::MAX` rows, and
+/// validation, which reading a capture runs, refuses a capture that does.
 fn index(position: usize) -> u32 {
-    u32::try_from(position).expect("a capture holds fewer than 2^32 rows")
+    let index = u32::try_from(position);
+    debug_assert!(
+        index.is_ok(),
+        "a capture holds fewer than 2^32 rows, not {position}"
+    );
+    index.unwrap_or(u32::MAX)
 }
 
 /// Where each of another capture's rows landed in this one.

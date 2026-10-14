@@ -155,19 +155,18 @@ impl Cli {
         let mut suffix = String::new();
         if located {
             if let Ok(place) = self.describe_location(false).await {
-                write!(suffix, " in {place}").expect("writing to a String cannot fail");
+                let _ = write!(suffix, " in {place}");
             }
             if let Some(snapshot) = &snapshot
                 && snapshot.threads.len() > 1
                 && let Some(ExecutionContext::Thread(thread)) = snapshot.selected
             {
-                write!(
+                let _ = write!(
                     suffix,
                     " [thread {} of {}]",
                     renderer.paint(Role::Metadata, thread),
                     snapshot.threads.len()
-                )
-                .expect("writing to a String cannot fail");
+                );
             }
             // The task the stopped thread runs, as the thread list shows it.
             if let Some(snapshot) = &snapshot
@@ -178,24 +177,22 @@ impl Cli {
                     .find(|listed| listed.id == thread)
                     .and_then(|listed| listed.activity.as_ref())
             {
-                write!(
+                let _ = write!(
                     suffix,
                     " {}",
                     renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
-                )
-                .expect("writing to a String cannot fail");
+                );
             }
         }
         if self.settings.config.stop.elapsed && elapsed >= Duration::from_secs(1) {
-            write!(
+            let _ = write!(
                 suffix,
                 " {}",
                 renderer.paint(
                     Role::Metadata,
                     format!("(ran {:.2}s)", elapsed.as_secs_f64())
                 )
-            )
-            .expect("writing to a String cannot fail");
+            );
         }
         let mut output = match reason {
             StopReason::Watchpoint { hits } => format::watchpoint_hits(
@@ -260,15 +257,13 @@ impl Cli {
             };
             let mut line = format!("thread {}", renderer.paint(Role::Metadata, thread.id));
             if let Some(ThreadActivity::Task { task, .. }) = &thread.activity {
-                write!(
+                let _ = write!(
                     line,
                     " {}",
                     renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
-                )
-                .expect("writing to a String cannot fail");
+                );
             }
-            write!(line, " also {}", format::stop(reason, renderer))
-                .expect("writing to a String cannot fail");
+            let _ = write!(line, " also {}", format::stop(reason, renderer));
             let context = StopContext {
                 stop,
                 execution: ExecutionContext::Thread(thread.id),
@@ -277,7 +272,7 @@ impl Cli {
             if let Ok(location) = self.debugger.at(context).location().await
                 && let Ok(place) = self.describe(&location, false).await
             {
-                write!(line, " in {place}").expect("writing to a String cannot fail");
+                let _ = write!(line, " in {place}");
             }
             lines.push(line);
         }
@@ -374,7 +369,7 @@ impl Cli {
         activation.is_some_and(|activation| {
             self.changes
                 .lock()
-                .expect("the change record is whole")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .changed(activation, name, &plain(line))
         })
     }
@@ -403,7 +398,7 @@ impl Cli {
         let displays = self
             .displays
             .lock()
-            .expect("the displays are whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .list
             .clone();
         let mut lines = Vec::with_capacity(displays.len());
@@ -519,7 +514,7 @@ impl Cli {
         let display = self
             .displays
             .lock()
-            .expect("the displays are whole")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .add(format, expression);
         let stopped = self
             .debugger
@@ -540,7 +535,10 @@ impl Cli {
     /// Lists the displays as `display` takes them.
     pub(super) fn list_displays(&self) -> String {
         let renderer = self.renderers.stdout;
-        let displays = self.displays.lock().expect("the displays are whole");
+        let displays = self
+            .displays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if displays.list.is_empty() {
             return "no displays".to_owned();
         }
@@ -560,7 +558,10 @@ impl Cli {
 
     /// Removes the displays `words` number, or every display for `all`.
     pub(super) fn undisplay(&self, words: &[&str], spec: &CommandSpec) -> Result<String> {
-        let mut displays = self.displays.lock().expect("the displays are whole");
+        let mut displays = self
+            .displays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ids = super::commands::parse_display_ids(words, displays.list.len(), spec)?;
         let removed = displays.remove(ids.as_deref())?;
         drop(displays);

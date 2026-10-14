@@ -163,7 +163,9 @@ fn resolve_frame_base(
         FrameBaseCache::Malformed(description) => {
             Err(EvaluateError::Malformed(Arc::clone(description)))
         }
-        FrameBaseCache::Empty => unreachable!("frame base cache was populated"),
+        FrameBaseCache::Empty => Err(EvaluateError::Fatal(
+            "the frame base cache was not populated".into(),
+        )),
     }
 }
 
@@ -542,7 +544,11 @@ fn evaluation_value(
     if value_type == gimli::ValueType::Generic {
         return bytes_to_u64(bytes, endian).map(Value::Generic);
     }
-    let size = usize::try_from(value_type.bit_size(u64::MAX) / 8).expect("value size fits usize");
+    let Ok(size) = usize::try_from(value_type.bit_size(u64::MAX) / 8) else {
+        return Err(EvaluateError::Malformed(
+            "register or memory value is too large to read".into(),
+        ));
+    };
     if bytes.len() < size {
         return Err(EvaluateError::Malformed(
             "register or memory value is shorter than its DWARF type".into(),
@@ -561,16 +567,20 @@ pub(super) fn dwarf_value_bytes(
     type_info: &BaseType,
     target: TargetDescription,
 ) -> std::result::Result<Arc<[u8]>, EvaluateError> {
-    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
-    let integer = match value {
-        Value::Generic(value) | Value::U64(value) => Some(u128::from(value)),
-        Value::U8(value) => Some(u128::from(value)),
-        Value::U16(value) => Some(u128::from(value)),
-        Value::U32(value) => Some(u128::from(value)),
-        Value::I8(value) => Some(i128::from(value).cast_unsigned()),
-        Value::I16(value) => Some(i128::from(value).cast_unsigned()),
-        Value::I32(value) => Some(i128::from(value).cast_unsigned()),
-        Value::I64(value) => Some(i128::from(value).cast_unsigned()),
+    let Ok(size) = usize::try_from(type_info.byte_size) else {
+        return Err(EvaluateError::Malformed(
+            "scalar type is too large to read".into(),
+        ));
+    };
+    let mut integer = match value {
+        Value::Generic(value) | Value::U64(value) => u128::from(value),
+        Value::U8(value) => u128::from(value),
+        Value::U16(value) => u128::from(value),
+        Value::U32(value) => u128::from(value),
+        Value::I8(value) => i128::from(value).cast_unsigned(),
+        Value::I16(value) => i128::from(value).cast_unsigned(),
+        Value::I32(value) => i128::from(value).cast_unsigned(),
+        Value::I64(value) => i128::from(value).cast_unsigned(),
         Value::F32(value) if size == 4 => {
             return integer_bytes(u128::from(value.to_bits()), size, target);
         }
@@ -583,7 +593,6 @@ pub(super) fn dwarf_value_bytes(
             ));
         }
     };
-    let mut integer = integer.expect("integer DWARF values were classified above");
     // GCC and Clang represent optimized source booleans with word-sized
     // bitwise expressions (notably DW_OP_not). The source truth value is the
     // low bit after conversion to the declared one-byte boolean type.
