@@ -1022,6 +1022,14 @@ impl CaptureBuilder {
         markers.sort_by_key(|marker| (marker.time.get(), marker.thread.get()));
         let mut gaps = self.gaps;
         gaps.sort_by_key(|gap| gap.start.get());
+        // The chunks of one file may hold gaps that overlap; a gap keeps only
+        // what no earlier one covers.
+        let mut covered = i64::MIN;
+        gaps.retain_mut(|gap| {
+            gap.start = gap.start.get().max(covered).into();
+            covered = covered.max(gap.end.get());
+            gap.start.get() <= gap.end.get()
+        });
         let mut task_waits = self.task_waits;
         task_waits.sort_by_key(|wait| (wait.time.get(), wait.task.get()));
         let mut strings = self.strings;
