@@ -79,6 +79,17 @@ fn first_failure_with(sabotage: Sabotage) -> &'static str {
         .expect("a sabotaged run fails")
 }
 
+/// A temporary breakpoint whose trap the CPU skips lets a hit go unseen,
+/// which breakpoint accounting catches as it does for any breakpoint.
+#[test]
+fn a_skipped_temporary_trap_fails_breakpoint_accounting() {
+    assert!(fails_with(
+        Sabotage::SkipTemporaryTraps,
+        "breakpoint accounting",
+        "without a trap reporting it"
+    ));
+}
+
 /// A program released from a trap's stop with its SIGTRAP dies of it,
 /// which transparency catches.
 #[test]

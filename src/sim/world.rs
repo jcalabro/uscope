@@ -182,6 +182,11 @@ pub enum Sabotage {
     /// without counting it lost.
     LoseTracedCalls,
 
+    /// The CPU executes the program's own instruction under a temporary
+    /// breakpoint's trap, as [`Sabotage::SkipTraps`] does under any user
+    /// breakpoint's.
+    SkipTemporaryTraps,
+
     /// `PTRACE_DETACH` from a stop at a trap passes the trap's SIGTRAP on, as
     /// a debugger that detached with the stop's signal would, so the
     /// released program dies of it.
@@ -629,6 +634,25 @@ impl<'a> World<'a> {
             // the kernel watches for unseen hits.
             self.machine.kernel.borrow_mut().user_breakpoints =
                 self.shared.addresses(self.variant.image.bias());
+            #[cfg(test)]
+            {
+                let bias = self.variant.image.bias();
+                let others = self
+                    .shared
+                    .intent(bias)
+                    .into_values()
+                    .flatten()
+                    .collect::<BTreeSet<_>>();
+                self.machine.kernel.borrow_mut().temporary_breakpoints = self
+                    .shared
+                    .temporaries
+                    .borrow()
+                    .values()
+                    .flatten()
+                    .map(|address| address + bias)
+                    .filter(|address| !others.contains(address))
+                    .collect();
+            }
             self.machine.kernel.borrow_mut().catching.rules =
                 self.shared.catches.borrow().values().cloned().collect();
             self.follow_watches();

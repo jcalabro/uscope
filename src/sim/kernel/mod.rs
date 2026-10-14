@@ -712,6 +712,11 @@ pub struct Kernel {
     /// executions there.
     pub user_breakpoints: BTreeSet<u64>,
 
+    /// The addresses among them only temporary breakpoints own, for
+    /// [`Sabotage::SkipTemporaryTraps`].
+    #[cfg(test)]
+    pub temporary_breakpoints: BTreeSet<u64>,
+
     /// Executions at those addresses no trap reported.
     pub unseen_hits: Vec<UnseenHit>,
 
@@ -808,6 +813,8 @@ impl Kernel {
             happenings: Vec::new(),
             debugged: None,
             user_breakpoints: BTreeSet::new(),
+            #[cfg(test)]
+            temporary_breakpoints: BTreeSet::new(),
             unseen_hits: Vec::new(),
             tracking: None,
             watching: Watching::new(),
@@ -1147,7 +1154,13 @@ impl Kernel {
         let trap = process.space.peek_bytes(address, 1).as_deref() == Some(&[0xcc]);
         let user_breakpoint = debugged && self.user_breakpoints.contains(&address);
         #[cfg(test)]
-        let skipped = trap && self.sabotage == Some(Sabotage::SkipTraps) && user_breakpoint;
+        let skipped = trap
+            && debugged
+            && match self.sabotage {
+                Some(Sabotage::SkipTraps) => user_breakpoint,
+                Some(Sabotage::SkipTemporaryTraps) => self.temporary_breakpoints.contains(&address),
+                _ => false,
+            };
         #[cfg(not(test))]
         let skipped = false;
         if user_breakpoint && thread.trapped_at != Some(address) && (!trap || skipped) {

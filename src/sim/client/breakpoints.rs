@@ -500,13 +500,18 @@ impl Client {
         let traps = image_traps(&breakpoint);
 
         // A temporary breakpoint may be gone at any stop, so only the hit
-        // oracle follows it.
+        // oracle and the kernel's search for unseen hits follow it.
         if !breakpoint.enabled {
             self.shared
                 .disabled
                 .borrow_mut()
                 .insert(breakpoint.id.get());
-        } else if !breakpoint.temporary {
+        } else if breakpoint.temporary {
+            self.shared
+                .temporaries
+                .borrow_mut()
+                .insert(breakpoint.id.get(), traps.iter().copied().collect());
+        } else {
             self.shared
                 .breakpoints
                 .borrow_mut()
@@ -593,6 +598,7 @@ impl Client {
             self.shared.disabled.borrow_mut().remove(&id.get());
         } else {
             self.shared.breakpoints.borrow_mut().remove(&id.get());
+            self.shared.temporaries.borrow_mut().remove(&id.get());
         }
 
         let mut policy = *added.policies.last().expect("a breakpoint has a policy");
@@ -608,9 +614,13 @@ impl Client {
                 added.policies.push(policy);
                 if enabled {
                     self.shared.disabled.borrow_mut().insert(id.get());
-                } else if !added.temporary {
-                    self.shared
-                        .breakpoints
+                } else {
+                    let enabled = if added.temporary {
+                        &self.shared.temporaries
+                    } else {
+                        &self.shared.breakpoints
+                    };
+                    enabled
                         .borrow_mut()
                         .insert(id.get(), added.traps.iter().copied().collect());
                 }
@@ -631,12 +641,14 @@ impl Client {
         added.enabled = enabled;
         if enabled {
             added.traps = image_traps(&breakpoint);
-            if !added.temporary {
-                self.shared
-                    .breakpoints
-                    .borrow_mut()
-                    .insert(id.get(), added.traps.iter().copied().collect());
-            }
+            let enabled = if added.temporary {
+                &self.shared.temporaries
+            } else {
+                &self.shared.breakpoints
+            };
+            enabled
+                .borrow_mut()
+                .insert(id.get(), added.traps.iter().copied().collect());
 
             self.mark(Mark::BreakpointEnabled);
         } else {
@@ -864,6 +876,12 @@ impl Client {
         };
 
         breakpoints.retain(|added| !added.temporary || remaining(added));
+        self.shared.temporaries.borrow_mut().retain(|&id, _| {
+            snapshot
+                .breakpoints
+                .iter()
+                .any(|breakpoint| breakpoint.id.get() == id)
+        });
         *self.baseline.borrow_mut() = Some(Baseline {
             process,
             counts: snapshot
@@ -896,6 +914,7 @@ impl Client {
 
         // From the moment the client asks, the breakpoint may be gone.
         self.shared.breakpoints.borrow_mut().remove(&id.get());
+        self.shared.temporaries.borrow_mut().remove(&id.get());
         self.shared.disabled.borrow_mut().remove(&id.get());
         match self.handle.remove_breakpoint(id).await {
             Ok(_) => {}

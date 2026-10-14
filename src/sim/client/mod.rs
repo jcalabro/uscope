@@ -137,6 +137,13 @@ pub struct Shared {
     /// among them.
     pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
 
+    /// The temporary breakpoints the debugger said it made enabled, until
+    /// a stop shows them gone, with the image addresses of their
+    /// locations: a thread may not execute one's location without a trap,
+    /// but the controller may delete it at a stop the client has yet to
+    /// see.
+    pub temporaries: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
+
     /// The breakpoints the debugger said are disabled, which the client has
     /// not asked to enable or remove since.
     pub disabled: Rc<RefCell<BTreeSet<u64>>>,
@@ -267,7 +274,12 @@ impl Shared {
     /// image loaded `bias` above its own addresses.
     #[must_use]
     pub fn addresses(&self, bias: u64) -> BTreeSet<u64> {
-        self.intent(bias).into_values().flatten().collect()
+        let temporaries = self.temporaries.borrow();
+        self.intent(bias)
+            .into_values()
+            .flatten()
+            .chain(temporaries.values().flatten().map(|address| address + bias))
+            .collect()
     }
 }
 
