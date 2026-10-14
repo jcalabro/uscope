@@ -79,6 +79,82 @@ address_type!(
     "An address in the virtual address space of a running process."
 );
 
+/// A process id, as the kernel numbers it in some pid namespace. Not the
+/// debugger's [`ProcessId`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct Pid(u32);
+
+/// A thread id, as the kernel numbers it. A process's first thread has its
+/// process's id, but the two are never interchangeable. Not the debugger's
+/// [`ThreadId`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct Tid(u32);
+
+macro_rules! os_id {
+    ($name:ident) => {
+        impl $name {
+            #[must_use]
+            pub const fn new(id: u32) -> Self {
+                Self(id)
+            }
+
+            #[must_use]
+            pub const fn get(self) -> u32 {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+os_id!(Pid);
+os_id!(Tid);
+
+impl Pid {
+    /// The process `leader` is the first thread of.
+    #[must_use]
+    pub const fn led_by(leader: Tid) -> Self {
+        Self(leader.0)
+    }
+
+    /// The process's first thread.
+    #[must_use]
+    pub const fn leader(self) -> Tid {
+        Tid(self.0)
+    }
+}
+
 /// How far a loaded module lies from its image's addresses.
 ///
 /// Each virtual address is its image address plus the bias. A module loaded

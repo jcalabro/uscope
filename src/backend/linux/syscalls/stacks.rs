@@ -14,6 +14,7 @@ use super::super::perf::{self, decode};
 use crate::capture::builder::{CaptureBuilder, LineInput};
 use crate::capture::records::{FrameKind, NONE};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
+use crate::model::Pid;
 use crate::profiler::{OwnedLine, hex, symbolize_lines};
 use crate::syscalls::CallStack;
 use crate::unwind::sample::{
@@ -91,7 +92,7 @@ pub struct Frame {
 pub struct Stacks {
     search: DebugFileSearch,
     images: HashMap<(PathBuf, u64), Image>,
-    processes: BTreeMap<u32, Vec<Mapped>>,
+    processes: BTreeMap<Pid, Vec<Mapped>>,
     rules: FrameRules,
     next_module: u32,
     /// The identifier the next image read gets, the vDSO's among them.
@@ -215,7 +216,7 @@ impl Stacks {
 
     /// Forgets a process's modules, as after it replaced its image: they
     /// are read again when a stack next needs them.
-    pub fn forget(&mut self, process: u32) {
+    pub fn forget(&mut self, process: Pid) {
         self.processes.remove(&process);
     }
 
@@ -224,7 +225,7 @@ impl Stacks {
     /// address, innermost first.
     pub fn unwind_live(
         &mut self,
-        process: u32,
+        process: Pid,
         thread: u32,
         registers: &[(u16, u64)],
     ) -> CallStack {
@@ -240,7 +241,7 @@ impl Stacks {
     /// Unwinds a stack the kernel sampled: the registers, a copy of the
     /// stack from the stack pointer up, and the kernel's frame-pointer
     /// walk, instruction first.
-    pub fn unwind_sampled(&mut self, process: u32, sample: SampledState<'_>) -> CallStack {
+    pub fn unwind_sampled(&mut self, process: Pid, sample: SampledState<'_>) -> CallStack {
         self.cover(process, sample.chain.first().copied());
         let modules: Vec<UnwindModule<'_>> = self
             .processes
@@ -261,7 +262,7 @@ impl Stacks {
     }
 
     /// Names each address of a stack of `process`'s.
-    pub fn frames(&mut self, process: u32, stack: &[u64]) -> Vec<Frame> {
+    pub fn frames(&mut self, process: Pid, stack: &[u64]) -> Vec<Frame> {
         if let Some(&first) = stack.first() {
             self.cover(process, Some(first));
         }
@@ -272,7 +273,7 @@ impl Stacks {
             .collect()
     }
 
-    fn frame(&self, process: u32, address: u64, innermost: bool) -> Frame {
+    fn frame(&self, process: Pid, address: u64, innermost: bool) -> Frame {
         // A return address may follow a call that never returns, past the
         // end of its function: the call itself names the caller's code.
         let code = if innermost {
@@ -316,7 +317,7 @@ impl Stacks {
         }
     }
 
-    fn mapping_at(&self, process: u32, address: u64) -> Option<Mapped> {
+    fn mapping_at(&self, process: Pid, address: u64) -> Option<Mapped> {
         self.processes
             .get(&process)?
             .iter()
@@ -328,7 +329,7 @@ impl Stacks {
     /// module's image address and with its lines, and says which it is.
     pub(crate) fn capture(
         &mut self,
-        process: u32,
+        process: Pid,
         stack: &CallStack,
         builder: &mut CaptureBuilder,
     ) -> u32 {
@@ -376,7 +377,7 @@ impl Stacks {
         builder.stack(&frames)
     }
 
-    fn modules(&self, process: u32) -> Vec<UnwindModule<'_>> {
+    fn modules(&self, process: Pid) -> Vec<UnwindModule<'_>> {
         self.processes
             .get(&process)
             .into_iter()
@@ -393,20 +394,20 @@ impl Stacks {
     }
 
     /// A process forked from another, whose mappings it begins with.
-    pub fn forked(&mut self, parent: u32, child: u32) {
+    pub fn forked(&mut self, parent: Pid, child: Pid) {
         if let Some(mapped) = self.processes.get(&parent).cloned() {
             self.processes.insert(child, mapped);
         }
     }
 
     /// Reads what the process maps now from `/proc`.
-    pub fn read_maps(&mut self, process: u32) {
+    pub fn read_maps(&mut self, process: Pid) {
         self.processes.remove(&process);
         self.cover(process, None);
     }
 
     /// Reads the process's modules again unless they map `address`.
-    fn cover(&mut self, process: u32, address: Option<u64>) {
+    fn cover(&mut self, process: Pid, address: Option<u64>) {
         let known = self.processes.get(&process).is_some_and(|mapped| {
             address.is_none_or(|address| {
                 mapped
@@ -417,7 +418,7 @@ impl Stacks {
         if known {
             return;
         }
-        let Ok(mappings) = perf::mappings(process) else {
+        let Ok(mappings) = perf::mappings(process.get()) else {
             return;
         };
         let mut modules = Vec::new();

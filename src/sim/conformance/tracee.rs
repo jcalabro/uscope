@@ -892,7 +892,7 @@ impl Record<'_> {
             let (record, length) = next.expect("the kernel writes whole records");
             if let decode::Record::Sample(sample) = record {
                 samples.push(Decoded {
-                    tid: Tid::try_from(sample.tid).expect("a thread id"),
+                    tid: Tid::try_from(sample.tid.get()).expect("a thread id"),
                     chain: sample.chain.iter().collect(),
                     registers: sample.registers.iter().collect(),
                     size: sample.stack_asked,

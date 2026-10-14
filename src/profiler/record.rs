@@ -20,6 +20,7 @@ use crate::capture::records::{
 };
 use crate::capture::{Capture, CaptureBuilder};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
+use crate::model::{Pid, Tid};
 use crate::unwind::UnwindModule;
 use crate::unwind::sample::{FrameRules, SampledState, StackEnd, unwind_sample};
 use crate::{
@@ -59,7 +60,7 @@ struct Mapped {
 #[derive(Debug, Clone, Default)]
 struct ProcessState {
     mapped: Vec<Mapped>,
-    threads: BTreeSet<u32>,
+    threads: BTreeSet<Tid>,
 }
 
 /// When one task snapshot held the program stopped, and the task row of
@@ -85,7 +86,7 @@ pub struct Processor {
     /// image and the address it links at.
     vdso_read: bool,
     vdso: Option<(usize, u64)>,
-    processes: BTreeMap<u32, ProcessState>,
+    processes: BTreeMap<Pid, ProcessState>,
     next_module: u32,
     limit: usize,
     /// Records held back for the next batch, past its watermark.
@@ -102,7 +103,7 @@ pub struct Processor {
     frames: Vec<u32>,
     /// Each thread off its CPU since a switch: its row, when it left, and
     /// whether it was preempted.
-    switched_out: BTreeMap<u32, (u32, u64, bool)>,
+    switched_out: BTreeMap<Tid, (u32, u64, bool)>,
     /// Each gap in sampling, in time order and apart, and where the last
     /// one ended: a recording that ends paused ends there.
     gaps: Vec<(u64, u64)>,
@@ -120,13 +121,13 @@ pub struct Processor {
     /// The process task snapshots read, the last few snapshots, and each
     /// sample no snapshot after it has claimed yet whose code kept its task
     /// in a register: its thread, time, and the register's value.
-    tasks_of: Option<u32>,
+    tasks_of: Option<Pid>,
     located: std::collections::VecDeque<Located>,
     unclaimed: Vec<(u32, i64, u64)>,
     /// Each process's modules with instrumentation, once mapped, and those
     /// the collector has not taken yet.
-    probes_mapped: BTreeSet<(u32, usize)>,
-    probes_found: Vec<(u32, Found)>,
+    probes_mapped: BTreeSet<(Pid, usize)>,
+    probes_found: Vec<(Pid, Found)>,
     stacks: Stacks,
     triggered: bool,
     /// Whether frames are left for a viewer to symbolize.
@@ -222,7 +223,7 @@ impl Processor {
     /// Records what a process already had when an attach began, as its
     /// records describe only what comes after: its name, its threads and
     /// theirs, and its executable mappings.
-    pub fn attached(&mut self, pid: u32, time: u64) {
+    pub fn attached(&mut self, pid: Pid, time: u64) {
         let at = time.cast_signed();
         self.first.get_or_insert(time);
         self.latest = self.latest.max(time);
@@ -236,8 +237,9 @@ impl Processor {
             self.builder.process_name(process, &name);
         }
         if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
-            let mut tids: Vec<u32> = tasks
+            let mut tids: Vec<Tid> = tasks
                 .filter_map(|task| task.ok()?.file_name().to_str()?.parse().ok())
+                .map(Tid::new)
                 .collect();
             tids.sort_unstable();
             for tid in tids {
@@ -247,7 +249,7 @@ impl Processor {
                 }
             }
         }
-        for mapped in perf::mappings(pid).unwrap_or_default() {
+        for mapped in perf::mappings(pid.get()).unwrap_or_default() {
             self.mmap(&decode::Mmap {
                 pid,
                 start: mapped.start,
@@ -375,7 +377,7 @@ impl Processor {
                 }
             }
             decode::Record::Fork { pid, ppid, tid, .. } => {
-                if pid == tid && pid != ppid {
+                if tid == pid.leader() && pid != ppid {
                     // A forked process starts with its parent's mappings.
                     let mapped = self
                         .processes
@@ -430,7 +432,7 @@ impl Processor {
         }
     }
 
-    fn thread(&mut self, pid: u32, tid: u32, time: i64) -> u32 {
+    fn thread(&mut self, pid: Pid, tid: Tid, time: i64) -> u32 {
         self.processes.entry(pid).or_default().threads.insert(tid);
         self.builder.thread(pid, tid, time)
     }
@@ -735,7 +737,7 @@ impl Processor {
 
     /// The modules with instrumentation process `pid` has mapped since
     /// last asked.
-    pub fn found_probes(&mut self, pid: u32) -> Vec<Found> {
+    pub fn found_probes(&mut self, pid: Pid) -> Vec<Found> {
         let (found, others) = std::mem::take(&mut self.probes_found)
             .into_iter()
             .partition(|(process, _)| *process == pid);
@@ -750,7 +752,7 @@ impl Processor {
     }
 
     /// The row of a thread whose ring holds instrumentation.
-    pub fn probe_thread(&mut self, pid: u32, tid: u32) -> u32 {
+    pub fn probe_thread(&mut self, pid: Pid, tid: Tid) -> u32 {
         self.thread(pid, tid, self.latest.cast_signed())
     }
 
@@ -780,7 +782,7 @@ impl Processor {
     /// been processed. Each of its threads came back to its CPU to exit,
     /// so one still off it came back in records a full ring dropped, at a
     /// time no interval can say.
-    pub fn exited(&mut self, pid: u32) {
+    pub fn exited(&mut self, pid: Pid) {
         if let Some(process) = self.processes.get(&pid) {
             for tid in &process.threads {
                 self.switched_out.remove(tid);
@@ -832,7 +834,7 @@ impl Processor {
     /// keeps the runtime's current task in.
     fn note_task(
         &mut self,
-        pid: u32,
+        pid: Pid,
         thread: u32,
         time: i64,
         leaf: &crate::unwind::sample::SampledFrame,
@@ -864,7 +866,7 @@ impl Processor {
     /// nanoseconds of waiting.
     pub fn task_snapshot(
         &mut self,
-        pid: u32,
+        pid: Pid,
         (start, end): (u64, u64),
         weight: u64,
         snapshot: &Snapshot,
@@ -879,7 +881,7 @@ impl Processor {
     /// program ran.
     pub fn live_task_snapshot(
         &mut self,
-        pid: u32,
+        pid: Pid,
         (start, end): (u64, u64),
         weight: u64,
         snapshot: &Snapshot,
@@ -891,7 +893,7 @@ impl Processor {
     }
 
     /// Records a snapshot's tasks and problems.
-    fn tasks(&mut self, pid: u32, (start, end): (u64, u64), weight: u64, snapshot: &Snapshot) {
+    fn tasks(&mut self, pid: Pid, (start, end): (u64, u64), weight: u64, snapshot: &Snapshot) {
         self.builder.count(AccountKind::Snapshots as u32, 1);
         if let Some(first) = snapshot.problems.first() {
             let more = snapshot.problems.len() - 1;
@@ -932,7 +934,7 @@ impl Processor {
     /// its register named, when the snapshots either side of the sample
     /// find that task where it was: the runtime may reuse a task's memory
     /// for another once it exits.
-    fn claim(&mut self, pid: u32, (start, end): (i64, i64), snapshot: &Snapshot) {
+    fn claim(&mut self, pid: Pid, (start, end): (i64, i64), snapshot: &Snapshot) {
         let mut tasks = HashMap::default();
         for task in &snapshot.located {
             let row = self.builder.task(task.noun, task.number, start);
@@ -978,7 +980,7 @@ impl Processor {
     }
 
     /// The frame of the code at `address` in process `pid`.
-    fn code_frame(&mut self, pid: u32, address: u64, role: u8) -> u32 {
+    fn code_frame(&mut self, pid: Pid, address: u64, role: u8) -> u32 {
         let owner = self.processes.get(&pid).and_then(|process| {
             process
                 .mapped
@@ -1237,12 +1239,13 @@ mod tests {
     #[test]
     fn a_thread_whose_return_was_dropped_has_no_interval() {
         let mut processor = Processor::new(DebugFileSearch::default(), 64);
-        let (exited, napper, living, sleeper) = (100, 101, 200, 201);
+        let (exited, napper, living, sleeper) =
+            (Pid::new(100), Tid::new(101), Pid::new(200), Tid::new(201));
         for record in [
             decode::Record::Fork {
                 pid: exited,
-                ppid: 1,
-                tid: exited,
+                ppid: Pid::new(1),
+                tid: exited.leader(),
                 time: 1_000,
             },
             decode::Record::Fork {
@@ -1253,8 +1256,8 @@ mod tests {
             },
             decode::Record::Fork {
                 pid: living,
-                ppid: 1,
-                tid: living,
+                ppid: Pid::new(1),
+                tid: living.leader(),
                 time: 2_000,
             },
             decode::Record::Fork {
@@ -1281,7 +1284,7 @@ mod tests {
             // exit was not.
             decode::Record::Exit {
                 pid: exited,
-                tid: exited,
+                tid: exited.leader(),
                 time: 9_000,
             },
         ] {
@@ -1296,6 +1299,6 @@ mod tests {
             .iter()
             .map(|interval| (interval.tid, interval.time, interval.duration))
             .collect();
-        assert_eq!(intervals, [(sleeper, 4_000, 5_000)]);
+        assert_eq!(intervals, [(sleeper.get(), 4_000, 5_000)]);
     }
 }

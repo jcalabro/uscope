@@ -27,7 +27,7 @@ use uscope::syscalls::fds::FdTable;
 use uscope::syscalls::filter::{self, Filter};
 use uscope::syscalls::stats::{Folded, SyscallStats, bytes_moved};
 use uscope::syscalls::{
-    Abi, CallStack, InFlight, Outcome, ProcessEnd, SyscallEvent, SyscallId, TraceEvent,
+    Abi, CallStack, InFlight, Outcome, Pid, ProcessEnd, SyscallEvent, SyscallId, Tid, TraceEvent,
 };
 
 use super::Renderers;
@@ -337,6 +337,10 @@ fn frame_text(frame: &Frame) -> String {
 /// The calls that end a thread or its process.
 const ENDING: [&str; 2] = ["exit", "exit_group"];
 
+/// The thread and process of an event that is no thread's, as a loss.
+const NO_THREAD: Tid = Tid::new(0);
+const NO_PROCESS: Pid = Pid::new(0);
+
 /// Everything the flags decide, checked.
 struct Plan {
     filter: Filter,
@@ -602,7 +606,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         capture.setting("syscalls", engine);
     }
     for &pid in &plan.attached {
-        printer.processes.insert(pid);
+        printer.processes.insert(Pid::new(pid));
     }
     let engine = bpf_options(args, &plan, ring);
     let finished = match (target, cgroup) {
@@ -616,7 +620,11 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         (None, None) => bail!("nothing to trace"),
     };
     for &pid in &plan.attached {
-        if printer.quiet == 0 && printer.processes.contains(&pid) && !printer.ended.contains(&pid) {
+        let process = Pid::new(pid);
+        if printer.quiet == 0
+            && printer.processes.contains(&process)
+            && !printer.ended.contains(&process)
+        {
             printer.message(&format!("Process {pid} detached"));
         }
     }
@@ -782,18 +790,18 @@ struct Printer {
     realtime: i128,
     zone: i64,
     previous: Option<u64>,
-    threads: BTreeSet<u32>,
-    processes: BTreeSet<u32>,
-    ended: BTreeSet<u32>,
-    names: BTreeMap<u32, String>,
+    threads: BTreeSet<Tid>,
+    processes: BTreeSet<Pid>,
+    ended: BTreeSet<Pid>,
+    names: BTreeMap<Pid, String>,
     /// The number of the call that ended each process, and each thread,
     /// when one did.
-    endings: BTreeMap<u32, u32>,
-    thread_endings: BTreeMap<u32, u32>,
+    endings: BTreeMap<Pid, u32>,
+    thread_endings: BTreeMap<Tid, u32>,
     /// In-flight calls already reported, by thread and entry time.
-    reported: BTreeSet<(u32, u64)>,
+    reported: BTreeSet<(Tid, u64)>,
     /// Each thread's last ABI, where it is not x86-64's.
-    personalities: BTreeMap<u32, Abi>,
+    personalities: BTreeMap<Tid, Abi>,
     error: Option<io::Error>,
     /// The ndjson line of a call being written.
     line: Vec<u8>,
@@ -1263,17 +1271,17 @@ impl Printer {
         }
     }
 
-    fn write(&mut self, process: u32, line: &str) {
-        self.write_bytes(process, line.as_bytes());
+    fn write(&mut self, process: Pid, line: &str) {
+        self.write_bytes(process.get(), line.as_bytes());
     }
 
     /// Writes a line of one thread's, which -ff writes to the thread's own
     /// file, as strace does.
-    fn write_thread(&mut self, process: u32, thread: u32, line: &str) {
-        let file = if self.per_process.is_some() && thread != 0 {
-            thread
+    fn write_thread(&mut self, process: Pid, thread: Tid, line: &str) {
+        let file = if self.per_process.is_some() && thread != NO_THREAD {
+            thread.get()
         } else {
-            process
+            process.get()
         };
         self.write_bytes(file, line.as_bytes());
     }
@@ -1334,10 +1342,10 @@ impl Printer {
     }
 
     /// strace's leader: the pid, the time, and the call's number.
-    fn leader(&mut self, thread: u32, process: u32, time: u64, number: Option<u32>) -> Tokens {
+    fn leader(&mut self, thread: Tid, process: Pid, time: u64, number: Option<u32>) -> Tokens {
         let mut out = Tokens::default();
         // A loss is no thread's, and names none.
-        if self.per_process.is_none() && self.threads.len() > 1 && thread != 0 {
+        if self.per_process.is_none() && self.threads.len() > 1 && thread != NO_THREAD {
             let name = self
                 .comm
                 .then(|| self.names.get(&process).map(|name| format!("<{name}>")))
@@ -1484,7 +1492,7 @@ impl Printer {
                 let mut line = std::mem::take(&mut self.line);
                 line.clear();
                 record.write(&mut line);
-                self.write_bytes(event.process, &line);
+                self.write_bytes(event.process.get(), &line);
                 self.line = line;
             }
         }
@@ -1492,7 +1500,7 @@ impl Printer {
 
     /// A stack as ndjson writes it: each frame's module, its address there,
     /// symbol, offset, and source line, and last, why it ends short.
-    fn stack_json(&self, process: u32, stack: &CallStack) -> Value {
+    fn stack_json(&self, process: Pid, stack: &CallStack) -> Value {
         let Some(stacks) = &self.stacks else {
             return Value::Null;
         };
@@ -1532,7 +1540,7 @@ impl Printer {
 
     /// The lines naming the frames of a call's stack, up to the limit, and
     /// why it ends short, if it does.
-    fn stack_lines(&self, process: u32, stack: &CallStack) -> Vec<String> {
+    fn stack_lines(&self, process: Pid, stack: &CallStack) -> Vec<String> {
         let Some(stacks) = &self.stacks else {
             return Vec::new();
         };
@@ -1666,7 +1674,7 @@ impl Printer {
             name: event.call.display_name(),
             number: event.call.number,
             path,
-            pid: event.process,
+            pid: event.process.get(),
             process_exited: event.outcome == Outcome::ProcessExited,
             ret,
             stack: event
@@ -1674,26 +1682,26 @@ impl Printer {
                 .as_ref()
                 .map(|stack| self.stack_json(event.process, stack).to_string()),
             text,
-            tid: event.thread,
+            tid: event.thread.get(),
             time_ns: i64::try_from(wall).unwrap_or(0),
             unavailable: event.outcome == Outcome::Unavailable,
             unfinished: event.outcome == Outcome::Unfinished,
         }
     }
 
-    fn base(&self, kind: &str, time: u64, thread: Option<u32>, process: u32) -> Map<String, Value> {
+    fn base(&self, kind: &str, time: u64, thread: Option<Tid>, process: Pid) -> Map<String, Value> {
         let mut object = Map::new();
         object.insert("type".into(), kind.into());
         let wall = self.realtime + i128::from(time);
         object.insert("time_ns".into(), json!(i64::try_from(wall).unwrap_or(0)));
-        object.insert("pid".into(), process.into());
+        object.insert("pid".into(), process.get().into());
         if let Some(thread) = thread {
-            object.insert("tid".into(), thread.into());
+            object.insert("tid".into(), thread.get().into());
         }
         object
     }
 
-    fn json(&mut self, process: u32, object: Map<String, Value>) {
+    fn json(&mut self, process: Pid, object: Map<String, Value>) {
         let line = Value::Object(object).to_string();
         self.write(process, &line);
     }
@@ -1738,7 +1746,7 @@ impl Printer {
                 if self.quiet >= 2 {
                     return;
                 }
-                (process, process)
+                (process.leader(), process)
             }
             TraceEvent::ThreadExit {
                 thread, process, ..
@@ -1748,10 +1756,10 @@ impl Printer {
                 }
                 (thread, process)
             }
-            TraceEvent::Lost { .. } => (0, 0),
+            TraceEvent::Lost { .. } => (NO_THREAD, NO_PROCESS),
             _ => return,
         };
-        if !self.follow && !self.processes.contains(&process) && process != 0 {
+        if !self.follow && !self.processes.contains(&process) && process != NO_PROCESS {
             return;
         }
         if !self.show_calls && !matches!(event, TraceEvent::Lost { .. }) {
@@ -1808,7 +1816,7 @@ impl Printer {
                     object.insert("code".into(), code.into());
                 }
                 if let Some(sender) = sender {
-                    object.insert("sender".into(), sender.into());
+                    object.insert("sender".into(), sender.get().into());
                 }
                 object
             }
@@ -1828,7 +1836,7 @@ impl Printer {
                 object
             }
             TraceEvent::Lost { time, count } => {
-                let mut object = self.base("lost", time, None, 0);
+                let mut object = self.base("lost", time, None, NO_PROCESS);
                 object.remove("pid");
                 object.insert("count".into(), count.into());
                 object
@@ -1917,7 +1925,7 @@ impl Printer {
         }
     }
 
-    fn note_thread(&mut self, thread: u32, process: u32) {
+    fn note_thread(&mut self, thread: Tid, process: Pid) {
         self.threads.insert(thread);
         if self.comm
             && !self.names.contains_key(&process)
@@ -1957,7 +1965,7 @@ impl Sink for Printer {
                 self.threads.insert(*parent_thread);
                 self.threads.insert(*child);
                 if !*thread && let Some(name) = self.names.get(parent).cloned() {
-                    self.names.insert(*child, name);
+                    self.names.insert(Pid::led_by(*child), name);
                 }
                 // strace calls every thread a process.
                 if self.follow && self.quiet == 0 {
@@ -1978,7 +1986,7 @@ impl Sink for Printer {
                 self.names.insert(*process, name);
                 if self.fds.of(*process).next().is_none() {
                     let mut seeds = Seeds::default();
-                    ptrace::seed_descriptors(*process, &mut seeds);
+                    ptrace::seed_descriptors(process.get(), &mut seeds);
                     for seed in seeds.0 {
                         if let Some((_, capture)) = &mut self.capture {
                             capture.event(&seed);
@@ -2069,7 +2077,7 @@ impl Sink for Printer {
             }
         }
         // Forget calls that have returned.
-        let live: BTreeSet<(u32, u64)> = calls
+        let live: BTreeSet<(Tid, u64)> = calls
             .iter()
             .map(|call| (call.thread, call.entered))
             .collect();

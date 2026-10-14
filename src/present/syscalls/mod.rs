@@ -19,7 +19,8 @@ use uscope::syscalls::fds::{FdTable, Kind as FdKind};
 use uscope::syscalls::filter::fd_value;
 use uscope::syscalls::specs::{self, Arg, Count, Direction, MemKind, Ret, Spec};
 use uscope::syscalls::{
-    Abi, Capture, CaptureState, Errno, EventFlags, Outcome, ProcessEnd, SyscallEvent, TraceEvent,
+    Abi, Capture, CaptureState, Errno, EventFlags, Outcome, Pid, ProcessEnd, SyscallEvent, Tid,
+    TraceEvent,
 };
 
 use sets::Shape;
@@ -283,8 +284,8 @@ pub struct Context<'a> {
 #[must_use]
 pub fn caught(stop: &uscope::SyscallStop) -> String {
     let event = SyscallEvent {
-        thread: 0,
-        process: 0,
+        thread: Tid::new(0),
+        process: Pid::new(0),
         call: stop.call,
         args: stop.args,
         captured: stop.captured.to_vec(),
@@ -512,7 +513,7 @@ fn octal(out: &mut Tokens, value: u64) {
 /// A descriptor, with what it refers to under `-y`.
 pub(super) fn descriptor(
     out: &mut Tokens,
-    process: u32,
+    process: Pid,
     fd: i64,
     style: &Style,
     context: Context<'_>,
@@ -556,7 +557,7 @@ pub(super) fn descriptor(
 
 /// Whether a descriptor the table lacks is known not to be open, which
 /// strace prints as a bare number.
-fn closed(process: u32, context: Context<'_>) -> bool {
+fn closed(process: Pid, context: Context<'_>) -> bool {
     context.fds.is_some_and(|table| table.knows(process))
 }
 

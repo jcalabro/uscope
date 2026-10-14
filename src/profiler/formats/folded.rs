@@ -7,13 +7,14 @@ use crate::analysis::{CallTree, Keys};
 use crate::capture::Capture;
 use crate::capture::builder::{CaptureBuilder, LineInput};
 use crate::capture::records::{FrameKind, NONE};
+use crate::model::{Pid, Tid};
 
 /// Reads folded stacks; each line's number is its stack's weight in
 /// samples. The format has no times, threads, or files, and the capture
 /// says so.
 pub fn import(text: &str) -> Result<Capture, String> {
     let mut builder = CaptureBuilder::new();
-    let thread = builder.thread(0, 0, 0);
+    let thread = builder.thread(Pid::new(0), Tid::new(0), 0);
     builder.thread_name(thread, "every thread");
     let mut frames: BTreeMap<&str, u32> = BTreeMap::new();
     let mut stack = Vec::new();

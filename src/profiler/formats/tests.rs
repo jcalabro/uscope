@@ -6,6 +6,7 @@ use super::Format;
 use crate::analysis::Granularity;
 use crate::capture::builder::{CaptureBuilder, LineInput};
 use crate::capture::records::{FrameKind, MarkerKind, NONE};
+use crate::model::{Pid, Tid};
 use crate::profiler::{Profile, StackView, query};
 
 const NAMES: [&str; 5] = ["main", "a", "b::<[u8; 4]>", "c", "d"];
@@ -15,7 +16,7 @@ const NAMES: [&str; 5] = ["main", "a", "b::<[u8; 4]>", "c", "d"];
 fn profile(samples: &[(Vec<usize>, u64)]) -> Profile {
     let mut builder = CaptureBuilder::new();
     let module = builder.module("/bin/app", None, [0; 16], 0);
-    let thread = builder.thread(1, 1, 0);
+    let thread = builder.thread(Pid::new(1), Tid::new(1), 0);
     let frames: Vec<u32> = (0..NAMES.len())
         .map(|at| {
             let frame = builder.frame(FrameKind::Native, module, 0x10 * at as u64, 0);
@@ -157,10 +158,10 @@ fn a_file_says_its_format_by_its_bytes_or_its_name() {
 fn a_mark_is_on_its_own_thread_when_a_tid_is_reused() {
     let mut builder = CaptureBuilder::new();
     let site = builder.site("frame", "/src/app.rs", 1, NONE, 0);
-    let first = builder.thread(10, 7, 100);
+    let first = builder.thread(Pid::new(10), Tid::new(7), 100);
     builder.thread_marker((first, site), 150, MarkerKind::Frame, None);
-    builder.thread_exit(7, 200);
-    builder.thread(20, 7, 300);
+    builder.thread_exit(Tid::new(7), 200);
+    builder.thread(Pid::new(20), Tid::new(7), 300);
     let profile = Profile::from_capture(builder.finish());
     let trace: serde_json::Value =
         serde_json::from_str(&super::chrome::export(&profile)).expect("a JSON trace");

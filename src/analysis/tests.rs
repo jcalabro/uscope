@@ -6,6 +6,7 @@ use super::*;
 use crate::capture::Capture;
 use crate::capture::builder::{CaptureBuilder, LineInput};
 use crate::capture::records::{FrameKind, NONE, Truncation};
+use crate::model::{Pid, Tid};
 
 const FUNCTIONS: [&str; 5] = ["a", "b", "c", "d", "e"];
 
@@ -61,9 +62,9 @@ fn capture(
         })
         .collect();
     let threads = [
-        builder.thread(1, 1, 0),
-        builder.thread(1, 2, 0),
-        builder.thread(1, 3, 0),
+        builder.thread(Pid::new(1), Tid::new(1), 0),
+        builder.thread(Pid::new(1), Tid::new(2), 0),
+        builder.thread(Pid::new(1), Tid::new(3), 0),
     ];
     let tasks: Vec<u32> = (1..=3)
         .map(|number| builder.task("goroutine", number, 0))
@@ -396,7 +397,10 @@ fn density_buckets_kept_samples_by_lane_and_time() {
 #[test]
 fn off_cpu_time_falls_in_each_slice_it_overlaps() {
     let mut builder = CaptureBuilder::new();
-    let (a, b) = (builder.thread(1, 1, 0), builder.thread(1, 2, 0));
+    let (a, b) = (
+        builder.thread(Pid::new(1), Tid::new(1), 0),
+        builder.thread(Pid::new(1), Tid::new(2), 0),
+    );
     builder.off_cpu(a, 5, 20, false);
     builder.off_cpu(a, 30, 4, true);
     builder.off_cpu(a, 45, 10, false);
@@ -521,7 +525,7 @@ fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
         builder.stack(&[park, run, start]),
         builder.stack(&[coop, harness, run, start]),
     ];
-    let thread = builder.thread(1, 1, 0);
+    let thread = builder.thread(Pid::new(1), Tid::new(1), 0);
     for (time, stack) in stacks.into_iter().enumerate() {
         builder.sample(
             thread,
@@ -590,7 +594,10 @@ fn labeled(spans: &[(u32, i64, i64, u32)], samples: &[Sample]) -> Capture {
     let frame = builder.frame(FrameKind::Native, module, 0x10, 0);
     builder.symbolize(frame, module, &[line("a")]);
     let stack = builder.stack(&[frame]);
-    let threads = [builder.thread(1, 1, 0), builder.thread(1, 2, 0)];
+    let threads = [
+        builder.thread(Pid::new(1), Tid::new(1), 0),
+        builder.thread(Pid::new(1), Tid::new(2), 0),
+    ];
     let tasks: Vec<u32> = (1..=3)
         .map(|number| builder.task("goroutine", number, 0))
         .collect();
@@ -722,7 +729,10 @@ proptest! {
 fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
     let mut builder = CaptureBuilder::new();
     let module = builder.module("/bin/app", None, [0; 16], 0);
-    let (one, two) = (builder.thread(1, 1, 0), builder.thread(1, 2, 0));
+    let (one, two) = (
+        builder.thread(Pid::new(1), Tid::new(1), 0),
+        builder.thread(Pid::new(1), Tid::new(2), 0),
+    );
     let kind = uscope_probes::abi::SITE_PLOT;
     let sites = [
         builder.site("depth", "a.rs", 1, module, kind),
@@ -789,7 +799,7 @@ fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
 fn stacks_of(samples: &[(Vec<usize>, u64)]) -> Capture {
     let mut builder = CaptureBuilder::new();
     let module = builder.module("/bin/app", None, [0; 16], 0);
-    let thread = builder.thread(1, 1, 0);
+    let thread = builder.thread(Pid::new(1), Tid::new(1), 0);
     let frames: Vec<u32> = (0..FUNCTIONS.len())
         .map(|at| {
             let frame = builder.frame(FrameKind::Native, module, 0x10 * at as u64, 0);

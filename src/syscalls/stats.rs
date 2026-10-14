@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{Errno, Outcome, SyscallEvent, SyscallId};
+use super::model::{Errno, Outcome, Pid, SyscallEvent, SyscallId};
 use super::specs::{self, Arg, Count, Direction, MemKind};
 
 /// Buckets in a latency histogram. Bucket 0 holds 0 ns; bucket `i` holds
@@ -176,7 +176,7 @@ pub fn moves(call: SyscallId) -> bool {
 /// Statistics folded per process and call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Folded {
-    pub by_call: BTreeMap<(u32, SyscallId), SyscallStats>,
+    pub by_call: BTreeMap<(Pid, SyscallId), SyscallStats>,
 }
 
 impl Folded {

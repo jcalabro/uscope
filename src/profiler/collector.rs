@@ -13,6 +13,7 @@ use super::probes::{self, Anchors, Decoder, Event, RingHeader, Table};
 use super::record::Processor;
 use crate::backend::perf;
 use crate::capture::records::AccountKind;
+use crate::model::{Pid, Tid};
 
 /// Which sites a recording switches on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -63,7 +64,7 @@ struct Ring {
     /// The first position not yet read.
     tail: u64,
     /// The thread that writes it, and its row.
-    thread: Option<(u32, u32)>,
+    thread: Option<(Tid, u32)>,
     interrupted: u64,
     /// Whether the thread wrote records before uscope began to read them.
     before: bool,
@@ -123,7 +124,7 @@ impl Collector {
     /// mapped since, then reads every ring.
     pub fn drain(&mut self, processor: &mut Processor) {
         let _span = crate::span!("probes drain");
-        for found in processor.found_probes(self.pid) {
+        for found in processor.found_probes(Pid::new(self.pid)) {
             self.adopt(processor, &found);
         }
         if self.gone {
@@ -316,7 +317,7 @@ impl Collector {
                 if let Some((_, row)) = previous {
                     processor.probe_thread_ended(row);
                 }
-                let row = processor.probe_thread(pid, header.thread);
+                let row = processor.probe_thread(Pid::new(pid), header.thread);
                 ring.thread = Some((header.thread, row));
                 row
             }

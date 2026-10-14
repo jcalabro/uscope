@@ -166,7 +166,7 @@ impl Sink for Live<'_, '_> {
             && self.fds.of(process).next().is_none()
         {
             let mut seeds = Seeds(Vec::new());
-            ptrace::seed_descriptors(process, &mut seeds);
+            ptrace::seed_descriptors(process.get(), &mut seeds);
             for seed in seeds.0 {
                 self.capture.event(&seed);
                 self.fds.apply(&seed);

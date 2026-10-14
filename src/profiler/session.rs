@@ -23,6 +23,7 @@ use crate::backend::syscall_engines::{Sink, TraceOptions};
 use crate::capture::Capture;
 use crate::capture::builder::CaptureBuilder;
 use crate::capture::records::{GapReason, MarkerKind};
+use crate::model::Pid;
 
 /// A recording and how its program ended.
 #[derive(Debug)]
@@ -143,7 +144,7 @@ pub fn record_watched(
         .unwrap_or_else(|_| Err(std::io::Error::other("the program's waiter panicked")))
         .map_err(RecordError::Start)?;
     record!("record: the program ended: {status}");
-    processor.exited(pid);
+    processor.exited(Pid::new(pid));
     let mut capture = processor.finish();
     if let Some(syscalls) = syscalls {
         capture = syscalls.merge(&capture).map_err(RecordError::Syscalls)?;
@@ -180,7 +181,7 @@ pub fn record_attached(
         mut events,
         process,
     } = perf::attach(pid, &events, options.max_events)?;
-    processor.attached(pid, monotonic());
+    processor.attached(Pid::new(pid), monotonic());
     let name = std::fs::read_link(&program).unwrap_or(program);
     let pages = events.pages();
     settings(
@@ -209,7 +210,7 @@ pub fn record_attached(
     );
     record!("record: detached from {pid}, stopped {stopped}");
     if !stopped {
-        processor.exited(pid);
+        processor.exited(Pid::new(pid));
     }
     Ok(Attachment {
         profile: Profile {
@@ -499,7 +500,12 @@ impl Snapshots {
                     let end = monotonic();
                     self.next = std::time::Instant::now() + self.every;
                     let weight = start.saturating_sub(self.previous);
-                    processor.live_task_snapshot(self.pid, (start, end), weight, &snapshot);
+                    processor.live_task_snapshot(
+                        Pid::new(self.pid),
+                        (start, end),
+                        weight,
+                        &snapshot,
+                    );
                     self.previous = start;
                     return;
                 }
@@ -529,13 +535,13 @@ impl Snapshots {
         match taken {
             Ok(snapshot) => {
                 let weight = start.saturating_sub(self.previous);
-                processor.task_snapshot(self.pid, (start, end), weight, &snapshot);
+                processor.task_snapshot(Pid::new(self.pid), (start, end), weight, &snapshot);
                 self.previous = start;
             }
             // A program that exited is not attached to, and has no tasks.
             Err(_) if tasks::exited(self.pid) => {}
             Err(error) => {
-                processor.task_snapshot(self.pid, (start, end), 0, &Snapshot::default());
+                processor.task_snapshot(Pid::new(self.pid), (start, end), 0, &Snapshot::default());
                 processor.snapshot_failed(start, &format!("a task snapshot failed: {error}"));
             }
         }

@@ -16,7 +16,7 @@ use super::kernel::syscalls::Served;
 use super::marks::{Mark, Marks};
 use crate::backend::syscall_engines::bpf::{self, RawErrnoKey, RawStatValue, Record};
 use crate::syscalls::stats::BUCKETS;
-use crate::syscalls::{Abi, Outcome, SyscallId};
+use crate::syscalls::{Abi, Outcome, Pid, SyscallId, Tid};
 
 /// How many records the ring holds: so few that most are lost, a few, and
 /// more than a run makes.
@@ -143,8 +143,8 @@ impl TraceModel {
                 &event.outcome,
             );
             let made = (
-                call.tid.cast_unsigned(),
-                call.tgid.cast_unsigned(),
+                Tid::new(call.tid.cast_unsigned()),
+                Pid::new(call.tgid.cast_unsigned()),
                 SyscallId::new(Abi::X86_64, call.number),
                 call.args,
                 &outcome,
@@ -171,7 +171,7 @@ impl TraceModel {
             ));
         }
         let folded = bpf::fold(
-            0,
+            Pid::new(0),
             self.stats
                 .iter()
                 .map(|(&call, cpus)| (call, cpus.values().copied().collect())),
@@ -180,7 +180,7 @@ impl TraceModel {
                 .map(|(&(slot, err), &count)| (RawErrnoKey { slot, err }, count)),
         );
         for (call, (calls, errors, errnos)) in &self.expected {
-            let stats = folded.by_call.get(&(0, *call));
+            let stats = folded.by_call.get(&(Pid::new(0), *call));
             let counted = stats.map(|stats| (stats.calls, stats.errors, &stats.errors_by_errno));
             if counted != Some((*calls, *errors, errnos)) {
                 return Err(format!(

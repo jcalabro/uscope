@@ -422,7 +422,7 @@ pub fn program_bias(pid: u32) -> Option<crate::LoadBias> {
         .into_iter()
         .find(|mapped| mapped.inode == inode)?;
     identify(&decode::Mmap {
-        pid,
+        pid: crate::model::Pid::new(pid),
         start: mapped.start,
         length: mapped.end - mapped.start,
         file_offset: mapped.file_offset,

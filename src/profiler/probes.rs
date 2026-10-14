@@ -18,6 +18,7 @@ use crate::capture::CaptureBuilder;
 use crate::capture::records::{
     MarkerKind, NONE, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED, Zone,
 };
+use crate::model::Tid;
 
 /// A module's instrumentation: where its control block links, and its
 /// sites.
@@ -165,7 +166,8 @@ pub struct RingHeader {
     /// Its size, as a power of two of records.
     pub size: u8,
     pub clock: u16,
-    pub thread: u32,
+    /// The thread that took it.
+    pub thread: Tid,
     pub state: u32,
     pub interrupted: u64,
     pub head: u64,
@@ -211,7 +213,7 @@ pub fn ring_header(bytes: &[u8]) -> Result<RingHeader, &'static str> {
     Ok(RingHeader {
         size,
         clock,
-        thread: word(8),
+        thread: Tid::new(word(8)),
         state,
         interrupted: long(16),
         head: long(64),
@@ -692,7 +694,7 @@ mod tests {
                 for _ in 0..before.min(1 << 20) {
                     writer.step();
                 }
-                let header = RingHeader { size, clock: 0, thread: 0, state: abi::RING_ACTIVE, interrupted: 0, head: writer.head };
+                let header = RingHeader { size, clock: 0, thread: Tid::new(0), state: abi::RING_ACTIVE, interrupted: 0, head: writer.head };
                 let (span, mut lost) = copy_span(tail, header);
                 let mut copied = Vec::new();
                 for position in span.clone() {
@@ -757,7 +759,7 @@ mod tests {
                 events.swap(at, at + 1);
             }
             let mut builder = CaptureBuilder::new();
-            let thread = builder.thread(1, 1, 0);
+            let thread = builder.thread(crate::model::Pid::new(1), Tid::new(1), 0);
             let sites: Vec<u32> = (0..4).map(|site| builder.site(&site.to_string(), "", 0, NONE, abi::SITE_ZONE)).collect();
             let mut stacks = Stacks::default();
             let mut read = 0;
