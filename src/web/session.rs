@@ -1096,10 +1096,12 @@ impl Session {
         else {
             return;
         };
-        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        counter.fetch_add(1, Ordering::Relaxed);
         self.state.send_modify(|state| {
             let mut next = State::clone(state);
-            set(&mut next, count);
+            // Read under the state's lock, so that a count bumped after
+            // this one and published first is not published back down.
+            set(&mut next, counter.load(Ordering::Relaxed));
             *state = Arc::new(next);
         });
     }
@@ -1688,13 +1690,7 @@ async fn pump(
             return;
         };
         let next = describer.describe(&snapshot).await;
-        state.send_if_modified(|current| {
-            let changed = **current != next;
-            if changed {
-                *current = Arc::new(next);
-            }
-            changed
-        });
+        publish(&state, next, &describer.writes, &describer.settings);
         match events.recv().await {
             Ok(event) => observe(&mut describer, &outlet, &event),
             Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -1709,6 +1705,26 @@ async fn pump(
             }
         }
     }
+}
+
+/// Publishes `next` unless it changes nothing, with the counts as they are
+/// now. Read under the state's lock, they are never lower than what a
+/// count published before.
+fn publish(
+    state: &watch::Sender<Arc<State>>,
+    mut next: State,
+    writes: &AtomicU64,
+    settings: &AtomicU64,
+) {
+    state.send_if_modified(|current| {
+        next.writes = writes.load(Ordering::Relaxed);
+        next.settings = settings.load(Ordering::Relaxed);
+        let changed = **current != next;
+        if changed {
+            *current = Arc::new(next);
+        }
+        changed
+    });
 }
 
 fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
@@ -1780,4 +1796,45 @@ fn frame_at(
         task,
         frame: frame.unwrap_or(0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tab can count a change while the pump builds a state from the
+    /// counts before it. Publishing that state keeps the newer count, so
+    /// tabs never see a count go back.
+    #[test]
+    fn a_state_built_before_a_count_publishes_the_count() {
+        let (writes, settings) = (AtomicU64::new(1), AtomicU64::new(1));
+        let built = State {
+            writes: writes.load(Ordering::Relaxed),
+            settings: settings.load(Ordering::Relaxed),
+            revision: 1,
+            ..State::idle(None)
+        };
+        let (state, receiver) = watch::channel(Arc::new(built.clone()));
+        writes.fetch_add(1, Ordering::Relaxed);
+        settings.fetch_add(1, Ordering::Relaxed);
+        state.send_modify(|state| {
+            *state = Arc::new(State {
+                writes: 2,
+                settings: 2,
+                ..State::clone(state)
+            });
+        });
+        publish(
+            &state,
+            State {
+                revision: 2,
+                ..built
+            },
+            &writes,
+            &settings,
+        );
+        let published = receiver.borrow();
+        assert_eq!(published.revision, 2, "the pump's state is published");
+        assert_eq!((published.writes, published.settings), (2, 2));
+    }
 }
