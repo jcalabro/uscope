@@ -40,6 +40,11 @@ impl IndirectFunctions {
         self.returns.remove(&address);
         self.calls.retain(|call| call.returns_to != address);
     }
+
+    /// Every site planted: the resolvers' entries and their calls' returns.
+    pub(super) fn planted(&self) -> BTreeSet<VirtualAddress> {
+        self.entries.keys().chain(&self.returns).copied().collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,23 +188,22 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         };
         let live = |pid: &Pid| inferior.threads.contains_key(pid);
-        let calls = std::mem::take(&mut inferior.indirect.calls)
-            .into_iter()
+        let calls = (inferior.indirect.calls.iter())
             .filter(|call| wanted.contains(&call.resolver) && live(&call.thread))
+            .copied()
             .collect::<Vec<_>>();
         let returns = calls
             .iter()
             .map(|call| call.returns_to)
             .collect::<BTreeSet<_>>();
-        let planted = (inferior.indirect.entries.keys())
-            .chain(&inferior.indirect.returns)
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let planted = inferior.indirect.planted();
         let needed = entries
             .keys()
             .chain(&returns)
             .copied()
             .collect::<BTreeSet<_>>();
+        // The record changes with each site, so that a failed edit leaves
+        // it naming exactly the sites planted.
         for &address in planted.difference(&needed) {
             remove_breakpoint_owner_from(
                 &self.ptrace,
@@ -207,6 +211,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address,
                 BreakpointOwner::Resolver,
             )?;
+            inferior.indirect.entries.remove(&address);
+            inferior.indirect.returns.remove(&address);
         }
         let pid = inferior.memory_thread();
         for &address in needed.difference(&planted) {
@@ -216,6 +222,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address,
                 BreakpointOwner::Resolver,
             )?;
+            match entries.get(&address) {
+                Some(&resolver) => {
+                    inferior.indirect.entries.insert(address, resolver);
+                }
+                None => {
+                    inferior.indirect.returns.insert(address);
+                }
+            }
         }
         inferior.indirect.entries = entries;
         inferior.indirect.calls = calls;

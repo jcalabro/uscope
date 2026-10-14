@@ -85,6 +85,35 @@ async fn a_program_that_executes_itself_again_is_followed_with_its_breakpoints()
     scenario.shutdown().await;
 }
 
+/// Breakpoints waiting on indirect functions' resolvers, which a program
+/// may never call, wait again in the image exec(2) maps: the first image's
+/// resolver sites went with it.
+#[tokio::test]
+async fn indirect_functions_wait_again_after_exec() {
+    let mut scenario = Scenario::launch("reexec");
+    for name in ["strlen", "strcasestr", "wcsnlen", "rawmemchr", "memrchr"] {
+        pending_function(&scenario, name).await;
+    }
+    // The loader has functions of these names of its own.
+    let mut reason = scenario.run_to_stop().await;
+    while let StopReason::Breakpoint { .. } = reason {
+        reason = scenario.resume_to_stop().await;
+    }
+    assert_eq!(reason, StopReason::Exec { followed: true });
+    // Libraries load again, which places the waiting breakpoints anew.
+    loop {
+        match scenario.resume_to_stop().await {
+            StopReason::Exited(status) => {
+                assert_eq!(status, ExitStatus::Code(2));
+                break;
+            }
+            StopReason::Breakpoint { .. } => {}
+            other => panic!("stopped for {other:?}"),
+        }
+    }
+    scenario.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_launcher_that_executes_the_program_launches_it() {
     for stop_at_entry in [false, true] {

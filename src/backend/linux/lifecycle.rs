@@ -1010,6 +1010,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.loader_site = None;
         inferior.runtime_hooks.clear();
         inferior.stack_moves.clear();
+        inferior.indirect = super::indirect::IndirectFunctions::default();
         // exec(2) flushes every debug register; the new image's addresses
         // have no relation to the old watchpoints.
         self.discard_watchpoints();

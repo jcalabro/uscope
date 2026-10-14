@@ -64,6 +64,11 @@ impl StackMoves {
         self.movers.remove(&address);
         self.returns.remove(&address);
     }
+
+    /// Every site planted: the movers' entries and the moves' returns.
+    pub(super) fn planted(&self) -> BTreeSet<VirtualAddress> {
+        self.movers.keys().chain(&self.returns).copied().collect()
+    }
 }
 
 /// One move of a watched task's stack: the thread in the mover, where it
@@ -238,15 +243,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .map(|moving| moving.returns_to)
             .collect::<BTreeSet<_>>();
-        let planted = (inferior.stack_moves.movers.keys())
-            .chain(&inferior.stack_moves.returns)
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let planted = inferior.stack_moves.planted();
         let needed = wanted
             .keys()
             .chain(&returns)
             .copied()
             .collect::<BTreeSet<_>>();
+        // The record changes with each site, so that a failed edit leaves
+        // it naming exactly the sites planted.
         for &address in planted.difference(&needed) {
             remove_breakpoint_owner_from(
                 &self.ptrace,
@@ -254,16 +258,23 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address,
                 BreakpointOwner::StackMove,
             )?;
+            inferior.stack_moves.forget(address);
         }
         let pid = inferior.memory_thread();
-        for &address in &needed {
-            if !planted.contains(&address) {
-                self.ptrace.install_breakpoint(
-                    pid,
-                    &mut inferior.breakpoints,
-                    address,
-                    BreakpointOwner::StackMove,
-                )?;
+        for &address in needed.difference(&planted) {
+            self.ptrace.install_breakpoint(
+                pid,
+                &mut inferior.breakpoints,
+                address,
+                BreakpointOwner::StackMove,
+            )?;
+            match wanted.get(&address) {
+                Some(&runtime) => {
+                    inferior.stack_moves.movers.insert(address, runtime);
+                }
+                None => {
+                    inferior.stack_moves.returns.insert(address);
+                }
             }
         }
         inferior.stack_moves.movers = wanted;
