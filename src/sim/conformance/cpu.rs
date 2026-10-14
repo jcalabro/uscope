@@ -24,7 +24,7 @@ use nix::libc;
 use crate::backend::native_tracee::NativeTracee;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{
-    self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, R11, RAX, RDI, RSI, Registers, SIGN,
+    self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, RAX, RDI, RSI, Registers, SIGN,
     STATUS_FLAGS, ZERO,
 };
 
@@ -38,12 +38,6 @@ const SYS_FORK: u64 = 57;
 const SYS_EXIT: u64 = 60;
 const SYS_WAIT4: u64 = 61;
 const SYS_EXIT_GROUP: u64 = 231;
-
-/// The resume flag, which the CPU may set as an instruction completes.
-const RESUME: u64 = 1 << 16;
-
-/// The trap flag.
-const TRAP: u64 = 1 << 8;
 
 /// Every golden program, in every variant and with every argument list its
 /// manifest names, executes identically in the interpreter and on the CPU.
@@ -143,7 +137,7 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         let instruction = cpu::decode(registers.rip, memory)
             .map_err(|fault| format!("decoding at {:#x} faulted: {fault:?}", registers.rip))?;
         let before = registers;
-        let outcome = cpu::execute(&mut registers, memory).outcome;
+        let outcome = cpu::execute(&mut registers, memory, true).outcome;
         native.resume(tid, None, true).map_err(failed)?;
         let mut status = native.wait(tid);
 
@@ -285,13 +279,8 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         }
 
         let expected = native.registers(tid).map_err(failed)?;
-        compare(
-            &instruction,
-            outcome == Outcome::Syscall,
-            &mut registers,
-            &expected,
-        )
-        .map_err(|difference| format!("{at}: {difference}"))?;
+        compare(&instruction, &mut registers, &expected)
+            .map_err(|difference| format!("{at}: {difference}"))?;
         threads[current].registers = registers;
         if outcome == Outcome::Syscall {
             compare_memory(&native, process, &memories[&process])
@@ -356,20 +345,11 @@ fn expect_exit_event(
 /// `instruction`, then copies in the flags it leaves undefined.
 fn compare(
     instruction: &Instruction,
-    after_syscall: bool,
     registers: &mut Registers,
     expected: &Registers,
 ) -> Result<(), String> {
     for (index, (&actual, &wanted)) in registers.general.iter().zip(&expected.general).enumerate() {
-        // r11 saves rflags across `syscall`, including the trap flag
-        // single-stepping set.
-        let mask = if after_syscall && index == R11 {
-            !(TRAP | RESUME)
-        } else {
-            u64::MAX
-        };
-
-        if actual & mask != wanted & mask {
+        if actual != wanted {
             return Err(format!(
                 "general register {index} is {actual:#x}, the CPU has {wanted:#x}"
             ));
@@ -393,11 +373,6 @@ fn compare(
     }
 
     registers.rflags = (registers.rflags & !undefined) | (expected.rflags & undefined);
-    if after_syscall {
-        // Keep the trap flag the CPU saved, which later moves of r11 copy.
-        registers.general[R11] = expected.general[R11];
-    }
-
     Ok(())
 }
 

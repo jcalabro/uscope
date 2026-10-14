@@ -342,7 +342,10 @@ model gap), whether it was a call or a return, and every load and store it
 made, `rep` iterations one at a time. Instructions are added only when the
 corpus needs them, each covered by lockstep. The CPU knows nothing of
 ptrace: the kernel applies the trap flag and the debug registers to each
-outcome and its accesses.
+outcome and its accesses. The trap flag a single step sets is in
+`rflags` while the instruction runs, so `syscall` saves it in r11, as
+the lockstep, which steps every instruction, requires; `rflags` never
+shows it, as `PTRACE_GETREGS` hides a trap flag ptrace set.
 
 **Memory.** An address space is a map of 4 KiB pages with protections.
 Pages loaded from a golden image are shared by every session and copied on

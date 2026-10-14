@@ -1216,9 +1216,14 @@ impl Kernel {
             flow,
             accesses,
         } = if skipped {
-            step_under_trap(&mut thread.registers, &mut process.space, &process.image)
+            step_under_trap(
+                &mut thread.registers,
+                &mut process.space,
+                &process.image,
+                single_step,
+            )
         } else {
-            cpu::execute(&mut thread.registers, &mut process.space)
+            cpu::execute(&mut thread.registers, &mut process.space, single_step)
         };
 
         #[cfg(not(test))]
@@ -1226,7 +1231,7 @@ impl Kernel {
             outcome,
             flow,
             accesses,
-        } = cpu::execute(&mut thread.registers, &mut process.space);
+        } = cpu::execute(&mut thread.registers, &mut process.space, single_step);
 
         // K-DR-1: an access an enabled slot covers raises a debug
         // exception once the instruction completes.
@@ -1846,13 +1851,14 @@ fn step_under_trap(
     registers: &mut Registers,
     space: &mut AddressSpace,
     image: &Image,
+    single_step: bool,
 ) -> cpu::Executed {
     let address = registers.rip;
     let original = image
         .original_byte(address)
         .expect("a trap in the program's code");
     assert!(space.poke_bytes(address, &[original]));
-    let executed = cpu::execute(registers, space);
+    let executed = cpu::execute(registers, space, single_step);
     assert!(space.poke_bytes(address, &[0xcc]));
     executed
 }

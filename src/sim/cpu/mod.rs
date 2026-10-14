@@ -45,6 +45,9 @@ pub const ADJUST: u64 = 1 << 4;
 
 pub const ZERO: u64 = 1 << 6;
 
+/// The trap flag, which raises a debug exception after each instruction.
+pub const TRAP: u64 = 1 << 8;
+
 pub const SIGN: u64 = 1 << 7;
 
 pub const DIRECTION: u64 = 1 << 10;
@@ -208,7 +211,12 @@ impl From<MemoryFault> for Stop {
 /// A string instruction with a repeat prefix executes one iteration,
 /// leaving `rip` at itself until its count runs out, as the CPU does when
 /// it traps between iterations.
-pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed {
+///
+/// `trap` sets the trap flag while the instruction runs, as ptrace sets
+/// it to single-step a thread. `rflags` never shows it, as
+/// `PTRACE_GETREGS` hides a trap flag ptrace set, but `syscall` saves it
+/// in r11 with the other flags.
+pub fn execute(registers: &mut Registers, memory: &mut AddressSpace, trap: bool) -> Executed {
     let failed = |outcome| Executed {
         outcome,
         flow: Flow::Other,
@@ -222,9 +230,14 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed
 
     let mut next = *registers;
     next.rip = instruction.next_ip();
+    if trap {
+        next.rflags |= TRAP;
+    }
+
     let accesses = std::cell::Cell::new(Accesses::default());
     match ops::execute(&instruction, &mut next, memory, &accesses) {
         Ok(outcome) => {
+            next.rflags &= !TRAP;
             *registers = next;
             let flow = match instruction.mnemonic() {
                 Mnemonic::Call => Flow::Call {
@@ -355,7 +368,7 @@ mod tests {
             u64::from_le_bytes(code.try_into().expect("8 bytes"))
         ));
         registers.rip = 0x1000;
-        execute(registers, &mut memory).outcome
+        execute(registers, &mut memory, false).outcome
     }
 
     /// A faulting instruction changes nothing, and the fault names the
@@ -404,6 +417,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// `syscall` saves the trap flag a single step sets in r11, though
+    /// `rflags` does not show it.
+    #[test]
+    fn syscall_saves_the_trap_flag_in_r11() {
+        for trap in [false, true] {
+            let mut memory = AddressSpace::default();
+            memory.map(0x1000, 0x2000, Protection::READ_EXECUTE, Backing::Anonymous);
+            assert!(memory.poke_bytes(0x1000, &[0x0f, 0x05]));
+            let mut registers = Registers {
+                rip: 0x1000,
+                rflags: 0x206,
+                ..Registers::default()
+            };
+
+            let outcome = execute(&mut registers, &mut memory, trap).outcome;
+            assert_eq!(outcome, Outcome::Syscall);
+            assert_eq!(registers.rflags, 0x206);
+            assert_eq!(registers.general[RCX], 0x1002);
+            assert_eq!(
+                registers.general[R11],
+                if trap { 0x306 } else { 0x206 },
+                "trap {trap}"
+            );
+        }
     }
 
     /// A form the model does not implement is a gap, even when it shares
