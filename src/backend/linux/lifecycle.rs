@@ -810,7 +810,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// left to take one. A child that cannot be scrubbed is killed rather than
     /// released with traps in place. Returns whether it was detached; one
     /// that was not stays traced until it exits.
-    fn scrub_and_settle(&self, parent: Pid, child: Pid, sites: &[(VirtualAddress, u8)]) -> bool {
+    pub(super) fn scrub_and_settle(
+        &self,
+        parent: Pid,
+        child: Pid,
+        sites: &[(VirtualAddress, u8)],
+    ) -> bool {
         let hold = !self.shutting_down
             && self
                 .held_children

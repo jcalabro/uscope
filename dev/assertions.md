@@ -8,8 +8,9 @@ that the type system can't express.
 | Path | What lives there |
 | --- | --- |
 | `Cargo.toml` | Profiles: where debug assertions and overflow checks are on |
-| `src/backend/linux.rs` | `Controller::handle_message`, which every request and wait status passes through |
+| `src/backend/linux.rs` | `Controller::handle_message`, which every request and wait status passes through, and `Controller::run`, which catches a panic |
 | `src/backend/linux/invariants.rs` | The controller's invariants, checked after its messages |
+| `src/backend/linux/panic_release.rs` | Releasing an attached process after a panic |
 | `src/backend/linux/lifecycle.rs` | `detach_inferior`, the correct way to release an attached process |
 
 ## Rules
@@ -71,14 +72,17 @@ error. The kernel then releases the tracees:
 - An attached process is detached with its traps and debug registers still
   set, so it dies with SIGTRAP at the next trap. That's not acceptable.
 
-The controller must therefore catch the unwind and release an attached process
-as `detach_inferior` does. The cleanup lives at the thread boundary, not in an
-assertion macro, because any panic can end the controller. It restores only
-bytes it can verify: memory still holds uscope's trap and the original byte is
-known. Aborts skip it: stack overflow, running out of memory, and a panic
-during cleanup.
+So `Controller::run` catches the unwind and releases an attached process as
+`detach_inferior` does. The cleanup lives at the thread boundary, not in an
+assertion macro, because any panic can end the controller. It trusts the kernel
+over the controller's state: a thread is stopped if it answers a register
+read, and a byte is restored only if memory still holds uscope's trap and the
+original byte is known. Aborts skip it: stack overflow, running out of memory,
+and a panic during cleanup.
 
-> TODO: This cleanup doesn't exist yet. Add it around `Controller::run`, along
-> with a simulator scenario that panics during an attached session and checks
-> that the process's code and debug registers are restored. Also check how a
-> panic on the waiter thread reaches the controller.
+In development builds, `USCOPE_TEST_PANIC_AFTER=<request>` makes the controller
+panic after serving a request whose description begins with `<request>`.
+`tests/cli.rs` uses it to check that an attached process survives.
+
+The waiter thread asserts nothing. If it ends, the controller hears no more
+wait statuses and stalls.

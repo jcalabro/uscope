@@ -87,6 +87,7 @@ mod native;
 #[cfg(test)]
 pub mod native_tracee;
 mod new_task;
+mod panic_release;
 pub mod perf;
 mod post_mortem;
 mod presentation;
@@ -1117,6 +1118,24 @@ impl Waiter {
             .join()
             .map_err(|_| Error::BackendThreadPanicked)
     }
+
+    /// Stops the waiter, calling `serve` until it ends, so that one
+    /// blocked sending a status to a full queue can be let through.
+    fn stop_and_join_serving(self, mut serve: impl FnMut()) -> Result<()> {
+        let Some(thread) = self.thread else {
+            return Ok(());
+        };
+        thread.stop.store(true, Ordering::Release);
+        thread.handle.thread().unpark();
+        while !thread.handle.is_finished() {
+            serve();
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        thread
+            .handle
+            .join()
+            .map_err(|_| Error::BackendThreadPanicked)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1275,6 +1294,10 @@ struct Controller<P: InspectionOps> {
     /// How many messages the controller served, which paces the invariant
     /// checks of a large state.
     messages_served: u64,
+    /// The description a served request begins with that makes the
+    /// controller panic, from [`PANIC_AFTER`], to test what a panic leaves.
+    #[cfg(debug_assertions)]
+    panic_after: Option<String>,
 }
 
 /// Fork children still on their way to their first stop when their parent's
@@ -1307,6 +1330,11 @@ enum Start {
         reply: Reply<ExecutionId>,
     },
 }
+
+/// In development builds, the variable that names a request after which
+/// the controller panics, by the start of its description.
+#[cfg(debug_assertions)]
+const PANIC_AFTER: &str = "USCOPE_TEST_PANIC_AFTER";
 
 pub fn spawn_controller(
     executable: Executable,
@@ -1388,6 +1416,8 @@ impl<P: InspectionOps> Controller<P> {
             runtime_models: RefCell::default(),
             revision: 0,
             messages_served: 0,
+            #[cfg(debug_assertions)]
+            panic_after: std::env::var(PANIC_AFTER).ok(),
         }
     }
 }
@@ -1451,13 +1481,22 @@ impl<P: InspectionOps> Controller<P> {
 
 impl<P: LinuxTraceOps> Controller<P> {
     fn run(mut self) {
-        while let Some(message) = self.next_message(true) {
-            if !self.handle_message(message) {
-                return;
+        // Any panic ends the controller, an assertion's or another's; an
+        // attached process is released before it does.
+        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while let Some(message) = self.next_message(true) {
+                if !self.handle_message(message) {
+                    return;
+                }
             }
+            // The controller holds a request sender for its waiter, so the
+            // queue never closes; dropping the `Debugger` sends a shutdown
+            // request.
+        }));
+        if let Err(panic) = served {
+            self.release_after_panic();
+            std::panic::resume_unwind(panic);
         }
-        // The controller holds a request sender for its waiter, so the queue
-        // never closes; dropping the `Debugger` sends a shutdown request.
     }
 
     /// Serves one queued request or wait status, and returns whether the
@@ -1468,7 +1507,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             ControllerMessage::Request(request) => {
                 record!("request {}", request.describe());
                 let _span = crate::span!("request", "{}", request.describe());
-                self.handle_request(request)
+                #[cfg(debug_assertions)]
+                let injected = self
+                    .panic_after
+                    .as_ref()
+                    .is_some_and(|prefix| request.describe().starts_with(prefix.as_str()));
+                let keeps_running = self.handle_request(request);
+                #[cfg(debug_assertions)]
+                assert!(!injected, "a panic injected by {PANIC_AFTER}");
+                keeps_running
             }
             ControllerMessage::Wait(status) => {
                 let _span = crate::span!("wait");

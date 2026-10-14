@@ -939,6 +939,8 @@ struct FakeTrace {
     /// Mapped library files, by path, with their load bias and whether
     /// their debug information loads.
     libraries: RefCell<BTreeMap<PathBuf, (u64, bool)>>,
+    /// Statuses the kernel holds that no waiter has taken.
+    unreaped: RefCell<BTreeMap<Pid, WaitEvent>>,
 }
 
 impl FakeTrace {
@@ -1137,6 +1139,9 @@ impl LinuxTraceOps for FakeTrace {
     }
     fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
         panic!("unexpected wait")
+    }
+    fn poll_status(&self, pid: Pid) -> Option<WaitEvent> {
+        self.unreaped.borrow_mut().remove(&pid)
     }
     fn process_start_time(&self, process: Pid) -> Option<u64> {
         self.start_times.borrow().get(&process).copied()
@@ -2795,6 +2800,59 @@ fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
     );
     assert!(harness.controller.inferior.is_none());
     assert!(harness.controller.orphans.is_none());
+}
+
+/// After a panic, an attached process is released as a detach would:
+/// the trap a thread executed before any waiter took its stop is given
+/// back its instruction and the thread rewound over it, debug registers
+/// are cleared, and a signal a thread stopped to take, in a status the
+/// controller had not handled, is delivered as it is released.
+#[test]
+fn a_panic_releases_an_attached_process_as_a_detach_would() {
+    let mut harness = watch_harness(2);
+    harness.attached();
+    let (trapped, signaled) = (harness.threads[0], harness.threads[1]);
+    let site = VirtualAddress::new(0x40);
+    harness.inferior().breakpoints.insert(
+        site,
+        BreakpointSite {
+            original_byte: 0x55,
+            installed: true,
+            owners: BTreeSet::from([BreakpointOwner::Runtime]),
+        },
+    );
+    harness.trace().put_byte(site, BREAKPOINT_OPCODE);
+    harness.trace().set_pc(trapped, 0x41);
+    harness.trace().set_siginfo(trapped, libc::SI_KERNEL, None);
+    harness
+        .trace()
+        .unreaped
+        .borrow_mut()
+        .insert(trapped, WaitEvent::Stopped(trapped, Signal::SIGTRAP));
+    harness
+        .controller
+        .pending
+        .borrow_mut()
+        .push_back(ControllerMessage::Wait(WaitEvent::Stopped(
+            signaled,
+            Signal::SIGUSR1,
+        )));
+    harness.trace().take_actions();
+
+    harness.controller.release_after_panic();
+
+    let actions = harness.trace().take_actions();
+    for expected in [
+        format!("write_word {trapped} 0x40 0x55"),
+        format!("set_registers {trapped} rip=0x40"),
+        format!("write {trapped} dr7=0x0"),
+        format!("write {signaled} dr7=0x0"),
+        format!("detach {trapped} None"),
+        format!("detach {signaled} Some(SIGUSR1)"),
+    ] {
+        assert!(actions.contains(&expected), "{expected} in {actions:#?}");
+    }
+    assert!(harness.controller.inferior.is_none());
 }
 
 /// The controller's invariant check fires on state that contradicts
