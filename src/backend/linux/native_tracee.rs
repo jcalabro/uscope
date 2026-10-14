@@ -44,12 +44,14 @@ pub struct NativeTracee {
 )]
 impl NativeTracee {
     /// Launches `executable` traced, as the controller does, and returns
-    /// once it reported its first stop, which is returned too.
+    /// once it reported its first stop, which is returned too. Its
+    /// environment is empty, as a simulated program's is.
     #[must_use]
     pub fn spawn(executable: &Path, arguments: &[String]) -> (Self, WaitStatus) {
         let ptrace = super::native::LinuxPtrace::new();
         let options = LaunchOptions {
             arguments: arguments.iter().map(Into::into).collect(),
+            environment: std::env::vars_os().map(|(name, _)| (name, None)).collect(),
             stdout: Some(std::process::Stdio::null()),
             ..LaunchOptions::default()
         };
@@ -78,6 +80,7 @@ impl NativeTracee {
         let mut command = std::process::Command::new(executable);
         command
             .args(arguments)
+            .env_clear()
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null());
         super::sys::before_exec(

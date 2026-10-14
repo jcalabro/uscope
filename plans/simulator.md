@@ -209,6 +209,7 @@ fails the run as a model gap, so the simulator never guesses.
 |---|---|
 | K-EXEC-1 | A launched program first reports a stop for SIGTRAP with `si_code` `SI_USER` from itself, at its entry point, with `orig_rax` naming `execve`. Its `comm` is its file name cut to 15 bytes. |
 | K-EXEC-2 | With randomization off, a static executable loads where its image says. A static-PIE one, having no interpreter, is the first mapping in the mmap area: its whole span ends at the mmap base, `0x7ffff7fff000` while the stack limit is under 127 MiB. Each segment's file pages are mapped from the file; the rest of a segment, and a segment with no file bytes, are anonymous. A file page holds the file's bytes, even past the segment's, except that a writable segment reaching past its file bytes has the rest of its last file page zeroed; anonymous pages hold zeros. Segments that share a page are not modeled. |
+| K-EXEC-3 | At the first stop, `rsp` is 16-byte aligned at argc, then argv, a null, the environment (none), a null, and the auxiliary vector: `AT_PAGESZ`, `AT_CLKTCK` (100), `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_BASE` (0), `AT_FLAGS` (0), `AT_ENTRY`, `AT_SECURE` (0), `AT_RANDOM`, `AT_EXECFN`, `AT_PLATFORM` (`x86_64`), and `AT_NULL`, in that order. The vector ends at most 15 bytes below the 16 random bytes, the platform's name lies just above them, and from the 16-byte boundary at or below argv[0] the argument strings ascend in order, then the executable's name, which argv[0] repeats, and a zero word ending the stack. Linux's other entries, `AT_SYSINFO_EHDR`, `AT_MINSIGSTKSZ`, `AT_HWCAP`, `AT_HWCAP2`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_RSEQ_FEATURE_SIZE`, and `AT_RSEQ_ALIGN`, depend on the machine, the user, or the kernel's version and are left out, so the model's `rsp` lies 16 bytes higher for each. The random bytes are unspecified. |
 | K-WAIT-1 | A thread has at most one reportable status. A thread woken out of a stop loses an unreported one. Ptrace requests on a thread not in a ptrace-stop fail with ESRCH. |
 | K-WAIT-2 | Which ready status a wait returns is unspecified, so the scheduler chooses. One exception: a group leader's exit is reported after every other thread's. |
 | K-WAIT-3 | A tracer that exits releases every thread it still traces. A running or exiting one runs on untraced, one at its exit event finishes exiting, and a traced leader that exited alone joins its process's end as if never traced. |
@@ -358,17 +359,20 @@ kernel's half, or a user address with 5-level paging, by the machine),
 and a branch there, which faults on the branch or at its target; an
 unmapped address with the stack the next mapping above, which Linux
 grows the stack over within its resource limit and guard gap (the
-model's stack never grows, and having no vDSO, takes more of the space
-below it for the stack's than Linux does); and a read of memory mapped
+model's stack never grows; with no vDSO mapped below it, the gap
+reaches down to the image, further than Linux's would); and a read of memory mapped
 writable or executable but not readable, which x86's page tables allow
 and protection keys may refuse. Bytes iced cannot decode are a gap too:
 an undefined opcode raises SIGILL and a too-long instruction SIGSEGV,
 and no probe pins either.
 
 **Loader.** `loader.rs` maps the `PT_LOAD` segments of a static or
-static-PIE executable (K-EXEC-2), builds the initial stack (arguments, an
-empty environment, and a minimal auxiliary vector with `AT_RANDOM` from
-the seed), and sets `rip` to the entry point. Randomization is off, as
+static-PIE executable (K-EXEC-2), builds the initial stack (K-EXEC-3:
+arguments, an empty environment, and Linux's auxiliary vector less the
+entries that depend on the machine, the user, or the kernel's version,
+none of which a golden program reads, with `AT_RANDOM`'s bytes from the
+seed), and sets `rip` to the entry point. The conformance tests launch
+programs natively with an empty environment too. Randomization is off, as
 uscope launches programs. A static-PIE runtime relocates itself.
 
 **Shadow state** is what threads really did, kept where the debugger cannot

@@ -30,9 +30,28 @@ const AT_PHDR: u64 = 3;
 const AT_PHENT: u64 = 4;
 const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
+
+/// Where the interpreter loaded: zero, without one.
+const AT_BASE: u64 = 7;
+
+/// Zero, unless a `binfmt_misc` handler preserved argv[0].
+const AT_FLAGS: u64 = 8;
 const AT_ENTRY: u64 = 9;
+
+/// `uname`'s machine, `x86_64`.
+const AT_PLATFORM: u64 = 15;
+const AT_CLKTCK: u64 = 17;
+
+/// Zero, for a program that gains no privileges as it starts.
+const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
+
+/// x86's `USER_HZ`.
+const CLOCK_TICKS_PER_SECOND: u64 = 100;
+
+/// The platform `AT_PLATFORM` names.
+const PLATFORM: &[u8] = b"x86_64\0";
 
 /// The `rflags` a new process starts with: interrupts enabled and the
 /// reserved bit that always reads as one.
@@ -276,16 +295,20 @@ impl Image {
         (space, registers)
     }
 
-    /// Lays out the initial stack as Linux does, top down: the executable's
-    /// name, the argument strings, the random bytes, then argc, argv, an
-    /// empty environment, and the auxiliary vector, with argc 16-byte
-    /// aligned. Returns the stack pointer, which points at argc.
+    /// Lays out the initial stack as Linux does (K-EXEC-3), top down: a
+    /// zero word, the executable's name, the argument strings, the last
+    /// highest, then from the next 16-byte boundary down the platform's
+    /// name and the random bytes, and below them argc, argv, an empty
+    /// environment, and the auxiliary vector, with argc 16-byte aligned.
+    /// The vector has Linux's entries, in Linux's order, but for those
+    /// whose values depend on the machine, the user, or the kernel's
+    /// version, none of which the model has and no golden program reads.
+    /// Returns the stack pointer, which points at argc.
     fn build_stack(&self, space: &mut AddressSpace, arguments: &[String], random: [u8; 16]) -> u64 {
-        let mut top = STACK_TOP - 8;
-        let mut push_bytes = |space: &mut AddressSpace, bytes: &[u8]| {
-            top -= bytes.len() as u64;
-            assert!(space.write(top, bytes).is_ok(), "the stack is writable");
-            top
+        let push = |space: &mut AddressSpace, top: &mut u64, bytes: &[u8]| {
+            *top -= bytes.len() as u64;
+            assert!(space.write(*top, bytes).is_ok(), "the stack is writable");
+            *top
         };
 
         let terminated = |text: &str| {
@@ -294,33 +317,49 @@ impl Image {
             bytes
         };
 
+        let mut top = STACK_TOP - 8;
         let name = terminated(&self.path);
-        let executable_name = push_bytes(space, &name);
-        let mut argv = vec![push_bytes(space, &name)];
-        for argument in arguments {
-            argv.push(push_bytes(space, &terminated(argument)));
-        }
+        let executable_name = push(space, &mut top, &name);
+        let mut argv = arguments
+            .iter()
+            .rev()
+            .map(|argument| push(space, &mut top, &terminated(argument)))
+            .collect::<Vec<_>>();
+        argv.push(push(space, &mut top, &name));
+        argv.reverse();
 
-        let random_address = push_bytes(space, &random);
+        top &= !15;
+        let platform = push(space, &mut top, PLATFORM);
+        let random_address = push(space, &mut top, &random);
 
         let mut words = vec![argv.len() as u64];
         words.extend(&argv);
         words.extend([0, 0]);
         words.extend([
+            AT_PAGESZ,
+            PAGE_SIZE,
+            AT_CLKTCK,
+            CLOCK_TICKS_PER_SECOND,
             AT_PHDR,
             self.program_headers,
             AT_PHENT,
             56,
             AT_PHNUM,
             self.program_header_count,
-            AT_PAGESZ,
-            PAGE_SIZE,
+            AT_BASE,
+            0,
+            AT_FLAGS,
+            0,
             AT_ENTRY,
             self.entry,
+            AT_SECURE,
+            0,
             AT_RANDOM,
             random_address,
             AT_EXECFN,
             executable_name,
+            AT_PLATFORM,
+            platform,
             AT_NULL,
             0,
         ]);

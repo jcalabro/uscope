@@ -7,7 +7,7 @@
 
 use nix::libc;
 
-use super::tracee::{Record, dual_run, dual_run_then_exit};
+use super::tracee::{Record, Tracee, dual_run, dual_run_then_exit};
 use crate::sim::cpu::{RAX, RDI, RSP};
 use crate::sim::kernel::{Tid, WaitStatus};
 
@@ -132,6 +132,239 @@ fn k_exec_2_a_programs_pages_hold_what_linux_loads() {
             }
         });
     }
+}
+
+/// The entries Linux's auxiliary vector has that the model's leaves out
+/// (K-EXEC-3): their values depend on the machine, the user, or the
+/// kernel's version, none of which the model has, and no golden program
+/// reads them.
+const UNMODELED_AUXILIARY_ENTRIES: [u64; 10] = [
+    // AT_SYSINFO_EHDR: the vDSO, which the model does not map.
+    33, // AT_MINSIGSTKSZ: the signal frame's size, by the CPU's extended
+    // state.
+    51, // AT_HWCAP and AT_HWCAP2: CPUID features.
+    16, 26,
+    // AT_UID, AT_EUID, AT_GID, and AT_EGID: the credentials of whoever
+    // ran the program.
+    11, 12, 13, 14,
+    // AT_RSEQ_FEATURE_SIZE and AT_RSEQ_ALIGN: restartable sequences, since
+    // Linux 6.3, sized by its version.
+    27, 28,
+];
+
+/// The stack a program starts with, as a K-EXEC-3 script reads it.
+struct FirstStack {
+    /// Where the stack mapping ends.
+    top: u64,
+    rsp: u64,
+    argv: Vec<u64>,
+
+    /// The word after argv's, a null.
+    argv_end: u64,
+    environment: usize,
+
+    /// The auxiliary vector's entries but `AT_NULL` and those the model
+    /// leaves out.
+    auxiliary: Vec<(u64, u64)>,
+
+    /// `AT_NULL`'s value, and where the vector ends.
+    null: u64,
+    end: u64,
+}
+
+impl FirstStack {
+    fn read(tracee: &dyn Tracee, thread: Tid) -> Self {
+        let (registers, _) = tracee
+            .registers(thread)
+            .expect("registers at the first stop");
+        let maps = tracee.maps(thread).unwrap_or_default();
+        let top = maps
+            .lines()
+            .find(|line| line.ends_with("[stack]"))
+            .and_then(|line| u64::from_str_radix(line.split(['-', ' ']).nth(1)?, 16).ok())
+            .expect("a stack");
+        let word = |address| stack_word(tracee, thread, address);
+        let rsp = registers.general[RSP];
+        let argv = (0..word(rsp))
+            .map(|index| word(rsp + 8 + 8 * index))
+            .collect::<Vec<_>>();
+        let mut at = rsp + 8 + 8 * argv.len() as u64;
+        let argv_end = word(at);
+        let mut environment = 0;
+        while word(at + 8) != 0 {
+            environment += 1;
+            at += 8;
+        }
+
+        at += 16;
+        let mut auxiliary = Vec::new();
+        let null = loop {
+            let (key, value) = (word(at), word(at + 8));
+            at += 16;
+            if key == 0 {
+                break value;
+            }
+
+            if !UNMODELED_AUXILIARY_ENTRIES.contains(&key) {
+                auxiliary.push((key, value));
+            }
+        };
+
+        Self {
+            top,
+            rsp,
+            argv,
+            argv_end,
+            environment,
+            auxiliary,
+            null,
+            end: at,
+        }
+    }
+
+    fn entry(&self, key: u64) -> Option<u64> {
+        self.auxiliary
+            .iter()
+            .find(|&&(held, _)| held == key)
+            .map(|&(_, value)| value)
+    }
+}
+
+fn stack_word(tracee: &dyn Tracee, thread: Tid, address: u64) -> u64 {
+    tracee
+        .peek(thread, address)
+        .unwrap_or_else(|errno| panic!("reading the stack at {address:#x}: {errno}"))
+}
+
+/// The string at `address`, which ends before `top`.
+fn stack_string(tracee: &dyn Tracee, thread: Tid, address: u64, top: u64) -> String {
+    let mut bytes = Vec::new();
+    for at in (address..top).step_by(8) {
+        let chunk = stack_word(tracee, thread, at).to_le_bytes();
+        if let Some(end) = chunk.iter().position(|&byte| byte == 0) {
+            bytes.extend(&chunk[..end]);
+            break;
+        }
+
+        bytes.extend(chunk);
+    }
+
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// K-EXEC-3: at the first stop, the stack holds what Linux puts there and
+/// where: argc at a 16-byte aligned `rsp`, argv, an empty environment, and
+/// the auxiliary vector, whose entries are Linux's less those the model
+/// leaves out; then, at most 15 bytes above, the random bytes, the
+/// platform's name, and, from the next 16-byte boundary up, the argument
+/// strings in order, the executable's name, and a zero word ending the
+/// stack. Every place is recorded relative to its neighbours, since the
+/// executable's path, and so its length, differs between the runs.
+#[test]
+fn k_exec_3_the_first_stack_is_laid_out_as_linux_lays_it() {
+    const AT_PHDR: u64 = 3;
+    const AT_ENTRY: u64 = 9;
+    const AT_PLATFORM: u64 = 15;
+    const AT_RANDOM: u64 = 25;
+    const AT_EXECFN: u64 = 31;
+    dual_run("straight", &["7", "", "abc"], |record| {
+        let leader = record.leader();
+        let bias = record.landmarks.bias;
+        let tracee = &*record.tracee;
+        let stack = FirstStack::read(tracee, leader);
+        let string = |address| stack_string(tracee, leader, address, stack.top);
+        let mut lines = vec![
+            format!(
+                "the stack ends at {:#x} with {:#x}; rsp % 16 is {}",
+                stack.top,
+                stack_word(tracee, leader, stack.top - 8),
+                stack.rsp % 16
+            ),
+            format!("argc {}, then {:#x}", stack.argv.len(), stack.argv_end),
+            format!("environment variables: {}", stack.environment),
+            format!("AT_NULL holds {}", stack.null),
+        ];
+        let shown = stack
+            .auxiliary
+            .iter()
+            .map(|&(key, value)| match key {
+                AT_PHDR | AT_ENTRY => format!("{key}: image+{:#x}", value.wrapping_sub(bias)),
+                AT_PLATFORM => format!("{key}: {:?}", string(value)),
+                AT_RANDOM | AT_EXECFN => format!("{key}: on the stack"),
+                _ => format!("{key}: {value:#x}"),
+            })
+            .collect::<Vec<_>>();
+        lines.push(format!("auxiliary vector: {shown:?}"));
+
+        // Each string from argv[0] up, as the distance from the end of
+        // the one before; the executable's name follows the arguments.
+        let executable = stack.entry(AT_EXECFN).map(string).unwrap_or_default();
+        let mut strings = stack
+            .argv
+            .iter()
+            .map(|&address| (address, string(address)))
+            .collect::<Vec<_>>();
+        strings.extend(
+            stack
+                .entry(AT_EXECFN)
+                .map(|address| (address, executable.clone())),
+        );
+        let shown = strings
+            .iter()
+            .enumerate()
+            .map(|(index, (address, text))| {
+                let text = if index == stack.argv.len() {
+                    let name = text.rsplit('/').next().unwrap_or_default();
+                    format!("AT_EXECFN, naming {name}")
+                } else if index == 0 && *text == executable {
+                    "the executable".to_owned()
+                } else {
+                    format!("{text:?}")
+                };
+
+                let after = index.checked_sub(1).map(|before| {
+                    let (start, text) = &strings[before];
+                    address.wrapping_sub(start + text.len() as u64 + 1)
+                });
+                format!("{text} {after:?} after the last")
+            })
+            .collect::<Vec<_>>();
+        lines.push(format!("strings: {shown:?}"));
+        if let Some((address, text)) = strings.last() {
+            let end = address + text.len() as u64 + 1;
+            lines.push(format!(
+                "the last string ends {} below the stack's end",
+                stack.top - end
+            ));
+        }
+
+        // The platform's name lies below argv[0] rounded down to 16 bytes,
+        // the random bytes below it, and the vector's end below them.
+        let places = [
+            (
+                "argv[0] rounded down",
+                stack.argv.first().map(|&address| address & !15),
+            ),
+            ("AT_PLATFORM", stack.entry(AT_PLATFORM)),
+            ("AT_RANDOM", stack.entry(AT_RANDOM)),
+            ("the vector's end", Some(stack.end)),
+        ];
+        for pair in places.windows(2) {
+            let distance = pair[0].1.zip(pair[1].1).map(|(upper, lower)| {
+                let distance = upper.wrapping_sub(lower).cast_signed();
+                if pair[1].0 == "the vector's end" && (0..16).contains(&distance) {
+                    "under 16".to_owned()
+                } else {
+                    distance.to_string()
+                }
+            });
+            lines.push(format!("{} is {distance:?} below {}", pair[1].0, pair[0].0));
+        }
+
+        for line in lines {
+            record.note(line);
+        }
+    });
 }
 
 /// K-TRAP-1: `int3` reports SIGTRAP with `SI_KERNEL` and `rip` past the
