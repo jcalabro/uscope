@@ -163,6 +163,7 @@
         packages = with pkgs; [
           rust
           cargo-fuzz
+          cargo-mutants
           cargo-nextest
           just
           gcc

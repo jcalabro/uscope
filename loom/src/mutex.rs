@@ -78,6 +78,16 @@ impl Waiters {
         notify
     }
 
+    /// Wakes the thread listed first.
+    fn wake_one(&self) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let first = (!waiting.is_empty()).then(|| waiting.remove(0));
+        drop(waiting);
+        if let Some(notify) = first {
+            notify.notify();
+        }
+    }
+
     fn wake_all(&self) {
         let waiting =
             std::mem::take(&mut *self.waiting.lock().unwrap_or_else(PoisonError::into_inner));
@@ -198,5 +208,13 @@ impl Condvar {
 
     pub fn notify_all(&self) {
         self.waiters.wake_all();
+    }
+
+    #[allow(
+        dead_code,
+        reason = "no protocol uses it; loom/mutants/notify-one-waiter.patch does"
+    )]
+    pub fn notify_one(&self) {
+        self.waiters.wake_one();
     }
 }

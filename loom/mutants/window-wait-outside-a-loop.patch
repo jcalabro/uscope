@@ -1,0 +1,13 @@
+Waits for the window once, with `if`: a spurious wake starts a walk outside it.
+
+--- a/src/in_order.rs
++++ b/src/in_order.rs
+@@ -169,7 +169,7 @@
+     /// walk is abandoned.
+     fn enter(&self, group: usize, abandoned: &AtomicBool) {
+         let mut added = self.added.lock().unwrap_or_else(PoisonError::into_inner);
+-        while group >= added.saturating_add(self.ahead) && !abandoned.load(Ordering::Relaxed) {
++        if group >= added.saturating_add(self.ahead) && !abandoned.load(Ordering::Relaxed) {
+             added = self
+                 .progress
+                 .wait(added)

@@ -415,6 +415,12 @@ thread, run with fewer.
 
 Before trusting a new model, break the protocol on purpose and watch the
 model fail. Loom passes a model that never reaches the broken code.
+`just loom-mutants` does this for every model, in under a minute: it
+applies each bug in `loom/mutants/` and then each break cargo-mutants
+makes, and fails if the models pass any. Keep a bug there for each thing
+the models' `Mutex` and `Condvar` exist to catch, since cargo-mutants
+makes none of those. A break that changes nothing goes in
+`loom/mutants.toml`, with the reason.
 
 Loom only runs code built on its types: not tokio tasks, rayon, syscalls, or
 the kernel side of a shared ring. Model a protocol of threads and locks, and
@@ -435,7 +441,7 @@ Every change runs `just`. Add these checks according to scope:
 | Fixture or golden program | `just build-test-programs`; record a manifest only when intentional |
 | Public docs | `just docs` plus executable-doc tests when affected |
 | Unsafe code | `just miri` |
-| A protocol `loom/` models | `just loom 4` |
+| A protocol `loom/` models | `just loom 4` and `just loom-mutants` |
 
 `just all` includes the repository's broad pre-commit checks. Run specialized
 long measurements only when the table calls for them; repeating them after
