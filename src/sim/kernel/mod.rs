@@ -1656,7 +1656,15 @@ impl Kernel {
             return Some(String::new());
         }
 
-        Some(self.processes.get(&thread.tgid)?.space.maps())
+        let maps = self.processes.get(&thread.tgid)?.space.maps();
+        #[cfg(test)]
+        let maps = if self.sabotage == Some(Sabotage::ShiftMappings) {
+            shift_file_mappings(&maps)
+        } else {
+            maps
+        };
+
+        Some(maps)
     }
 
     /// The threads of `group` not yet reaped, as `/proc/<tgid>/task` lists
@@ -1666,6 +1674,35 @@ impl Kernel {
             .values()
             .filter(move |thread| thread.tgid == group)
     }
+}
+
+/// `maps` with each file's mappings a page higher than they are, for
+/// [`Sabotage::ShiftMappings`].
+#[cfg(test)]
+fn shift_file_mappings(maps: &str) -> String {
+    maps.lines()
+        .map(|line| {
+            let range = line.split_whitespace().next().unwrap_or_default();
+            let bounds = range
+                .split_once('-')
+                .and_then(|(start, end)| {
+                    Some((
+                        u64::from_str_radix(start, 16).ok()?,
+                        u64::from_str_radix(end, 16).ok()?,
+                    ))
+                })
+                .filter(|_| line.contains('/'));
+            match bounds {
+                Some((start, end)) => format!(
+                    "{:08x}-{:08x}{}\n",
+                    start + crate::sim::memory::PAGE_SIZE,
+                    end + crate::sim::memory::PAGE_SIZE,
+                    &line[range.len()..]
+                ),
+                None => format!("{line}\n"),
+            }
+        })
+        .collect()
 }
 
 /// Executes the program's own instruction at `rip` though a trap covers

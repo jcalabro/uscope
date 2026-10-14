@@ -844,12 +844,24 @@ impl Client {
             .loaded_modules()
             .await
             .map_err(|error| protocol(format!("listing modules failed: {error}")))?;
-        modules
+        let bias = modules
             .modules
             .iter()
             .find(|record| record.module.id == ModuleId::new(0))
             .map(|record| record.module.load_bias)
-            .ok_or_else(|| protocol("no main module is loaded"))
+            .ok_or_else(|| protocol("no main module is loaded"))?;
+        if bias.get() != self.script.image.bias() {
+            return Err(Failure::debugger(
+                "modules",
+                format!(
+                    "the main module is loaded {:#x} above its addresses, not {:#x}",
+                    bias.get(),
+                    self.script.image.bias()
+                ),
+            ));
+        }
+
+        Ok(bias)
     }
 
     /// Reads code, which must show the program's own bytes whatever traps

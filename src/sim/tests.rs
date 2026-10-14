@@ -79,6 +79,49 @@ fn first_failure_with(sabotage: Sabotage) -> &'static str {
         .expect("a sabotaged run fails")
 }
 
+/// A kernel that misplaces the program's mappings makes the debugger
+/// misplace the program, which the client's check of where the debugger
+/// says it loaded catches. Misplaced breakpoints usually fail first.
+#[test]
+fn shifted_mappings_fail_the_modules_check() {
+    assert!(fails_with(
+        Sabotage::ShiftMappings,
+        "modules",
+        "the main module"
+    ));
+}
+
+/// A watch on an object by name, when the debugger misplaces the program,
+/// watches other memory than the symbol table says the object is in.
+#[test]
+fn shifted_mappings_fail_watch_accounting() {
+    assert!(fails_with(
+        Sabotage::ShiftMappings,
+        "watch accounting",
+        "but watchpoint"
+    ));
+}
+
+/// Whether some fixed seed run with `sabotage` fails `check`, saying
+/// `message`.
+fn fails_with(sabotage: Sabotage, check: &str, message: &str) -> bool {
+    let corpus = Corpus::load().expect("load the golden corpus");
+    let settings = Settings {
+        sabotage: Some(sabotage),
+        ..Settings::default()
+    };
+
+    (0..GATE_SEEDS).any(|seed| {
+        run(seed, &corpus, &settings)
+            .failure
+            .is_some_and(|failure| {
+                failure.kind == FailureKind::Debugger
+                    && failure.check == check
+                    && failure.message.contains(message)
+            })
+    })
+}
+
 /// A kernel that loses the debugger's writes leaves traps the controller
 /// believes installed missing from memory, which code integrity catches.
 #[test]

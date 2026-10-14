@@ -104,8 +104,11 @@ impl Client {
                 .await
         };
 
+        // Where the object is, from the symbol table and the loader, not
+        // from the debugger.
+        let wanted = (image_address + self.script.image.bias(), size);
         match result {
-            Ok(watchpoint) => self.armed(&watchpoint, &name, policy),
+            Ok(watchpoint) => self.armed(&watchpoint, &name, wanted, policy)?,
             Err(Error::UnsupportedWatchAccess(WatchAccess::Read))
                 if access == WatchAccess::Read =>
             {
@@ -136,8 +139,36 @@ impl Client {
     }
 
     /// Notes a watchpoint the debugger armed, which the kernel then
-    /// follows.
-    fn armed(&self, watchpoint: &Watchpoint, name: &str, policy: Policy) {
+    /// follows, failing unless it watches the `wanted` address and size
+    /// and its slots cover them.
+    fn armed(
+        &self,
+        watchpoint: &Watchpoint,
+        name: &str,
+        wanted: (u64, u64),
+        policy: Policy,
+    ) -> Result<(), Failure> {
+        let (address, size) = wanted;
+        let covered = (address..address + size).all(|byte| {
+            watchpoint
+                .coverage
+                .iter()
+                .any(|span| (span.start.get()..span.end.get()).contains(&byte))
+        });
+        if (watchpoint.address.get(), watchpoint.byte_size) != wanted || !covered {
+            return Err(Failure::debugger(
+                "watch accounting",
+                format!(
+                    "{name} is {size} bytes at {address:#x}, but watchpoint {} watches {} at {:#x} \
+                     with slots over {:x?}",
+                    watchpoint.id,
+                    watchpoint.byte_size,
+                    watchpoint.address.get(),
+                    watchpoint.coverage
+                ),
+            ));
+        }
+
         self.note(format!(
             "watchpoint {} on {name} for {}: {:x?} {:?} {:?}",
             watchpoint.id,
@@ -162,6 +193,7 @@ impl Client {
             },
         );
         self.mark(Mark::WatchAdded);
+        Ok(())
     }
 
     /// Chooses a new watchpoint's options: half none, the rest a hit

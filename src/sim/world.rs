@@ -181,6 +181,11 @@ pub enum Sabotage {
     /// The model of the tracepoint stream drops a call from a full ring
     /// without counting it lost.
     LoseTracedCalls,
+
+    /// `/proc/<pid>/maps` reports each file's mappings a page higher than
+    /// they are, so the debugger places a position-independent program's
+    /// addresses a page off.
+    ShiftMappings,
 }
 
 impl Default for Settings {
