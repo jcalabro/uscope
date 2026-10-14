@@ -137,26 +137,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // The leader may have exited before the rest of its process.
         let pid = inferior.memory_thread();
         let main_loaded = inferior.loaded_module;
-        let mut observed = Vec::<(PathBuf, u64)>::new();
-        let mut mapped_modules = BTreeMap::new();
+        let link_maps = loader_link_maps(&self.ptrace, pid, &self.module_image, main_loaded)?;
         let mappings = self.ptrace.module_mappings(pid)?;
-        for mapping in mappings.files {
-            if mapping.inode == self.executable_identity.inode {
-                continue;
-            }
-            let module = match self.mapped_modules.remove(&mapping) {
-                Some(module) => module,
-                None => match self.ptrace.identify_module(&mapping) {
-                    Some(module) => module,
-                    None => continue,
-                },
-            };
-            if module.0 != *self.executable {
-                observed.push(module.clone());
-            }
-            mapped_modules.insert(mapping, module);
-        }
-        self.mapped_modules = mapped_modules;
+        let mut observed = self.observe_files(mappings.files, mappings.headers, &link_maps);
         let moved = self.moved_code(&observed, mappings.vdso.as_ref());
         let lost_locations = self.reconcile_sites(&moved)?;
         let (vdso, vdso_image) = self.observe_vdso(pid, mappings.vdso.as_ref()).unzip();
@@ -164,7 +147,6 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut vdso_image = vdso_image.flatten();
         observed.sort();
         observed.dedup();
-        let link_maps = loader_link_maps(&self.ptrace, pid, &self.module_image, main_loaded)?;
 
         let observed_modules = observed.iter().cloned().collect::<BTreeSet<_>>();
         let unloaded = self
@@ -232,6 +214,48 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// The files mapped as modules other than the executable, with their
+    /// load biases. Each mapping's file is remembered for the next refresh.
+    fn observe_files(
+        &mut self,
+        files: Vec<ModuleMapping>,
+        headers: Vec<ModuleMapping>,
+        link_maps: &[(u64, VirtualAddress)],
+    ) -> Vec<(PathBuf, u64)> {
+        let mut observed = Vec::<(PathBuf, u64)>::new();
+        let mut known = std::mem::take(&mut self.mapped_modules);
+        let mut mapped_modules = BTreeMap::new();
+        let mut identify = |mapping: ModuleMapping| {
+            let module = known
+                .remove(&mapping)
+                .or_else(|| self.ptrace.identify_module(&mapping))?;
+            mapped_modules.insert(mapping, module.clone());
+            Some(module)
+        };
+        let executable_inode = self.executable_identity.inode;
+        // A library with no code maps nothing executable; the loader lists
+        // an object at its first page.
+        let code_less = headers
+            .into_iter()
+            .filter(|mapping| {
+                link_maps.iter().any(|&(bias, _)| bias == mapping.start)
+                    && !files.iter().any(|file| file.inode == mapping.inode)
+            })
+            .collect::<Vec<_>>();
+        for mapping in files.into_iter().chain(code_less) {
+            if mapping.inode == executable_inode {
+                continue;
+            }
+            if let Some(module) = identify(mapping)
+                && module.0 != *self.executable
+            {
+                observed.push(module);
+            }
+        }
+        self.mapped_modules = mapped_modules;
+        observed
+    }
+
     /// Numbers each of the `observed` modules not yet registered, in the
     /// order they were observed, whether or not it will load.
     fn number_new_modules(&mut self, observed: Vec<(PathBuf, u64)>) -> Result<Vec<NewModule>> {
@@ -410,6 +434,9 @@ pub(super) fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
 pub(super) struct ProcessMappings {
     /// Executable mappings of files.
     pub(super) files: Vec<ModuleMapping>,
+    /// Other mappings of files' first pages. A library with no code maps
+    /// only these, so one is a module where the loader lists one.
+    pub(super) headers: Vec<ModuleMapping>,
     /// The vDSO, which no file backs.
     pub(super) vdso: Option<Range<u64>>,
 }
@@ -417,10 +444,13 @@ pub(super) struct ProcessMappings {
 /// The mappings holding loaded modules in a process whose memory map is
 /// `maps`.
 pub(super) fn process_mappings_in(maps: &str) -> Result<ProcessMappings> {
-    let mut files = parse_maps(maps)?;
-    files.retain(|mapping| mapping.executable);
+    let (files, headers) = parse_maps(maps)?
+        .into_iter()
+        .filter(|mapping| mapping.executable || mapping.file_offset == 0)
+        .partition(|mapping| mapping.executable);
     Ok(ProcessMappings {
         files,
+        headers,
         vdso: vdso_mapping(maps),
     })
 }

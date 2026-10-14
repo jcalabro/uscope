@@ -162,8 +162,8 @@ async fn attach_traces_a_process_whose_main_thread_exited() {
         }
     ));
     assert_eq!(snapshot.threads.len(), 1, "{:?}", snapshot.threads);
-    // Both TLS lookups read the address space through the worker.
-    let (_, value) = super::globals::tls_location_both_ways(&scenario, "worker_value").await;
+    // The TLS lookup reads the address space through the worker.
+    let (_, value) = super::globals::tls_location_by_name(&scenario, "worker_value").await;
     assert_eq!(value, 31);
 
     scenario.shutdown().await;

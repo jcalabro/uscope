@@ -54,7 +54,7 @@ read_dash_version() {
 readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
-build_disassembly_fixture build_tls_modules_fixture build_rust_fixture build_go_fixture \
+build_disassembly_fixture build_tls_modules_fixture build_ubuntu_tls_fixture build_rust_fixture build_go_fixture \
 build_go_command build_zig_fixture build_zig_self_hosted_fixture build_odin_fixture build_fortran_fixture build_d_fixture build_nim_fixture build_ada_fixture "
 # What each running job makes, by process ID, and the compiles among them.
 declare -A job_outputs=()
@@ -381,9 +381,64 @@ build_tls_modules_fixture() {
         "${command[@]}"
 }
 
-# Derives a C library standing in for another machine's build: the version
-# that libthread_db checks and the build-id each differ in one byte, while the
-# code stays the toolchain's own so the fixture runs against its loader.
+# Builds a library of the TLS modules fixture, or with `program` a program,
+# for Ubuntu's build of glibc VERSION. Zig compiles SOURCE against that
+# version's headers and symbols, with the compiler flags before `--`; GNU ld
+# links the object with the arguments after it, as Ubuntu builds programs:
+# against its own startup files and libraries, needing only those it uses. A
+# program runs on Ubuntu's loader and finds Ubuntu's libraries first, never
+# the toolchain's.
+build_ubuntu_tls_fixture() {
+    local kind="$1"
+    local version="$2"
+    local output="$3"
+    shift 3
+    local root
+    root=$(realpath "$USCOPE_UBUNTU_GLIBC/$version")
+    # shellcheck disable=SC2016
+    local script='
+        set -euo pipefail
+        kind="$1"; root="$2"; version="$3"; output="$4"; shift 4
+        compile=()
+        while [[ "$1" != -- ]]; do compile+=("$1"); shift; done
+        shift
+        lib="$root/lib"; dev="$root/dev"; object="${output}.o"
+        position=-fPIE
+        [[ "$kind" == program ]] || position=-fPIC
+        zig cc -target "x86_64-linux-gnu.${version}" -fno-sanitize=undefined -std=c17 \
+            -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 "$position" "${compile[@]}" -c -o "$object"
+        if [[ "$kind" == program ]]; then
+            start=(-pie "$dev/Scrt1.o")
+            threads=("$lib/libpthread.so.0" "$lib/libdl.so.2")
+        else
+            start=(-shared "-Wl,-soname,${output##*/}")
+            threads=()
+        fi
+        gcc -nostdlib "${start[@]}" "$dev/crti.o" "$(gcc -print-file-name=crtbeginS.o)" \
+            "$object" -Wl,--as-needed "$@" "${threads[@]}" "$lib/libc.so.6" \
+            "$dev"/lib*_nonshared.a "$lib/ld-linux-x86-64.so.2" \
+            "$(gcc -print-file-name=crtendS.o)" "$dev/crtn.o" -o "$output"
+        if [[ "$kind" == program ]]; then
+            patchelf --set-interpreter "$(realpath "$lib/ld-linux-x86-64.so.2")" \
+                --set-rpath "\$ORIGIN:$lib" "$output"
+        else
+            patchelf --remove-rpath "$output"
+        fi
+        rm "$object"
+    '
+    local -a command=(bash -c "$script" _ "$kind" "$root" "$version" "$output" "$@")
+    if [[ -z "$zig_version" ]]; then
+        zig_version=$(zig version)
+    fi
+    read_dash_version gcc
+    run_cached_build "$c_fixtures_dir/tls-modules" "$output" \
+        "compiler=zig ${zig_version}"$'\n'"linker=${dash_version}"$'\n'"target=x86_64-linux-gnu.${version}" \
+        "${command[@]}"
+}
+
+# Derives a C library standing in for another machine's build: its build-id
+# differs in one byte, while the code stays the toolchain's own so the fixture
+# runs against its loader.
 derive_foreign_libc() {
     wait_builds
     local input="$1"
@@ -393,44 +448,26 @@ derive_foreign_libc() {
     script='
         set -euo pipefail
         input="$1"; output="$2"
-        # Converts a virtual address to its file offset through the load
-        # segment containing it. Each awk below reads all its input, printing
-        # only the first match: one that exits early fails the pipeline when
-        # what feeds it is still writing.
-        file_offset() {
-            readelf -lW "$input" | awk -v address=$(( $1 )) "
-                !found && \$1 == \"LOAD\" && address >= strtonum(\$3) && address < strtonum(\$3) + strtonum(\$5) {
-                    print address - strtonum(\$3) + strtonum(\$2); found = 1
-                }"
-        }
         byte_at() { od -An -tu1 -j "$1" -N1 "$output" | tr -d " "; }
         put_byte() { printf "\\$(printf %03o "$2")" | dd of="$output" bs=1 seek="$1" conv=notrunc status=none; }
-        read -r version_address version_size < <(readelf -W --dyn-syms "$input" \
-            | awk "!found && \$8 ~ /^__nptl_version@/ { print \"0x\" \$2, \$3; found = 1 }")
-        version=$(file_offset "$version_address")
         # Section numbers are bracketed and padded, so they are removed first.
+        # awk reads all its input, printing only the first match: one that
+        # exits early fails the pipeline when what feeds it is still writing.
         note=$(readelf -SW "$input" | sed "s/^ *\\[ *[0-9]*\\]//" \
             | awk "!found && \$1 == \".note.gnu.build-id\" { print \"0x\" \$4; found = 1 }")
-        if [[ -z "$version" || -z "$note" ]]; then
-            printf "error: %s has no __nptl_version or build-id note\n" "$input" >&2
+        if [[ -z "$note" ]]; then
+            printf "error: %s has no build-id note\n" "$input" >&2
             exit 1
         fi
         cp "$input" "$output.tmp"
         chmod u+w "$output.tmp"
         output="$output.tmp"
-        if [[ "$(dd if="$output" bs=1 skip="$version" count="$version_size" status=none | tr -d "\0")" != [0-9]*.* ]]; then
-            printf "error: %s does not hold a version at __nptl_version\n" "$input" >&2
-            exit 1
-        fi
-        # The major version becomes 9, or 8 when it already is 9.
-        major=$(byte_at "$version")
-        put_byte "$version" $(( major == 57 ? 56 : 57 ))
         # The build-id descriptor follows the 12-byte note header and "GNU".
         identifier=$(( note + 16 ))
         put_byte "$identifier" $(( $(byte_at "$identifier") ^ 255 ))
         mv "$output" "${output%.tmp}"
     '
-    run_cached_build "$input" "$output" "derivation=foreign-libc-v1" \
+    run_cached_build "$input" "$output" "derivation=foreign-libc-v2" \
         bash -c "$script" _ "$input" "$output"
 }
 
@@ -934,7 +971,7 @@ require_musl() {
 # Fails the build unless a fixture is statically linked with glibc: it has no
 # interpreter and contains glibc's static TLS setup. `threads` says whether it
 # must contain glibc's thread library, whose absence leaves a program without
-# the descriptors libthread_db reads.
+# glibc's descriptors of its thread structures.
 require_static_glibc() {
     wait_for "$1"
     local output="$1"
@@ -964,8 +1001,63 @@ require_static_glibc() {
     record_validation "$stamp" "$signature"
 }
 
+# Fails the build unless a fixture runs on Ubuntu's glibc VERSION: its loader
+# finds every library outside the output directory among Ubuntu's, never the
+# toolchain's or the host's. `pthread` says whether it must load libpthread,
+# which alone describes the thread structures of a glibc before 2.34.
+require_ubuntu_glibc() {
+    wait_for "$1"
+    local output="$1"
+    local version="$2"
+    local pthread="$3"
+    local stamp="${output}.validation-ubuntu-glibc"
+    local libraries
+    libraries=$(realpath "$USCOPE_UBUNTU_GLIBC/$version/lib")
+    local signature="validator=ubuntu-glibc-v1"$'\n'"libraries=${libraries}"$'\n'"pthread=${pthread}"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    local loaded path outputs
+    loaded=$(LD_TRACE_LOADED_OBJECTS=1 "$output")
+    outputs=$(realpath "$output_dir")
+    # Each line names a library, then the path it was found at, if any.
+    while read -r path; do
+        if [[ "$path" != "$libraries"/* && "$path" != "$outputs"/* ]]; then
+            printf 'error: %s loads %s, not Ubuntu glibc %s\n' "$output" "$path" "$version" >&2
+            exit 1
+        fi
+    done < <(awk '$1 != "linux-vdso.so.1" { print ($2 == "=>" ? $3 : $1) }' <<<"$loaded")
+    if grep -E '^\s*libpthread\.so\.0 => ' <<<"$loaded" >/dev/null; then
+        local linked=yes
+    else
+        local linked=no
+    fi
+    if [[ $linked != "$pthread" ]]; then
+        printf 'error: %s loads libpthread: %s, expected %s\n' \
+            "$output" "$linked" "$pthread" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
+# Requires that OUTPUT maps no code: no loadable segment is executable.
+require_no_code() {
+    wait_for "$1"
+    local output="$1"
+    local stamp="${output}.validation-no-code"
+    local signature="validator=no-code-v1"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    if readelf -lW "$output" | awk '$1 == "LOAD" && $(NF - 1) ~ /E/ { found = 1 } END { exit !found }'; then
+        printf 'error: %s has an executable segment\n' "$output" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 require_dwarf_operation() {
     wait_for "$1"
     local output="$1"
@@ -1683,6 +1775,29 @@ require_static_glibc "$output_dir/tls-modules-gcc-static" yes
 require_static_glibc "$output_dir/tls-modules-clang-static-pie" yes
 require_static_glibc "$output_dir/tls-modules-single-thread-gcc-static-pie" no
 require_static_glibc "$output_dir/tls-modules-single-thread-clang-static" no
+# Dynamically linked on Ubuntu's glibc builds: 18.04's and 20.04's describe
+# their thread structures in libpthread, which a program without threads
+# never loads, and 22.04's in libc, as every glibc since 2.34 does.
+for version in 2.27 2.31 2.35; do
+    suffix="-glibc${version}"
+    build_ubuntu_tls_fixture library "$version" "$output_dir/libtls-modules${suffix}.so" \
+        "$tls_modules_dir/library.c" --
+    build_ubuntu_tls_fixture library "$version" "$output_dir/libtls-plugin${suffix}.so" \
+        "$tls_modules_dir/plugin.c" --
+    build_ubuntu_tls_fixture program "$version" "$output_dir/tls-modules${suffix}" \
+        "-DPLUGIN=\"libtls-plugin${suffix}.so\"" "$tls_modules_dir/main.c" -- \
+        "-L$output_dir" "-ltls-modules${suffix}"
+done
+for version in 2.31 2.35; do
+    build_ubuntu_tls_fixture program "$version" \
+        "$output_dir/tls-modules-single-thread-glibc${version}" \
+        "$tls_modules_dir/single-thread.c" -- "-L$output_dir" "-ltls-modules-glibc${version}"
+done
+require_ubuntu_glibc "$output_dir/tls-modules-glibc2.27" 2.27 yes
+require_ubuntu_glibc "$output_dir/tls-modules-glibc2.31" 2.31 yes
+require_ubuntu_glibc "$output_dir/tls-modules-glibc2.35" 2.35 no
+require_ubuntu_glibc "$output_dir/tls-modules-single-thread-glibc2.31" 2.31 no
+require_ubuntu_glibc "$output_dir/tls-modules-single-thread-glibc2.35" 2.35 no
 for variant in "g++ gcc -O0" "g++ gcc -O2" "clang++ clang -O2"; do
     read -r compiler name level <<<"$variant"
     suffix="${level#-}"
@@ -2196,6 +2311,11 @@ build_fixture clang "$c_fixtures_dir/locations/main.c" "$output_dir/locations-cl
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie "${locations_library[@]}"
 require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_OP_piece'
 require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_AT_call_tail_call'
+build_shared_fixture gcc "$c_fixtures_dir/data-library/library.c" "$output_dir/libdata.so" \
+    -O0 -g3 -gdwarf-5 -nostdlib
+require_no_code "$output_dir/libdata.so"
+build_fixture gcc "$c_fixtures_dir/data-library/main.c" "$output_dir/data-library" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir" -ldata '-Wl,-rpath,$ORIGIN'
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o2" \
@@ -2414,6 +2534,14 @@ generate_core "${program}.core" 6 "$default_core_filter" \
 for variant in musl-clang-static-pie gcc-static single-thread-clang-static; do
     program="$output_dir/tls-modules-${variant}"
     generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
+done
+# Ubuntu's 2.27 and 2.35 loaders leave the gaps between their C libraries'
+# segments mapped without access.
+for version in 2.27 2.31 2.35; do
+    program="$output_dir/tls-modules-glibc${version}"
+    generate_core "${program}.core" 6 "$default_core_filter" \
+        "$program $output_dir/libtls-modules-glibc${version}.so $output_dir/libtls-plugin-glibc${version}.so" \
+        "$program" abort
 done
 for variant in gcc-o2 gcc-o2-nopie clang-o2; do
     program="$output_dir/locations-${variant}"

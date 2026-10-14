@@ -43,7 +43,7 @@ const POST_MORTEM_THREAD_NAME: &str = "uscope-core";
 /// Registers and memory recorded by a core dump.
 pub(super) struct CoreTarget {
     memory: CoreMemory,
-    /// Loaded images whose symbols answer `libthread_db` lookups.
+    /// Loaded images whose symbols locate the C library's thread structures.
     symbol_modules: Vec<SymbolModule>,
 }
 
@@ -167,9 +167,7 @@ impl InspectionOps for CoreTarget {
         module: TlsModule,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
-        let process = i32::try_from(self.memory.core().process.pid)
-            .map_err(|_| Arc::from("the core dump's process identifier is invalid"))?;
-        tls::tls_address(self, Pid::from_raw(process), thread, module, offset)
+        tls::tls_address(self, thread, module, offset)
     }
 }
 
@@ -194,6 +192,8 @@ struct PlacedFile {
     path: PathBuf,
     data: Arc<[u8]>,
     inode: u64,
+    /// The recorded image grown to the file's extent.
+    image: ImageMappings,
     load_bias: u64,
     /// Dump-time addresses whose file bytes are the process's memory.
     read_only: Vec<Range<u64>>,
@@ -204,6 +204,7 @@ struct ImageFile {
     path: PathBuf,
     data: Arc<[u8]>,
     inode: u64,
+    image: ImageMappings,
     load_bias: u64,
     identity: ModuleIdentity,
     read_only: Vec<Range<u64>>,
@@ -215,6 +216,7 @@ impl PlacedFile {
             path: self.path,
             data: self.data,
             inode: self.inode,
+            image: self.image,
             load_bias: self.load_bias,
             identity,
             read_only: self.read_only,
@@ -301,12 +303,13 @@ fn examine(
         path, data, inode, ..
     } = file;
     let data: Arc<[u8]> = data.into();
-    let (load_bias, mut evidence, read_only) = match verify_image(core, image, &data)? {
+    let (image, load_bias, mut evidence, read_only) = match verify_image(core, image, &data)? {
         ImageVerification::Placed {
+            image,
             load_bias,
             evidence,
             read_only,
-        } => (load_bias, evidence, read_only),
+        } => (image, load_bias, evidence, read_only),
         ImageVerification::Unplaced(detail) => {
             return Ok(Examined::Rejected(Rejected {
                 path,
@@ -331,6 +334,7 @@ fn examine(
         path: path.clone(),
         data,
         inode,
+        image,
         load_bias,
         read_only,
     };
@@ -533,7 +537,7 @@ fn resolve_executable(
         ))
     })?;
     Ok(MainImage {
-        image,
+        image: file.image.clone(),
         build_id,
         file,
     })
@@ -565,7 +569,15 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
     )];
     let mut libraries = Vec::new();
     for image in &images {
-        if *image == main_image {
+        // A part of an image already placed, such as a packed lld segment.
+        let placed = std::iter::once(&main_image)
+            .chain(
+                libraries
+                    .iter()
+                    .map(|library: &LibraryImage| &library.image),
+            )
+            .any(|whole| whole.path == image.path && whole.contains(image.start()));
+        if placed {
             continue;
         }
         // Without a saved header, only an ELF file can say that the image
@@ -602,7 +614,7 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         };
         modules.push(core_module(image, build_id, loaded_state(loaded, &file)));
         libraries.push(LibraryImage {
-            image: image.clone(),
+            image: file.image.clone(),
             file,
             loaded,
             debug,

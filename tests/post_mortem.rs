@@ -1249,6 +1249,32 @@ async fn go_rust_and_zig_cores_present_frames_and_locals() {
     }
 }
 
+/// lld packs a small program's segments so that its code shares the
+/// header's first file page, and each is mapped from file offset zero. The
+/// mappings are still one image, loaded once at the address of the first.
+#[tokio::test]
+async fn an_image_mapped_from_offset_zero_more_than_once_is_one_module() {
+    let core_name = "crash-rust-o0.core";
+    let scenario = open_core(core_name);
+    let executable = Scenario::fixture("crash-rust-o0");
+    let info = core_info(&scenario);
+    let recorded = file_images(&info)
+        .filter(|module| *module.recorded_path == executable)
+        .collect::<Vec<_>>();
+    let [module] = recorded[..] else {
+        panic!("{core_name}: {:#?}", info.modules);
+    };
+    assert!(
+        matches!(
+            &module.state,
+            CoreModuleState::Loaded { module: loaded, identity }
+                if identity.is_verified() && loaded.module.load_bias == module.start.get()
+        ),
+        "{core_name}: {module:#?}"
+    );
+    scenario.shutdown().await;
+}
+
 #[tokio::test]
 async fn core_sessions_coexist_with_each_other_and_a_live_session() {
     let first = open_core("crash-gcc-o0-segv.core");
@@ -1527,8 +1553,8 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
         .await;
     assert_eq!(read.completion, MemoryReadCompletion::Complete);
     assert_eq!(&*read.bytes, b"post-mortem read-only message");
-    // libthread_db refuses the other machine's C library as another
-    // version, whose own layout descriptors then locate its TLS.
+    // The other machine's C library describes its own structures, which
+    // locate its TLS.
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
     scenario.shutdown().await;
 }
@@ -1555,8 +1581,8 @@ async fn a_sysroot_copy_of_this_machine_serves_tls_through_its_c_library() {
     let (libc, identity) = loaded_from(&core_info(&scenario), "libc.so.6");
     assert!(libc.starts_with(&canonical_root), "{}", libc.display());
     assert_eq!(identity, ModuleIdentity::BuildId);
-    // libthread_db finds the C library's symbols and version through the
-    // sysroot file, then the TLS blocks in the dump.
+    // The C library's descriptors are found through the sysroot file, and
+    // the TLS blocks in the dump.
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
     assert_eq!(signed(&variable(&scenario, "crash_library_tls").await), 654);
     scenario.shutdown().await;
@@ -1878,20 +1904,13 @@ fn tls_values(threads: &[[(i128, u64); 2]]) -> Vec<[i128; 2]> {
 }
 
 #[tokio::test]
-async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descriptors() {
+async fn core_tls_is_located_through_the_c_librarys_own_descriptors() {
     let expected = [[100, 654], [101, 655], [102, 656], [103, 657]];
     let scenario = open_core("crash-gcc-o0-segv.core");
-    let thread_library = thread_tls(&scenario).await;
-    uscope::force_internal_tls_lookup(true);
-    let descriptors = thread_tls(&scenario).await;
-    uscope::force_internal_tls_lookup(false);
-    assert_eq!(thread_library, descriptors);
-    assert_eq!(tls_values(&thread_library), expected);
+    assert_eq!(tls_values(&thread_tls(&scenario).await), expected);
     scenario.shutdown().await;
 
-    // A thread whose thread pointer is unset has no TLS, which each way
-    // reports in its own words; forcing the descriptors bypasses
-    // libthread_db entirely.
+    // A thread whose thread pointer is unset has no TLS.
     let (_directory, path) = edited(
         "unset-thread-pointer",
         "crash-gcc-o0-segv.core",
@@ -1902,26 +1921,18 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
         },
     );
     let unset = Scenario::open_core("unset thread pointer", &CoreDumpOptions::new(path));
-    let reason = || async {
-        match variable(&unset, "crash_tls").await.state {
-            VariableState::Unavailable(reason) => reason.to_string(),
-            state => panic!("TLS without a thread pointer was available: {state:?}"),
-        }
+    let reason = match variable(&unset, "crash_tls").await.state {
+        VariableState::Unavailable(reason) => reason.to_string(),
+        state => panic!("TLS without a thread pointer was available: {state:?}"),
     };
-    let thread_library = reason().await;
-    assert!(thread_library.contains("libthread_db"), "{thread_library}");
-    uscope::force_internal_tls_lookup(true);
-    let described = reason().await;
-    uscope::force_internal_tls_lookup(false);
     assert!(
-        described.ends_with("the thread has not allocated the module's TLS block")
-            && !described.contains("libthread_db"),
-        "{described}"
+        reason.ends_with("the thread has not allocated the module's TLS block"),
+        "{reason}"
     );
     unset.shutdown().await;
 
-    // Another machine's C library is refused by libthread_db, so only its
-    // descriptors locate every thread's blocks.
+    // Another machine's build of the C library describes its own structures,
+    // which locate every thread's blocks.
     let modules = foreign_modules().await;
     let originals = ScratchDir::new("foreign-tls");
     for name in ["crash-gcc-o0", "libcrash.so", "libc.so.6"] {
@@ -1935,19 +1946,22 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
     foreign_scenario.shutdown().await;
 }
 
-/// musl has no thread debugging library, and a statically linked glibc
-/// program may lack its own, so the C library's thread structures in the dump
-/// locate each thread's TLS, with or without a dynamic loader.
+/// The C library's thread structures in the dump locate each thread's TLS,
+/// with or without a dynamic loader: musl's, statically linked glibc's,
+/// and those of Ubuntu's glibc 2.27, 2.31, and 2.35.
 #[tokio::test]
-async fn musl_and_static_glibc_cores_locate_every_threads_tls_in_every_module() {
-    for (name, dynamic, threads) in [
+async fn cores_locate_every_threads_tls_in_every_module_on_each_c_library() {
+    for (name, plugin, threads) in [
         ("tls-modules-musl-gcc-o0.core", true, 3),
         ("tls-modules-musl-clang-static-pie.core", false, 3),
         ("tls-modules-gcc-static.core", false, 3),
         ("tls-modules-single-thread-clang-static.core", false, 1),
+        ("tls-modules-glibc2.27.core", true, 3),
+        ("tls-modules-glibc2.31.core", true, 3),
+        ("tls-modules-glibc2.35.core", true, 3),
     ] {
         let mut scenario = open_core(name);
-        support::assert_tls_modules(&mut scenario, name, dynamic, threads).await;
+        support::assert_tls_modules(&mut scenario, name, plugin, threads).await;
         scenario.shutdown().await;
     }
 }

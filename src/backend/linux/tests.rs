@@ -1173,6 +1173,7 @@ impl LinuxTraceOps for FakeTrace {
                     executable: true,
                 })
                 .collect(),
+            headers: Vec::new(),
             vdso: None,
         })
     }

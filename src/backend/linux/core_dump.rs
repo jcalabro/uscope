@@ -665,6 +665,7 @@ impl ImageMappings {
 /// Groups `NT_FILE` mappings into image instances. A mapping at file offset
 /// zero starts an instance; later mappings of the same path join the nearest
 /// instance below them. Mappings with no such instance are not images.
+/// Verification against a file can join instances that its extent covers.
 pub(super) fn image_mappings(files: &[CoreFileMapping]) -> Vec<ImageMappings> {
     let mut sorted = files.to_vec();
     sorted.sort_by_key(|mapping| mapping.start);
@@ -809,6 +810,8 @@ pub(super) enum ImageEvidence {
 pub(super) enum ImageVerification {
     /// The file's segments are placed at the dumped image by `load_bias`.
     Placed {
+        /// The recorded image with every mapping the file's extent covers.
+        image: ImageMappings,
         load_bias: u64,
         evidence: ImageEvidence,
         /// Dump-time addresses of the file's read-only, file-backed bytes.
@@ -824,12 +827,16 @@ struct FileSegment {
     address: u64,
     file_offset: u64,
     file_size: u64,
+    memory_size: u64,
     writable: bool,
 }
 
 /// Places `file` at the dumped image and checks that it is the same image.
 ///
-/// Placement must agree with every recorded mapping. Identity is then proven
+/// The image grows to every later mapping of its file within the file's
+/// extent: lld packs a small file's segments into its first page, so several
+/// of them map from file offset zero. Placement must agree with every
+/// recorded mapping. Identity is then proven
 /// by the build-id note when the dump saved it, and otherwise by comparing
 /// every saved byte of the file's read-only segments. Writable segments are
 /// never compared because the process legitimately modified them.
@@ -866,6 +873,7 @@ pub(super) fn verify_image(
                 address: header.p_vaddr(endian),
                 file_offset,
                 file_size,
+                memory_size: header.p_memsz(endian),
                 writable: header.p_flags(endian) & elf::PF_W != 0,
             }),
             elf::PT_NOTE => notes.push((header.p_vaddr(endian), file_offset, file_size)),
@@ -886,8 +894,10 @@ pub(super) fn verify_image(
             "no loadable segment of the file is placed at the dumped image".to_owned(),
         ));
     };
+    let image = &whole_image(core, image, &segments, load_bias);
     let verified = |evidence| {
         Ok(ImageVerification::Placed {
+            image: image.clone(),
             load_bias,
             evidence,
             read_only: read_only_ranges(&segments, load_bias),
@@ -918,6 +928,43 @@ pub(super) fn verify_image(
     verified(evidence)
 }
 
+/// `image` and the later mappings of its path that lie within the extent of
+/// the file's segments at `load_bias`.
+fn whole_image(
+    core: &CoreDump,
+    image: &ImageMappings,
+    segments: &[FileSegment],
+    load_bias: u64,
+) -> ImageMappings {
+    let extent_end = segments
+        .iter()
+        .filter_map(|segment| {
+            load_bias
+                .checked_add(segment.address)?
+                .checked_add(segment.memory_size)?
+                .checked_next_multiple_of(PAGE_SIZE)
+        })
+        .max()
+        .unwrap_or(0);
+    let mut mappings = image.mappings.clone();
+    mappings.extend(
+        core.files
+            .iter()
+            .filter(|mapping| {
+                image.start() < mapping.start
+                    && mapping.end <= extent_end
+                    && strip_deleted(&mapping.path) == image.path
+                    && !image.mappings.contains(mapping)
+            })
+            .cloned(),
+    );
+    mappings.sort_by_key(|mapping| mapping.start);
+    ImageMappings {
+        path: image.path.clone(),
+        mappings,
+    }
+}
+
 /// Writable segments are excluded: the process may have modified them, and a
 /// dump can omit modified pages when its filter or truncation drops them.
 fn read_only_ranges(segments: &[FileSegment], load_bias: u64) -> Vec<Range<u64>> {
@@ -934,27 +981,51 @@ fn read_only_ranges(segments: &[FileSegment], load_bias: u64) -> Vec<Range<u64>>
 /// Protection changes such as RELRO split one segment into several mappings,
 /// so each mapping must fall inside a segment's file-backed pages at the
 /// address that segment implies.
+///
+/// glibc's loader first maps the file's whole extent from its first mapping
+/// and then removes access to the gaps between segments, which stay mapped.
+/// A gap is therefore the first mapping continued: its file offset is its
+/// distance from the image's start, and it lies between two segments.
 fn placement_mismatch(
     image: &ImageMappings,
     segments: &[FileSegment],
     load_bias: u64,
 ) -> Option<String> {
+    let page_start =
+        |segment: &FileSegment| load_bias.checked_add(segment.address & !(PAGE_SIZE - 1));
+    let page_end = |segment: &FileSegment| {
+        load_bias
+            .checked_add(segment.address)?
+            .checked_add(segment.memory_size)?
+            .checked_next_multiple_of(PAGE_SIZE)
+    };
+    let in_segment = |mapping: &CoreFileMapping| {
+        segments.iter().any(|segment| {
+            let aligned_offset = segment.file_offset & !(PAGE_SIZE - 1);
+            let file_end = segment.file_offset.saturating_add(segment.file_size);
+            let delta = mapping.file_offset.wrapping_sub(aligned_offset);
+            mapping.file_offset >= aligned_offset
+                && mapping.file_offset < file_end
+                && page_start(segment).and_then(|start| start.checked_add(delta))
+                    == Some(mapping.start)
+        })
+    };
+    let in_gap = |mapping: &CoreFileMapping| {
+        let below =
+            |segment: &FileSegment| page_end(segment).is_some_and(|end| end <= mapping.start);
+        let above =
+            |segment: &FileSegment| page_start(segment).is_some_and(|start| mapping.end <= start);
+        image.start().checked_add(mapping.file_offset) == Some(mapping.start)
+            && segments.iter().any(below)
+            && segments.iter().any(above)
+            && segments
+                .iter()
+                .all(|segment| below(segment) || above(segment))
+    };
     image
         .mappings
         .iter()
-        .find(|mapping| {
-            !segments.iter().any(|segment| {
-                let aligned_offset = segment.file_offset & !(PAGE_SIZE - 1);
-                let file_end = segment.file_offset.saturating_add(segment.file_size);
-                let delta = mapping.file_offset.wrapping_sub(aligned_offset);
-                mapping.file_offset >= aligned_offset
-                    && mapping.file_offset < file_end
-                    && load_bias
-                        .checked_add(segment.address & !(PAGE_SIZE - 1))
-                        .and_then(|start| start.checked_add(delta))
-                        == Some(mapping.start)
-            })
-        })
+        .find(|mapping| !in_segment(mapping) && !in_gap(mapping))
         .map(|mapping| {
             format!(
                 "the file's segment layout does not match the mapping at {:#x}",
@@ -1194,8 +1265,11 @@ pub(super) fn fuzz(data: &[u8]) {
     for image in &images {
         let _ = saved_header(&core, image);
         let _ = recorded_build_id(&core, image);
-        if let Ok(ImageVerification::Placed { read_only, .. }) = verify_image(&core, image, &data) {
-            backings.extend(FileBacking::for_image(image, &data, &read_only));
+        if let Ok(ImageVerification::Placed {
+            image, read_only, ..
+        }) = verify_image(&core, image, &data)
+        {
+            backings.extend(FileBacking::for_image(&image, &data, &read_only));
         }
     }
     let addresses = core
@@ -1986,5 +2060,62 @@ mod tests {
         assert_eq!(recorded(late[..0x1000].to_vec(), 0x12000), None);
         assert_eq!(recorded(Vec::new(), 0x12000), None);
         assert_eq!(recorded(page(0x7f), 0x12000), None);
+    }
+
+    /// Ubuntu 18.04's libc: text, then a 2 MiB gap, then data whose first
+    /// page RELRO leaves read-only.
+    #[test]
+    fn mappings_must_follow_the_segments_or_the_loaders_gaps_between_them() {
+        const BASE: u64 = 0x7f00_0000_0000;
+        let segments = [
+            FileSegment {
+                address: 0,
+                file_offset: 0,
+                file_size: 0x1e_6a7c,
+                memory_size: 0x1e_6a7c,
+                writable: false,
+            },
+            FileSegment {
+                address: 0x3e_7618,
+                file_offset: 0x1e_7618,
+                file_size: 0x5248,
+                memory_size: 0x94c8,
+                writable: true,
+            },
+        ];
+        let mismatch = |extra: &[(u64, u64, u64)]| {
+            let mut mappings = vec![
+                (0, 0x1e_7000, 0),
+                (0x3e_7000, 0x3e_b000, 0x1e_7000),
+                (0x3e_b000, 0x3e_d000, 0x1e_b000),
+            ];
+            mappings.extend_from_slice(extra);
+            let image = ImageMappings {
+                path: PathBuf::from("/lib/libc.so.6"),
+                mappings: mappings
+                    .into_iter()
+                    .map(|(start, end, file_offset)| CoreFileMapping {
+                        start: BASE + start,
+                        end: BASE + end,
+                        file_offset,
+                        path: PathBuf::from("/lib/libc.so.6"),
+                    })
+                    .collect(),
+            };
+            placement_mismatch(&image, &segments, BASE)
+                .map(|detail| detail.contains(&format!("{:#x}", BASE + extra[0].0)))
+        };
+        assert_eq!(mismatch(&[(0x1e_7000, 0x3e_7000, 0x1e_7000)]), None);
+        assert_eq!(mismatch(&[(0x2e_7000, 0x2e_8000, 0x2e_7000)]), None);
+        // A gap mapped from any other offset, or one that reaches into a
+        // segment's pages or past the last segment, is another file's layout.
+        for wrong in [
+            (0x1e_7000, 0x3e_7000, 0x1e_8000),
+            (0x1e_7000, 0x3e_8000, 0x1e_7000),
+            (0x3f_0000, 0x3f_1000, 0x3f_0000),
+            (0x3f_1000, 0x3f_2000, 0x3f_1000),
+        ] {
+            assert_eq!(mismatch(&[wrong]), Some(true), "{wrong:x?}");
+        }
     }
 }

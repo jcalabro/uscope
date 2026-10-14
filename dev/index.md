@@ -259,7 +259,6 @@ Unsafe code lives in a few files, which `scripts/unsafe-sites.sh` lists and
   nix cannot make, and `tgkill`.
 - `backend/linux/perf/sys.rs`: `perf_event_open`, its ioctls, and the ring
   mapping.
-- `backend/linux/tls/thread_db.rs`: libthread_db and its callbacks.
 - `backend/linux/syscalls/ptrace.rs`: the SIGURG handler that interrupts a
   blocking `waitpid`.
 - `timings/alloc.rs`: the counting allocator.
