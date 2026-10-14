@@ -401,7 +401,7 @@ const fn low_bits_mask(bits: usize) -> u128 {
 
 pub(super) fn register_u64(
     runtime: &mut dyn VariableRuntime,
-    register: u16,
+    register: crate::unwind::DwarfRegister,
     endian: RunTimeEndian,
 ) -> std::result::Result<u64, EvaluateError> {
     let value = runtime.register(register)?;

@@ -13,7 +13,7 @@ use super::{
     RawDecode, RawIndirect,
 };
 use crate::ByteOrder;
-use crate::unwind::RegisterFile;
+use crate::unwind::{DwarfRegister, FS_BASE, GS_BASE, RegisterFile};
 
 /// The longest x86-64 instruction encoding the architecture permits.
 const MAX_INSTRUCTION_LENGTH: usize = 15;
@@ -188,8 +188,8 @@ fn references(instruction: &Instruction) -> Vec<(InstructionReferenceKind, u64)>
 fn register_value(registers: &RegisterFile, register: Register) -> Option<u64> {
     let dwarf = match register {
         Register::ES | Register::CS | Register::SS | Register::DS => return Some(0),
-        Register::FS => return registers.get(58),
-        Register::GS => return registers.get(59),
+        Register::FS => return registers.get(FS_BASE),
+        Register::GS => return registers.get(GS_BASE),
         _ => match register.full_register() {
             Register::RAX => 0,
             Register::RDX => 1,
@@ -210,7 +210,7 @@ fn register_value(registers: &RegisterFile, register: Register) -> Option<u64> {
             _ => return None,
         },
     };
-    let value = registers.get(dwarf)?;
+    let value = registers.get(DwarfRegister::new(dwarf))?;
     Some(match register.size() {
         8 => value,
         bytes => value & ((1 << (bytes * 8)) - 1),

@@ -7,13 +7,11 @@
 use std::sync::Arc;
 
 use super::{GoFunction, GoTable};
-use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{
+    DwarfRegister, FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile,
+    UnwindStep,
+};
 use crate::{ImageAddress, UnwindTermination, VirtualAddress};
-
-/// DWARF register numbers on x86-64.
-const RBP: u16 = 6;
-const RSP: u16 = 7;
-const RETURN_ADDRESS: u16 = 16;
 
 /// What a frame's caller had in its frame-pointer register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +139,7 @@ impl GoUnwind {
         &self,
         address: ImageAddress,
         registers: &RegisterFile,
-        clobbered: &[u16],
+        clobbered: &[DwarfRegister],
         memory: &mut dyn MemoryReader,
     ) -> Option<std::result::Result<UnwindStep, UnwindTermination>> {
         let cfa = match self.cfa(address, registers)? {

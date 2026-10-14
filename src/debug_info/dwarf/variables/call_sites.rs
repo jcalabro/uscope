@@ -31,6 +31,7 @@ use crate::image::calls::{
     self, CallView, CallingFunction, Calls, Site, SiteId, SiteParameter, SiteTarget,
 };
 use crate::image::locations::ExpressionId;
+use crate::unwind::DwarfRegister;
 
 /// How many functions a search for tail calls may visit.
 const MAX_TAIL_CALL_FUNCTIONS: usize = 4_096;
@@ -502,7 +503,7 @@ const fn unavailable(reason: EntryValueUnavailableReason) -> VariableRuntimeErro
 fn passed(site: Site<'_>, parameter: EntryParameter) -> Result<ExpressionId, VariableRuntimeError> {
     let mut entries = site.parameters().filter(|passed| match parameter {
         EntryParameter::Register(register) | EntryParameter::Referent(register) => {
-            passed.register == Some(register)
+            passed.register.map(DwarfRegister::new) == Some(register)
         }
         EntryParameter::Parameter(offset) => passed.parameter == Some(offset),
     });
@@ -790,7 +791,7 @@ impl DwarfVariableInfo {
             Location::Address { address } => Ok(*address),
             Location::Value { value } => Ok(word(*value)),
             Location::Register { register } => {
-                let register = runtime.register(register.0)?;
+                let register = runtime.register((*register).into())?;
                 bytes_to_u64(&register.bytes, self.endian).map_err(runtime_error)
             }
             Location::Bytes { value } => {
@@ -922,10 +923,22 @@ mod tests {
                 panic!("refused for another reason")
             }
         };
-        assert_eq!(passed(one, EntryParameter::Register(4)), Ok(vec![2]));
-        assert_eq!(passed(one, EntryParameter::Register(1)), Err("not passed"));
-        assert_eq!(passed(one, EntryParameter::Referent(4)), Err("not passed"));
-        assert_eq!(passed(twice, EntryParameter::Register(5)), Err("malformed"));
+        assert_eq!(
+            passed(one, EntryParameter::Register(DwarfRegister::new(4))),
+            Ok(vec![2])
+        );
+        assert_eq!(
+            passed(one, EntryParameter::Register(DwarfRegister::new(1))),
+            Err("not passed")
+        );
+        assert_eq!(
+            passed(one, EntryParameter::Referent(DwarfRegister::new(4))),
+            Err("not passed")
+        );
+        assert_eq!(
+            passed(twice, EntryParameter::Register(DwarfRegister::new(5))),
+            Err("malformed")
+        );
     }
 
     /// A frame's function was entered by the call its caller made, or by

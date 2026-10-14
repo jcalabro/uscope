@@ -17,7 +17,9 @@ use super::{
     RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StartedTask, StoredValue, TaskContext,
     TaskLabels, TaskPage, TaskRef, TaskStarter, ThreadActivity, Unbound,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{
+    DwarfRegister, R12, RAX, RBP, RDI, RETURN_ADDRESS as RIP, RSI, RSP, RegisterFile,
+};
 use crate::{
     AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress,
 };
@@ -26,14 +28,6 @@ use crate::{
 /// the same way wherever its debug information binds, and says it is
 /// unverified.
 const VERIFIED: (u64, u64) = (1, 27);
-/// x86-64's DWARF register numbers.
-const RAX: u16 = 0;
-const RSI: u16 = 4;
-const RDI: u16 = 5;
-const RBP: u16 = 6;
-const RSP: u16 = 7;
-const R12: u16 = 12;
-const RIP: u16 = 16;
 /// What Go calls its tasks.
 pub(super) const TASK_NOUN: (&str, &str) = ("goroutine", "goroutines");
 pub(super) use exceptions::EXCEPTION_FILTERS;
@@ -140,7 +134,7 @@ struct GoRuntime {
     /// The functions cgo calls between Go and C through, each with the
     /// register that holds what it calls: `runtime.cgocall(fn, arg)` calls
     /// C, and `crosscall2(fn, a, n, ctxt)` the Go that C calls.
-    call_outs: Vec<(ImageAddress, u16, &'static str)>,
+    call_outs: Vec<(ImageAddress, DwarfRegister, &'static str)>,
 }
 
 impl GoRuntime {
@@ -646,7 +640,7 @@ impl RuntimeModel for GoRuntime {
         let name = self
             .image
             .function_name(stop.load_bias().wrapping_unload(VirtualAddress::new(pc)));
-        let register = |number: u16, name: &str| {
+        let register = |number: DwarfRegister, name: &str| {
             frame
                 .get(number)
                 .ok_or_else(|| Arc::<str>::from(format!("the frame's {name} is unknown")))

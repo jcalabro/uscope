@@ -27,7 +27,7 @@ use super::{
     RuntimeSignals, RuntimeStop, StartedTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
     TaskPage, TaskRef, TaskStarter, ThreadActivity,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress};
 
 /// What tokio calls its tasks.
@@ -42,9 +42,6 @@ const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
 /// The task state's bits (`runtime/task/state.rs`), which tokio keeps in
 /// constants its debug information does not describe.
 const RUNNING: u64 = 0b1;
-/// The registers a function's first and second arguments are passed in.
-const RDI: u16 = 5;
-const RSI: u16 = 4;
 const COMPLETE: u64 = 0b10;
 const NOTIFIED: u64 = 0b100;
 const CANCELLED: u64 = 0b10_0000;

@@ -4,6 +4,7 @@
 
 use super::sys::sample;
 use crate::model::{Pid, Tid};
+use crate::unwind::DwarfRegister;
 
 /// The sample fields every event asks for, in the kernel's order.
 pub const SAMPLE_TYPE: u64 = sample::IDENTIFIER
@@ -24,11 +25,11 @@ pub const REGISTERS: u64 = 0x3ff | (0xff << 16);
 
 /// The DWARF number of each register [`REGISTERS`] asks for, in the order
 /// the kernel writes them.
-pub const DWARF_REGISTERS: [u16; 18] =
-    [0, 3, 2, 1, 4, 5, 6, 7, 16, 49, 8, 9, 10, 11, 12, 13, 14, 15];
+pub const DWARF_REGISTERS: [DwarfRegister; 18] =
+    DwarfRegister::each([0, 3, 2, 1, 4, 5, 6, 7, 16, 49, 8, 9, 10, 11, 12, 13, 14, 15]);
 
 /// The DWARF number of the flags register.
-pub const DWARF_FLAGS: u16 = 49;
+pub const DWARF_FLAGS: DwarfRegister = DwarfRegister::new(49);
 
 const RECORD_MMAP2: u32 = 10;
 const RECORD_COMM: u32 = 3;

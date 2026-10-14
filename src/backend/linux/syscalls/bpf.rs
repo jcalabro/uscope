@@ -40,6 +40,7 @@ use crate::syscalls::{
     Abi, CallStack, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, Pid, ProcessEnd,
     ReadAt, SyscallEvent, SyscallId, SyscallStats, Tid, TraceEvent,
 };
+use crate::unwind::DwarfRegister;
 use crate::unwind::sample::SampledState;
 
 /// The programs, as `build.rs` compiled them.
@@ -469,7 +470,7 @@ pub struct SampledStack {
     pub thread: Tid,
     pub process: Pid,
     /// The user registers by DWARF number.
-    pub registers: [(u16, u64); 17],
+    pub registers: [(DwarfRegister, u64); 17],
     /// The kernel's walk of the frame pointers, the instruction first.
     pub chain: Vec<u64>,
     /// The stack's bytes from its pointer up, if copied.
@@ -609,7 +610,8 @@ fn stack_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> 
         .get(chain_end..chain_end + raw.copied as usize)
         .ok_or(DecodeError::Short(bytes.len()))?;
     #[expect(clippy::cast_possible_truncation, reason = "seventeen registers")]
-    let registers = std::array::from_fn(|index| (index as u16, raw.regs[index]));
+    let registers =
+        std::array::from_fn(|index| (DwarfRegister::new(index as u16), raw.regs[index]));
     Ok(Record::Stack(SampledStack {
         thread: Tid::new(header.tid),
         process: Pid::new(header.tgid),

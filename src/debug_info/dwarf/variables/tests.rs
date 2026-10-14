@@ -8,6 +8,7 @@ use gimli::{Encoding, Format, LittleEndian};
 use gimli::{Location, Value};
 
 use crate::debug_info::{EntryParameter, VariableRuntimeError};
+use crate::unwind::DwarfRegister;
 use crate::{
     Accessibility, Architecture, ArrayDimension, BaseType, BaseTypeEncoding, FloatValue,
     IntegerValue, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout, ScalarValue,
@@ -454,8 +455,9 @@ struct Runtime {
 impl VariableRuntime for Runtime {
     fn register(
         &mut self,
-        register: u16,
+        register: DwarfRegister,
     ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
+        let register = register.number();
         let value = self.registers.get(&register).copied().ok_or_else(|| {
             VariableRuntimeError::Unavailable(VariableUnavailableReason::RegisterUnavailable(
                 register.to_string().into(),
@@ -1073,8 +1075,8 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
     let mut pool = Pool::new([(0x10, gimli::ValueType::I32)]);
     let mut runtime = Runtime::new([]);
     runtime.entry_values = vec![
-        (EntryParameter::Register(5), 41),
-        (EntryParameter::Referent(4), 0x20),
+        (EntryParameter::Register(DwarfRegister::new(5)), 41),
+        (EntryParameter::Referent(DwarfRegister::new(4)), 0x20),
         (EntryParameter::Parameter(0x100 + 0x2a), 7),
     ];
     let value = |pieces: Vec<gimli::Piece<Reader<'_>>>| match pieces.as_slice() {
@@ -2154,7 +2156,7 @@ struct Memory {
 impl VariableRuntime for Memory {
     fn register(
         &mut self,
-        _register: u16,
+        _register: DwarfRegister,
     ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
         Err(VariableRuntimeError::Fatal(
             "pieces hold registers' bytes".into(),

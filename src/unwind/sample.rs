@@ -13,8 +13,8 @@
 use foldhash::HashMap;
 
 use super::{
-    FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile, UnwindModule,
-    interrupted_registers, unwind_module_for,
+    DwarfRegister, FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile,
+    UnwindModule, interrupted_registers, unwind_module_for,
 };
 use crate::capture::records::Truncation;
 use crate::{CodeRole, ModuleImageId, UnwindTermination, VirtualAddress};
@@ -23,7 +23,7 @@ use crate::{CodeRole, ModuleImageId, UnwindTermination, VirtualAddress};
 #[derive(Debug, Clone, Copy)]
 pub struct SampledState<'a> {
     /// The user registers by DWARF number.
-    pub registers: &'a [(u16, u64)],
+    pub registers: &'a [(DwarfRegister, u64)],
     /// The stack's bytes from the stack pointer up.
     pub stack: &'a [u8],
     /// The kernel's frame-pointer walk: the instruction pointer, then
@@ -149,7 +149,7 @@ fn sampled_frames(
 /// read ends the stack as unreadable.
 pub fn unwind_memory(
     modules: &[UnwindModule<'_>],
-    registers: &[(u16, u64)],
+    registers: &[(DwarfRegister, u64)],
     memory: &mut dyn MemoryReader,
     limit: usize,
 ) -> (Vec<SampledFrame>, StackEnd) {
@@ -525,7 +525,7 @@ mod tests {
         fn unwind(
             &self,
             rip: u64,
-            registers: &[(u16, u64)],
+            registers: &[(DwarfRegister, u64)],
             words: &[u64],
         ) -> (Vec<u64>, StackEnd) {
             let stack = words

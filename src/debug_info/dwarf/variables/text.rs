@@ -641,7 +641,10 @@ mod tests {
     struct Filled;
 
     impl VariableRuntime for Filled {
-        fn register(&mut self, _: u16) -> Result<VariableRegister, VariableRuntimeError> {
+        fn register(
+            &mut self,
+            _: crate::unwind::DwarfRegister,
+        ) -> Result<VariableRegister, VariableRuntimeError> {
             Err(VariableRuntimeError::Fatal("no registers".into()))
         }
 

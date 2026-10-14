@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use crate::inspection::InspectionBudget;
 use crate::model::ValueStorage;
-use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{DwarfRegister, FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
@@ -220,9 +220,9 @@ impl From<VariableUnavailableReason> for VariableRuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryParameter {
     /// The value a register held on entry.
-    Register(u16),
+    Register(DwarfRegister),
     /// The value stored, on entry, at the address a register held.
-    Referent(u16),
+    Referent(DwarfRegister),
     /// The value passed for the parameter whose debug information entry
     /// is at this offset in the frame's module.
     Parameter(u64),
@@ -278,7 +278,7 @@ pub enum CallTarget {
 pub trait VariableRuntime {
     fn register(
         &mut self,
-        register: u16,
+        register: DwarfRegister,
     ) -> std::result::Result<VariableRegister, VariableRuntimeError>;
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError>;
     fn tls_address(
@@ -512,7 +512,7 @@ pub trait UnwindInfo: Send + Sync {
     /// The register, by its DWARF number, in which the code at `address`
     /// keeps its runtime's current task: Go's compiled code keeps the
     /// goroutine's `g` in R14. Other code keeps none.
-    fn task_register(&self, _address: ImageAddress) -> Option<u16> {
+    fn task_register(&self, _address: ImageAddress) -> Option<DwarfRegister> {
         None
     }
 }

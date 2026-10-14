@@ -95,7 +95,7 @@ pub struct Processor {
     latest: u64,
     first: Option<u64>,
     order: Vec<(u64, usize, usize)>,
-    registers: Vec<(u16, u64)>,
+    registers: Vec<(crate::unwind::DwarfRegister, u64)>,
     /// A breakpoint's instruction and the branch that makes its samples
     /// repeats, not calls.
     repeats: Option<(u64, Branch)>,

@@ -728,7 +728,7 @@ impl LiveRuntime<'_> {
             start: registers.get(crate::unwind::RSP)?,
             pages: BTreeMap::new(),
         };
-        let registers: Vec<(u16, u64)> = registers.iter().collect();
+        let registers: Vec<_> = registers.iter().collect();
         let (unwound, end) =
             crate::unwind::sample::unwind_memory(self.modules, &registers, &mut pages, LIVE_FRAMES);
         let mut frames: Vec<WaitFrame> = unwound

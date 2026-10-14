@@ -29,7 +29,7 @@ use super::{
     RuntimeStop, StartedTask, StoredValue, TaskContext, TaskPage, TaskRef, TaskStarter,
     ThreadActivity,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{
     ExceptionFilter, ImageAddress, LanguageExceptionKind, StackSegment, ThreadId, VirtualAddress,
 };
@@ -47,10 +47,6 @@ const PANIC: ExceptionFilter = ExceptionFilter {
     default: true,
 };
 
-/// x86-64's DWARF numbers for the first two integer argument registers,
-/// which pass the payload's data and vtable.
-const RDI: u16 = 5;
-const RSI: u16 = 4;
 /// Where a trait object's vtable keeps its size, and its first method:
 /// `Display::fmt` for a payload, `type_id` for an `Any`.
 const VTABLE_SIZE: u64 = 8;

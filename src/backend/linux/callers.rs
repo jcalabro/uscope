@@ -481,7 +481,10 @@ const fn discarded() -> VariableRuntimeError {
 }
 
 impl<P: InspectionOps> VariableRuntime for TailCallFrame<'_, '_, '_, '_, P> {
-    fn register(&mut self, _register: u16) -> Result<VariableRegister, VariableRuntimeError> {
+    fn register(
+        &mut self,
+        _register: crate::unwind::DwarfRegister,
+    ) -> Result<VariableRegister, VariableRuntimeError> {
         Err(discarded())
     }
 

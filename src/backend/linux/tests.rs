@@ -5963,7 +5963,10 @@ impl UnwindInfo for OutermostCallerUnwindInfo {
     ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
         match address.get() {
             0x30 => Ok(crate::unwind::UnwindStep {
-                registers: RegisterFile::new([(16, 0x50), (7, 0x1000)]),
+                registers: RegisterFile::new([
+                    (crate::unwind::RETURN_ADDRESS, 0x50),
+                    (crate::unwind::RSP, 0x1000),
+                ]),
                 cfa: VirtualAddress::new(0x1000),
                 signal_frame: false,
             }),
@@ -6453,7 +6456,7 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
     // A handler's frame returned into the trampoline, whose stack holds the
     // ucontext; each saved register gets a value of its own.
     let stack = 0x7fff_0000_u64;
-    let expected: Vec<(u16, u64)> = SIGCONTEXT_REGISTERS
+    let expected: Vec<_> = SIGCONTEXT_REGISTERS
         .iter()
         .enumerate()
         .map(|(slot, &register)| (register, 0x1000 + slot as u64 * 0x11))
@@ -6465,7 +6468,10 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
             .map(|(slot, &(_, value))| (stack + UCONTEXT_MCONTEXT + 8 * slot as u64, value))
             .collect(),
     );
-    let registers = RegisterFile::new([(7, stack), (16, trampoline.get())]);
+    let registers = RegisterFile::new([
+        (crate::unwind::RSP, stack),
+        (crate::unwind::RETURN_ADDRESS, trampoline.get()),
+    ]);
     let step = debug
         .unwind
         .unwind(trampoline, &registers, &mut memory)

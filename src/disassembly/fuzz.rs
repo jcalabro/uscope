@@ -7,7 +7,7 @@ use super::{
     IndirectTarget, InstructionContent, InstructionDecoder, RawDecode, RawIndirect, TargetBoundary,
     Window, decoder_for,
 };
-use crate::unwind::RegisterFile;
+use crate::unwind::{DwarfRegister, RAX, RegisterFile};
 use crate::{
     AddressRange, Architecture, ByteOrder, PointerWidth, TargetDescription, VirtualAddress,
 };
@@ -100,10 +100,13 @@ fn registers(code: &[u8], flags: u8) -> RegisterFile {
         let raw = u16::from_le_bytes([code[index % code.len()], code[(index + 1) % code.len()]]);
         BASE + u64::from(raw) % (length + 16)
     };
-    let mut registers =
-        RegisterFile::new((0..16).chain([58, 59]).map(|dwarf| (dwarf, value(dwarf))));
+    let mut registers = RegisterFile::new(
+        (0..16)
+            .chain([58, 59])
+            .map(|dwarf| (DwarfRegister::new(dwarf), value(dwarf))),
+    );
     if flags & 2 != 0 {
-        registers.remove(0);
+        registers.remove(RAX);
     }
     registers
 }
@@ -154,7 +157,7 @@ fn check_indirect(
             }
             Some(IndirectTarget::NeedsRegisters) => {
                 assert!(
-                    stopped.is_none_or(|(_, registers)| registers.get(0).is_none()),
+                    stopped.is_none_or(|(_, registers)| registers.get(RAX).is_none()),
                     "{instruction:?}"
                 );
             }

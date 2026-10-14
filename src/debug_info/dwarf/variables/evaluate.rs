@@ -196,7 +196,7 @@ fn evaluate_frame_base(
     match piece.location {
         Location::Address { address } => Ok(VirtualAddress::new(address)),
         Location::Register { register } => {
-            register_u64(runtime, register.0, endian).map(VirtualAddress::new)
+            register_u64(runtime, register.into(), endian).map(VirtualAddress::new)
         }
         _ => Err(EvaluateError::Malformed(
             "frame base did not evaluate to an address or register".into(),
@@ -302,7 +302,7 @@ pub(super) fn evaluate_with_object<'expression>(
                 register,
                 base_type,
             } => {
-                let register = runtime.register(register.0)?;
+                let register = runtime.register(register.into())?;
                 let value = evaluation_value(
                     &register.bytes,
                     evaluation_value_type(expression, base_type.0)?,
@@ -484,7 +484,7 @@ fn entry_parameter(
     };
     let parameter = match (next()?, next()?, next()?) {
         (Some(gimli::Operation::Register { register }), None, None) => (
-            EntryParameter::Register(register.0),
+            EntryParameter::Register(register.into()),
             gimli::ValueType::Generic,
         ),
         // DW_OP_regval_type, or DW_OP_bregN 0 used as one.
@@ -497,7 +497,7 @@ fn entry_parameter(
             None,
             None,
         ) => (
-            EntryParameter::Register(register.0),
+            EntryParameter::Register(register.into()),
             evaluation_value_type(expression, base_type.0)?,
         ),
         (
@@ -513,7 +513,7 @@ fn entry_parameter(
             }),
             None,
         ) if u64::from(size) == u64::from(expression.encoding().address_size) => (
-            EntryParameter::Referent(register.0),
+            EntryParameter::Referent(register.into()),
             gimli::ValueType::Generic,
         ),
         _ => return Err(crate::UnsupportedVariableFeature::EntryValue.into()),

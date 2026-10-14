@@ -227,7 +227,7 @@ impl Stacks {
         &mut self,
         process: Pid,
         thread: u32,
-        registers: &[(u16, u64)],
+        registers: &[(crate::unwind::DwarfRegister, u64)],
     ) -> CallStack {
         let instruction = registers.iter().find_map(|&(register, value)| {
             (register == crate::unwind::RETURN_ADDRESS).then_some(value)

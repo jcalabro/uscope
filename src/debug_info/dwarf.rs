@@ -16,7 +16,7 @@ use super::separate::Supplementary;
 use super::{DebugInfo, UnwindInfo};
 use crate::image::lines::{Files, LineTables, Row, StatementsByAddress};
 use crate::model::{Binding, ModuleMetadata};
-use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
+use crate::unwind::{DwarfRegister, FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EmbeddedSymbolTable, EntryProvenance, Error, FunctionId,
@@ -1915,7 +1915,7 @@ impl DwarfUnwindInfo {
     /// Returns the registers the function at `address` may overwrite
     /// without saving them, by the calling convention it follows. Go's
     /// lets a callee overwrite registers the System V ABI preserves.
-    fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
+    fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [DwarfRegister] {
         if self.view().is_go_code(address) || self.go().is_some_and(|go| go.is_go(address)) {
             &X86_64_GO_CALL_CLOBBERED_REGISTERS
         } else {
@@ -2022,8 +2022,8 @@ impl UnwindInfo for DwarfUnwindInfo {
             .unwrap_or_else(|| crate::unwind::frame_pointer_rule(self, address))
     }
 
-    fn task_register(&self, address: ImageAddress) -> Option<u16> {
-        const R14: u16 = 14;
+    fn task_register(&self, address: ImageAddress) -> Option<DwarfRegister> {
+        const R14: DwarfRegister = DwarfRegister::new(14);
         self.go()
             .is_some_and(|go| go.compiled(address))
             .then_some(R14)
@@ -2088,7 +2088,7 @@ fn unwind_from_section<'data, S>(
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
-    clobbered: &[u16],
+    clobbered: &[DwarfRegister],
     memory: &mut dyn MemoryReader,
 ) -> std::result::Result<UnwindStep, UnwindTermination>
 where
@@ -2096,7 +2096,7 @@ where
 {
     let mut context = UnwindContext::new();
     let (fde, row) = unwind_row(section, index, bases, address, &mut context)?;
-    let return_register = fde.cie().return_address_register().0;
+    let return_register = DwarfRegister::from(fde.cie().return_address_register());
     let cfa = cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)?;
     let mut caller = registers.clone();
     // A callee may overwrite every register its calling convention does not
@@ -2106,7 +2106,7 @@ where
     for &register in clobbered {
         if !row
             .registers()
-            .any(|(described, _)| described.0 == register)
+            .any(|(described, _)| DwarfRegister::from(*described) == register)
         {
             caller.remove(register);
         }
@@ -2119,19 +2119,20 @@ where
         encoding: fde.cie().encoding(),
     };
     for &(register, ref rule) in row.registers() {
-        match rules.apply(&mut caller, memory, register.0, rule) {
+        let register = DwarfRegister::from(register);
+        match rules.apply(&mut caller, memory, register, rule) {
             // A register saved where memory cannot be read is unknown in
             // the caller, as an undefined one is: an epilogue's rules may
             // still name a slot it popped, below a sample's copy. Only the
             // return address, without which there is no caller, ends the
             // unwind.
-            Err(UnwindTermination::MemoryReadFailed { .. }) if register.0 != return_register => {
-                caller.remove(register.0);
+            Err(UnwindTermination::MemoryReadFailed { .. }) if register != return_register => {
+                caller.remove(register);
             }
             result => result?,
         }
     }
-    caller.set(7, cfa.get());
+    caller.set(crate::unwind::RSP, cfa.get());
 
     if caller.get(return_register).is_none() {
         return Err(UnwindTermination::Complete);
@@ -2168,7 +2169,7 @@ fn stub_cfa(
 fn unwind_stub(
     pushed: u32,
     registers: &RegisterFile,
-    clobbered: &[u16],
+    clobbered: &[DwarfRegister],
     memory: &mut dyn MemoryReader,
 ) -> std::result::Result<UnwindStep, UnwindTermination> {
     let cfa = stub_cfa(pushed, registers)?;
@@ -2192,20 +2193,20 @@ fn unwind_stub(
 /// The DWARF numbers of the registers the x86-64 System V ABI lets a callee
 /// overwrite: rax, rdx, rcx, rsi, rdi, r8-r11, rflags, the SSE registers,
 /// and the x87 stack.
-const X86_64_SYSV_CALL_CLOBBERED_REGISTERS: [u16; 34] = [
+const X86_64_SYSV_CALL_CLOBBERED_REGISTERS: [DwarfRegister; 34] = DwarfRegister::each([
     0, 1, 2, 4, 5, 8, 9, 10, 11, 49, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40,
-];
+]);
 
 /// The DWARF numbers of the registers Go code may overwrite: every System V
 /// call-clobbered register, and rbx, rbp, and r12-r15 too. Go's register ABI
 /// preserves none of them across calls, assembly functions may overwrite the
 /// goroutine pointer in r14, and Go's call-frame information does not
 /// describe the frame pointer a prologue saves.
-const X86_64_GO_CALL_CLOBBERED_REGISTERS: [u16; 40] = [
+const X86_64_GO_CALL_CLOBBERED_REGISTERS: [DwarfRegister; 40] = DwarfRegister::each([
     0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 49, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-];
+]);
 
 fn cfa_from_rule<'data, S>(
     rule: &CfaRule<usize>,
@@ -2219,9 +2220,10 @@ where
 {
     match rule {
         CfaRule::RegisterAndOffset { register, offset } => {
+            let register = DwarfRegister::from(*register);
             let value = registers
-                .get(register.0)
-                .ok_or_else(|| register_unavailable(register.0))?;
+                .get(register)
+                .ok_or_else(|| register_unavailable(register))?;
             Ok(VirtualAddress::new(
                 checked_add(value, *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
                     description: "CFA arithmetic overflow".into(),
@@ -2283,9 +2285,10 @@ where
         result = match result {
             EvaluationResult::Complete => break,
             EvaluationResult::RequiresRegister { register, .. } => {
+                let register = DwarfRegister::from(register);
                 let value = registers
-                    .get(register.0)
-                    .ok_or_else(|| register_unavailable(register.0))?;
+                    .get(register)
+                    .ok_or_else(|| register_unavailable(register))?;
                 evaluation
                     .resume_with_register(Value::Generic(value))
                     .map_err(corrupt)?
@@ -2349,7 +2352,7 @@ impl<'data, S: UnwindSection<Reader<'data>>> RuleContext<'_, S> {
         &self,
         caller: &mut RegisterFile,
         memory: &mut dyn MemoryReader,
-        register: u16,
+        register: DwarfRegister,
         rule: &RegisterRule<usize>,
     ) -> std::result::Result<(), UnwindTermination> {
         let cfa = self.cfa;
@@ -2380,8 +2383,8 @@ impl<'data, S: UnwindSection<Reader<'data>>> RuleContext<'_, S> {
             }
             RegisterRule::Register(source) => self
                 .current
-                .get(source.0)
-                .ok_or_else(|| register_unavailable(source.0))?,
+                .get(DwarfRegister::from(*source))
+                .ok_or_else(|| register_unavailable(DwarfRegister::from(*source)))?,
             RegisterRule::Constant(value) => *value,
             // The register was saved where the expression computes.
             RegisterRule::Expression(expression) => match self.evaluate(expression, memory)? {
@@ -2430,7 +2433,7 @@ impl<'data, S: UnwindSection<Reader<'data>>> RuleContext<'_, S> {
     }
 }
 
-fn register_unavailable(register: u16) -> UnwindTermination {
+fn register_unavailable(register: DwarfRegister) -> UnwindTermination {
     UnwindTermination::RegisterUnavailable {
         register: format!("DWARF register {register}").into(),
     }
@@ -4091,7 +4094,8 @@ mod tests {
 
     #[test]
     fn register_rules_distinguish_locations_values_and_frozen_registers() {
-        let current = RegisterFile::new([(1, 100), (2, 200), (3, 300)]);
+        let dwarf = DwarfRegister::new;
+        let current = RegisterFile::new([(dwarf(1), 100), (dwarf(2), 200), (dwarf(3), 300)]);
         let mut caller = current.clone();
         let mut memory = TestMemory {
             values: [(0xff8, 0xfeed), (0x64, 0xbeef)]
@@ -4125,7 +4129,7 @@ mod tests {
                 section: &section,
                 encoding: TEST_ENCODING,
             }
-            .apply(caller, &mut memory, register, &rule)
+            .apply(caller, &mut memory, dwarf(register), &rule)
         };
         for (register, rule) in [
             (1, RegisterRule::Constant(999)),
@@ -4140,16 +4144,20 @@ mod tests {
         ] {
             apply(&mut caller, 0x1000, register, rule).unwrap();
         }
-        assert_eq!(caller.get(1), Some(999));
-        assert_eq!(caller.get(4), Some(100), "rule read mutated caller state");
-        assert_eq!(caller.get(5), Some(0xfeed));
-        assert_eq!(caller.get(6), Some(0xff8));
-        assert_eq!(caller.get(3), None);
-        assert_eq!(caller.get(7), Some(0xfeed));
-        assert_eq!(caller.get(8), Some(0x1010));
-        assert_eq!(caller.get(9), Some(0x1001));
+        assert_eq!(caller.get(dwarf(1)), Some(999));
         assert_eq!(
-            caller.get(10),
+            caller.get(dwarf(4)),
+            Some(100),
+            "rule read mutated caller state"
+        );
+        assert_eq!(caller.get(dwarf(5)), Some(0xfeed));
+        assert_eq!(caller.get(dwarf(6)), Some(0xff8));
+        assert_eq!(caller.get(dwarf(3)), None);
+        assert_eq!(caller.get(dwarf(7)), Some(0xfeed));
+        assert_eq!(caller.get(dwarf(8)), Some(0x1010));
+        assert_eq!(caller.get(dwarf(9)), Some(0x1001));
+        assert_eq!(
+            caller.get(dwarf(10)),
             Some(0xbeef),
             "expressions read the callee's registers"
         );
@@ -4392,8 +4400,8 @@ mod tests {
                 let registers = RegisterFile::new([
                     (crate::unwind::RSP, stack),
                     (crate::unwind::RETURN_ADDRESS, address.get()),
-                    (3, 0xb),
-                    (0, 0xa),
+                    (DwarfRegister::new(3), 0xb),
+                    (DwarfRegister::new(0), 0xa),
                 ]);
                 let step = info
                     .unwind
@@ -4409,8 +4417,16 @@ mod tests {
                     Some(0x1234)
                 );
                 assert_eq!(step.registers.get(crate::unwind::RSP), Some(stack + 8));
-                assert_eq!(step.registers.get(3), Some(0xb), "rbx survives a call");
-                assert_eq!(step.registers.get(0), None, "rax need not");
+                assert_eq!(
+                    step.registers.get(DwarfRegister::new(3)),
+                    Some(0xb),
+                    "rbx survives a call"
+                );
+                assert_eq!(
+                    step.registers.get(DwarfRegister::new(0)),
+                    None,
+                    "rax need not"
+                );
             }
             let header = info
                 .image

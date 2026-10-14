@@ -11,7 +11,7 @@ use super::layout::{Missing, constant, member, offset, symbol};
 use super::types::TypeTables;
 use super::{read_unsigned, word};
 use crate::runtime_model::{RuntimeException, RuntimeHook, RuntimeImage, RuntimeStop};
-use crate::unwind::RegisterFile;
+use crate::unwind::{DwarfRegister, RAX, RBX, RegisterFile};
 use crate::{ExceptionFilter, ImageAddress, LanguageExceptionKind, VirtualAddress};
 
 /// What Go's runtime reports: a panic nothing recovered and a fatal error
@@ -48,10 +48,6 @@ const PANIC: ExceptionFilter = ExceptionFilter {
     default: false,
 };
 
-/// x86-64's DWARF numbers for the first two integer argument registers of
-/// Go's register ABI.
-const RAX: u16 = 0;
-const RBX: u16 = 3;
 /// The most panics one chain is read through.
 const MAX_PANICS: usize = 64;
 /// The longest message read; the runtime prints longer ones in full, so
@@ -211,7 +207,7 @@ pub fn exception(
     hook: ImageAddress,
     registers: &RegisterFile,
 ) -> Result<RuntimeException, Arc<str>> {
-    let argument = |register: u16| {
+    let argument = |register: DwarfRegister| {
         registers
             .get(register)
             .ok_or_else(|| Arc::<str>::from("the runtime's arguments are unavailable"))

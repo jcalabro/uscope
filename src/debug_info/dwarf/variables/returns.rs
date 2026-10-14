@@ -43,25 +43,27 @@ use super::generic::Generic;
 use super::inspect::evaluate_error_state;
 use super::types::TypeResolution;
 use crate::image::variables::Object;
+use crate::unwind::DwarfRegister;
 
 /// The DWARF numbers of x86-64's integer result registers, in order: rax,
 /// rbx, rcx, rdi, rsi, and r8 through r11.
-const INTEGER: [u16; 9] = [0, 3, 2, 5, 4, 8, 9, 10, 11];
+const INTEGER: [DwarfRegister; 9] = DwarfRegister::each([0, 3, 2, 5, 4, 8, 9, 10, 11]);
 /// The DWARF numbers of x86-64's floating-point result registers, xmm0
 /// through xmm14.
-const FLOATING: [u16; 15] = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+const FLOATING: [DwarfRegister; 15] =
+    DwarfRegister::each([17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
 /// x86-64's stack pointer.
-const STACK_POINTER: u16 = 7;
+const STACK_POINTER: DwarfRegister = crate::unwind::RSP;
 /// The size of a word, and the stack's alignment between arguments and
 /// results.
 const WORD: u64 = 8;
 
 /// System V's integer result registers, rax and rdx.
-const SYSTEM_V_INTEGER: [u16; 2] = [0, 1];
+const SYSTEM_V_INTEGER: [DwarfRegister; 2] = DwarfRegister::each([0, 1]);
 /// System V's floating-point result registers, xmm0 and xmm1.
-const SYSTEM_V_FLOATING: [u16; 2] = [17, 18];
+const SYSTEM_V_FLOATING: [DwarfRegister; 2] = DwarfRegister::each([17, 18]);
 /// The x87 register stack's top, which returns a `long double`.
-const ST0: u16 = 33;
+const ST0: DwarfRegister = DwarfRegister::new(33);
 /// The size of an eightbyte, the unit System V classifies.
 const EIGHTBYTE: u64 = 8;
 
@@ -71,11 +73,11 @@ pub(super) use crate::image::variables::{ReturnConvention, SystemV};
 #[derive(Debug, Clone, Copy)]
 enum Source {
     /// The low bytes of a register.
-    Register(u16),
+    Register(DwarfRegister),
     /// The stack, this far past the caller's stack pointer.
     Stack(u64),
     /// Memory at the address a register holds.
-    Indirect(u16),
+    Indirect(DwarfRegister),
 }
 
 /// One part of a value: where it is in the value, its size, and where it

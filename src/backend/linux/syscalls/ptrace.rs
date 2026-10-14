@@ -529,7 +529,8 @@ impl Tracer<'_> {
             (14, registers.r14),
             (15, registers.r15),
             (16, registers.rip),
-        ];
+        ]
+        .map(|(number, value)| (crate::unwind::DwarfRegister::new(number), value));
         let mut stacks = stacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
