@@ -926,6 +926,10 @@ impl Client {
 
     /// Reads code, which must show the program's own bytes whatever traps
     /// the debugger planted. Half the reads aim at a breakpoint's trap.
+    ///
+    /// Half are made after writing the program's own bytes there, which
+    /// changes nothing the program does: the write must keep the traps in
+    /// place, as code integrity judges, and hide them from the read.
     async fn read_code(&self, breakpoints: &[Added]) -> Result<(), Failure> {
         let pages = self.script.image.code().collect::<Vec<_>>();
         let traps = breakpoints
@@ -956,13 +960,35 @@ impl Client {
             )
             .min(page.len() as u64 - length);
         let address = page_address + offset;
+        let start = usize::try_from(offset).expect("small");
+        let expected = &page[start..start + usize::try_from(length).expect("small")];
+        let covers_trap = aim.is_some_and(|trap| (address..address + length).contains(&trap));
+        if self.draw(2) == 0 {
+            let written = self
+                .handle
+                .write_memory(VirtualAddress::new(address), expected)
+                .await
+                .map_err(|error| protocol(format!("writing {address:#x} failed: {error}")))?;
+            if written != length {
+                return Err(Failure::debugger(
+                    "memory",
+                    format!("writing {length} bytes of code at {address:#x} wrote {written}"),
+                ));
+            }
+
+            self.note(format!(
+                "wrote the program's {length} bytes at {address:#x}"
+            ));
+            if covers_trap {
+                self.mark(Mark::WroteOverTrap);
+            }
+        }
+
         let read = self
             .handle
             .read_memory(VirtualAddress::new(address), length)
             .await
             .map_err(|error| protocol(format!("reading {address:#x} failed: {error}")))?;
-        let start = usize::try_from(offset).expect("small");
-        let expected = &page[start..start + usize::try_from(length).expect("small")];
         if read.completion != MemoryReadCompletion::Complete || &*read.bytes != expected {
             return Err(Failure::debugger(
                 "memory",
@@ -975,7 +1001,7 @@ impl Client {
         }
 
         self.note(format!("read {length} bytes at {address:#x}"));
-        if aim.is_some_and(|trap| (address..address + length).contains(&trap)) {
+        if covers_trap {
             self.mark(Mark::ReadOverTrap);
         }
 

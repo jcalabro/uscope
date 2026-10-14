@@ -48,6 +48,9 @@ marks! {
     /// A memory read covered a trap the debugger planted.
     ReadOverTrap,
 
+    /// A memory write covered a trap the debugger planted.
+    WroteOverTrap,
+
     /// A request naming a stale stop was refused.
     StaleStopRefused,
 

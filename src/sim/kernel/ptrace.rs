@@ -180,6 +180,18 @@ impl Kernel {
             return Ok(());
         }
 
+        // A byte a sabotaged read showed falsely, written back as shown, is
+        // written as the byte it hid: the lie is one only reads can see.
+        #[cfg(test)]
+        let value = self.processes[&group]
+            .space
+            .peek(address)
+            .map_or(value, |word| {
+                let shown = self.sabotage_read(group, address, word);
+                let hidden = (shown ^ word) & !(shown ^ value);
+                value & !hidden | word & hidden
+            });
+
         let space = &mut self
             .processes
             .get_mut(&group)
