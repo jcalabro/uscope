@@ -392,21 +392,26 @@ mimalloc, and it checks a freed block's layout only on its own allocator.
 
 [Loom](https://docs.rs/loom) runs a concurrent protocol under every schedule
 of a few threads, which finds orderings that a test can't force and a stress
-run reaches only by luck. `just loom` runs the models in `loom/` in about a
-second.
+run reaches only by luck. `just loom` runs the models in `loom/` in about
+two seconds.
 
 A model builds the protocol's own source file, not a copy. The file uses
 only the types `crate::sync` names, which are std's in uscope. The `loom/`
 crate includes the file with `#[path]` and gives it a `sync` of loom's
-types. Its `Mutex` also lets another thread run right after each unlock,
-which loom on its own never does. A `try_lock` handoff can't be checked
-without that. Tests that only std can run sit under
-`#[cfg(all(test, not(loom)))]`.
+types. Its `Mutex` and `Condvar` stand in for loom's, which miss three
+things: loom never runs another thread right after an unlock, so a
+`try_lock` handoff can't be checked; its `Condvar` never wakes spuriously,
+so a wait outside a loop passes; and a model thread's panic poisons the
+locks of the others. `loom/src/mutex.rs` says how. Tests that only std can
+run sit under `#[cfg(all(test, not(loom)))]`.
 
 Keep models small: two threads and three or four items find the
-interleaving bugs these protocols have. `just loom BOUND` sets how many
-preemptions a schedule may have: 3 by default, and 4 in `just all`. Each
-step up takes about ten times as long.
+interleaving bugs these protocols have. Check what a model adds, not only
+that it finishes: the unit-walk models also check that every walk begins
+inside its window. `just loom BOUND` sets how many preemptions a schedule
+may have: 3 by default, and 4 in `just all`. Each step up takes about ten
+times as long, so sweeps over every small case, and models with a third
+thread, run with fewer.
 
 Before trusting a new model, break the protocol on purpose and watch the
 model fail. Loom passes a model that never reaches the broken code.

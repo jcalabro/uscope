@@ -1,64 +1,147 @@
-//! Loom's `Mutex` and `Condvar`, with a scheduling point at each unlock.
+//! A `Mutex` and `Condvar` for models, scheduled where loom's are not.
 //!
 //! Loom switches threads only before operations that can block or observe
-//! another thread, such as taking a lock; it never does so on an unlock.
-//! A protocol that hands work off through `try_lock` depends on what
-//! another thread does between one unlock and the next: a worker that
-//! looks for more work, then lets go of the lock, strands whatever arrived
-//! in between. Loom alone never runs a thread in that gap, so a model of
-//! the protocol passes with the bug in it.
+//! another thread, such as taking a lock; it never does so when its
+//! `Mutex` unlocks. A protocol that hands work off through `try_lock`
+//! depends on what another thread does between one unlock and the next: a
+//! worker that looks for more work, then lets go of the lock, strands
+//! whatever arrived in between. Loom never runs a thread in that gap, so a
+//! model of the protocol passes with the bug in it.
 //!
-//! Here each unlock is followed by a read-modify-write of an atomic the
-//! mutex owns, which every lock and `try_lock` also touches first. The
-//! accesses conflict, so loom also tries running the other thread right
-//! after the unlock.
+//! Loom's `Condvar` never wakes a waiter that was not notified, as a real
+//! one may, so a wait not rechecked in a loop passes too.
+//!
+//! And loom runs every thread of a model on one OS thread, so while one
+//! model thread unwinds a panic, `std::thread::panicking` holds in all of
+//! them. A guard another thread drops meanwhile poisons the std mutex that
+//! loom's `Mutex` keeps its data in, and loom unwraps it.
+//!
+//! So this `Mutex` is a flag taken by compare-exchange and released by a
+//! store, at which loom schedules. A thread that finds it taken waits to be
+//! woken by the next release; spinning instead would give loom more
+//! schedules than it can explore. Its data sits in a std mutex that only
+//! the flag's holder locks and whose poisoning it ignores. The `Condvar`
+//! wakes its waiters the same way.
+//!
+//! Each waiting thread waits on a `Notify` of its own, which loom wakes
+//! spuriously once in some schedules. It is the thread's for as long as
+//! the mutex or condvar lives: a new one for each wait would let loom
+//! choose a spurious wake every time, and never finish.
 
 use std::ops::{Deref, DerefMut};
-use std::sync::{LockResult, PoisonError, TryLockError, TryLockResult};
+use std::sync::{Arc, LockResult, PoisonError, TryLockError, TryLockResult};
 
-use loom::sync::atomic::{AtomicUsize, Ordering};
+use loom::sync::Notify;
+use loom::sync::atomic::{AtomicBool, Ordering};
+use loom::thread::ThreadId;
+
+/// Threads waiting to be woken. Its lists are std mutexes, locked only
+/// around steps that are no loom operation, so loom never switches threads
+/// while one is held, and none is ever contended.
+struct Waiters {
+    /// Each thread's `Notify`, made the first time it waits.
+    notifies: std::sync::Mutex<Vec<(ThreadId, Arc<Notify>)>>,
+    /// Those waiting now.
+    waiting: std::sync::Mutex<Vec<Arc<Notify>>>,
+}
+
+impl Waiters {
+    fn new() -> Self {
+        Self {
+            notifies: std::sync::Mutex::new(Vec::new()),
+            waiting: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Lists this thread as waiting, and returns what it waits on.
+    fn enlist(&self) -> Arc<Notify> {
+        let thread = loom::thread::current().id();
+        let known = self
+            .notifies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(waiter, _)| *waiter == thread)
+            .map(|(_, notify)| Arc::clone(notify));
+        let notify = known.unwrap_or_else(|| {
+            let notify = Arc::new(Notify::new());
+            self.notifies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((thread, Arc::clone(&notify)));
+            notify
+        });
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        if !waiting.iter().any(|listed| Arc::ptr_eq(listed, &notify)) {
+            waiting.push(Arc::clone(&notify));
+        }
+        notify
+    }
+
+    fn wake_all(&self) {
+        let waiting =
+            std::mem::take(&mut *self.waiting.lock().unwrap_or_else(PoisonError::into_inner));
+        for notify in waiting {
+            notify.notify();
+        }
+    }
+}
 
 pub struct Mutex<T> {
-    inner: loom::sync::Mutex<T>,
-    /// Touched around every lock and unlock, for loom to schedule at.
-    turns: AtomicUsize,
+    locked: AtomicBool,
+    waiters: Waiters,
+    /// Only the holder of `locked` locks it, so it never waits.
+    data: std::sync::Mutex<T>,
 }
 
 pub struct MutexGuard<'a, T> {
-    inner: Option<loom::sync::MutexGuard<'a, T>>,
-    turns: &'a AtomicUsize,
+    data: Option<std::sync::MutexGuard<'a, T>>,
+    mutex: &'a Mutex<T>,
 }
 
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Self {
         Self {
-            inner: loom::sync::Mutex::new(value),
-            turns: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
+            waiters: Waiters::new(),
+            data: std::sync::Mutex::new(value),
         }
     }
 
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
-        self.turns.fetch_add(1, Ordering::Relaxed);
-        Ok(self.guard(self.inner.lock().unwrap_or_else(PoisonError::into_inner)))
+        // A thread is listed in the same step as its failed take, before
+        // another can run and release, so no release is missed.
+        while !self.take() {
+            self.waiters.enlist().wait();
+        }
+        Ok(self.guard())
     }
 
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
-        self.turns.fetch_add(1, Ordering::Relaxed);
-        match self.inner.try_lock() {
-            Ok(inner) => Ok(self.guard(inner)),
-            Err(TryLockError::Poisoned(poisoned)) => Ok(self.guard(poisoned.into_inner())),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+        if self.take() {
+            Ok(self.guard())
+        } else {
+            Err(TryLockError::WouldBlock)
         }
     }
 
     pub fn into_inner(self) -> LockResult<T> {
-        self.inner.into_inner()
+        Ok(self
+            .data
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner))
     }
 
-    fn guard<'a>(&'a self, inner: loom::sync::MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    fn take(&self) -> bool {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn guard(&self) -> MutexGuard<'_, T> {
         MutexGuard {
-            inner: Some(inner),
-            turns: &self.turns,
+            data: Some(self.data.lock().unwrap_or_else(PoisonError::into_inner)),
+            mutex: self,
         }
     }
 }
@@ -67,7 +150,7 @@ impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        self.inner
+        self.data
             .as_deref()
             .expect("a guard holds its lock until dropped")
     }
@@ -75,7 +158,7 @@ impl<T> Deref for MutexGuard<'_, T> {
 
 impl<T> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.inner
+        self.data
             .as_deref_mut()
             .expect("a guard holds its lock until dropped")
     }
@@ -83,41 +166,37 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        if self.inner.take().is_some() {
-            self.turns.fetch_add(1, Ordering::Relaxed);
+        // The data before the flag, so the next holder finds it free.
+        if self.data.take().is_some() {
+            self.mutex.locked.store(false, Ordering::Release);
+            self.mutex.waiters.wake_all();
         }
     }
 }
 
 pub struct Condvar {
-    inner: loom::sync::Condvar,
+    waiters: Waiters,
 }
 
 impl Condvar {
     pub fn new() -> Self {
         Self {
-            inner: loom::sync::Condvar::new(),
+            waiters: Waiters::new(),
         }
     }
 
-    /// Waits as loom's `Condvar` does, unlocking while it waits.
-    pub fn wait<'a, T>(&self, mut guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
-        let turns = guard.turns;
-        let inner = guard
-            .inner
-            .take()
-            .expect("a guard holds its lock until dropped");
-        let inner = self
-            .inner
-            .wait(inner)
-            .unwrap_or_else(PoisonError::into_inner);
-        Ok(MutexGuard {
-            inner: Some(inner),
-            turns,
-        })
+    /// Unlocks `guard`'s mutex until notified, or woken spuriously, and
+    /// locks it again. The wait is listed before the unlock, so a notify
+    /// that follows a change made under the lock is not missed.
+    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
+        let notify = self.waiters.enlist();
+        let mutex = guard.mutex;
+        drop(guard);
+        notify.wait();
+        mutex.lock()
     }
 
     pub fn notify_all(&self) {
-        self.inner.notify_all();
+        self.waiters.wake_all();
     }
 }
