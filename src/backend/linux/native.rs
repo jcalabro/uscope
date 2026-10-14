@@ -472,6 +472,7 @@ impl LinuxTraceOps for LinuxPtrace {
         self.assert_owner_thread();
         let mut mappings = process_mappings_in(&read_maps(pid)?)?;
         in_process_root(pid, &mut mappings.files);
+        in_process_root(pid, &mut mappings.headers);
         Ok(mappings)
     }
 

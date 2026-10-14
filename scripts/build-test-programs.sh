@@ -1042,6 +1042,22 @@ require_ubuntu_glibc() {
 
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
+# Requires that OUTPUT maps no code: no loadable segment is executable.
+require_no_code() {
+    wait_for "$1"
+    local output="$1"
+    local stamp="${output}.validation-no-code"
+    local signature="validator=no-code-v1"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    if readelf -lW "$output" | awk '$1 == "LOAD" && $(NF - 1) ~ /E/ { found = 1 } END { exit !found }'; then
+        printf 'error: %s has an executable segment\n' "$output" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 require_dwarf_operation() {
     wait_for "$1"
     local output="$1"
@@ -2295,6 +2311,11 @@ build_fixture clang "$c_fixtures_dir/locations/main.c" "$output_dir/locations-cl
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie "${locations_library[@]}"
 require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_OP_piece'
 require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_AT_call_tail_call'
+build_shared_fixture gcc "$c_fixtures_dir/data-library/library.c" "$output_dir/libdata.so" \
+    -O0 -g3 -gdwarf-5 -nostdlib
+require_no_code "$output_dir/libdata.so"
+build_fixture gcc "$c_fixtures_dir/data-library/main.c" "$output_dir/data-library" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir" -ldata '-Wl,-rpath,$ORIGIN'
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o2" \

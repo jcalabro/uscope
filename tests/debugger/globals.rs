@@ -889,6 +889,40 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
     }
 }
 
+/// A library with no code maps nothing executable, but it is a module all
+/// the same, with globals and TLS of its own.
+#[tokio::test]
+async fn a_library_with_no_code_is_a_module_with_its_globals_and_tls() {
+    let fixture = "data-library";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("data_stop").await;
+    assert!(
+        matches!(scenario.run_to_stop().await, StopReason::Breakpoint { .. }),
+        "{fixture}"
+    );
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    assert!(
+        modules
+            .modules
+            .iter()
+            .any(|module| module.path.ends_with("libdata.so")),
+        "{modules:#?}"
+    );
+    for (name, expected) in [("data_global", 7), ("data_tls", 42)] {
+        let variable = scenario
+            .operation(name, scenario.handle().variable(name))
+            .await;
+        assert_variable_value(&variable, ScalarValue::Signed(expected));
+    }
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
 /// glibc before 2.34 describes its thread structures only in libpthread, so
 /// the TLS of a program that never loads it cannot be found, which uscope
 /// says rather than guessing at the C library's layout.
