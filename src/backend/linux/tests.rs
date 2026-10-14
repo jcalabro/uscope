@@ -2253,6 +2253,54 @@ fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
     assert_eq!(detached, 1, "clients learn the process is gone");
 }
 
+/// A waiter thread that took a status while the controller's queue is full
+/// waits to send it there, and only the controller makes room. Ending the
+/// session lets that status through rather than joining a waiter that can
+/// never finish, and keeps it for the controller to serve.
+#[test]
+fn ending_a_session_lets_through_a_waiter_blocked_on_a_full_queue() {
+    let mut harness = watch_harness(2);
+    harness.attached();
+    let sender = harness.controller.message_sender.clone();
+    let filler = WaitEvent::Exited(Pid::from_raw(9000), 0);
+    while sender.try_send(ControllerMessage::Wait(filler)).is_ok() {}
+    let held = WaitEvent::Exited(Pid::from_raw(9001), 0);
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            // As the waiter does, it sends what it took before looking again.
+            let _ = sender.blocking_send(ControllerMessage::Wait(held));
+            while !stop.load(Ordering::Acquire) {
+                thread::park();
+            }
+        }
+    });
+    harness.inferior().waiter = Some(Waiter {
+        thread: Some(WaiterThread { stop, handle }),
+    });
+
+    let (ended, end) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        harness.controller.begin_shutdown(Some(reply));
+        let result = result.blocking_recv().expect("shutdown reply");
+        let _ = ended.send((result, harness));
+    });
+    let (result, harness) = end
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the session ends while its waiter waits on a full queue");
+    assert!(result.is_ok(), "{result:?}");
+    harness.controller.drain_messages();
+    let pending = harness.controller.pending.borrow();
+    assert!(
+        pending
+            .iter()
+            .any(|message| matches!(message, ControllerMessage::Wait(status) if *status == held)),
+        "the waiter's status is kept for the controller"
+    );
+}
+
 /// SIGKILL from outside took every thread of an attached process out of its
 /// stop before the session ends: none can be written, but its process is
 /// ending, so the traps left in it can never run and the detach succeeds.

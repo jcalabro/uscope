@@ -1108,21 +1108,10 @@ impl Waiter {
         Self { thread: None }
     }
 
-    fn stop_and_join(self) -> Result<()> {
-        let Some(thread) = self.thread else {
-            return Ok(());
-        };
-        thread.stop.store(true, Ordering::Release);
-        thread.handle.thread().unpark();
-        thread
-            .handle
-            .join()
-            .map_err(|_| Error::BackendThreadPanicked)
-    }
-
-    /// Stops the waiter, calling `serve` until it ends, so that one
-    /// blocked sending a status to a full queue can be let through.
-    fn stop_and_join_serving(self, mut serve: impl FnMut()) -> Result<()> {
+    /// Stops the waiter, calling `serve` until it ends: one blocked
+    /// sending a status to a full queue waits for the controller to make
+    /// room, which `serve` does.
+    fn stop_and_join(self, mut serve: impl FnMut()) -> Result<()> {
         let Some(thread) = self.thread else {
             return Ok(());
         };
@@ -1470,6 +1459,11 @@ impl<P: InspectionOps> Controller<P> {
             .borrow()
             .iter()
             .any(ControllerMessage::preempts_inspection)
+    }
+
+    /// Stops and joins a waiter, keeping what it sends meanwhile to serve.
+    fn join_waiter(&self, waiter: Waiter) -> Result<()> {
+        waiter.stop_and_join(|| self.drain_messages())
     }
 
     /// Serves a request again after the run control that interrupted it.
