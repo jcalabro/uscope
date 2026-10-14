@@ -217,6 +217,26 @@ impl Breakpoints {
         }
     }
 
+    /// Stores a group's entries after its plan failed part way: those it
+    /// kept, and those it had yet to release, whose owners still count.
+    /// One it released before is gone, as is one it had yet to resolve.
+    pub fn abandon(
+        &mut self,
+        group: Group,
+        slots: Vec<Slot>,
+        unreleased: impl IntoIterator<Item = Entry>,
+    ) {
+        let entries = slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                Slot::Keep(entry) => Some(entry),
+                Slot::Resolve { .. } => None,
+            })
+            .chain(unreleased)
+            .collect();
+        self.install(group, entries);
+    }
+
     /// Allocates an id from the one space every kind of breakpoint shares.
     pub const fn allocate_id(&mut self) -> i64 {
         let id = self.next_id;
@@ -540,5 +560,47 @@ mod tests {
         let changes = breakpoints.sync(&[core(9)]);
         assert!(matches!(&changes[..], [Change::Removed(entry)] if entry.id == 1));
         assert!(!breakpoints.groups.contains_key(&file));
+    }
+
+    /// A replacement that fails to release a breakpoint puts back every
+    /// entry whose debugger breakpoint may still be installed, so their
+    /// hits are still named and none is adopted as the console's.
+    #[test]
+    fn an_abandoned_replacement_keeps_the_entries_still_installed() {
+        let mut breakpoints = Breakpoints::default();
+        let file = Group::Source("/a.c".into());
+        let first = apply(&mut breakpoints, &file, vec![line(10), line(20), line(30)]);
+        // Keeps 10 and releases 20 and 30, but the debugger fails to remove
+        // 20, whose owner the session takes back.
+        let plan = breakpoints.plan(&file, vec![line(10)]);
+        let mut release = plan.release.into_iter();
+        let failed = release.next().expect("an entry to release");
+        assert_eq!(failed, first[1]);
+        assert!(breakpoints.release(BreakpointId::new(20)));
+        breakpoints.acquire(BreakpointId::new(20));
+        breakpoints.abandon(file, plan.slots, std::iter::once(failed).chain(release));
+
+        let entries = breakpoints
+            .entries()
+            .map(|(_, entry)| entry.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, first);
+        let hit = BreakpointHit {
+            breakpoint: BreakpointId::new(20),
+            hit_count: 1,
+        };
+        assert_eq!(breakpoints.hit(&[hit]), (vec![2], "breakpoint"));
+        let core = |id: u64| uscope::Breakpoint {
+            id: BreakpointId::new(id),
+            spec: uscope::BreakpointSpec::Function("f".to_owned()),
+            locations: std::sync::Arc::from([]),
+            hit_condition: None,
+            condition: None,
+            log_message: None,
+            hit_count: 0,
+            enabled: true,
+            temporary: false,
+        };
+        assert!(breakpoints.sync(&[core(10), core(20), core(30)]).is_empty());
     }
 }

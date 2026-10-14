@@ -1914,8 +1914,13 @@ impl Session {
     /// request order.
     async fn replace_group(&mut self, group: Group, wants: Vec<Want>) -> Result<Value, ErrorBody> {
         let plan = self.breakpoints.plan(&group, wants);
-        for entry in plan.release {
-            self.release_breakpoint(&entry).await?;
+        let mut release = plan.release.into_iter();
+        while let Some(entry) = release.next() {
+            if let Err(error) = self.release_breakpoint(&entry).await {
+                self.breakpoints
+                    .abandon(group, plan.slots, std::iter::once(entry).chain(release));
+                return Err(error);
+            }
         }
         let mut entries = Vec::with_capacity(plan.slots.len());
         for slot in plan.slots {
@@ -1944,7 +1949,11 @@ impl Session {
         {
             match handle.remove_breakpoint(breakpoint).await {
                 Ok(_) | Err(Error::BreakpointNotFound(_)) => {}
-                Err(error) => return Err(self::error(error)),
+                Err(error) => {
+                    // It may still be installed, and its entry still owns it.
+                    self.breakpoints.acquire(breakpoint);
+                    return Err(self::error(error));
+                }
             }
         }
         Ok(())
