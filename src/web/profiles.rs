@@ -179,7 +179,10 @@ impl Profiles {
         for recorder in recordings.values() {
             recorder.stop.store(true, Ordering::Relaxed);
         }
-        for thread in recordings.into_values().filter_map(|recorder| recorder.thread) {
+        for thread in recordings
+            .into_values()
+            .filter_map(|recorder| recorder.thread)
+        {
             let _ = thread.join();
         }
     }
@@ -393,7 +396,10 @@ impl Profiles {
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&listed);
         }));
-        let mut recordings = self.recordings.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut recordings = self
+            .recordings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let thread = match started {
             Ok(thread) => thread,
             Err(error) => {

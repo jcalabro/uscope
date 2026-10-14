@@ -91,7 +91,12 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
         self.abandoned.store(true, Ordering::Relaxed);
         // Under the lock, so that no worker sees the walk held and then
         // waits past the wake.
-        drop(self.window.added.lock().unwrap_or_else(PoisonError::into_inner));
+        drop(
+            self.window
+                .added
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         self.window.progress.notify_all();
     }
 

@@ -115,7 +115,9 @@ fn a_later_recording_reports_no_span_of_an_earlier_one() {
         outer_ends.recv().expect("the test ends the outer span");
         drop(outer);
     });
-    inner_finished.recv().expect("the worker finished its inner span");
+    inner_finished
+        .recv()
+        .expect("the worker finished its inner span");
     drop(earlier.finish().unwrap());
     let later = Recording::start(Options::default()).expect("the earlier one ended");
     end_outer.send(()).expect("the worker waits");
