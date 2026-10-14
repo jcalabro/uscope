@@ -100,7 +100,7 @@ pub const SIGCONTEXT_REGISTERS: [u16; 17] =
 pub fn interrupted_registers(context: u64, memory: &mut dyn MemoryReader) -> Option<RegisterFile> {
     let mut registers = RegisterFile::new([]);
     for (slot, register) in SIGCONTEXT_REGISTERS.iter().enumerate() {
-        let address = context + UCONTEXT_MCONTEXT + 8 * slot as u64;
+        let address = context.checked_add(UCONTEXT_MCONTEXT + 8 * slot as u64)?;
         registers.set(*register, memory.read_u64(VirtualAddress::new(address))?);
     }
     Some(registers)

@@ -71,15 +71,17 @@ impl FrameRules {
     }
 }
 
-/// The stack bytes a sample copied, at the stack pointer's address.
+/// The stack bytes a sample copied, at the stack pointer's address. A
+/// sample without its stack pointer has a copy at no known address, from
+/// which nothing can be read.
 struct StackCopy<'a> {
-    start: u64,
+    start: Option<u64>,
     bytes: &'a [u8],
 }
 
 impl MemoryReader for StackCopy<'_> {
     fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
-        let offset = usize::try_from(address.get().checked_sub(self.start)?).ok()?;
+        let offset = usize::try_from(address.get().checked_sub(self.start?)?).ok()?;
         let word = self.bytes.get(offset..offset.checked_add(8)?)?;
         Some(u64::from_le_bytes(word.try_into().ok()?))
     }
@@ -122,7 +124,7 @@ fn sampled_frames(
         return (Vec::new(), StackEnd::Truncated(Truncation::NoStack, None));
     };
     let mut memory = StackCopy {
-        start: registers.get(RSP).unwrap_or(0),
+        start: registers.get(RSP),
         bytes: sample.stack,
     };
     let walked = walk_cfi(modules, instruction, registers, &mut memory, limit);
@@ -269,10 +271,13 @@ fn walk_cfi(
                 .registers
                 .get(RSP)
                 .and_then(|context| interrupted_registers(context, memory));
-            let Some(interrupted) = interrupted else {
+            let Some((interrupted, instruction)) = interrupted.and_then(|interrupted| {
+                let instruction = interrupted.get(RETURN_ADDRESS)?;
+                Some((interrupted, instruction))
+            }) else {
                 break StackEnd::Truncated(Truncation::StackCopyExhausted, None);
             };
-            address = VirtualAddress::new(interrupted.get(RETURN_ADDRESS).unwrap_or(0));
+            address = VirtualAddress::new(instruction);
             registers = interrupted;
             continue;
         }
@@ -437,91 +442,151 @@ mod tests {
     use super::*;
     use crate::{LoadedModule, ModuleId, ModuleImageId};
 
+    /// `work` in `stores-clang-O2`, which keeps its frame pointer.
+    struct Work {
+        info: crate::debug_info::DebugInfo,
+        /// Just past its prologue, where its frame is found by rbp.
+        body: u64,
+        /// In its epilogue, after it pops rbx and before r14, where its
+        /// rules still find rbx below the stack pointer.
+        epilogue: u64,
+        returns_to: u64,
+    }
+
+    impl Work {
+        fn new() -> Self {
+            let path =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("build/golden/stores/stores-clang-O2");
+            let data = std::fs::read(&path).expect("build the golden programs");
+            let info =
+                crate::debug_info::load_bytes(&path, &data).expect("load its debug information");
+            let file = object::File::parse(&*data).expect("parse it");
+            let text = file.section_by_name(".text").expect("a text section");
+            let instructions = Decoder::with_ip(
+                64,
+                text.data().expect("text bytes"),
+                text.address(),
+                DecoderOptions::NONE,
+            )
+            .iter()
+            .collect::<Vec<_>>();
+            let symbol = |name: &str| {
+                file.symbols()
+                    .find(|symbol| symbol.name() == Ok(name))
+                    .expect("the symbol")
+                    .address()
+            };
+            let after = |start: u64, found: &dyn Fn(&iced_x86::Instruction) -> bool| {
+                instructions
+                    .iter()
+                    .skip_while(|instruction| instruction.ip() < start)
+                    .find(|instruction| found(instruction))
+                    .expect("the instruction")
+                    .ip()
+            };
+            let pop = |register| {
+                move |instruction: &iced_x86::Instruction| {
+                    instruction.mnemonic() == Mnemonic::Pop
+                        && instruction.op0_register() == register
+                }
+            };
+            let body = after(symbol("work"), &|instruction| {
+                instruction.mnemonic() == Mnemonic::Mov
+                    && instruction.op0_register() == Register::RBP
+                    && instruction.op1_register() == Register::RSP
+            });
+            let body = instructions
+                .iter()
+                .find(|instruction| instruction.ip() == body)
+                .expect("the frame's setup")
+                .next_ip();
+            let epilogue = after(
+                after(symbol("work"), &pop(Register::RBX)),
+                &pop(Register::R14),
+            );
+            let call = after(symbol("rt_thread_start"), &|instruction| {
+                instruction.mnemonic() == Mnemonic::Call
+            });
+            let returns_to = instructions
+                .iter()
+                .find(|instruction| instruction.ip() == call)
+                .expect("the call")
+                .next_ip();
+            Self {
+                info,
+                body,
+                epilogue,
+                returns_to,
+            }
+        }
+
+        /// Unwinds a sample at `rip` with `registers` and the stack
+        /// `words`, whose kernel chain is this frame and its caller.
+        fn unwind(
+            &self,
+            rip: u64,
+            registers: &[(u16, u64)],
+            words: &[u64],
+        ) -> (Vec<u64>, StackEnd) {
+            let stack = words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>();
+            let modules = [UnwindModule {
+                loaded: LoadedModule {
+                    id: ModuleId::new(1),
+                    image: ModuleImageId::new(1),
+                    load_bias: 0,
+                },
+                image: &self.info.image,
+                unwind: self.info.unwind.as_ref(),
+            }];
+            let (frames, end) = unwind_sample(
+                &modules,
+                &mut FrameRules::default(),
+                SampledState {
+                    registers,
+                    stack: &stack,
+                    chain: &[rip, self.returns_to],
+                },
+                16,
+            );
+            let addresses = frames.iter().map(|frame| frame.address.get()).collect();
+            (addresses, end)
+        }
+    }
+
     /// A sample in an epilogue, after a register was popped whose rules
     /// still name its slot, now below the stack pointer and outside the
     /// copy: the caller is found all the same, and the stack is whole.
     #[test]
     fn a_register_saved_below_the_copy_still_leaves_its_caller_found() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("build/golden/stores/stores-clang-O2");
-        let data = std::fs::read(&path).expect("build the golden programs");
-        let info = crate::debug_info::load_bytes(&path, &data).expect("load its debug information");
-        let file = object::File::parse(&*data).expect("parse it");
-        let text = file.section_by_name(".text").expect("a text section");
-        let instructions = Decoder::with_ip(
-            64,
-            text.data().expect("text bytes"),
-            text.address(),
-            DecoderOptions::NONE,
-        )
-        .iter()
-        .collect::<Vec<_>>();
-        let symbol = |name: &str| {
-            file.symbols()
-                .find(|symbol| symbol.name() == Ok(name))
-                .expect("the symbol")
-                .address()
-        };
-        let after = |start: u64, found: &dyn Fn(&iced_x86::Instruction) -> bool| {
-            instructions
-                .iter()
-                .skip_while(|instruction| instruction.ip() < start)
-                .find(|instruction| found(instruction))
-                .expect("the instruction")
-                .ip()
-        };
-        // `work` pops rbx, then r14, under rules that still find rbx below.
-        let pop = |register| {
-            move |instruction: &iced_x86::Instruction| {
-                instruction.mnemonic() == Mnemonic::Pop && instruction.op0_register() == register
-            }
-        };
-        let rip = after(
-            after(symbol("work"), &pop(Register::RBX)),
-            &pop(Register::R14),
-        );
-        let call = after(symbol("rt_thread_start"), &|instruction| {
-            instruction.mnemonic() == Mnemonic::Call
-        });
-        let returns_to = instructions
-            .iter()
-            .find(|instruction| instruction.ip() == call)
-            .expect("the call")
-            .next_ip();
-
+        let work = Work::new();
         // The copy holds r14, r15, the caller's rbp, and the return address.
         let sp = 0x7000_0000_u64;
-        let stack = [7, 8, 0, returns_to]
-            .iter()
-            .flat_map(|word: &u64| word.to_le_bytes())
-            .collect::<Vec<_>>();
-        let registers = [(RETURN_ADDRESS, rip), (RSP, sp), (RBP, sp + 16)];
-        let modules = [UnwindModule {
-            loaded: LoadedModule {
-                id: ModuleId::new(1),
-                image: ModuleImageId::new(1),
-                load_bias: 0,
-            },
-            image: &info.image,
-            unwind: info.unwind.as_ref(),
-        }];
-        let (frames, end) = unwind_sample(
-            &modules,
-            &mut FrameRules::default(),
-            SampledState {
-                registers: &registers,
-                stack: &stack,
-                chain: &[rip, returns_to],
-            },
-            16,
-        );
-        let addresses = frames
-            .iter()
-            .map(|frame| frame.address.get())
-            .collect::<Vec<_>>();
+        let rip = work.epilogue;
         assert_eq!(
-            (addresses, end),
-            (vec![rip, returns_to - 1], StackEnd::Complete)
+            work.unwind(
+                rip,
+                &[(RETURN_ADDRESS, rip), (RSP, sp), (RBP, sp + 16)],
+                &[7, 8, 0, work.returns_to],
+            ),
+            (vec![rip, work.returns_to - 1], StackEnd::Complete)
         );
+    }
+
+    /// A sample without its stack pointer has a copy at no known address:
+    /// read as if it began at zero, its words would name a false caller.
+    /// The kernel's chain names the true one.
+    #[test]
+    fn a_copy_without_its_stack_pointer_names_no_caller() {
+        let work = Work::new();
+        let rip = work.body;
+        let (addresses, _) = work.unwind(
+            rip,
+            &[(RETURN_ADDRESS, rip), (RBP, 0x10)],
+            &[0, 0, 0, work.returns_to + 0x20],
+        );
+        assert_eq!(addresses, [rip, work.returns_to - 1]);
     }
 }
