@@ -9,6 +9,7 @@ that the type system can't express.
 | --- | --- |
 | `Cargo.toml` | Profiles: where debug assertions and overflow checks are on |
 | `src/backend/linux.rs` | `Controller::handle_message`, which every request and wait status passes through |
+| `src/backend/linux/invariants.rs` | The controller's invariants, checked after its messages |
 | `src/backend/linux/lifecycle.rs` | `detach_inferior`, the correct way to release an attached process |
 
 ## Rules
@@ -49,10 +50,16 @@ debug_assert!(
 ## Invariant checks
 
 Give a stateful component a `check_invariants` method and call it under debug
-assertions after each change. For controller state, call it at the end of
-`Controller::handle_message`, so the simulator runs it at every step of every
-seed. Prove that it fires with a unit test that corrupts the state and uses
-`#[should_panic]`.
+assertions after each change. Prove that it fires with a unit test that
+corrupts the state and uses `#[should_panic]`.
+
+The controller's invariants run at the end of `Controller::handle_message`, so
+the simulator checks them at every step of every seed. Their cost grows with
+the state, so past a few hundred breakpoints, threads, and modules they run
+every few messages instead. They must hold even when a ptrace request failed
+partway through, as a tracee killed from outside makes one do. Record a
+breakpoint site's owner and its bookkeeping one site at a time, so that a
+failed edit leaves them in step.
 
 ## When an assertion fires
 

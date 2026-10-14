@@ -76,6 +76,7 @@ mod frames;
 mod indirect;
 mod inspection;
 mod internal_stops;
+mod invariants;
 mod language_exceptions;
 mod libraries;
 mod lifecycle;
@@ -1271,6 +1272,9 @@ struct Controller<P: InspectionOps> {
     /// The language runtime each image carries, bound on first need.
     runtime_models: runtimes::RuntimeCache,
     revision: u64,
+    /// How many messages the controller served, which paces the invariant
+    /// checks of a large state.
+    messages_served: u64,
 }
 
 /// Fork children still on their way to their first stop when their parent's
@@ -1383,6 +1387,7 @@ impl<P: InspectionOps> Controller<P> {
             step_into_runtime: false,
             runtime_models: RefCell::default(),
             revision: 0,
+            messages_served: 0,
         }
     }
 }
@@ -1470,6 +1475,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_wait(status)
             }
         };
+        if cfg!(debug_assertions) {
+            self.messages_served += 1;
+            if self
+                .messages_served
+                .is_multiple_of(self.invariant_check_stride())
+            {
+                self.check_invariants();
+            }
+        }
         // A shutdown, whether requested or begun when an attached process
         // failed, ends the controller once nothing is left to release.
         keeps_running && !(self.shutting_down && self.inferior.is_none() && self.orphans.is_none())

@@ -2797,6 +2797,24 @@ fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
     assert!(harness.controller.orphans.is_none());
 }
 
+/// The controller's invariant check fires on state that contradicts
+/// itself: a site that no owner holds.
+#[test]
+#[should_panic(expected = "the site at 0x40 has no owners")]
+fn the_invariant_check_finds_a_site_no_owner_holds() {
+    let mut harness = watch_harness(1);
+    harness.controller.check_invariants();
+    harness.inferior().breakpoints.insert(
+        VirtualAddress::new(0x40),
+        BreakpointSite {
+            original_byte: 0x90,
+            installed: true,
+            owners: BTreeSet::new(),
+        },
+    );
+    harness.controller.check_invariants();
+}
+
 /// A client's shutdown after one the controller began itself, as a failed
 /// attach does, is answered once the first is done, not begun again.
 #[test]

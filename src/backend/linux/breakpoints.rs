@@ -49,6 +49,29 @@ impl UserBreakpoints {
         std::mem::take(&mut self.list)
     }
 
+    /// Panics if the spec counts disagree with the list. The message names
+    /// no spec, which holds the user's text.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a sum does not depend on the order of its terms"
+    )]
+    pub(super) fn check_invariants(&self) {
+        debug_assert_eq!(
+            self.specs.values().sum::<usize>(),
+            self.list.len(),
+            "the spec counts cover a different number of breakpoints than are listed"
+        );
+        for breakpoint in &self.list {
+            debug_assert!(
+                self.specs
+                    .get(&breakpoint.spec)
+                    .is_some_and(|&count| count > 0),
+                "breakpoint {} has a spec the counts do not include",
+                breakpoint.id
+            );
+        }
+    }
+
     /// The breakpoint that a request with this spec and these options would
     /// duplicate.
     fn identical(
