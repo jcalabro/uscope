@@ -165,6 +165,7 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
                 match before.general[RAX] {
                     SYS_EXIT_GROUP => {
                         expect_exit_event(&native, tid, status, code)
+                            .and_then(|()| compare_memory(&native, process, &memories[&process]))
                             .map_err(|difference| format!("{at}: {difference}"))?;
                         if threads.iter().all(|thread| thread.process == process) {
                             return Ok(step);
@@ -193,6 +194,7 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
                     }
                     SYS_EXIT => {
                         expect_exit_event(&native, tid, status, code)
+                            .and_then(|()| compare_memory(&native, process, &memories[&process]))
                             .map_err(|difference| format!("{at}: {difference}"))?;
                         native.resume(tid, None, false).map_err(failed)?;
                         threads.remove(current);
