@@ -4826,6 +4826,95 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
     );
 }
 
+/// The stepping thread traps at a site its step's plan shares with a user
+/// breakpoint, which a client removes or disables while the step runs.
+/// The edit's internal stop drops the hit, and the step meets its own site
+/// there and ends, rather than stepping over the trap as if only the
+/// breakpoint had owned it.
+///
+/// The simulator found this, with a source step over that ran on past the
+/// line it had to stop at. It needs the edit's stop requested before the
+/// trap is handled, which on a real kernel is a race between the client's
+/// request and the waiter's status that no fixture can force, so this
+/// drives the controller directly.
+fn a_steps_site_shared_with_a_breakpoint_edited_while_running(
+    edit: fn(BreakpointId, Reply<Breakpoint>) -> Edit,
+) {
+    const SITE: u64 = 0x40;
+    let mut harness = watch_harness(2);
+    let stepping = harness.threads[0];
+    let breakpoint = harness.add_breakpoint(SITE);
+    harness.start_continue();
+    {
+        let inferior = harness.inferior();
+        let active = inferior.active.as_mut().expect("execution");
+        let execution = active.id;
+        active.kind = step_execution(
+            stepping,
+            StepKind::Advance,
+            StepStart {
+                plan_addresses: BTreeSet::from([VirtualAddress::new(SITE)]),
+                targets: BTreeSet::from([VirtualAddress::new(SITE)]),
+                ..StepStart::default()
+            },
+        );
+        inferior
+            .plan_sites
+            .insert(execution, BTreeSet::from([VirtualAddress::new(SITE)]));
+        inferior
+            .breakpoints
+            .get_mut(&VirtualAddress::new(SITE))
+            .expect("the breakpoint's site")
+            .owners
+            .insert(BreakpointOwner::Plan(execution));
+    }
+
+    harness.published();
+    harness.trace().take_actions();
+    let mut edited = harness.edit(|reply| edit(breakpoint.id, reply));
+
+    // The trap was raised before the thread saw its stop request.
+    harness.hit_at(stepping, SITE).expect("shared site trap");
+    harness.settle_requested_stops();
+
+    edited.try_recv().expect("reply").expect("edited");
+    assert_eq!(
+        harness.stopped(),
+        Some((
+            debug_thread_id(stepping),
+            StopReason::Step {
+                kind: StepKind::Advance
+            }
+        )),
+        "the step ends at its own site"
+    );
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions.contains(&format!("step {stepping}")),
+        "the step stops before the instruction its site covers: {actions:?}"
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.breakpoints.is_empty(), "every trap is gone");
+}
+
+#[test]
+fn a_step_ends_at_its_site_where_a_breakpoint_removed_while_running_was_hit() {
+    a_steps_site_shared_with_a_breakpoint_edited_while_running(|id, reply| {
+        Edit::RemoveBreakpoint { id, reply }
+    });
+}
+
+#[test]
+fn a_step_ends_at_its_site_where_a_breakpoint_disabled_while_running_was_hit() {
+    a_steps_site_shared_with_a_breakpoint_edited_while_running(|id, reply| {
+        Edit::SetBreakpointEnabled {
+            id,
+            enabled: false,
+            reply,
+        }
+    });
+}
+
 /// A runtime whose threads run the tasks a test sets, so run control's
 /// following of a task is tested without any language's runtime.
 #[derive(Debug, Default)]

@@ -899,12 +899,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             );
         }
 
+        self.arrive_unstopped(pid, address)
+    }
+
+    /// Goes on from a trap at `address` at which no user breakpoint stops:
+    /// none owns the site, each declined the hit by its hit condition, or
+    /// an edit applied while the stop formed dropped every hit that
+    /// stopped. Whatever else owns the site, such as the active step's
+    /// plan, meets the thread there.
+    fn arrive_unstopped(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
         if let Some(reason) = self.runtime_exception(pid, address) {
             return self.begin_visible_stop(pid, reason);
         }
 
-        // No user breakpoint stops at this hit: none owns the site, or each
-        // declined it by its hit condition.
         if self.reach_resumed_future(pid, address)? {
             return Ok(());
         }
@@ -1682,17 +1689,52 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Applies the edits requested while the stop formed, then settles the
     /// reasons of threads whose breakpoint or watchpoint they changed.
-    fn apply_pending_edits(&mut self) -> Result<()> {
+    ///
+    /// Returns the trap at which the active step's thread stopped for a
+    /// breakpoint hit the edits dropped. A hit that stops preempts what
+    /// else owns the site, such as the step's own plan, so the step has
+    /// yet to meet the thread there.
+    fn apply_pending_edits(&mut self) -> Result<Option<(Pid, VirtualAddress)>> {
         let edits = self
             .inferior
             .as_mut()
             .map(Inferior::take_pending_edits)
             .unwrap_or_default();
+        let stepping_hit = if edits.is_empty() {
+            None
+        } else {
+            self.stepping_thread_hit()
+        };
         for edit in edits {
             self.apply_edit(edit);
         }
 
-        self.settle_edited_reasons()
+        self.settle_edited_reasons()?;
+        Ok(stepping_hit.filter(|(pid, _)| {
+            self.inferior
+                .as_ref()
+                .and_then(|inferior| inferior.threads.get(pid))
+                .is_some_and(|thread| thread.reason.is_none())
+        }))
+    }
+
+    /// The thread running the active step and the site at which a user
+    /// breakpoint's hit stopped it, if one did.
+    fn stepping_thread_hit(&self) -> Option<(Pid, VirtualAddress)> {
+        let inferior = self.inferior.as_ref()?;
+        let ActiveKind::Step { owner, .. } = inferior.active.as_ref()?.kind else {
+            return None;
+        };
+
+        inferior
+            .threads
+            .iter()
+            .find_map(|(&pid, thread)| match thread.reason {
+                Some(StopReason::Breakpoint { address, .. }) if self.runs_step(owner, pid) => {
+                    Some((pid, address))
+                }
+                _ => None,
+            })
     }
 
     pub(super) fn finish_barrier_if_ready(&mut self) -> Result<()> {
@@ -1726,7 +1768,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         self.restore_active_breakpoints()?;
-        self.apply_pending_edits()?;
+        if let Some((pid, address)) = self.apply_pending_edits()? {
+            // The step meets its thread at the trap now. However it goes
+            // on, it completes this stop again, with no edit left to drop
+            // a hit.
+            return self.arrive_unstopped(pid, address);
+        }
+
         if self
             .inferior
             .as_ref()
