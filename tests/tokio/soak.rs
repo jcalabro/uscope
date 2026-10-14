@@ -23,9 +23,9 @@ const CLIENTS: u64 = 4;
 const LINES_PER_ROUND: u64 = 64;
 /// How long a client waits for an answer, however long the server is
 /// stopped.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(120);
+const ANSWER_TIMEOUT: Duration = Duration::from_mins(2);
 /// How long the server may take to serve a round's lines.
-const ROUND_TIMEOUT: Duration = Duration::from_secs(60);
+const ROUND_TIMEOUT: Duration = Duration::from_mins(1);
 /// The rounds before the debugger's memory is first sampled, and how much
 /// it may grow after.
 const WARM_UP_ROUNDS: u64 = 20;

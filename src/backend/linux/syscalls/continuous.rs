@@ -235,7 +235,7 @@ mod tests {
         let mut trace = Continuous::new(
             ContinuousOptions {
                 directory: directory.clone(),
-                keep: Duration::from_secs(3600),
+                keep: Duration::from_hours(1),
                 segment: second,
                 window: 2 * second,
                 slower_than: Some(second / 10),
