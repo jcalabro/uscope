@@ -1091,12 +1091,11 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
     reason = "libc's localtime_r is the only way to read the zone"
 )]
 fn zone_offset(seconds: i64) -> i64 {
-    let time: nix::libc::time_t = seconds;
     // SAFETY: zeroes are a valid `tm`, which is plain data.
     let mut local: nix::libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: both pointers name live locals of the right types, and
     // localtime_r writes only through the second.
-    let converted = unsafe { nix::libc::localtime_r(&raw const time, &raw mut local) };
+    let converted = unsafe { nix::libc::localtime_r(&raw const seconds, &raw mut local) };
     if converted.is_null() {
         0
     } else {

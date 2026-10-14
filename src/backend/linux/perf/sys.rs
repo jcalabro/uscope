@@ -81,9 +81,9 @@ pub mod sample {
 }
 
 const FLAG_FD_CLOEXEC: libc::c_ulong = 1 << 3;
-const IOC_ENABLE: libc::c_ulong = 0x2400;
-const IOC_DISABLE: libc::c_ulong = 0x2401;
-const IOC_SET_OUTPUT: libc::c_ulong = 0x2405;
+const IOC_ENABLE: libc::Ioctl = 0x2400;
+const IOC_DISABLE: libc::Ioctl = 0x2401;
+const IOC_SET_OUTPUT: libc::Ioctl = 0x2405;
 
 /// `read_format`: each read also gives how many samples the event lost.
 pub const FORMAT_LOST: u64 = 1 << 4;

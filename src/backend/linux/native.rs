@@ -31,7 +31,7 @@ use super::modules::{
     ModuleMapping, ProcessMappings, identify_mapped_module, load_bias, process_mappings_in,
     read_maps,
 };
-use super::registers::{Fxsave, native_fxsave};
+use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
 use super::{
     BREAKPOINT_OPCODE, BreakpointOwner, BreakpointSite, LinuxError, SignalMetadata,
@@ -321,8 +321,8 @@ impl InspectionOps for LinuxPtrace {
 
     fn floating_registers(&self, pid: Pid) -> Result<Fxsave> {
         self.assert_owner_thread();
-        ptrace::getregset::<ptrace::regset::NT_PRFPREG>(pid)
-            .map(|registers| native_fxsave(&registers))
+        super::sys::floating_registers(pid)
+            .map(Arc::new)
             .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
@@ -397,7 +397,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
         self.assert_owner_thread();
-        match ptrace_with_signal(libc::PTRACE_DETACH, pid, signal) {
+        match ptrace_with_signal(ptrace::Request::PTRACE_DETACH, pid, signal) {
             Ok(()) => Ok(true),
             Err(Errno::ESRCH) => Ok(false),
             Err(error) => Err(backend_error(LinuxError::System(error))),
@@ -525,7 +525,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        ptrace_with_signal(libc::PTRACE_CONT, pid, signal)
+        ptrace_with_signal(ptrace::Request::PTRACE_CONT, pid, signal)
             .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
@@ -533,7 +533,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
-        let result = ptrace_with_signal(libc::PTRACE_CONT, pid, Some(Signal::SIGKILL));
+        let result = ptrace_with_signal(ptrace::Request::PTRACE_CONT, pid, Some(Signal::SIGKILL));
         self.wake_waiter();
         match result {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -543,7 +543,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        ptrace_with_signal(libc::PTRACE_SINGLESTEP, pid, signal)
+        ptrace_with_signal(ptrace::Request::PTRACE_SINGLESTEP, pid, signal)
             .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
@@ -551,7 +551,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        ptrace_with_signal(libc::PTRACE_SYSCALL, pid, signal)
+        ptrace_with_signal(ptrace::Request::PTRACE_SYSCALL, pid, signal)
             .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
@@ -937,7 +937,7 @@ pub(super) fn wait_for(
 
 /// Resumes or detaches a stopped tracee, delivering `signal` to it.
 pub(super) fn ptrace_with_signal(
-    request: libc::c_uint,
+    request: ptrace::Request,
     pid: Pid,
     signal: Option<Signal>,
 ) -> std::result::Result<(), Errno> {

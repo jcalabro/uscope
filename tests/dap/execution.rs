@@ -287,7 +287,8 @@ fn signal_stops(exceptions: Value) -> (Vec<String>, Value, String) {
 fn signals_stop_as_exceptions_that_the_filters_choose() {
     // Every signal the program raises is handled; the exit status has a
     // bit for each handler that ran, so passing every signal makes 63.
-    let realtime = format!("SIG{}", nix::libc::SIGRTMIN() + 1);
+    // The fixture's SIGRTMIN + 1: glibc reserves two real-time signals.
+    let realtime = "SIG35".to_owned();
     let defaults = json!({"filters": ["fatal", "interrupt", "other"]});
     let (stops, exit, console) = signal_stops(defaults);
     assert_eq!(stops, ["SIGUSR1".to_owned(), realtime.clone()]);

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 /// Where the unified hierarchy is mounted.
 pub const ROOT: &str = "/sys/fs/cgroup";
 
-const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
 /// The proc inode numbers of the initial cgroup and pid namespaces, which
 /// the kernel fixes.
 const INIT_CGROUP_NS: &str = "cgroup:[4026531835]";
@@ -60,7 +59,7 @@ impl Cgroup {
     /// or when uscope is in a cgroup namespace of its own.
     pub fn open(path: &Path) -> Result<Self, CgroupError> {
         let unified = nix::sys::statfs::statfs(ROOT)
-            .is_ok_and(|fs| fs.filesystem_type().0 == CGROUP2_SUPER_MAGIC);
+            .is_ok_and(|fs| fs.filesystem_type() == nix::sys::statfs::CGROUP2_SUPER_MAGIC);
         if !unified {
             return Err(CgroupError::NotUnified);
         }
