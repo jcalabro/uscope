@@ -17,6 +17,7 @@ pub fn import(text: &str) -> Result<Capture, String> {
     builder.thread_name(thread, "every thread");
     let mut frames: BTreeMap<&str, u32> = BTreeMap::new();
     let mut stack = Vec::new();
+    let mut total = 0_u64;
     for (number, line) in text.lines().enumerate() {
         let line = line.trim_end();
         if line.is_empty() {
@@ -32,6 +33,9 @@ pub fn import(text: &str) -> Result<Capture, String> {
         if weight == 0 {
             continue;
         }
+        total = total
+            .checked_add(weight)
+            .ok_or_else(|| format!("{} brings the weights past {}", at(), u64::MAX))?;
         stack.clear();
         for name in names.trim_end().split(';').rev() {
             let next = frames.len() as u64;
