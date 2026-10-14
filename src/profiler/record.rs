@@ -153,7 +153,8 @@ impl Processor {
             vdso: None,
             processes: BTreeMap::new(),
             next_module: 0,
-            limit,
+            // A stack keeps at least its innermost frame.
+            limit: limit.max(1),
             carry: Vec::new(),
             latest: 0,
             first: None,

@@ -242,6 +242,9 @@ fn walk_cfi(
         // interrupted instruction, with the registers the kernel saved.
         if let Some(trampoline) = signal_trampoline(modules, caller, &step.registers) {
             unwound.push(trampoline);
+            if unwound.len() >= limit {
+                return Walked::certain(unwound, StackEnd::Truncated(Truncation::DepthLimit, None));
+            }
             let interrupted = step
                 .registers
                 .get(RSP)

@@ -936,6 +936,27 @@ fn a_signal_handlers_stack_goes_on_through_what_the_signal_interrupted() {
     }
 }
 
+/// A stack keeps at most its frame limit, the limit falling just past the
+/// signal trampoline that leads to what the signal interrupted.
+#[test]
+fn a_signal_handlers_stack_keeps_to_its_frame_limit() {
+    for variant in ["gcc-o0", "clang-o2-nofp"] {
+        let mut command = Command::new(Scenario::fixture(&format!("profile-signals-{variant}")));
+        command.arg("3").stdout(Stdio::null());
+        let options = RecordOptions {
+            max_frames: 2,
+            ..calls_of("on_signal")
+        };
+        let recording = record(command, &options).expect("record");
+        assert!(recording.status.success(), "{variant}");
+        let stacks = recording.profile.stacks();
+        assert_eq!(stacks.len(), 3, "{variant}");
+        for stack in &stacks {
+            assert_eq!(stack.functions, ["on_signal", "__restore_rt"], "{variant}");
+        }
+    }
+}
+
 #[test]
 fn a_stack_through_the_vdso_goes_on_to_its_callers() {
     let mut command = Command::new(Scenario::fixture("profile-vdso"));
