@@ -127,10 +127,10 @@ fn the_schema_is_the_records_layout() {
             declaration.column,
             enclosing,
             coroutine,
-            generics,
-            generic_count,
-            instances,
-            instance_count,
+            generics.first,
+            generics.count,
+            instances.first,
+            instances.count,
             other_language,
             language,
             role,
@@ -148,10 +148,10 @@ fn the_schema_is_the_records_layout() {
             call_site.file,
             call_site.line,
             call_site.column,
-            ranges,
-            range_count,
-            entries,
-            entry_count,
+            ranges.first,
+            ranges.count,
+            entries.first,
+            entries.count,
             entry,
             provenance,
             inline
@@ -226,12 +226,12 @@ fn the_schema_is_the_records_layout() {
             base_name,
             identity,
             target,
-            first,
-            count,
-            bases,
-            base_count,
-            variants,
-            variant_count,
+            parts.first,
+            parts.count,
+            bases.first,
+            bases.count,
+            variants.first,
+            variants.count,
             discriminant,
             byte_size,
             value,
@@ -267,10 +267,10 @@ fn the_schema_is_the_records_layout() {
         VariantRecord,
         [
             name,
-            selectors,
-            selector_count,
-            members,
-            member_count,
+            selectors.first,
+            selectors.count,
+            members.first,
+            members.count,
             default
         ]
     );
@@ -312,13 +312,13 @@ fn the_schema_is_the_records_layout() {
         TableKind::TypeIdentities,
         IdentityRecord,
         [
-            path,
-            path_count,
-            inline,
-            inline_count,
+            path.first,
+            path.count,
+            inline.first,
+            inline.count,
             base,
-            arguments,
-            argument_count,
+            arguments.first,
+            arguments.count,
             pack,
             runtime_type,
             other_language,
@@ -341,10 +341,10 @@ fn the_schema_is_the_records_layout() {
             bytes,
             length,
             unit,
-            addresses,
-            address_count,
-            procedures,
-            procedure_count,
+            addresses.first,
+            addresses.count,
+            procedures.first,
+            procedures.count,
             version,
             address_size,
             dwarf64
@@ -356,7 +356,11 @@ fn the_schema_is_the_records_layout() {
         [index, address]
     );
     check!(TableKind::Procedures, ProcedureRecord, [offset, list]);
-    check!(TableKind::LocationLists, LocationListRecord, [first, count]);
+    check!(
+        TableKind::LocationLists,
+        LocationListRecord,
+        [entries.first, entries.count]
+    );
     check!(
         TableKind::LocationEntries,
         LocationEntryRecord,
@@ -365,7 +369,7 @@ fn the_schema_is_the_records_layout() {
     check!(
         TableKind::EvaluationUnits,
         EvaluationUnitRecord,
-        [offset, base_types, base_type_count, language, flags]
+        [offset, base_types.first, base_types.count, language, flags]
     );
     check!(TableKind::BaseTypes, BaseTypeRecord, [offset, value_type]);
     check!(TableKind::ScopeRanges, CodeRange, [start, end]);
@@ -373,8 +377,8 @@ fn the_schema_is_the_records_layout() {
         TableKind::Scopes,
         ScopeRecord,
         [
-            ranges,
-            range_count,
+            ranges.first,
+            ranges.count,
             instance,
             go_instance,
             lexical_depth,
@@ -407,13 +411,13 @@ fn the_schema_is_the_records_layout() {
         TableKind::VariableFunctions,
         VariableFunctionRecord,
         [
-            ranges,
-            range_count,
-            objects,
-            object_count,
+            ranges.first,
+            ranges.count,
+            objects.first,
+            objects.count,
             name,
-            captures,
-            capture_count,
+            captures.first,
+            captures.count,
             returned_name,
             returned_type,
             other_language,
@@ -443,8 +447,8 @@ fn the_schema_is_the_records_layout() {
         [
             name,
             frame_base,
-            tail_calls,
-            tail_call_count,
+            tail_calls.first,
+            tail_calls.count,
             frame_base_kind,
             flags
         ]
@@ -459,8 +463,8 @@ fn the_schema_is_the_records_layout() {
             enters,
             jump_instruction,
             jump_lookup,
-            parameters,
-            parameter_count,
+            parameters.first,
+            parameters.count,
             malformed,
             target_kind,
             flags
@@ -498,22 +502,22 @@ fn the_schema_is_the_records_layout() {
         ResumeRecord,
         [
             instance,
-            dispatch,
-            dispatch_count,
-            points,
-            point_count,
+            dispatch.first,
+            dispatch.count,
+            points.first,
+            points.count,
             malformed
         ]
     );
     check!(
         TableKind::ResumePoints,
         ResumePointRecord,
-        [state, address, resumption, resumption_count]
+        [state, address, resumption.first, resumption.count]
     );
     check!(
         TableKind::Held,
         HeldRecord,
-        [offset, state, ranges, range_count]
+        [offset, state, ranges.first, ranges.count]
     );
     for kind in [
         TableKind::GoEntries,
@@ -565,7 +569,7 @@ fn the_schema_is_the_records_layout() {
     // A change to any record changes this; bump the format with it.
     assert_eq!(
         schema::layout_fingerprint(),
-        0x38bd_5a6a_51fd_9797,
+        0x3ac0_8700_2751_cb3a,
         "the layout changed:\n{}",
         schema::schema_text()
     );
@@ -1220,12 +1224,12 @@ fn validation_rejects_functions_that_disagree() {
         ),
         (
             "generics past their table",
-            function(|f| f[0].generic_count = 9.into()),
+            function(|f| f[0].generics.count = 9.into()),
             "function is malformed",
         ),
         (
             "an instance claimed twice",
-            function(|f| f[2].instance_count = 1.into()),
+            function(|f| f[2].instances.count = 1.into()),
             "instance index disagrees",
         ),
         (
@@ -1259,7 +1263,7 @@ fn validation_rejects_functions_that_disagree() {
         ),
         (
             "ranges past their table",
-            instance(|i| i[3].range_count = 9.into()),
+            instance(|i| i[3].ranges.count = 9.into()),
             "instance is malformed",
         ),
         (
@@ -1622,7 +1626,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a pointer's list",
-            ty(|t| t[1].count = 1.into()),
+            ty(|t| t[1].parts.count = 1.into()),
             "a type is malformed",
         ),
         (
@@ -1632,12 +1636,12 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "members out of order",
-            ty(|t| t[2].first = 1.into()),
+            ty(|t| t[2].parts.first = 1.into()),
             "a type is malformed",
         ),
         (
             "a member claimed twice",
-            ty(|t| t[7].first = t[2].first),
+            ty(|t| t[7].parts.first = t[2].parts.first),
             "a type is malformed",
         ),
         (
@@ -1647,7 +1651,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a discriminant before the variants' members",
-            ty(|t| t[3].discriminant = t[3].first),
+            ty(|t| t[3].discriminant = t[3].parts.first),
             "a type is malformed",
         ),
         (
@@ -1662,7 +1666,7 @@ fn validation_rejects_types_that_disagree() {
         ),
         (
             "a list longer than its types say",
-            ty(|t| t[12].count = 1.into()),
+            ty(|t| t[12].parts.count = 1.into()),
             "lists do not match",
         ),
         (
@@ -2352,7 +2356,7 @@ fn validation_rejects_locations_that_disagree() {
         ),
         (
             "base types past the table",
-            unit(|u| u[0].base_type_count = 3.into()),
+            unit(|u| u[0].base_types.count = 3.into()),
             "evaluation unit",
         ),
         (
@@ -2372,7 +2376,7 @@ fn validation_rejects_locations_that_disagree() {
         ),
         (
             "entries past the table",
-            list(|l| l[2].count = 1.into()),
+            list(|l| l[2].entries.count = 1.into()),
             "location list",
         ),
         (
@@ -2422,12 +2426,12 @@ fn validation_rejects_locations_that_disagree() {
         ),
         (
             "addresses past the table",
-            expression(|x| x[1].address_count = 4.into()),
+            expression(|x| x[1].addresses.count = 4.into()),
             "expression",
         ),
         (
             "procedures past the table",
-            expression(|x| x[2].procedure_count = 3.into()),
+            expression(|x| x[2].procedures.count = 3.into()),
             "expression",
         ),
         (
@@ -2681,7 +2685,7 @@ fn validation_rejects_variables_that_disagree() {
         ),
         (
             "code past the table",
-            scope(|s| s[0].range_count = 9.into()),
+            scope(|s| s[0].ranges.count = 9.into()),
             "scope",
         ),
         (
@@ -2837,7 +2841,7 @@ fn validation_rejects_variables_that_disagree() {
         ),
         (
             "objects past the list",
-            function(|f| f[0].object_count = 8.into()),
+            function(|f| f[0].objects.count = 8.into()),
             "function",
         ),
         (
@@ -2847,12 +2851,12 @@ fn validation_rejects_variables_that_disagree() {
         ),
         (
             "captures past the table",
-            function(|f| f[0].capture_count = 3.into()),
+            function(|f| f[0].captures.count = 3.into()),
             "function",
         ),
         (
             "malformed captures with some",
-            function(|f| f[1].capture_count = 1.into()),
+            function(|f| f[1].captures.count = 1.into()),
             "function",
         ),
         (
@@ -3029,7 +3033,7 @@ fn validation_rejects_calls_that_disagree() {
         ),
         (
             "tail calls past the table",
-            function(|f| f[2].tail_call_count = 2.into()),
+            function(|f| f[2].tail_calls.count = 2.into()),
             "calling",
         ),
         (
@@ -3089,7 +3093,7 @@ fn validation_rejects_calls_that_disagree() {
         ),
         (
             "parameters past the table",
-            site(|s| s[0].parameter_count = 3.into()),
+            site(|s| s[0].parameters.count = 3.into()),
             "call site is",
         ),
         (
@@ -3428,12 +3432,12 @@ fn validation_rejects_resumes_that_disagree() {
         ),
         (
             "points past the table",
-            resume(|r| r[0].point_count = 4.into()),
+            resume(|r| r[0].points.count = 4.into()),
             "resume points",
         ),
         (
             "dispatch past the ranges",
-            resume(|r| r[0].dispatch = 0xffff_fff0.into()),
+            resume(|r| r[0].dispatch.first = 0xffff_fff0.into()),
             "resume points",
         ),
         (
@@ -3443,19 +3447,19 @@ fn validation_rejects_resumes_that_disagree() {
         ),
         (
             "an undecodable instance's points",
-            resume(|r| r[1].point_count = 1.into()),
+            resume(|r| r[1].points.count = 1.into()),
             "resume points",
         ),
         (
             "a resumption past the ranges",
-            point(|p| p[1].resumption_count = 99.into()),
+            point(|p| p[1].resumption.count = 99.into()),
             "resume point is",
         ),
         ("held out of order", held(|h| h.swap(0, 1)), "held range"),
         ("a key twice", held(|h| h[1] = h[0]), "held range"),
         (
             "held past the ranges",
-            held(|h| h[2].ranges = 99.into()),
+            held(|h| h[2].ranges.first = 99.into()),
             "held range",
         ),
     ];

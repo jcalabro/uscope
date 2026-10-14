@@ -10,7 +10,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use super::index::{self, Interval, NameEntry};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::symbols::{role, role_code, valid_role};
-use super::{Builder, Image, NONE, Record, SharedRecord, TableKind};
+use super::{Builder, Image, NONE, Record, SharedRecord, Span, TableKind};
 use crate::{
     AddressRange, BoundaryEvidence, BreakpointEntry, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, CodeRole, ColumnNumber, EntryProvenance, FunctionId, FunctionInfo,
@@ -76,11 +76,9 @@ pub struct FunctionRecord {
     /// The type of the coroutine the function runs, or [`NONE`].
     pub coroutine: U32,
     /// The function's first type argument in [`TableKind::Generics`].
-    pub generics: U32,
-    pub generic_count: U32,
+    pub generics: Span<GenericRecord>,
     /// The function's first instance in [`TableKind::FunctionInstances`].
-    pub instances: U32,
-    pub instance_count: U32,
+    pub instances: Span<Member>,
     /// A language that has no code of its own, by its DWARF code.
     pub other_language: U16,
     pub language: u8,
@@ -119,12 +117,10 @@ pub struct InstanceRecord {
     /// An inline expansion's call, when described.
     pub call_site: LocationRecord,
     /// The instance's first range in [`TableKind::InstanceRanges`].
-    pub ranges: U32,
-    pub range_count: U32,
+    pub ranges: Span<RangeRecord>,
     /// The instance's first recommended entry in
     /// [`TableKind::RecommendedEntries`].
-    pub entries: U32,
-    pub entry_count: U32,
+    pub entries: Span<EntryRecord>,
     /// The preferred function breakpoint location, when `provenance` is
     /// not [`NONE_PROVENANCE`].
     pub entry: U64,
@@ -382,10 +378,8 @@ fn add_functions(
             declaration: LocationRecord::of(function.declaration.as_ref()),
             enclosing: optional(function.enclosing.map(FunctionId::get)),
             coroutine: optional(function.coroutine.map(TypeId::get)),
-            generics: first_generic.into(),
-            generic_count: number(function.generics.len())?.into(),
-            instances: number(first_instance)?.into(),
-            instance_count: number(instance_count)?.into(),
+            generics: Span::new(first_generic, number(function.generics.len())?),
+            instances: Span::new(number(first_instance)?, number(instance_count)?),
             other_language: other_language.into(),
             language,
             role: role_code(function.role),
@@ -426,10 +420,8 @@ fn add_instances(
             function: instance.function.get().into(),
             parent: optional(instance.parent.map(CodeInstanceId::get)),
             call_site: LocationRecord::of(call_site),
-            ranges: number(ranges.len())?.into(),
-            range_count: number(instance.ranges.len())?.into(),
-            entries: number(entry_records.len())?.into(),
-            entry_count: number(recommended.len())?.into(),
+            ranges: Span::new(number(ranges.len())?, number(instance.ranges.len())?),
+            entries: Span::new(number(entry_records.len())?, number(recommended.len())?),
             entry: instance
                 .breakpoint_entry
                 .map_or(0, |entry| entry.address.get())
@@ -706,10 +698,10 @@ impl<'a> Function<'a> {
     /// name.
     #[must_use]
     pub fn generics(self) -> impl ExactSizeIterator<Item = (&'a str, TypeId)> + 'a {
-        let first = self.record.generics.get() as usize;
-        let count = self.record.generic_count.get() as usize;
         let strings = self.view.strings;
-        self.view.generics[first..first + count]
+        self.record
+            .generics
+            .rows(self.view.generics)
             .iter()
             .map(move |generic| {
                 (
@@ -722,10 +714,10 @@ impl<'a> Function<'a> {
     /// The function's concrete instances, in order.
     #[must_use]
     pub fn instances(self) -> impl ExactSizeIterator<Item = CodeInstance<'a>> + 'a {
-        let first = self.record.instances.get() as usize;
-        let count = self.record.instance_count.get() as usize;
         let view = self.view;
-        self.view.members[first..first + count]
+        self.record
+            .instances
+            .rows(self.view.members)
             .iter()
             .map(move |member| {
                 view.instance(CodeInstanceId::new(member.value.get()))
@@ -818,9 +810,9 @@ impl<'a> CodeInstance<'a> {
         self,
     ) -> impl ExactSizeIterator<Item = AddressRange<ImageAddress>> + DoubleEndedIterator + Clone + 'a
     {
-        let first = self.record.ranges.get() as usize;
-        let count = self.record.range_count.get() as usize;
-        self.view.ranges[first..first + count]
+        self.record
+            .ranges
+            .rows(self.view.ranges)
             .iter()
             .map(RangeRecord::get)
     }
@@ -846,9 +838,9 @@ impl<'a> CodeInstance<'a> {
     /// instance's every prologue end, or otherwise its breakpoint entry.
     #[must_use]
     pub fn recommended_entries(self) -> impl ExactSizeIterator<Item = BreakpointEntry> + 'a {
-        let first = self.record.entries.get() as usize;
-        let count = self.record.entry_count.get() as usize;
-        self.view.entries[first..first + count]
+        self.record
+            .entries
+            .rows(self.view.entries)
             .iter()
             .map(|entry| BreakpointEntry {
                 address: ImageAddress::new(entry.address.get()),
@@ -868,13 +860,6 @@ impl<'a> CodeInstance<'a> {
             breakpoint_entry: self.breakpoint_entry(),
         }
     }
-}
-
-/// Whether `count` records from `first` lie within `length`.
-pub(super) fn span(first: U32, count: U32, length: usize) -> bool {
-    (first.get() as usize)
-        .checked_add(count.get() as usize)
-        .is_some_and(|end| end <= length)
 }
 
 /// Checks the function and instance tables and their indexes.
@@ -905,17 +890,16 @@ fn validate_functions(image: &Image) -> Result<(), String> {
             || !valid_language(function.language, function.other_language.get())
             || !valid_role(function.role)
             || function.main_subprogram > 1
-            || function.generics.get() != next_generic
-            || !span(function.generics, function.generic_count, generics.len())
-            || function.instances.get() as usize != next_member
-            || !span(function.instances, function.instance_count, members.len())
+            || function.generics.first() != next_generic
+            || !function.generics.within(generics.len())
+            || function.instances.first() as usize != next_member
+            || !function.instances.within(members.len())
         {
             return Err("a function is malformed".into());
         }
-        next_generic += function.generic_count.get();
-        next_member += function.instance_count.get() as usize;
-        let first = function.instances.get() as usize;
-        let own = &members[first..first + function.instance_count.get() as usize];
+        next_generic += function.generics.count();
+        next_member += function.instances.count() as usize;
+        let own = function.instances.rows(members);
         if !own.iter().all(|member| {
             instances
                 .get(member.value.get() as usize)
@@ -996,18 +980,18 @@ fn validate_instances(image: &Image) -> Result<(), String> {
             || (instance.parent.get() != NONE && instance.parent.get() as usize >= index)
             || !instance.call_site.valid(files)
             || (!inline && instance.call_site != LocationRecord::NONE)
-            || instance.ranges.get() != next_range
-            || !span(instance.ranges, instance.range_count, ranges.len())
-            || instance.entries.get() != next_entry
-            || !span(instance.entries, instance.entry_count, entries.len())
+            || instance.ranges.first() != next_range
+            || !instance.ranges.within(ranges.len())
+            || instance.entries.first() != next_entry
+            || !instance.entries.within(entries.len())
             || (instance.provenance == NONE_PROVENANCE && instance.entry.get() != 0)
             || (instance.provenance != NONE_PROVENANCE
                 && usize::from(instance.provenance) >= PROVENANCES.len())
         {
             return Err("an instance is malformed".into());
         }
-        next_range += instance.range_count.get();
-        next_entry += instance.entry_count.get();
+        next_range += instance.ranges.count();
+        next_entry += instance.entries.count();
     }
     if next_range as usize != ranges.len()
         || next_entry as usize != entries.len()
@@ -1022,10 +1006,7 @@ fn validate_instances(image: &Image) -> Result<(), String> {
     }
     // Each entry is one of its instance's ranges, and each range has one.
     let code_ranges = image.shared::<Interval>(TableKind::CodeRanges);
-    let own = |instance: &InstanceRecord| {
-        let first = instance.ranges.get() as usize;
-        &ranges[first..first + instance.range_count.get() as usize]
-    };
+    let own = |instance: &InstanceRecord| instance.ranges.rows(ranges);
     // The index is strictly ordered, so it names each (range, instance)
     // once, and each of its intervals is one of its instance's ranges.
     // Then it holds every instance's every range exactly when it has as

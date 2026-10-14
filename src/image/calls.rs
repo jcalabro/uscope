@@ -10,12 +10,11 @@ use std::sync::Arc;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::functions::span;
 use super::locations::{ExpressionId, LocationListId};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::types::Item;
 use super::variables::{Keyed, Metadata};
-use super::{Builder, Image, NONE, Record, TableKind};
+use super::{Builder, Image, NONE, Record, Span, TableKind};
 use crate::ImageAddress;
 use crate::debug_info::TailJump;
 
@@ -82,8 +81,7 @@ pub struct CallingFunctionRecord {
     /// The linker name, or [`NONE`].
     pub name: U32,
     pub frame_base: U32,
-    pub tail_calls: U32,
-    pub tail_call_count: U32,
+    pub tail_calls: Span<Item>,
     pub frame_base_kind: u8,
     pub flags: u8,
 }
@@ -110,8 +108,7 @@ pub struct CallSiteRecord {
     pub enters: U32,
     pub jump_instruction: U64,
     pub jump_lookup: U64,
-    pub parameters: U32,
-    pub parameter_count: U32,
+    pub parameters: Span<SiteParameterRecord>,
     /// Why the site is malformed, or [`NONE`].
     pub malformed: U32,
     pub target_kind: u8,
@@ -204,8 +201,10 @@ pub fn add_to(
                 None => NONE.into(),
             },
             frame_base,
-            tail_calls: number(tail_calls.len())?.into(),
-            tail_call_count: number(function.tail_calls.len())?.into(),
+            tail_calls: Span::new(
+                number(tail_calls.len())?,
+                number(function.tail_calls.len())?,
+            ),
             frame_base_kind,
             flags: if function.tail_calls_described {
                 calling_flags::TAIL_CALLS_DESCRIBED
@@ -246,8 +245,7 @@ pub fn add_to(
             enters: optional(site.enters),
             jump_instruction: site.jump.map_or(0, |jump| jump.instruction.get()).into(),
             jump_lookup: site.jump.map_or(0, |jump| jump.lookup.get()).into(),
-            parameters: number(parameters.len())?.into(),
-            parameter_count: number(site.parameters.len())?.into(),
+            parameters: Span::new(number(parameters.len())?, number(site.parameters.len())?),
             malformed: match &site.malformed {
                 Some(why) => text(strings, why)?,
                 None => NONE.into(),
@@ -378,8 +376,9 @@ impl<'a> Calling<'a> {
 
     /// The tail calls it makes, in the order it describes them.
     pub fn tail_calls(self) -> impl ExactSizeIterator<Item = SiteId> + 'a {
-        let first = self.record.tail_calls.get() as usize;
-        self.view.tail_calls[first..first + self.record.tail_call_count.get() as usize]
+        self.record
+            .tail_calls
+            .rows(self.view.tail_calls)
             .iter()
             .map(|item| SiteId(item.value.get()))
     }
@@ -438,8 +437,9 @@ impl<'a> Site<'a> {
     }
 
     pub fn parameters(self) -> impl ExactSizeIterator<Item = SiteParameter> + 'a {
-        let first = self.record.parameters.get() as usize;
-        self.view.parameters[first..first + self.record.parameter_count.get() as usize]
+        self.record
+            .parameters
+            .rows(self.view.parameters)
             .iter()
             .map(|parameter| SiteParameter {
                 register: (parameter.flags & parameter_flags::REGISTER != 0)
@@ -476,11 +476,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 lists,
                 strings,
             )
-            && span(
-                function.tail_calls,
-                function.tail_call_count,
-                view.tail_calls.len(),
-            )
+            && function.tail_calls.within(view.tail_calls.len())
     }) {
         return Err("a calling function is malformed".into());
     }
@@ -508,7 +504,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             && (site.flags & site_flags::RETURN_ADDRESS != 0 || site.return_address.get() == 0)
             && (site.flags & site_flags::JUMP != 0
                 || (site.jump_instruction.get() == 0 && site.jump_lookup.get() == 0))
-            && span(site.parameters, site.parameter_count, view.parameters.len())
+            && site.parameters.within(view.parameters.len())
             && optional_string(site.malformed)
             && match site.target_kind {
                 targets::UNKNOWN => site.target.get() == 0,

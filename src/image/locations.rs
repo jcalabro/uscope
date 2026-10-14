@@ -10,7 +10,7 @@ use gimli::ValueType;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use super::{Builder, Image, NONE, Record, TableKind};
+use super::{Builder, Image, NONE, Record, Span, TableKind};
 use crate::{AddressRange, ImageAddress};
 
 /// One expression.
@@ -25,11 +25,9 @@ pub struct ExpressionRecord {
     /// The unit it was read from, in [`TableKind::EvaluationUnits`].
     pub unit: U32,
     /// Its indexed addresses, by index.
-    pub addresses: U32,
-    pub address_count: U32,
+    pub addresses: Span<IndexedAddressRecord>,
     /// The procedures it calls, by `.debug_info` offset.
-    pub procedures: U32,
-    pub procedure_count: U32,
+    pub procedures: Span<ProcedureRecord>,
     /// Its unit's DWARF version.
     pub version: U16,
     pub address_size: u8,
@@ -76,8 +74,7 @@ impl Record for ProcedureRecord {
     Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned,
 )]
 pub struct LocationListRecord {
-    pub first: U32,
-    pub count: U32,
+    pub entries: Span<LocationEntryRecord>,
 }
 
 impl Record for LocationListRecord {
@@ -114,8 +111,7 @@ pub struct EvaluationUnitRecord {
     /// Where the unit begins in `.debug_info`, when [`unit_flags::OFFSET`].
     pub offset: U64,
     /// Its base types, by unit offset.
-    pub base_types: U32,
-    pub base_type_count: U32,
+    pub base_types: Span<BaseTypeRecord>,
     /// Its `DW_AT_language`, when [`unit_flags::LANGUAGE`].
     pub language: U16,
     pub flags: u8,
@@ -231,8 +227,7 @@ impl LocationsBuilder {
         }
         self.units.push(EvaluationUnitRecord {
             offset: unit.offset.unwrap_or(0).into(),
-            base_types: first.into(),
-            base_type_count: index(base_types.len())?.into(),
+            base_types: Span::new(first, index(base_types.len())?),
             language: unit.language.map_or(0, |language| language.0).into(),
             flags,
         });
@@ -281,10 +276,8 @@ impl LocationsBuilder {
             bytes: index(self.bytes.len())?.into(),
             length: index(bytes.len())?.into(),
             unit: unit.into(),
-            addresses: index(self.addresses.len())?.into(),
-            address_count: index(addresses.len())?.into(),
-            procedures: index(self.procedures.len())?.into(),
-            procedure_count: index(procedures.len())?.into(),
+            addresses: Span::new(index(self.addresses.len())?, index(addresses.len())?),
+            procedures: Span::new(index(self.procedures.len())?, index(procedures.len())?),
             version: encoding.version.into(),
             address_size: encoding.address_size,
             dwarf64: u8::from(encoding.format == gimli::Format::Dwarf64),
@@ -328,8 +321,7 @@ impl LocationsBuilder {
         }
         let id = index(self.lists.len())?;
         self.lists.push(LocationListRecord {
-            first: index(self.entries.len())?.into(),
-            count: index(entries.len())?.into(),
+            entries: Span::new(index(self.entries.len())?, index(entries.len())?),
         });
         self.entries.extend(
             entries
@@ -381,9 +373,7 @@ impl LocationsBuilder {
         // names is.
         while expressions.len() < other.expressions.len() || lists.len() < other.lists.len() {
             if let Some(record) = other.expressions.get(expressions.len()) {
-                let first = record.procedures.get() as usize;
-                let called =
-                    &other.procedures[first..first + record.procedure_count.get() as usize];
+                let called = record.procedures.rows(&other.procedures);
                 if called.iter().all(|procedure| {
                     procedure.list.get() == NONE || (procedure.list.get() as usize) < lists.len()
                 }) {
@@ -483,10 +473,9 @@ impl<'a> LocationTables<'a> {
     /// The list `id` names, which must be one of these.
     pub fn list(self, id: LocationListId) -> LocationList<'a> {
         let record = &self.lists[id.0 as usize];
-        let first = record.first.get() as usize;
         LocationList {
             tables: self,
-            entries: &self.entries[first..first + record.count.get() as usize],
+            entries: record.entries.rows(self.entries),
         }
     }
 
@@ -505,8 +494,7 @@ impl<'a> LocationTables<'a> {
     /// The value type of the base type at `offset` in unit `unit`.
     pub fn base_type(self, unit: u32, offset: u64) -> Option<ValueType> {
         let record = self.units.get(unit as usize)?;
-        let first = record.base_types.get() as usize;
-        let types = &self.base_types[first..first + record.base_type_count.get() as usize];
+        let types = record.base_types.rows(self.base_types);
         let found = types
             .binary_search_by_key(&offset, |record| record.offset.get())
             .ok()?;
@@ -562,13 +550,11 @@ impl<'a> Expression<'a> {
     }
 
     fn address_records(self) -> &'a [IndexedAddressRecord] {
-        let first = self.record.addresses.get() as usize;
-        &self.tables.addresses[first..first + self.record.address_count.get() as usize]
+        self.record.addresses.rows(self.tables.addresses)
     }
 
     fn procedure_records(self) -> &'a [ProcedureRecord] {
-        let first = self.record.procedures.get() as usize;
-        &self.tables.procedures[first..first + self.record.procedure_count.get() as usize]
+        self.record.procedures.rows(self.tables.procedures)
     }
 
     /// Its indexed addresses, by index.
@@ -662,23 +648,13 @@ impl<'a> LocationList<'a> {
 /// Checks the locations.
 pub(super) fn validate(image: &Image) -> Result<(), String> {
     let tables = LocationTables::new(image);
-    let within = |first: U32, count: U32, length: usize| {
-        (first.get() as usize)
-            .checked_add(count.get() as usize)
-            .is_some_and(|end| end <= length)
-    };
     if !tables.units.iter().all(|unit| {
         unit.flags & !unit_flags::ALL == 0
             && (unit.flags & unit_flags::OFFSET != 0 || unit.offset.get() == 0)
             && (unit.flags & unit_flags::LANGUAGE != 0 || unit.language.get() == 0)
-            && within(
-                unit.base_types,
-                unit.base_type_count,
-                tables.base_types.len(),
-            )
+            && unit.base_types.within(tables.base_types.len())
             && {
-                let first = unit.base_types.get() as usize;
-                let types = &tables.base_types[first..first + unit.base_type_count.get() as usize];
+                let types = unit.base_types.rows(tables.base_types);
                 types
                     .iter()
                     .all(|record| (1..=VALUE_TYPES.len()).contains(&usize::from(record.value_type)))
@@ -691,7 +667,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     if !tables
         .lists
         .iter()
-        .all(|list| within(list.first, list.count, tables.entries.len()))
+        .all(|list| list.entries.within(tables.entries.len()))
         || !tables.entries.iter().all(|entry| {
             (entry.expression.get() as usize) < tables.expressions.len()
                 && match entry.flags {
@@ -711,30 +687,26 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             && (record.bytes.get() as usize)
                 .checked_add(record.length.get() as usize)
                 .is_some_and(|end| end <= tables.bytes.len())
-            && within(
-                record.addresses,
-                record.address_count,
-                tables.addresses.len(),
-            )
-            && within(
-                record.procedures,
-                record.procedure_count,
-                tables.procedures.len(),
-            )
+            && record.addresses.within(tables.addresses.len())
+            && record.procedures.within(tables.procedures.len())
             && {
-                let first = record.addresses.get() as usize;
-                tables.addresses[first..first + record.address_count.get() as usize]
+                record
+                    .addresses
+                    .rows(tables.addresses)
                     .is_sorted_by(|earlier, later| earlier.index.get() < later.index.get())
             }
             && {
-                let first = record.procedures.get() as usize;
-                tables.procedures[first..first + record.procedure_count.get() as usize]
+                record
+                    .procedures
+                    .rows(tables.procedures)
                     .iter()
                     .all(|procedure| {
                         procedure.list.get() == NONE
                             || (procedure.list.get() as usize) < tables.lists.len()
                     })
-                    && tables.procedures[first..first + record.procedure_count.get() as usize]
+                    && record
+                        .procedures
+                        .rows(tables.procedures)
                         .is_sorted_by(|earlier, later| earlier.offset.get() < later.offset.get())
             }
     }) {
