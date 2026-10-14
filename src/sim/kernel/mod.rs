@@ -88,6 +88,13 @@ const UID: u32 = 1000;
 /// `orig_rax` outside any system call.
 pub const NO_SYSTEM_CALL: u64 = u64::MAX;
 
+/// `rax` after a call that failed for a signal pending, to be restarted
+/// whatever the signal does (K-SYS-7).
+const ERESTARTNOINTR_RESULT: u64 = (-513_i64).cast_unsigned();
+
+/// The length of the `syscall` instruction, which a restart rewinds.
+const SYSCALL_LENGTH: u64 = 2;
+
 /// What `rax` holds while a thread is inside a system call.
 const ENOSYS_RESULT: u64 = (-(libc::ENOSYS as i64)).cast_unsigned();
 
@@ -357,6 +364,11 @@ pub struct Thread {
     /// call when it next runs (K-SYS-2).
     pub entered: bool,
 
+    /// Whether the call the thread made last failed with
+    /// `-ERESTARTNOINTR` for a signal pending, to be made again as the
+    /// thread returns to its program (K-SYS-7).
+    pub restarting: bool,
+
     /// Whether its tracer has resumed it, as it has not a thread it seized
     /// running, which makes calls before the tracer can catch them.
     pub resumed: bool,
@@ -484,6 +496,7 @@ impl Thread {
             // K-SYS-3: a new thread does not inherit system-call-stops.
             syscall_stops: false,
             entered: false,
+            restarting: false,
             resumed: false,
             report: None,
             trapped_at: None,
@@ -613,6 +626,10 @@ pub enum Happening {
 
     /// A group exit or SIGKILL took a thread out of a ptrace-stop.
     PulledFromStop { tid: Tid },
+
+    /// A thread's fork or clone failed for a signal pending, to be made
+    /// again (K-SYS-7).
+    Restarting { tid: Tid },
 
     /// A group leader exited while other threads ran on.
     LeaderExitedAlone { tid: Tid },
@@ -975,6 +992,7 @@ impl Kernel {
                 orig_rax: syscalls::SYS_EXECVE,
                 syscall_stops: false,
                 entered: false,
+                restarting: false,
                 resumed: false,
                 returning: None,
                 state: if traced {
@@ -1122,6 +1140,7 @@ impl Kernel {
                 break;
             }
 
+            self.restart_call(tid);
             ran.executed += 1;
             match self.execute(tid) {
                 Executed::Continue => {}
@@ -1624,6 +1643,51 @@ impl Kernel {
             SigInfo::event(tid, event),
             WaitStatus::Event(tid, event),
         );
+    }
+
+    /// Whether a signal or an interrupt is pending for a thread, which
+    /// makes a fork or clone it enters fail with `-ERESTARTNOINTR`
+    /// (K-SYS-7), as Linux's `signal_pending` does `copy_process`.
+    fn signal_pending(&self, tid: Tid) -> bool {
+        let thread = &self.threads[&tid];
+        let interrupted = matches!(
+            thread.tracing,
+            Tracing::Seized {
+                interrupted: true,
+                ..
+            }
+        );
+        interrupted
+            || !thread.pending.is_empty()
+            || self
+                .processes
+                .get(&thread.tgid)
+                .is_some_and(|process| !process.shared.is_empty())
+    }
+
+    /// Fails the fork or clone a thread is making for the signal pending
+    /// (K-SYS-7): it creates nothing and returns `-ERESTARTNOINTR`, to be
+    /// made again once the thread has taken what is pending.
+    fn fail_to_restart(&mut self, tid: Tid) {
+        let thread = self.threads.get_mut(&tid).expect("the calling thread");
+        thread.registers.general[RAX] = ERESTARTNOINTR_RESULT;
+        thread.restarting = true;
+        self.happenings.push(Happening::Restarting { tid });
+    }
+
+    /// Makes a call that failed to restart again as the thread returns to
+    /// its program, having taken every stop and signal on the way: the
+    /// kernel rewinds `rip` over the `syscall` and puts the call back in
+    /// `rax`, unless the tracer changed the result meanwhile (K-SYS-7).
+    fn restart_call(&mut self, tid: Tid) {
+        let thread = self.threads.get_mut(&tid).expect("running thread exists");
+        if std::mem::take(&mut thread.restarting)
+            && thread.orig_rax != NO_SYSTEM_CALL
+            && thread.registers.general[RAX] == ERESTARTNOINTR_RESULT
+        {
+            thread.registers.general[RAX] = thread.orig_rax;
+            thread.registers.rip -= SYSCALL_LENGTH;
+        }
     }
 
     /// Stops a running thread for the interrupt waiting for it, with

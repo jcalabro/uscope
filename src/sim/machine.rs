@@ -106,29 +106,17 @@ impl Machine {
 
                     lines.push(format!("{tid} was taken out of its stop"));
                 }
+                Happening::Restarting { tid } => {
+                    self.marks.borrow_mut().hit(Mark::CallRestarted);
+                    lines.push(format!("{tid}'s call fails, to be made again"));
+                }
                 Happening::LeaderExitedAlone { tid } => {
                     self.marks.borrow_mut().hit(Mark::LeaderExitedAlone);
                     lines.push(format!("leader {tid} exited alone"));
                 }
                 Happening::Yielded { tid } => self.scheduler.borrow_mut().yielded(tid),
                 Happening::Forked { parent, child } => {
-                    let mut marks = self.marks.borrow_mut();
-                    marks.hit(Mark::Forked);
-                    if self
-                        .kernel
-                        .borrow()
-                        .process_of(parent)
-                        .is_some_and(|process| process.tgid.leader() != parent)
-                    {
-                        marks.hit(Mark::ForkedFromThread);
-                    }
-
-                    drop(marks);
-                    self.note_seized_child(child);
-                    lines.push(format!("{parent} forked {child}"));
-                    if self.faults.borrow_mut().forked() {
-                        lines.extend(self.kill(Mark::KilledNearFork));
-                    }
+                    lines.extend(self.note_forked(parent, child));
                 }
 
                 Happening::Released {
@@ -177,6 +165,30 @@ impl Machine {
                     lines.push(format!("{tid} received {}", signals::name(signal)));
                 }
             }
+        }
+
+        lines
+    }
+
+    /// Counts a fork, and fires a fault planned for one. Returns lines for
+    /// the trace.
+    fn note_forked(&self, parent: Tid, child: Tid) -> Vec<String> {
+        let mut marks = self.marks.borrow_mut();
+        marks.hit(Mark::Forked);
+        if self
+            .kernel
+            .borrow()
+            .process_of(parent)
+            .is_some_and(|process| process.tgid.leader() != parent)
+        {
+            marks.hit(Mark::ForkedFromThread);
+        }
+
+        drop(marks);
+        self.note_seized_child(child);
+        let mut lines = vec![format!("{parent} forked {child}")];
+        if self.faults.borrow_mut().forked() {
+            lines.extend(self.kill(Mark::KilledNearFork));
         }
 
         lines

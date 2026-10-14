@@ -204,10 +204,16 @@ fn write(kernel: &mut Kernel, tid: Tid, fd: u64, buffer: u64, count: u64) -> u64
 /// creator returns from the call, on `stack`, with `rax` zero. A creator
 /// tracing clones stops at `PTRACE_EVENT_CLONE` inside the call, and the
 /// child, traced with the creator's options, first stops for a SIGSTOP
-/// nobody sent (K-CLONE-1).
+/// nobody sent (K-CLONE-1). Made with a signal pending, it creates
+/// nothing, to be made again (K-SYS-7).
 fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
     if flags != THREAD_FLAGS {
         kernel.gap(format!("clone with flags {flags:#x}"));
+        return;
+    }
+
+    if kernel.signal_pending(parent) {
+        kernel.fail_to_restart(parent);
         return;
     }
 

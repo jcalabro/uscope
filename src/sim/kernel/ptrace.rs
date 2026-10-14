@@ -66,6 +66,18 @@ impl Kernel {
             registers
         };
 
+        // K-SYS-7: Linux decides whether to restart a call from `rax` and
+        // `rip` as the thread returns, and no probe pins a tracer's change
+        // to either before then.
+        let thread = self.stopped(tid)?;
+        if thread.restarting
+            && (registers.rip != thread.registers.rip
+                || registers.general[RAX] != thread.registers.general[RAX])
+        {
+            self.gap("writing rax or rip of a call about to restart");
+            return Err(Errno::ENOSYS);
+        }
+
         self.stopped_mut(tid)?.registers = registers;
         Ok(())
     }

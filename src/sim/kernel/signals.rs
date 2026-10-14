@@ -61,6 +61,12 @@ impl Pending {
         }
     }
 
+    /// Whether no signal is pending.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
     #[must_use]
     pub const fn contains(&self, signal: i32) -> bool {
         self.0[(signal - 1).cast_unsigned() as usize].is_some()
@@ -348,27 +354,33 @@ impl Kernel {
         );
     }
 
-    /// Delivers a running thread's next pending signal, its own before its
-    /// process's. A traced thread stops for the tracer; an untraced one
-    /// takes the signal's default action. Returns whether it stopped.
+    /// Delivers a running thread's pending signals, its own before its
+    /// process's, until one stops it or none is left. A traced thread
+    /// stops for the tracer; an untraced one takes the signal's default
+    /// action, and goes on to the next one it ignores, as Linux's
+    /// `get_signal` does. Returns whether it stopped.
     pub(super) fn deliver_pending(&mut self, tid: Tid) -> bool {
-        let thread = self.threads.get_mut(&tid).expect("running thread exists");
-        let group = thread.tgid;
-        let Some(info) = thread.pending.take_next().or_else(|| {
-            self.processes
-                .get_mut(&group)
-                .and_then(|process| process.shared.take_next())
-        }) else {
-            return false;
-        };
+        loop {
+            let thread = self.threads.get_mut(&tid).expect("running thread exists");
+            let group = thread.tgid;
+            let Some(info) = thread.pending.take_next().or_else(|| {
+                self.processes
+                    .get_mut(&group)
+                    .and_then(|process| process.shared.take_next())
+            }) else {
+                return false;
+            };
 
-        if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal) {
-            self.gap(format!("delivering pending {}", name(info.signal)));
-            return true;
+            if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal) {
+                self.gap(format!("delivering pending {}", name(info.signal)));
+                return true;
+            }
+
+            self.signal_stop(tid, info);
+            if !matches!(self.threads[&tid].state, State::Running) {
+                return true;
+            }
         }
-
-        self.signal_stop(tid, info);
-        !matches!(self.threads[&tid].state, State::Running)
     }
 
     /// Resumes a thread from a signal-delivery-stop with `signal` delivered

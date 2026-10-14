@@ -7,11 +7,59 @@
 
 use nix::libc;
 
-use super::tracee::{dual_run, dual_run_then_exit};
+use super::tracee::{Record, dual_run, dual_run_then_exit};
 use crate::sim::cpu::{RAX, RDI, RSP};
+use crate::sim::kernel::{Tid, WaitStatus};
 
 /// `rax` inside a system call, before it returns.
 const ENOSYS: u64 = (-(libc::ENOSYS as i64)).cast_unsigned();
+
+const SYS_CLONE: u64 = 56;
+
+const SYS_FORK: u64 = 57;
+
+/// Continues `thread` from call to call until it stops at the entry of
+/// call `number`, passing on any signal it stops for and recording
+/// nothing, since what it meets on the way depends on timing.
+fn run_to_entry(record: &mut Record<'_>, thread: Tid, number: u64) {
+    let mut signal = None;
+    loop {
+        record
+            .tracee
+            .resume_to_call(thread, signal)
+            .expect("continue to a call");
+        signal = match record.tracee.wait(thread) {
+            WaitStatus::Stopped(_, signal) => Some(signal),
+            _ => None,
+        };
+
+        let info = record.tracee.call_info(thread).expect("a stopped thread");
+        if info.op == 1 && info.number == number {
+            return;
+        }
+    }
+}
+
+/// From the entry of a fork or clone made with a signal pending: the call
+/// fails with `-ERESTARTNOINTR` and returns, creating nothing; the thread
+/// takes what is pending; and it enters the call again (K-SYS-7).
+fn restart(record: &mut Record<'_>, thread: Tid) {
+    record.resume_to_call(thread, None);
+    record.wait(thread);
+    record.stop(thread);
+    record.system_call(thread);
+    record.call(thread);
+    record.children_of(thread);
+    record.resume_to_call(thread, None);
+    record.wait(thread);
+    record.stop(thread);
+    record.system_call(thread);
+    record.resume_to_call(thread, None);
+    record.wait(thread);
+    record.stop(thread);
+    record.system_call(thread);
+    record.call(thread);
+}
 
 /// K-EXEC-1: a launched program first stops at its entry point for a
 /// SIGTRAP it sent itself, at the end of `execve`, and is named after its
@@ -1423,4 +1471,129 @@ fn k_sys_6_a_thread_detached_at_a_call_makes_it() {
             record.detach(leader, None);
         });
     }
+}
+
+/// K-SYS-7: a fork entered with the tracer's SIGSTOP pending fails with
+/// `-ERESTARTNOINTR` and forks nothing. The thread stops at the call's
+/// exit, then for the signal, both with `rip` after the `syscall`; as it
+/// returns to the program the kernel rewinds it there, and it makes the
+/// call again, which forks.
+#[test]
+fn k_sys_7_a_fork_entered_with_a_signal_pending_restarts() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        run_to_entry(record, leader, SYS_FORK);
+        record.note("at the fork's entry");
+        record.system_call(leader);
+        let result = record.tracee.request_stop(leader);
+        record.result("tgkill SIGSTOP", result);
+        restart(record, leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.detach(child, None);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SYS-7: a clone entered with a signal pending restarts as a fork
+/// does, creating no thread until it is made again.
+#[test]
+fn k_sys_7_a_clone_entered_with_a_signal_pending_restarts() {
+    dual_run("threads", &["1", "main"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        run_to_entry(record, leader, SYS_CLONE);
+        record.note("at the clone's entry");
+        let result = record.tracee.request_stop(leader);
+        record.result("tgkill SIGSTOP", result);
+        restart(record, leader);
+        record.resume(leader, None);
+        let child = record.cloned(leader);
+        record.wait(child);
+
+        // The leader stays stopped until the worker is gone, or its group
+        // exit would race the worker's own.
+        record.resume(child, None);
+        record.wait(child);
+        record.event_message(child);
+        record.resume(child, None);
+        record.wait(child);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-SYS-7: a pending interrupt makes a fork restart too. The call's exit
+/// stop takes the interrupt's place (K-INT-1), so no `PTRACE_EVENT_STOP`
+/// follows, and the thread enters the call again.
+#[test]
+fn k_sys_7_a_fork_entered_with_an_interrupt_pending_restarts() {
+    dual_run("fork", &["2", "0"], |record| {
+        let leader = seized_at_second_fork(record);
+        record.interrupt(leader);
+        record.resume_to_call(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.system_call(leader);
+        record.call(leader);
+        record.resume_to_call(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.system_call(leader);
+        record.call(leader);
+        record.resume(leader, None);
+        finish_second_fork(record, leader);
+    });
+}
+
+/// Seizes the leader of `fork` while its first child is held, and runs it
+/// to the entry of its second fork. Returns the leader.
+fn seized_at_second_fork(record: &mut Record<'_>) -> Tid {
+    let leader = record.leader();
+    record.set_options(leader);
+    record.resume(leader, None);
+
+    // The first child stays at its first stop, so its parent waits for it,
+    // running untraced once detached, until it is seized.
+    let first = record.forked(leader);
+    record.wait(first);
+    record.detach(leader, None);
+    record.seize(leader);
+    record.interrupt(leader);
+    record.wait(leader);
+    record.signal(leader);
+    record.detach(first, None);
+    run_to_entry(record, leader, SYS_FORK);
+    record.note("at the second fork's entry");
+    record.system_call(leader);
+    leader
+}
+
+/// From a seized leader of `fork` continued to make its second fork: the
+/// child it reports is let go, and the leader reaps it and exits.
+fn finish_second_fork(record: &mut Record<'_>, leader: Tid) {
+    let second = record.forked(leader);
+    record.wait(second);
+    record.signal(second);
+    record.detach(second, None);
+    record.resume(leader, None);
+    record.wait(leader);
+    record.signal(leader);
+    record.resume(leader, Some(libc::SIGCHLD));
+    record.wait(leader);
+    record.event_message(leader);
+    record.resume(leader, None);
+    record.wait(leader);
 }

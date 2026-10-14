@@ -52,8 +52,14 @@ impl Kernel {
     /// at `PTRACE_EVENT_FORK` inside the call, and the child, traced with
     /// the caller's options, first stops for a SIGSTOP nobody sent; neither
     /// order of the two stops is fixed. Otherwise the child is untraced
-    /// (K-FORK-1).
+    /// (K-FORK-1). Made with a signal pending, it forks nothing, to be made
+    /// again (K-SYS-7).
     pub(super) fn fork(&mut self, tid: Tid) {
+        if self.signal_pending(tid) {
+            self.fail_to_restart(tid);
+            return;
+        }
+
         let child = self.allocate_tid();
         let caller = &self.threads[&tid];
         let traced = caller.traced() && caller.options.trace_fork;

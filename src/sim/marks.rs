@@ -287,6 +287,10 @@ marks! {
     /// An interrupt reached a thread already stopped.
     InterruptWaited,
 
+    /// A fork or clone entered with a signal pending failed, to be made
+    /// again.
+    CallRestarted,
+
     /// A thread or process a seized thread created started in an
     /// interrupt's stop.
     SeizedChildStarted,
