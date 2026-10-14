@@ -1017,7 +1017,8 @@ impl Processor {
     fn symbolize_new(&mut self) {
         let start = self.first.unwrap_or(0);
         self.builder.setting("start", &start.to_string());
-        let end = self.latest.max(self.gaps_end);
+        // A segment cut after the last record ends no earlier than it began.
+        let end = self.latest.max(self.gaps_end).max(start);
         self.builder.setting("end", &end.to_string());
         if self.symbols_later {
             return;
@@ -1210,6 +1211,18 @@ pub fn thread_cpu() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A segment cut where every record was processed, with nothing
+    /// recorded after it, ends no earlier than it begins.
+    #[test]
+    fn a_last_segment_with_nothing_after_its_cut_ends_where_it_begins() {
+        let mut processor = Processor::new(DebugFileSearch::default(), 64);
+        processor.ingest(&[], Some(5_000));
+        let first = processor.segment();
+        let last = processor.finish();
+        assert_eq!(first.span().1, 5_000);
+        assert_eq!(last.span(), (5_000, 5_000));
+    }
 
     /// A full ring drops whatever does not fit, so a thread can come back
     /// to its CPU and exit unseen. Once its process has exited, the thread
