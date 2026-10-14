@@ -104,6 +104,12 @@ pub(super) fn read_logical_block(
         .checked_add(u64::try_from(size).map_err(|_| Error::AddressOverflow)?)
         .ok_or(Error::AddressOverflow)?;
     if let Some(mut bytes) = ptrace.read_block(pid, address.get(), size) {
+        debug_assert_eq!(
+            bytes.len(),
+            size,
+            "a block read at {address} gave {} of {size} bytes",
+            bytes.len()
+        );
         for (site_address, site) in breakpoints.range(address..VirtualAddress::new(end)) {
             if site.installed {
                 let offset = usize::try_from(site_address.get() - address.get())
@@ -111,6 +117,7 @@ pub(super) fn read_logical_block(
                 bytes[offset] = site.original_byte;
             }
         }
+        check_traps_hidden(address, &bytes, breakpoints);
         return Ok(LogicalMemoryRead {
             bytes,
             completion: MemoryReadCompletion::Complete,
@@ -203,10 +210,35 @@ pub(super) fn read_logical_memory_with(
             .checked_add(word_size)
             .ok_or(Error::AddressOverflow)?;
     }
+    check_traps_hidden(address, &bytes, breakpoints);
     Ok(LogicalMemoryRead {
         bytes,
         completion: MemoryReadCompletion::Complete,
     })
+}
+
+/// Panics in development builds if `bytes`, read at `address`, show the
+/// trap of an installed breakpoint rather than the byte it replaced.
+fn check_traps_hidden(
+    address: VirtualAddress,
+    bytes: &[u8],
+    breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
+) {
+    if !cfg!(debug_assertions) || bytes.is_empty() {
+        return;
+    }
+    let end = VirtualAddress::new(address.get().saturating_add(bytes.len() as u64));
+    for (&site_address, site) in breakpoints.range(address..end) {
+        let offset = usize::try_from(site_address.get() - address.get()).unwrap_or(usize::MAX);
+        if site.installed
+            && let Some(&byte) = bytes.get(offset)
+        {
+            debug_assert_eq!(
+                byte, site.original_byte,
+                "a read at {address} shows the trap installed at {site_address}"
+            );
+        }
+    }
 }
 
 impl MemoryReader for PtraceMemory<'_> {

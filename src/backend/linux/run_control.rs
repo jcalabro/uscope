@@ -253,7 +253,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         let resume_threads = scoped_threads(inferior, scope)?;
-        inferior.next_execution = inferior.next_execution.wrapping_add(1);
+        inferior.next_execution += 1;
         let execution_id = ExecutionId::new(inferior.next_execution);
         self.install_plan(&kind, execution_id)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -275,6 +275,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         inferior.public_stop = None;
+        debug_assert!(
+            inferior.active.is_none(),
+            "beginning execution {execution_id} while execution {:?} is active",
+            inferior.active.as_ref().map(|active| active.id)
+        );
         inferior.active = Some(ActiveExecution {
             id: execution_id,
             kind,
@@ -664,6 +669,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let holds = inferior.holds_signals(&expected);
         let thread = inferior.thread_mut(pid)?;
+        // A thread in its exit stop runs on to its exit.
+        debug_assert!(
+            matches!(
+                thread.state,
+                NativeThreadState::Stopped | NativeThreadState::Exiting
+            ),
+            "resuming thread {pid} from {:?}, not from a stop",
+            thread.state
+        );
         // A pending signal is delivered only if its policy passes it.
         let mut signal = deliver_signal
             .then(|| thread.pending_signal.map(|pending| pending.signal))
@@ -1414,6 +1428,14 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     pub(super) fn queue_repair(&mut self, pid: Pid, address: VirtualAddress) {
         let inferior = self.inferior.as_mut().expect("inferior exists");
+        debug_assert!(
+            !inferior
+                .repairs
+                .iter()
+                .any(|group| { group.current == Some(pid) || group.remaining.contains(&pid) }),
+            "thread {pid} is queued to step over the trap at {address} while it \
+             already waits to step over another"
+        );
         if let Some(group) = inferior
             .repairs
             .iter_mut()
@@ -1630,6 +1652,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let temporaries_removed = self.remove_stopped_temporaries()?;
         let stop_id = self.ptrace.allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        check_publishable(inferior, stop_id);
         for thread in inferior.threads.values_mut() {
             thread.expected = ExpectedStop::None;
         }
@@ -1738,4 +1761,48 @@ pub(super) fn collect_repairs(inferior: &Inferior) -> VecDeque<RepairGroup> {
             site_removed: false,
         })
         .collect()
+}
+
+/// Panics if `inferior` is not in the state a stop is published from: no
+/// stop already published, every thread stopped, every trap in place, no
+/// repair outstanding, and none of the active execution's traps left.
+fn check_publishable(inferior: &Inferior, stop_id: StopId) {
+    debug_assert!(
+        inferior.public_stop.is_none(),
+        "publishing stop {stop_id} over stop {:?}",
+        inferior.public_stop.as_ref().map(|stop| stop.id)
+    );
+    for (&pid, thread) in &inferior.threads {
+        debug_assert!(
+            inferior.settled(pid, thread),
+            "publishing stop {stop_id} while thread {pid} is {:?}",
+            thread.state
+        );
+    }
+    debug_assert!(
+        inferior.repairs.is_empty(),
+        "publishing stop {stop_id} with {} breakpoint repairs outstanding",
+        inferior.repairs.len()
+    );
+    let execution = inferior.active.as_ref().map(|active| active.id);
+    for (&address, site) in &inferior.breakpoints {
+        debug_assert!(
+            site.installed,
+            "publishing stop {stop_id} with the trap at {address} lifted"
+        );
+        debug_assert!(
+            execution.is_none_or(|execution| {
+                !site.owners.contains(&BreakpointOwner::Plan(execution))
+            }),
+            "publishing stop {stop_id} while execution {execution:?} still owns the \
+             trap at {address}"
+        );
+    }
+    debug_assert!(
+        inferior
+            .barrier
+            .as_ref()
+            .is_none_or(|barrier| barrier.edits.is_empty()),
+        "publishing stop {stop_id} drops edits queued after the stop's edits were applied"
+    );
 }

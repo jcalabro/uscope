@@ -1188,6 +1188,11 @@ pub(super) fn install_plan_breakpoint(
     address: VirtualAddress,
     execution: ExecutionId,
 ) -> Result<()> {
+    debug_assert!(
+        !inferior.traps_lifted,
+        "installing the trap at {address} for execution {execution} while the traps \
+         are lifted for a vfork child"
+    );
     inferior
         .plan_sites
         .entry(execution)
@@ -1207,6 +1212,11 @@ pub(super) fn install_logical_breakpoint(
     inferior: &mut Inferior,
     breakpoint: &Breakpoint,
 ) -> Result<()> {
+    debug_assert!(
+        !inferior.traps_lifted,
+        "installing breakpoint {} while the traps are lifted for a vfork child",
+        breakpoint.id
+    );
     let owner = BreakpointOwner::User(breakpoint.id);
     let addresses = breakpoint
         .locations
@@ -1297,6 +1307,10 @@ pub(super) fn lift_all_traps(ptrace: &dyn LinuxTraceOps, inferior: &mut Inferior
     for address in installed {
         ptrace.remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
     }
+    debug_assert!(
+        inferior.breakpoints.values().all(|site| !site.installed),
+        "lifting every trap left one in place"
+    );
     Ok(())
 }
 
@@ -1314,6 +1328,10 @@ pub(super) fn reinstall_all_traps(
     for address in lifted {
         ptrace.reinstall_breakpoint(pid, &mut inferior.breakpoints, address)?;
     }
+    debug_assert!(
+        inferior.breakpoints.values().all(|site| site.installed),
+        "reinstalling every trap left one lifted"
+    );
     Ok(())
 }
 
@@ -1369,7 +1387,10 @@ pub(super) fn remove_breakpoint_owner_from(
             .expect("known breakpoint site")
             .owners
             .remove(&owner);
-        assert!(removed, "known breakpoint owner existed");
+        debug_assert!(
+            removed,
+            "{owner:?} owned the site at {address}, then did not"
+        );
     }
     Ok(())
 }

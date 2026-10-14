@@ -146,7 +146,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let mut stopping = Vec::new();
         for id in caught {
-            let Some(catchpoint) = self.catchpoints.get_mut(&id) else {
+            let catchpoint = self.catchpoints.get_mut(&id);
+            debug_assert!(
+                catchpoint.is_some(),
+                "catchpoint {id} caught a call at {pid}'s stop but is not listed"
+            );
+            let Some(catchpoint) = catchpoint else {
                 continue;
             };
             catchpoint.hit_count += 1;

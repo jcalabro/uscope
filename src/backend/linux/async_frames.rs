@@ -320,6 +320,12 @@ impl<P: InspectionOps> Controller<P> {
         if drivers.is_empty() {
             return expanded;
         }
+        // The notes' frame identifiers would be the unspliced trace's.
+        debug_assert!(
+            expanded.trace.unfollowed.is_empty(),
+            "splicing a trace that already notes {} futures not followed",
+            expanded.trace.unfollowed.len()
+        );
 
         let mut frames = Vec::with_capacity(expanded.trace.frames.len());
         let mut origins = Vec::with_capacity(frames.capacity());
@@ -386,7 +392,7 @@ impl<P: InspectionOps> Controller<P> {
             frame.level = level;
             frame.id = StackFrameId::new(level);
         }
-        Expanded {
+        let spliced = Expanded {
             trace: Backtrace {
                 frames: frames.into(),
                 unfollowed: unfollowed.into(),
@@ -395,7 +401,9 @@ impl<P: InspectionOps> Controller<P> {
             origins,
             futures,
             lost,
-        }
+        };
+        spliced.check_invariants(stack.frames.len());
+        spliced
     }
 
     /// The chain of awaits of the future the frame `driver` drives through

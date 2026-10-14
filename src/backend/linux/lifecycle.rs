@@ -733,12 +733,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         }
-        assert!(
-            inferior
-                .threads
-                .insert(child, TraceThread::starting(ExpectedStop::None))
-                .is_none(),
-            "clone TID is unique"
+        // The thread a TID named exited, and its exit was handled, before
+        // the kernel could give the TID to another.
+        let previous = inferior
+            .threads
+            .insert(child, TraceThread::starting(ExpectedStop::None));
+        debug_assert!(
+            previous.is_none(),
+            "a clone event of {parent} names thread {child}, which is already live"
         );
         // A new thread runs with its siblings, unless the execution resumed
         // one thread alone.
@@ -1715,6 +1717,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .collect();
         for (parent, window) in unresumed {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            debug_assert!(
+                inferior.traps_lifted,
+                "resuming vforking thread {parent} while its child {} shares memory \
+                 that still holds traps",
+                window.child
+            );
             inferior.vfork_windows.insert(
                 parent,
                 VforkWindow {
@@ -1772,6 +1780,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// with breakpoints or debug registers still armed. The first failure is
     /// reported in the shutdown reply.
     pub(super) fn detach_inferior(&mut self) {
+        debug_assert!(
+            self.inferior.as_ref().is_some_and(|inferior| {
+                inferior
+                    .threads
+                    .iter()
+                    .all(|(&pid, thread)| inferior.settled(pid, thread))
+            }),
+            "detaching an inferior with a thread that is not stopped"
+        );
         // Every thread was stopped, and only SIGKILL takes one out of its
         // stop: a thread that refuses to be written belongs to a process
         // that is ending, where what is left can never run.

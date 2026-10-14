@@ -195,6 +195,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 continue;
             };
+            debug_assert!(
+                watchpoint.enabled,
+                "a hit is reported for watchpoint {id}, which is disabled"
+            );
             watchpoint.hit_count = watchpoint.hit_count.saturating_add(1);
             let hit_count = watchpoint.hit_count;
             let condition = watchpoint
@@ -412,7 +416,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
-        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        inferior.watch.generation += 1;
         inferior.watch.plan = plan;
         let generation = inferior.watch.generation;
         for pid in programmed {
@@ -474,6 +478,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// an attached process, which would otherwise kill it with SIGTRAP.
     pub(super) fn clear_attached_debug_registers(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        debug_assert!(
+            inferior.watch.plan.is_empty(),
+            "an attached process starts with {} debug-register slots planned",
+            inferior.watch.plan.slots().iter().flatten().count()
+        );
+        // Each thread is marked as carrying the current plan.
         let generation = inferior.watch.generation;
         let empty = DebugRegisterPlan::default();
         for (&pid, thread) in &mut inferior.threads {
@@ -671,7 +681,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let had_watchpoints = !inferior.watch.watchpoints.is_empty();
         inferior.watch.watchpoints.clear();
         inferior.watch.plan = DebugRegisterPlan::default();
-        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        inferior.watch.generation += 1;
         if had_watchpoints {
             self.publish_watchpoints_changed();
         }

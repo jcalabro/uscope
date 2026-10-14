@@ -236,7 +236,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let pc = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
         let stop_id = self.ptrace.allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        let execution = ExecutionId::new(inferior.next_execution.wrapping_add(1));
+        let execution = ExecutionId::new(inferior.next_execution + 1);
         inferior.next_execution = execution.get();
         let thread = inferior.thread_mut(pid)?;
         thread.stopped_at_breakpoint = thread.stopped_at_breakpoint.filter(|trap| *trap == pc);

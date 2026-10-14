@@ -84,10 +84,12 @@ const CONFIG_GENERATION: u32 = 64;
 
 const CALL_PROCESS_EXITED: u8 = 8;
 /// The flags a call record shares with [`EventFlags`].
-const CALL_EVENT_FLAGS: u8 = 2 | 4;
+const CALL_EVENT_FLAGS: u8 = EventFlags::ENTRY_UNSEEN.0 | EventFlags::ABI_UNCERTAIN.0;
 
 /// A call's slot in the CALLS map: its ABI and number.
 const SLOTS: u32 = 3072;
+// Each chosen call's statistics row is a `u16` in its CALLS entry.
+const _: () = assert!(SLOTS <= 1 << 16, "statistics rows outgrow their u16");
 
 /// The ring's default size, which a 3 M calls per second burst fills in
 /// no less than a few milliseconds.
@@ -323,7 +325,8 @@ const fn abi_of(code: u8) -> Option<Abi> {
 }
 
 /// A call's slot, as the programs key it: its ABI above ten bits of
-/// number.
+/// number. A larger number, which no table names, folds into those bits
+/// as it does in the programs.
 #[must_use]
 pub const fn errno_slot(call: SyscallId) -> u32 {
     let abi = match call.abi {
@@ -331,7 +334,7 @@ pub const fn errno_slot(call: SyscallId) -> u32 {
         Abi::X86_32 => 1,
         Abi::X32 => 2,
     };
-    abi << 10 | call.number
+    abi << 10 | (call.number & 1023)
 }
 
 /// The record the stream program writes for a call it read nothing of.
@@ -654,7 +657,7 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
         });
         at = start + len.next_multiple_of(8);
     }
-    let unseen = raw.flags & 2 != 0;
+    let unseen = raw.flags & EventFlags::ENTRY_UNSEEN.0 != 0;
     let exited_inside = raw.flags & CALL_PROCESS_EXITED != 0;
     let call = SyscallId::new(abi, raw.nr);
     // Only these end a thread inside them. Any other call returns first,
