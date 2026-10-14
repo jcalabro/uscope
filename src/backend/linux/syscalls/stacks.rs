@@ -73,11 +73,10 @@ pub struct Frame {
     /// The code the frame runs: the innermost frame's instruction, and in
     /// each frame after, the byte before its return address, inside the
     /// call, as strace names it.
-    pub address: u64,
-    /// The mapped file, as `/proc/PID/maps` names it.
-    pub module: Option<Arc<str>>,
-    /// The address within the module's image.
-    pub image_address: u64,
+    pub address: VirtualAddress,
+    /// The mapped file, as `/proc/PID/maps` names it, and the address
+    /// within its image.
+    pub module: Option<(Arc<str>, ImageAddress)>,
     /// The function's symbol and the address's offset from it.
     pub symbol: Option<(Arc<str>, u64)>,
     /// The source file and line of the code the frame runs.
@@ -284,9 +283,8 @@ impl Stacks {
         let mapped = self.mapping_at(process, code);
         let Some(mapped) = mapped else {
             return Frame {
-                address: code,
+                address: VirtualAddress::new(code),
                 module: None,
-                image_address: code,
                 symbol: None,
                 source: None,
             };
@@ -311,9 +309,8 @@ impl Stacks {
             (symbol, source)
         });
         Frame {
-            address: code,
-            module: Some(Arc::clone(&mapped.path)),
-            image_address: code_address.get(),
+            address: VirtualAddress::new(code),
+            module: Some((Arc::clone(&mapped.path), code_address)),
             symbol,
             source,
         }

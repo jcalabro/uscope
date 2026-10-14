@@ -326,13 +326,10 @@ fn pids(texts: &[String]) -> Result<Vec<u32>> {
 /// offset from it, and the address within the module.
 fn frame_text(frame: &Frame) -> String {
     match (&frame.module, &frame.symbol) {
-        (Some(module), Some((symbol, offset))) => {
-            format!(
-                "{module}({symbol}+{offset:#x}) [{:#x}]",
-                frame.image_address
-            )
+        (Some((module, address)), Some((symbol, offset))) => {
+            format!("{module}({symbol}+{offset:#x}) [{address:#x}]")
         }
-        (Some(module), None) => format!("{module}() [{:#x}]", frame.image_address),
+        (Some((module, address)), None) => format!("{module}() [{address:#x}]"),
         (None, _) => format!("[unmapped] [{:#x}]", frame.address),
     }
 }
@@ -1507,11 +1504,13 @@ impl Printer {
             .iter()
             .map(|frame| {
                 let mut object = Map::new();
-                object.insert(
-                    "address".into(),
-                    format!("{:#x}", frame.image_address).into(),
-                );
-                if let Some(module) = &frame.module {
+                // A frame in no module has only its virtual address.
+                let address = frame
+                    .module
+                    .as_ref()
+                    .map_or(frame.address.get(), |(_, address)| address.get());
+                object.insert("address".into(), format!("{address:#x}").into());
+                if let Some((module, _)) = &frame.module {
                     object.insert("module".into(), module.as_ref().into());
                 }
                 if let Some((symbol, offset)) = &frame.symbol {
