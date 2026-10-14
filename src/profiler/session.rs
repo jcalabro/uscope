@@ -232,7 +232,7 @@ fn processor(options: &RecordOptions, breakpoint: Option<Calls>) -> record::Proc
     if let Some(calls) = breakpoint
         && let Some(branch) = calls.repeats_when
     {
-        processor.repeats_when(calls.address + calls.bias, branch);
+        processor.repeats_when(calls.loaded().get(), branch);
     }
     processor
 }
@@ -667,7 +667,7 @@ impl Pacer {
 fn perf_source(
     program: &Path,
     source: &SampleSource,
-    bias: Option<u64>,
+    bias: Option<crate::LoadBias>,
 ) -> Result<(perf::Source, Option<Calls>), RecordError> {
     Ok(match source {
         SampleSource::Clock { rate } => (
@@ -680,7 +680,7 @@ fn perf_source(
             let calls = calls::plan(program, symbol, bias)?;
             (
                 perf::Source::Breakpoint {
-                    address: calls.address + calls.bias,
+                    address: calls.loaded().get(),
                 },
                 Some(calls),
             )

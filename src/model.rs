@@ -64,6 +64,84 @@ address_type!(
     "An address in the virtual address space of a running process."
 );
 
+/// How far a loaded module lies from its image's addresses.
+///
+/// Each virtual address is its image address plus the bias. A module loaded
+/// below its image's addresses, as the vDSO and a prelinked library can be,
+/// has a bias that wraps.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LoadBias(u64);
+
+impl LoadBias {
+    /// Creates a bias from its numeric representation.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation of this bias.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The bias that loads `image` at `loaded`.
+    #[must_use]
+    pub const fn between(image: ImageAddress, loaded: VirtualAddress) -> Self {
+        Self(loaded.get().wrapping_sub(image.get()))
+    }
+
+    /// Where `address` is loaded, or `None` past the last address.
+    #[must_use]
+    pub const fn load(self, address: ImageAddress) -> Option<VirtualAddress> {
+        match self.0.checked_add(address.get()) {
+            Some(loaded) => Some(VirtualAddress::new(loaded)),
+            None => None,
+        }
+    }
+
+    /// The image address loaded at `address`, or `None` below the bias.
+    #[must_use]
+    pub const fn unload(self, address: VirtualAddress) -> Option<ImageAddress> {
+        match address.get().checked_sub(self.0) {
+            Some(image) => Some(ImageAddress::new(image)),
+            None => None,
+        }
+    }
+
+    /// Where `address` is loaded, wrapping past the last address as a
+    /// bias below the image does.
+    #[must_use]
+    pub const fn wrapping_load(self, address: ImageAddress) -> VirtualAddress {
+        VirtualAddress::new(address.get().wrapping_add(self.0))
+    }
+
+    /// The image address loaded at `address`, wrapping as a bias below
+    /// the image does.
+    #[must_use]
+    pub const fn wrapping_unload(self, address: VirtualAddress) -> ImageAddress {
+        ImageAddress::new(address.get().wrapping_sub(self.0))
+    }
+}
+
+impl fmt::Debug for LoadBias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LoadBias({:#x})", self.0)
+    }
+}
+
+impl fmt::Display for LoadBias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl fmt::LowerHex for LoadBias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
 /// A half-open address range `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddressRange<A> {
@@ -4136,24 +4214,14 @@ impl StatementFlags {
 }
 
 /// A module image mapped into a running process.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadedModule {
     /// The loaded module's session-scoped identifier.
     pub id: ModuleId,
     /// The corresponding immutable module image.
     pub image: ModuleImageId,
     /// The load bias applied to image addresses.
-    pub load_bias: u64,
-}
-
-impl fmt::Debug for LoadedModule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LoadedModule")
-            .field("id", &self.id)
-            .field("image", &self.image)
-            .field("load_bias", &format_args!("{:#x}", self.load_bias))
-            .finish()
-    }
+    pub load_bias: LoadBias,
 }
 
 /// Public identity and path for one runtime module mapping.
@@ -4175,7 +4243,7 @@ pub struct LoadedModuleSnapshot {
 }
 
 impl LoadedModule {
-    pub(crate) const fn main(image: ModuleImageId, load_bias: u64) -> Self {
+    pub(crate) const fn main(image: ModuleImageId, load_bias: LoadBias) -> Self {
         Self {
             id: ModuleId::new(0),
             image,
@@ -4185,18 +4253,13 @@ impl LoadedModule {
 
     /// Converts an image address into a process virtual address.
     pub fn virtual_address(self, address: ImageAddress) -> Result<VirtualAddress> {
-        self.load_bias
-            .checked_add(address.get())
-            .map(VirtualAddress::new)
-            .ok_or(Error::AddressOverflow)
+        self.load_bias.load(address).ok_or(Error::AddressOverflow)
     }
 
     /// Converts a process virtual address into an image address.
     pub fn image_address(self, address: VirtualAddress) -> Result<ImageAddress> {
-        address
-            .get()
-            .checked_sub(self.load_bias)
-            .map(ImageAddress::new)
+        self.load_bias
+            .unload(address)
             .ok_or(Error::AddressOutsideModule)
     }
 }

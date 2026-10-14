@@ -420,7 +420,7 @@ async fn assigning_the_program_counter_moves_the_thread_under_a_new_stop() {
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
         .await;
-    let address = modules.modules[0].module.load_bias + image_address.get();
+    let address = modules.modules[0].module.load_bias.get() + image_address.get();
     scenario.remove_breakpoint(target.id).await;
     let context = frame_view(&mut scenario, 0).await;
     let handle = scenario.handle().clone();

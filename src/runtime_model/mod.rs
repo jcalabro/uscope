@@ -145,7 +145,7 @@ pub trait RuntimeStop {
     /// The instruction a stopped thread will execute next.
     fn instruction(&self, thread: ThreadId) -> Option<VirtualAddress>;
     /// What the module carrying the runtime adds to its image addresses.
-    fn load_bias(&self) -> u64;
+    fn load_bias(&self) -> crate::LoadBias;
     /// Every thread of the process, in the order of their ids.
     fn threads(&self) -> Vec<ThreadId>;
     /// The sets of tasks the futures the stop's threads drive run, by

@@ -1246,7 +1246,7 @@ struct Controller<P: InspectionOps> {
     debug_files: crate::debug_info::DebugFileSearch,
     /// The canonical path and load bias computed for each mapping, so known
     /// modules are not re-read from disk at every stop.
-    mapped_modules: BTreeMap<ModuleMapping, (PathBuf, u64)>,
+    mapped_modules: BTreeMap<ModuleMapping, (PathBuf, crate::LoadBias)>,
     next_module_id: u32,
     next_image_id: u32,
     messages: RefCell<mpsc::Receiver<ControllerMessage>>,
@@ -1369,7 +1369,7 @@ impl<P: InspectionOps> Controller<P> {
             variables: variable_info,
         } = debug_info;
         let main = RuntimeModule {
-            loaded: LoadedModule::main(module_image.id(), 0),
+            loaded: LoadedModule::main(module_image.id(), crate::LoadBias::default()),
             image: Arc::clone(&module_image),
             unwind: Arc::clone(&unwind_info),
             variables: variable_info,

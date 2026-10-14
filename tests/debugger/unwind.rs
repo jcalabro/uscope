@@ -446,7 +446,7 @@ async fn backtraces_unwind_through_the_vdso() {
             let vdso = support::vdso_module(&modules);
             // The kernel links its vDSO at zero.
             let mapping = support::vdso_mapping(process_id);
-            assert_eq!(vdso.module.load_bias, mapping.start, "{context}");
+            assert_eq!(vdso.module.load_bias.get(), mapping.start, "{context}");
 
             let trace = scenario
                 .operation("backtrace", scenario.handle().backtrace())

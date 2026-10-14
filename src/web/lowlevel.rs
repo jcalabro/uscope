@@ -483,8 +483,8 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
                 |name| name.to_string_lossy().into_owned(),
             ),
             path: record.path.display().to_string(),
-            start: range.map(|range| hex(range.start.get().wrapping_add(bias))),
-            end: range.map(|range| hex(range.end.get().wrapping_add(bias))),
+            start: range.map(|range| hex(bias.wrapping_load(range.start).get())),
+            end: range.map(|range| hex(bias.wrapping_load(range.end).get())),
             symbols: match &image {
                 Some(image) if image.functions().len() != 0 => "debug",
                 Some(image) if image.symbols().next().is_some() => "symbols",

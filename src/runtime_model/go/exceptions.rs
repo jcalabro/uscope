@@ -474,10 +474,11 @@ impl Reader<'_> {
     /// The name `fatalsignal` prints for a signal.
     fn signal(&self, signal: u64) -> Result<Arc<str>, Arc<str>> {
         let layout = self.layout;
-        let entry = layout
-            .signals
+        let entry = self
+            .stop
+            .load_bias()
+            .wrapping_load(layout.signals)
             .get()
-            .wrapping_add(self.stop.load_bias())
             .wrapping_add(signal.wrapping_mul(layout.signal_stride))
             .wrapping_add(layout.signal_name);
         let name = self.text(

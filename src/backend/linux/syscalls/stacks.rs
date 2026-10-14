@@ -21,7 +21,8 @@ use crate::unwind::sample::{
 };
 use crate::unwind::{MemoryReader, UnwindModule};
 use crate::{
-    CodeRole, DebugFileOptions, ImageAddress, LoadedModule, ModuleId, ModuleImageId, VirtualAddress,
+    CodeRole, DebugFileOptions, ImageAddress, LoadBias, LoadedModule, ModuleId, ModuleImageId,
+    VirtualAddress,
 };
 
 /// The most frames a stack keeps, as strace's default.
@@ -168,7 +169,8 @@ impl Stacks {
     fn module(&mut self, mmap: &decode::Mmap<'_>) -> Option<Mapped> {
         let (image, bias) = if perf::is_vdso(mmap) {
             let (image, link) = self.vdso()?;
-            (image, mmap.start.wrapping_sub(link))
+            let start = VirtualAddress::new(mmap.start);
+            (image, LoadBias::between(ImageAddress::new(link), start))
         } else {
             let (file, bias) = perf::identify(mmap)?;
             (self.image(&file, mmap.inode.unwrap_or(0)), bias)
@@ -289,7 +291,10 @@ impl Stacks {
                 source: None,
             };
         };
-        let code_address = ImageAddress::new(code.wrapping_sub(mapped.loaded.load_bias));
+        let code_address = mapped
+            .loaded
+            .load_bias
+            .wrapping_unload(VirtualAddress::new(code));
         let (symbol, source) = mapped.image.info.as_deref().map_or((None, None), |info| {
             let image = &info.image;
             let symbol = image.symbolize(code_address).map(|found| {
@@ -344,7 +349,11 @@ impl Stacks {
                 frames.push(builder.frame(FrameKind::Native, NONE, code, 0));
                 continue;
             };
-            let image_address = code.wrapping_sub(mapped.loaded.load_bias);
+            let image_address = mapped
+                .loaded
+                .load_bias
+                .wrapping_unload(VirtualAddress::new(code))
+                .get();
             let module = mapped.image.identity.as_ref().map_or(NONE, |identity| {
                 builder.module(
                     &mapped.path,

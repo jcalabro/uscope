@@ -105,9 +105,10 @@ impl Payload<'_> {
     /// The demangled name of the method a vtable holds at `slot`.
     fn method(&self, vtable: u64, slot: u64) -> Result<Arc<str>, Arc<str>> {
         let method = self.word(vtable + slot)?;
-        let address = method
-            .checked_sub(self.stop.load_bias())
-            .map(ImageAddress::new)
+        let address = self
+            .stop
+            .load_bias()
+            .unload(VirtualAddress::new(method))
             .ok_or("the panic's vtable points outside the program")?;
         self.image
             .symbol_at(address)

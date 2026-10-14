@@ -43,7 +43,7 @@ async fn assert_vdso_follows_the_image(scenario: &mut Scenario) {
         .operation("modules", scenario.handle().loaded_modules())
         .await;
     assert_eq!(
-        support::vdso_module(&modules).module.load_bias,
+        support::vdso_module(&modules).module.load_bias.get(),
         support::vdso_mapping(process_id).start
     );
 }

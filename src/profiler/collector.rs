@@ -53,7 +53,7 @@ impl std::fmt::Display for ProbeSelection {
 #[derive(Debug, Clone)]
 pub struct Found {
     pub module: u32,
-    pub bias: u64,
+    pub bias: crate::LoadBias,
     pub table: Arc<Table>,
 }
 
@@ -160,7 +160,8 @@ impl Collector {
     /// Switches on a module's sites: the rings its threads already have
     /// are read from where they are now.
     fn adopt(&mut self, processor: &mut Processor, found: &Found) {
-        let control = found.table.control.wrapping_add(found.bias);
+        let image = |address| crate::ImageAddress::new(address);
+        let control = found.bias.wrapping_load(image(found.table.control)).get();
         let mut instance = Instance {
             control,
             sites: HashMap::default(),
@@ -172,7 +173,9 @@ impl Collector {
             let row = processor.probe_site(found.module, site);
             instance.sites.insert(site.key, row);
             if self.selection.selects(&site.name) {
-                instance.states.push(site.state.wrapping_add(found.bias));
+                instance
+                    .states
+                    .push(found.bias.wrapping_load(image(site.state)).get());
             }
         }
         if instance.states.is_empty() {

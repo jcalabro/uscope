@@ -127,6 +127,7 @@ impl Modules {
             .expect("known module")
             .module
             .load_bias
+            .get()
     }
 
     fn named(&self, file_name: &str) -> (uscope::ModuleId, &ModuleImage) {
@@ -590,7 +591,7 @@ async fn vdso_cores_agree_with_gdb() {
                     &recorded.state,
                     CoreModuleState::Loaded { module, identity: ModuleIdentity::DumpedMemory }
                         if module.module.id == vdso
-                            && module.module.load_bias == recorded.start.get()
+                            && module.module.load_bias.get() == recorded.start.get()
                 ),
                 "{core}: {recorded:#?}"
             );

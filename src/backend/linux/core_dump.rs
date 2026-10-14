@@ -20,6 +20,8 @@ use object::elf;
 use object::read::elf::{ElfFile64, FileHeader as _, Note, NoteIterator, ProgramHeader as _};
 use object::{LittleEndian, ReadCache, ReadRef};
 
+use crate::{ImageAddress, LoadBias, VirtualAddress};
+
 const PRSTATUS_SIZE: usize = 336;
 const PRSTATUS_SIGNAL_OFFSET: usize = 12;
 const PRSTATUS_PID_OFFSET: usize = 32;
@@ -812,7 +814,7 @@ pub(super) enum ImageVerification {
     Placed {
         /// The recorded image with every mapping the file's extent covers.
         image: ImageMappings,
-        load_bias: u64,
+        load_bias: LoadBias,
         evidence: ImageEvidence,
         /// Dump-time addresses of the file's read-only, file-backed bytes.
         read_only: Vec<Range<u64>>,
@@ -888,6 +890,7 @@ pub(super) fn verify_image(
             image
                 .start()
                 .checked_sub(segment.address & !(PAGE_SIZE - 1))
+                .map(LoadBias::new)
         })
     else {
         return Ok(ImageVerification::Unplaced(
@@ -934,13 +937,14 @@ fn whole_image(
     core: &CoreDump,
     image: &ImageMappings,
     segments: &[FileSegment],
-    load_bias: u64,
+    load_bias: LoadBias,
 ) -> ImageMappings {
     let extent_end = segments
         .iter()
         .filter_map(|segment| {
             load_bias
-                .checked_add(segment.address)?
+                .load(ImageAddress::new(segment.address))
+                .map(VirtualAddress::get)?
                 .checked_add(segment.memory_size)?
                 .checked_next_multiple_of(PAGE_SIZE)
         })
@@ -967,12 +971,14 @@ fn whole_image(
 
 /// Writable segments are excluded: the process may have modified them, and a
 /// dump can omit modified pages when its filter or truncation drops them.
-fn read_only_ranges(segments: &[FileSegment], load_bias: u64) -> Vec<Range<u64>> {
+fn read_only_ranges(segments: &[FileSegment], load_bias: LoadBias) -> Vec<Range<u64>> {
     segments
         .iter()
         .filter(|segment| !segment.writable)
         .filter_map(|segment| {
-            let start = load_bias.checked_add(segment.address)?;
+            let start = load_bias
+                .load(ImageAddress::new(segment.address))
+                .map(VirtualAddress::get)?;
             Some(start..start.checked_add(segment.file_size)?)
         })
         .collect()
@@ -989,13 +995,17 @@ fn read_only_ranges(segments: &[FileSegment], load_bias: u64) -> Vec<Range<u64>>
 fn placement_mismatch(
     image: &ImageMappings,
     segments: &[FileSegment],
-    load_bias: u64,
+    load_bias: LoadBias,
 ) -> Option<String> {
-    let page_start =
-        |segment: &FileSegment| load_bias.checked_add(segment.address & !(PAGE_SIZE - 1));
+    let page_start = |segment: &FileSegment| {
+        load_bias
+            .load(ImageAddress::new(segment.address & !(PAGE_SIZE - 1)))
+            .map(VirtualAddress::get)
+    };
     let page_end = |segment: &FileSegment| {
         load_bias
-            .checked_add(segment.address)?
+            .load(ImageAddress::new(segment.address))
+            .map(VirtualAddress::get)?
             .checked_add(segment.memory_size)?
             .checked_next_multiple_of(PAGE_SIZE)
     };
@@ -1039,14 +1049,17 @@ fn build_id_evidence(
     core: &CoreDump,
     file: &[u8],
     notes: &[(u64, u64, u64)],
-    load_bias: u64,
+    load_bias: LoadBias,
 ) -> Result<Option<ImageEvidence>, CoreError> {
     for &(address, file_offset, size) in notes {
         let expected = file_range(file, file_offset, size)?;
         if !note_has_build_id(expected) {
             continue;
         }
-        let Some(dumped) = load_bias.checked_add(address) else {
+        let Some(dumped) = load_bias
+            .load(ImageAddress::new(address))
+            .map(VirtualAddress::get)
+        else {
             continue;
         };
         let mut saved = vec![0; expected.len()];
@@ -2102,7 +2115,7 @@ mod tests {
                     })
                     .collect(),
             };
-            placement_mismatch(&image, &segments, BASE)
+            placement_mismatch(&image, &segments, LoadBias::new(BASE))
                 .map(|detail| detail.contains(&format!("{:#x}", BASE + extra[0].0)))
         };
         assert_eq!(mismatch(&[(0x1e_7000, 0x3e_7000, 0x1e_7000)]), None);

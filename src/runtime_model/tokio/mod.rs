@@ -126,7 +126,7 @@ struct TokioRuntime {
     /// checked against, or one the program does not name.
     caveat: Option<Arc<str>>,
     /// Whether each vtable, by image address, is a task's.
-    vtables: Mutex<BTreeMap<u64, Option<Arc<str>>>>,
+    vtables: Mutex<BTreeMap<ImageAddress, Option<Arc<str>>>>,
     /// Where the future is in the cells of each poll function.
     futures: Mutex<BTreeMap<ImageAddress, Result<future::FutureLayout, Arc<str>>>>,
     /// Where the function that runs each coroutine type begins.
@@ -471,14 +471,14 @@ impl TokioRuntime {
         let tasks = self.task_layout()?;
         let poll = records::word(stop, vtable.wrapping_add(tasks.poll))
             .ok_or_else(|| format!("the vtable at {vtable:#x} is unreadable"))?;
-        let image = poll.wrapping_sub(stop.load_bias());
+        let image = stop.load_bias().wrapping_unload(VirtualAddress::new(poll));
         let verdict = self
             .vtables
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(image)
             .or_insert_with(|| {
-                let name = self.image.symbol_at(ImageAddress::new(image));
+                let name = self.image.symbol_at(image);
                 match name {
                     Some(name)
                         if name
@@ -502,7 +502,7 @@ impl TokioRuntime {
         let Some(poll) = records::word(stop, vtable.wrapping_add(tasks.poll)) else {
             return false;
         };
-        let poll = ImageAddress::new(poll.wrapping_sub(stop.load_bias()));
+        let poll = stop.load_bias().wrapping_unload(VirtualAddress::new(poll));
         // A legacy symbol names no generic arguments, while the debug
         // information names them under either mangling.
         [self.image.symbol_at(poll), self.image.function_name(poll)]
@@ -524,7 +524,7 @@ fn thread_local(
     let offset = match *tls {
         ThreadLocal::Offset(offset) => offset,
         ThreadLocal::Slot(slot) => {
-            let slot = slot.get().wrapping_add(stop.load_bias());
+            let slot = stop.load_bias().wrapping_load(slot).get();
             records::word(stop, slot)
                 .map(u64::cast_signed)
                 .ok_or("the slot of tokio's context is unreadable")?
@@ -773,7 +773,7 @@ impl RuntimeModel for TokioRuntime {
         // `S`, as its poll function's name spells them.
         let frees = self
             .image
-            .function_name(ImageAddress::new(poll.get().wrapping_sub(stop.load_bias())))
+            .function_name(stop.load_bias().wrapping_unload(poll))
             .and_then(|name| {
                 let arguments = name.strip_prefix("poll")?.to_owned();
                 Some(self.image.function_entries(&format!(
@@ -790,7 +790,7 @@ impl RuntimeModel for TokioRuntime {
             runs: vec![poll, shutdown],
             frees: frees
                 .into_iter()
-                .map(|entry| VirtualAddress::new(entry.get().wrapping_add(stop.load_bias())))
+                .map(|entry| stop.load_bias().wrapping_load(entry))
                 .collect(),
         }))
     }

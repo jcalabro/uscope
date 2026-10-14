@@ -221,7 +221,7 @@ impl GoRuntime {
     ) -> Result<Vec<u64>, Arc<str>> {
         let layout = self.goroutines()?;
         let bias = stop.load_bias();
-        let at = |address: ImageAddress| VirtualAddress::new(address.get().wrapping_add(bias));
+        let at = |address: ImageAddress| bias.wrapping_load(address);
         let length = word(stop, at(layout.allglen)).ok_or("runtime.allglen is unreadable")?;
         let array = word(stop, at(layout.allgs)).ok_or("runtime.allgs is unreadable")?;
         let capacity = word(
@@ -352,9 +352,10 @@ impl GoRuntime {
                 .map(word)
                 .transpose()?
                 .filter(|parent| *parent != 0),
-            internal: self
-                .internal
-                .is_internal(self.image.as_ref(), entry.wrapping_sub(stop.load_bias())),
+            internal: self.internal.is_internal(
+                self.image.as_ref(),
+                stop.load_bias().wrapping_unload(VirtualAddress::new(entry)),
+            ),
             labels: Vec::new(),
         }))
     }
@@ -644,7 +645,7 @@ impl RuntimeModel for GoRuntime {
         let pc = frame.get(RIP).ok_or("the frame's instruction is unknown")?;
         let name = self
             .image
-            .function_name(ImageAddress::new(pc.wrapping_sub(stop.load_bias())));
+            .function_name(stop.load_bias().wrapping_unload(VirtualAddress::new(pc)));
         let register = |number: u16, name: &str| {
             frame
                 .get(number)
@@ -947,7 +948,7 @@ impl GoRuntime {
             .thread_pointer(thread)
             .ok_or("the thread's thread pointer is unreadable")?;
         if let Some(instruction) = stop.instruction(thread) {
-            let image = ImageAddress::new(instruction.get().wrapping_sub(stop.load_bias()));
+            let image = stop.load_bias().wrapping_unload(instruction);
             if self.starting.iter().any(|range| range.contains(image)) {
                 return Err("the thread is starting, before its goroutine is set".into());
             }
@@ -955,7 +956,7 @@ impl GoRuntime {
         let offset = match threads.tls_g {
             ThreadLocal::Offset(offset) => offset,
             ThreadLocal::Slot(slot) => {
-                let slot = VirtualAddress::new(slot.get().wrapping_add(stop.load_bias()));
+                let slot = stop.load_bias().wrapping_load(slot);
                 word(stop, slot)
                     .map(u64::cast_signed)
                     .ok_or("the slot of the goroutine's place is unreadable")?
@@ -1028,8 +1029,7 @@ impl Internal {
         }
     }
 
-    fn is_internal(&self, image: &dyn RuntimeImage, entry: u64) -> bool {
-        let entry = ImageAddress::new(entry);
+    fn is_internal(&self, image: &dyn RuntimeImage, entry: ImageAddress) -> bool {
         !self.program.contains(&entry)
             && image
                 .function_name(entry)
@@ -1053,7 +1053,7 @@ impl Names {
             let Some(count) = symbol.size.map(|size| size / 16) else {
                 return Vec::new();
             };
-            let base = symbol.address.get().wrapping_add(stop.load_bias());
+            let base = stop.load_bias().wrapping_load(symbol.address).get();
             (0..count.min(256))
                 .map(|index| string(stop, VirtualAddress::new(base.wrapping_add(index * 16))))
                 .collect()

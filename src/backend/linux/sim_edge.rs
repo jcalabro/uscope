@@ -543,7 +543,7 @@ impl LinuxTraceOps for SimTrace {
         StopId::new(next)
     }
 
-    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         let _ = self.gap::<()>("identifying a library");
         None
     }
@@ -565,7 +565,7 @@ impl LinuxTraceOps for SimTrace {
         executable: &Path,
         image_base: u64,
         identity: FileIdentity,
-    ) -> Result<u64> {
+    ) -> Result<crate::LoadBias> {
         load_bias_in(&self.maps(pid)?, executable, image_base, identity)
     }
 

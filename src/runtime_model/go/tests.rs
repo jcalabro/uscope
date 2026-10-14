@@ -180,8 +180,8 @@ impl RuntimeStop for Memory {
         None
     }
 
-    fn load_bias(&self) -> u64 {
-        0
+    fn load_bias(&self) -> crate::LoadBias {
+        crate::LoadBias::default()
     }
 
     fn threads(&self) -> Vec<ThreadId> {

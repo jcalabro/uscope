@@ -1268,7 +1268,7 @@ async fn an_image_mapped_from_offset_zero_more_than_once_is_one_module() {
         matches!(
             &module.state,
             CoreModuleState::Loaded { module: loaded, identity }
-                if identity.is_verified() && loaded.module.load_bias == module.start.get()
+                if identity.is_verified() && loaded.module.load_bias.get() == module.start.get()
         ),
         "{core_name}: {module:#?}"
     );
@@ -1331,7 +1331,7 @@ async fn core_reads_keep_backed_bytes_that_end_inside_a_word() {
         .find(|section| section.name.as_ref() == ".fini")
         .expect(".fini")
         .range;
-    let end = library.module.load_bias + fini.end.get();
+    let end = library.module.load_bias.get() + fini.end.get();
     assert_ne!(end % 8, 0, "the segment must end inside a word");
 
     let whole = scenario

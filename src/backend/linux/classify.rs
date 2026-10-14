@@ -175,16 +175,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             let address = registers.rip.checked_sub(1)?;
             let moved = self.moved_code_now(inferior.memory_thread()).ok()?;
             let carried = moved.iter().any(|code| {
-                let Some(source) = address
-                    .checked_sub(code.to)
-                    .and_then(|offset| code.from.start.checked_add(offset))
-                    .filter(|source| code.from.contains(source))
-                else {
+                let Some(source) = code.source(VirtualAddress::new(address)) else {
                     return false;
                 };
                 inferior
                     .breakpoints
-                    .get(&VirtualAddress::new(source))
+                    .get(&source)
                     .is_some_and(|site| site.installed && site.original_byte != BREAKPOINT_OPCODE)
             });
             if !carried {

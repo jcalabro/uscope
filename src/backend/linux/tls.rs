@@ -25,7 +25,7 @@ use object::read::elf::ProgramHeader as _;
 use object::{Object, ObjectSymbol, SymbolKind};
 
 use super::{mapped_module_load_bias, module_mappings};
-use crate::VirtualAddress;
+use crate::{ImageAddress, LoadBias, VirtualAddress};
 
 mod glibc;
 mod musl;
@@ -89,10 +89,10 @@ impl CLibrary {
     /// those the debugger could not load.
     pub(super) fn tls_modules(
         self,
-        link_maps: &[(u64, VirtualAddress)],
-        main_load_bias: u64,
-        has_tls: &BTreeMap<u64, bool>,
-    ) -> BTreeMap<u64, TlsModule> {
+        link_maps: &[(LoadBias, VirtualAddress)],
+        main_load_bias: LoadBias,
+        has_tls: &BTreeMap<LoadBias, bool>,
+    ) -> BTreeMap<LoadBias, TlsModule> {
         match self {
             Self::Glibc => link_maps
                 .iter()
@@ -285,9 +285,10 @@ fn lookup_symbol(pid: Pid, requested_object: Option<&str>, requested_symbol: &st
         else {
             continue;
         };
-        let Some(address) = bias.checked_add(symbol.address()) else {
+        let Some(address) = bias.load(ImageAddress::new(symbol.address())) else {
             continue;
         };
+        let address = address.get();
         if preferred {
             return Some(address);
         }
@@ -335,41 +336,50 @@ mod tests {
 
     #[test]
     fn each_c_library_identifies_its_modules_tls() {
-        let link_maps = [0x1000, 0x2000, 0x3000, 0x4000, 0x5000]
-            .map(|load_bias| (load_bias, VirtualAddress::new(load_bias + 1)));
+        let link_maps = [
+            LoadBias::new(0x1000),
+            LoadBias::new(0x2000),
+            LoadBias::new(0x3000),
+            LoadBias::new(0x4000),
+            LoadBias::new(0x5000),
+        ]
+        .map(|load_bias| (load_bias, VirtualAddress::new(load_bias.get() + 1)));
         // The executable and a library have TLS and the loader none; the
         // fourth module could not be loaded.
         let has_tls = BTreeMap::from([
-            (0x1000, true),
-            (0x2000, false),
-            (0x3000, true),
-            (0x5000, true),
+            (LoadBias::new(0x1000), true),
+            (LoadBias::new(0x2000), false),
+            (LoadBias::new(0x3000), true),
+            (LoadBias::new(0x5000), true),
         ]);
         assert_eq!(
-            CLibrary::Musl.tls_modules(&link_maps, 0x1000, &has_tls),
-            BTreeMap::from([(0x1000, musl(1)), (0x3000, musl(2))])
+            CLibrary::Musl.tls_modules(&link_maps, LoadBias::new(0x1000), &has_tls),
+            BTreeMap::from([
+                (LoadBias::new(0x1000), musl(1)),
+                (LoadBias::new(0x3000), musl(2))
+            ])
         );
         // Without the loader's list, only the executable has a number.
         assert_eq!(
-            CLibrary::Musl.tls_modules(&[], 0x1000, &has_tls),
-            BTreeMap::from([(0x1000, musl(1))])
+            CLibrary::Musl.tls_modules(&[], LoadBias::new(0x1000), &has_tls),
+            BTreeMap::from([(LoadBias::new(0x1000), musl(1))])
         );
         assert_eq!(
-            CLibrary::Musl.tls_modules(&link_maps[1..3], 0x2000, &has_tls),
-            BTreeMap::from([(0x3000, musl(1))])
+            CLibrary::Musl.tls_modules(&link_maps[1..3], LoadBias::new(0x2000), &has_tls),
+            BTreeMap::from([(LoadBias::new(0x3000), musl(1))])
         );
         // glibc finds every listed module's block through its link map.
         assert_eq!(
-            CLibrary::Glibc.tls_modules(&link_maps[..2], 0x1000, &has_tls),
+            CLibrary::Glibc.tls_modules(&link_maps[..2], LoadBias::new(0x1000), &has_tls),
             BTreeMap::from([
                 (
-                    0x1000,
+                    LoadBias::new(0x1000),
                     TlsModule::Glibc {
                         link_map: VirtualAddress::new(0x1001)
                     }
                 ),
                 (
-                    0x2000,
+                    LoadBias::new(0x2000),
                     TlsModule::Glibc {
                         link_map: VirtualAddress::new(0x2001)
                     }
@@ -378,11 +388,11 @@ mod tests {
         );
         // Statically linked glibc identifies only the executable, if it has TLS.
         assert_eq!(
-            CLibrary::StaticGlibc.tls_modules(&link_maps[..3], 0x1000, &has_tls),
-            BTreeMap::from([(0x1000, TlsModule::StaticGlibc)])
+            CLibrary::StaticGlibc.tls_modules(&link_maps[..3], LoadBias::new(0x1000), &has_tls),
+            BTreeMap::from([(LoadBias::new(0x1000), TlsModule::StaticGlibc)])
         );
         assert_eq!(
-            CLibrary::StaticGlibc.tls_modules(&[], 0x2000, &has_tls),
+            CLibrary::StaticGlibc.tls_modules(&[], LoadBias::new(0x2000), &has_tls),
             BTreeMap::new()
         );
     }

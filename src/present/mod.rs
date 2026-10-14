@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use uscope::{
     DebuggerHandle, DereferenceReference, DereferenceState, Expression, ImageAddress,
-    InspectionExhaustion, InspectionLimits, IntegerValue, ModuleId, ModuleImage, PresentedShape,
-    ScalarValue, SourceLocation, StopContext, SymbolKind, TypeInfo, ValueChild, ValueChildQuery,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, VariableKind, VariableSnapshot,
-    VariableState, VariableValue, VariableValueSource, VirtualAddress,
+    InspectionExhaustion, InspectionLimits, IntegerValue, LoadBias, ModuleId, ModuleImage,
+    PresentedShape, ScalarValue, SourceLocation, StopContext, SymbolKind, TypeInfo, ValueChild,
+    ValueChildQuery, ValueChildRelationship, ValueChildren, ValueChildrenReference, VariableKind,
+    VariableSnapshot, VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 use crate::cli::value::summary;
@@ -189,24 +189,27 @@ impl From<uscope::Error> for ListError {
 #[derive(Debug, Default)]
 pub struct Code {
     /// Each module's load bias and image.
-    modules: Vec<(u64, Arc<ModuleImage>)>,
+    modules: Vec<(LoadBias, Arc<ModuleImage>)>,
 }
 
 impl Code {
-    pub const fn new(modules: Vec<(u64, Arc<ModuleImage>)>) -> Self {
+    pub const fn new(modules: Vec<(LoadBias, Arc<ModuleImage>)>) -> Self {
         Self { modules }
     }
 
     /// Each module's load bias and image.
-    pub fn modules(&self) -> &[(u64, Arc<ModuleImage>)] {
+    pub fn modules(&self) -> &[(LoadBias, Arc<ModuleImage>)] {
         &self.modules
     }
 
     /// The image and image address of the function an address enters, when
     /// it is a function's first instruction rather than any other address.
-    pub fn function_entry(&self, address: u64) -> Option<(&Arc<ModuleImage>, ImageAddress)> {
+    pub fn function_entry(
+        &self,
+        address: VirtualAddress,
+    ) -> Option<(&Arc<ModuleImage>, ImageAddress)> {
         self.modules.iter().find_map(|(bias, image)| {
-            let address = ImageAddress::new(address.checked_sub(*bias)?);
+            let address = bias.unload(address)?;
             if !image.contains_address(address) {
                 return None;
             }
@@ -262,8 +265,8 @@ impl Presenter<'_> {
                 // A pointer to a function, or a function value, leads to
                 // the function's code.
                 let code = called(value)
-                    .map(VirtualAddress::get)
-                    .filter(|address| self.code.function_entry(*address).is_some());
+                    .filter(|address| self.code.function_entry(*address).is_some())
+                    .map(VirtualAddress::get);
                 // A pointer's natural memory is what it points to.
                 let memory = match (value, source) {
                     (VariableValue::Address(address), _) => Some(address.address.get()),

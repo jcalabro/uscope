@@ -762,7 +762,7 @@ impl Client {
     }
 
     /// The load bias of the main executable.
-    async fn main_bias(&self) -> Result<u64, Failure> {
+    async fn main_bias(&self) -> Result<crate::LoadBias, Failure> {
         let modules = self
             .handle
             .loaded_modules()
@@ -787,7 +787,8 @@ impl Client {
         let length = self.draw(MAX_READ) + 1;
         let aim = if !traps.is_empty() && self.draw(2) == 0 {
             let image = *self.choices.borrow_mut().pick(Stream::Client, &traps);
-            Some(image + self.main_bias().await?)
+            let image = crate::ImageAddress::new(image);
+            Some(self.main_bias().await?.wrapping_load(image).get())
         } else {
             None
         };

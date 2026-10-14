@@ -218,8 +218,12 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
         for module in self.modules {
             let bias = module.loaded.load_bias;
             let image_range = AddressRange {
-                start: crate::ImageAddress::new(range.start.get().saturating_sub(bias)),
-                end: crate::ImageAddress::new(range.end.get().saturating_sub(bias)),
+                start: bias
+                    .unload(range.start)
+                    .unwrap_or(crate::ImageAddress::new(0)),
+                end: bias
+                    .unload(range.end)
+                    .unwrap_or(crate::ImageAddress::new(0)),
             };
             for (address, evidence) in module.image.instruction_starts(image_range) {
                 if let Ok(address) = module.loaded.virtual_address(address)

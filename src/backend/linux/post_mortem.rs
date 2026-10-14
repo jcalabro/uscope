@@ -34,8 +34,8 @@ use crate::protocol::{
     ProcessId, Request, StopReason,
 };
 use crate::{
-    Error, LoadedModule, LoadedModuleRecord, ModuleId, ModuleImage, ModuleImageId, Result,
-    VirtualAddress,
+    Error, ImageAddress, LoadBias, LoadedModule, LoadedModuleRecord, ModuleId, ModuleImage,
+    ModuleImageId, Result, VirtualAddress,
 };
 
 const POST_MORTEM_THREAD_NAME: &str = "uscope-core";
@@ -49,7 +49,7 @@ pub(super) struct CoreTarget {
 
 struct SymbolModule {
     recorded_path: PathBuf,
-    load_bias: u64,
+    load_bias: LoadBias,
     image: Arc<ModuleImage>,
 }
 
@@ -72,7 +72,11 @@ impl ProcessServices for CoreTarget {
             else {
                 continue;
             };
-            let Some(address) = module.load_bias.checked_add(found.address().get()) else {
+            let Some(address) = module
+                .load_bias
+                .load(found.address())
+                .map(VirtualAddress::get)
+            else {
                 continue;
             };
             let preferred = object.is_some_and(|object| {
@@ -194,7 +198,7 @@ struct PlacedFile {
     inode: u64,
     /// The recorded image grown to the file's extent.
     image: ImageMappings,
-    load_bias: u64,
+    load_bias: LoadBias,
     /// Dump-time addresses whose file bytes are the process's memory.
     read_only: Vec<Range<u64>>,
 }
@@ -205,7 +209,7 @@ struct ImageFile {
     data: Arc<[u8]>,
     inode: u64,
     image: ImageMappings,
-    load_bias: u64,
+    load_bias: LoadBias,
     identity: ModuleIdentity,
     read_only: Vec<Range<u64>>,
 }
@@ -324,7 +328,11 @@ fn examine(
     {
         // Verification already proved the file parses as an ELF image.
         let declared = object::File::parse(data.as_ref()).map_or(0, |object| object.entry());
-        if load_bias.checked_add(declared) != Some(recorded) {
+        if load_bias
+            .load(ImageAddress::new(declared))
+            .map(VirtualAddress::get)
+            != Some(recorded)
+        {
             evidence = ImageEvidence::Mismatch(format!(
                 "the recorded entry point {recorded:#x} differs from the file's"
             ));

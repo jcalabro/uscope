@@ -938,7 +938,7 @@ struct FakeTrace {
     start_times: RefCell<BTreeMap<Pid, u64>>,
     /// Mapped library files, by path, with their load bias and whether
     /// their debug information loads.
-    libraries: RefCell<BTreeMap<PathBuf, (u64, bool)>>,
+    libraries: RefCell<BTreeMap<PathBuf, (crate::LoadBias, bool)>>,
     /// Statuses the kernel holds that no waiter has taken.
     unreaped: RefCell<BTreeMap<Pid, WaitEvent>>,
 }
@@ -1152,7 +1152,7 @@ impl LinuxTraceOps for FakeTrace {
     fn allocate_stop_id(&self) -> StopId {
         allocate_stop_id()
     }
-    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         let libraries = self.libraries.borrow();
         let (bias, _) = libraries.get(&mapping.path)?;
         Some((mapping.path.clone(), *bias))
@@ -1167,7 +1167,7 @@ impl LinuxTraceOps for FakeTrace {
                 .map(|(index, (path, (bias, _)))| ModuleMapping {
                     path: path.clone(),
                     inode: 100 + index as u64,
-                    start: *bias,
+                    start: bias.get(),
                     file_offset: 0,
                     deleted: false,
                     executable: true,
@@ -1229,8 +1229,8 @@ impl LinuxTraceOps for FakeTrace {
         _executable: &Path,
         _image_base: u64,
         _identity: FileIdentity,
-    ) -> Result<u64> {
-        Ok(0)
+    ) -> Result<crate::LoadBias> {
+        Ok(crate::LoadBias::default())
     }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
         self.record(format!("write_word {pid} {address:#x} {value:#x}"));
@@ -1673,7 +1673,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
         ..Inferior::new(
             InferiorOrigin::Launched,
             pid,
-            LoadedModule::main(image.id(), 0),
+            LoadedModule::main(image.id(), crate::LoadBias::default()),
             threads.iter().map(|&pid| (pid, stopped())).collect(),
             None,
         )
@@ -6500,7 +6500,7 @@ fn new_modules_load_together_and_register_in_observation_order() {
             .trace()
             .libraries
             .borrow_mut()
-            .insert(PathBuf::from(path), (bias, loads));
+            .insert(PathBuf::from(path), (crate::LoadBias::new(bias), loads));
     }
     harness.trace().take_actions();
     let libraries = |harness: &WatchHarness| {
@@ -6551,11 +6551,10 @@ fn new_modules_load_together_and_register_in_observation_order() {
         [(1, "/lib/liba.so".into()), (3, "/lib/libc.so".into())]
     );
 
-    harness
-        .trace()
-        .libraries
-        .borrow_mut()
-        .insert(PathBuf::from("/lib/libd.so"), (0x7300_0000, true));
+    harness.trace().libraries.borrow_mut().insert(
+        PathBuf::from("/lib/libd.so"),
+        (crate::LoadBias::new(0x7300_0000), true),
+    );
     harness.controller.refresh_modules().unwrap();
     let loads = harness
         .trace()

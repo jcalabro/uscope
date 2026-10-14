@@ -99,7 +99,7 @@ async fn the_processor_leaves_each_dispatch_where_the_debugger_says() {
         let modules = scenario
             .operation("modules", scenario.handle().loaded_modules())
             .await;
-        let bias = modules.modules[0].module.load_bias;
+        let bias = modules.modules[0].module.load_bias.get();
         for entry in bodies.keys() {
             scenario
                 .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(

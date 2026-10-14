@@ -280,10 +280,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                         locations.push(ResolvedBreakpointLocation {
                             location: match bias {
                                 None => BreakpointLocation::Image(address),
-                                Some(bias) => BreakpointLocation::Virtual(VirtualAddress::new(
-                                    bias.checked_add(address.get())
-                                        .ok_or(Error::AddressOverflow)?,
-                                )),
+                                Some(bias) => BreakpointLocation::Virtual(
+                                    bias.load(address).ok_or(Error::AddressOverflow)?,
+                                ),
                             },
                             code_instances,
                             library: bias.map(|_| module),
@@ -881,13 +880,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Traps come out of moved code first, since one may have landed on
         // another site's address.
         for (&address, site) in &inferior.breakpoints {
-            let Some(code) = moved
+            let Some(destination) = moved
                 .iter()
-                .find(|code| site.installed && code.from.contains(&address.get()))
+                .filter(|_| site.installed)
+                .find_map(|code| code.destination(address))
             else {
                 continue;
             };
-            let destination = code.to + (address.get() - code.from.start);
+            let destination = destination.get();
             if site.original_byte != BREAKPOINT_OPCODE
                 && memory_byte(&self.ptrace, pid, destination)? == Some(BREAKPOINT_OPCODE)
             {
@@ -980,8 +980,28 @@ impl<P: LinuxTraceOps> Controller<P> {
 /// at `to` onwards, the debugger's traps among them.
 #[derive(Debug)]
 pub(super) struct MovedCode {
-    pub(super) from: std::ops::Range<u64>,
-    pub(super) to: u64,
+    pub(super) from: std::ops::Range<VirtualAddress>,
+    pub(super) to: VirtualAddress,
+}
+
+impl MovedCode {
+    /// Where the byte now at `address` came from, if this code holds it.
+    pub(super) fn source(&self, address: VirtualAddress) -> Option<VirtualAddress> {
+        let offset = address.get().checked_sub(self.to.get())?;
+        let source = VirtualAddress::new(self.from.start.get().checked_add(offset)?);
+        self.from.contains(&source).then_some(source)
+    }
+
+    /// Where the byte at `address` went, if this code held it.
+    fn destination(&self, address: VirtualAddress) -> Option<VirtualAddress> {
+        if !self.from.contains(&address) {
+            return None;
+        }
+        self.to
+            .get()
+            .checked_add(address.get() - self.from.start.get())
+            .map(VirtualAddress::new)
+    }
 }
 
 /// The size of the pages [`Controller::reconcile_sites`] reads at once.

@@ -14,8 +14,8 @@ use crate::sim::report::Failure;
 use crate::sim::watches::{self, Intent};
 use crate::{
     BreakpointId, BreakpointLocation, BreakpointOptions, BreakpointSpec, Condition, Error,
-    HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, VirtualAddress,
-    WatchAccess, Watchpoint, WatchpointId, WatchpointOptions, WatchpointSpec,
+    HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, WatchAccess,
+    Watchpoint, WatchpointId, WatchpointOptions, WatchpointSpec,
 };
 
 /// A breakpoint the client added, with the image addresses of its traps.
@@ -83,7 +83,8 @@ impl Client {
                 }
             }
         } else {
-            let address = VirtualAddress::new(image_address + self.main_bias().await?);
+            let image_address = crate::ImageAddress::new(image_address);
+            let address = self.main_bias().await?.wrapping_load(image_address);
             self.handle
                 .add_watchpoint_with(
                     WatchpointSpec::Location {

@@ -1630,7 +1630,7 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
             "disassemble getpid",
             scenario.handle().disassemble(uscope::DisassemblyQuery {
                 range: uscope::DisassemblyRange::Function(VirtualAddress::new(
-                    libc.module.load_bias + getpid.address().get(),
+                    libc.module.load_bias.get() + getpid.address().get(),
                 )),
                 syntax: uscope::AssemblySyntax::Intel,
             }),

@@ -18,18 +18,26 @@ use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 
 use super::RecordError;
 use crate::debug_info::gopclntab::GoTable;
+use crate::{ImageAddress, LoadBias, VirtualAddress};
 
 /// The instruction a breakpoint samples to count a function's calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Calls {
-    /// The instruction's address, where the program loads without address
-    /// randomization.
-    pub address: u64,
-    /// The bias the program must load at for `address` to be right.
-    pub bias: u64,
+    /// The instruction's address in the program's image.
+    pub address: ImageAddress,
+    /// The bias the program must load at for the breakpoint to be right.
+    pub bias: LoadBias,
     /// When the instruction is a Go stack check's branch, the condition
     /// under which it branches to grow the stack.
     pub repeats_when: Option<Branch>,
+}
+
+impl Calls {
+    /// Where the instruction is once the program loads at its bias.
+    #[must_use]
+    pub const fn loaded(self) -> VirtualAddress {
+        self.bias.wrapping_load(self.address)
+    }
 }
 
 /// A conditional branch's condition, by the flags it reads.
@@ -61,18 +69,20 @@ const UNRANDOMIZED_PIE_BASE: u64 = 0x5555_5555_4aaa;
 /// Where to count the calls of the function `symbol` names in `program`.
 /// The program loads at `bias`, or where it does without address
 /// randomization.
-pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, RecordError> {
+pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Calls, RecordError> {
     let unreadable = |error: &dyn std::fmt::Display| RecordError::Program(error.to_string());
     let program =
         super::session::which(program).ok_or_else(|| RecordError::Program("not found".into()))?;
     let data = std::fs::read(&program).map_err(|error| unreadable(&error))?;
     let file = object::File::parse(data.as_slice()).map_err(|error| unreadable(&error))?;
-    let bias = bias.unwrap_or_else(|| match file.kind() {
-        object::ObjectKind::Dynamic => {
-            let first = file.segments().map(|segment| segment.address()).min();
-            UNRANDOMIZED_PIE_BASE.wrapping_sub(first.unwrap_or(0)) & !0xfff
-        }
-        _ => 0,
+    let bias = bias.unwrap_or_else(|| {
+        LoadBias::new(match file.kind() {
+            object::ObjectKind::Dynamic => {
+                let first = file.segments().map(|segment| segment.address()).min();
+                UNRANDOMIZED_PIE_BASE.wrapping_sub(first.unwrap_or(0)) & !0xfff
+            }
+            _ => 0,
+        })
     });
     // A symbol, or the name a profile shows for one.
     let addresses: BTreeSet<u64> = file
@@ -98,7 +108,7 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, Re
         }
     };
     let plain = Calls {
-        address: entry,
+        address: ImageAddress::new(entry),
         bias,
         repeats_when: None,
     };
@@ -134,7 +144,7 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<u64>) -> Result<Calls, Re
         return Err(uncountable("the Go runtime may restart it at its entry"));
     }
     Ok(Calls {
-        address: check.ip(),
+        address: ImageAddress::new(check.ip()),
         bias,
         repeats_when: Some(repeats_when),
     })

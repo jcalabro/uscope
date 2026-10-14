@@ -1352,7 +1352,7 @@ pub fn source_context(
 pub struct ModuleRow {
     pub path: Arc<PathBuf>,
     /// Where it is loaded, once it is.
-    pub load_bias: Option<u64>,
+    pub load_bias: Option<uscope::LoadBias>,
     pub image: Option<Arc<uscope::ModuleImage>>,
 }
 
@@ -1368,8 +1368,8 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
                 let range = image.address_range();
                 format!(
                     "{:#x}-{:#x}",
-                    range.start.get().wrapping_add(bias),
-                    range.end.get().wrapping_add(bias)
+                    bias.wrapping_load(range.start),
+                    bias.wrapping_load(range.end)
                 )
             }
             (_, None) => "not loaded".to_owned(),

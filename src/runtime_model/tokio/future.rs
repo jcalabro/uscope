@@ -97,7 +97,7 @@ impl TokioRuntime {
         let vtable =
             records::word(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
         let poll = records::word(stop, vtable.wrapping_add(tasks.poll)).ok_or_else(unreadable)?;
-        let poll = ImageAddress::new(poll.wrapping_sub(stop.load_bias()));
+        let poll = stop.load_bias().wrapping_unload(VirtualAddress::new(poll));
         let layout = self
             .futures
             .lock()
@@ -133,8 +133,6 @@ impl TokioRuntime {
             .entry(outermost.ty)
             .or_insert_with(|| self.image.coroutine_body(outermost.ty))
             .as_ref()?;
-        Some(VirtualAddress::new(
-            body.get().wrapping_add(stop.load_bias()),
-        ))
+        Some(stop.load_bias().wrapping_load(body))
     }
 }

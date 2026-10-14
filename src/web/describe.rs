@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use uscope::{
-    BreakpointLocation, BreakpointSpec, DebuggerHandle, ImageAddress, InferiorState, ModuleId,
-    ModuleImage, StackFrame, StackFrameId, StateSnapshot, StopContext, StopReason, VirtualAddress,
+    BreakpointLocation, BreakpointSpec, DebuggerHandle, ImageAddress, InferiorState, LoadBias,
+    ModuleId, ModuleImage, StackFrame, StackFrameId, StateSnapshot, StopContext, StopReason,
+    VirtualAddress,
 };
 
 use super::protocol::{self, Inferior, Place, State, StopEntry, Thread};
@@ -50,7 +51,7 @@ impl Images {
 
     /// Each loaded module's load bias and image; before the program runs,
     /// only the executable, at no bias.
-    pub async fn loaded(&self) -> Vec<(u64, Arc<ModuleImage>)> {
+    pub async fn loaded(&self) -> Vec<(LoadBias, Arc<ModuleImage>)> {
         let records = self
             .handle
             .loaded_modules()
@@ -64,7 +65,7 @@ impl Images {
             }
         }
         if loaded.is_empty() {
-            loaded.push((0, Arc::clone(self.handle.module_image())));
+            loaded.push((LoadBias::default(), Arc::clone(self.handle.module_image())));
         }
         loaded
     }
@@ -332,16 +333,14 @@ impl Describer {
                 // Before the program runs, there is no virtual address yet.
                 self.main_bias()
                     .await
-                    .map_or_else(|| address.get(), |bias| address.get().wrapping_add(bias)),
+                    .map_or_else(|| address.get(), |bias| bias.wrapping_load(address).get()),
             ),
             (BreakpointLocation::Virtual(address), Some(library)) => {
                 let bias = self.bias_of(library).await;
                 match (self.images.get(library).await, bias) {
-                    (Some(image), Some(bias)) => (
-                        Some(image),
-                        ImageAddress::new(address.get().wrapping_sub(bias)),
-                        address.get(),
-                    ),
+                    (Some(image), Some(bias)) => {
+                        (Some(image), bias.wrapping_unload(address), address.get())
+                    }
                     _ => (None, ImageAddress::new(0), address.get()),
                 }
             }
@@ -388,7 +387,7 @@ impl Describer {
             line: None,
         };
         for (bias, image) in self.images.loaded().await {
-            let Some(image_address) = address.get().checked_sub(bias).map(ImageAddress::new) else {
+            let Some(image_address) = bias.unload(address) else {
                 continue;
             };
             if !image.contains_address(image_address) {
@@ -412,7 +411,7 @@ impl Describer {
 
     /// The executable's load bias, once it is loaded: modules are listed
     /// by identifier, and the executable's comes first.
-    async fn main_bias(&self) -> Option<u64> {
+    async fn main_bias(&self) -> Option<LoadBias> {
         let snapshot = self.handle.loaded_modules().await.ok()?;
         snapshot
             .modules
@@ -420,7 +419,7 @@ impl Describer {
             .map(|record| record.module.load_bias)
     }
 
-    async fn bias_of(&self, module: ModuleId) -> Option<u64> {
+    async fn bias_of(&self, module: ModuleId) -> Option<LoadBias> {
         let snapshot = self.handle.loaded_modules().await.ok()?;
         snapshot
             .modules

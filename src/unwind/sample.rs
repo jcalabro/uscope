@@ -536,7 +536,7 @@ mod tests {
                 loaded: LoadedModule {
                     id: ModuleId::new(1),
                     image: ModuleImageId::new(1),
-                    load_bias: 0,
+                    load_bias: crate::LoadBias::default(),
                 },
                 image: &self.info.image,
                 unwind: self.info.unwind.as_ref(),

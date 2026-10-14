@@ -414,7 +414,7 @@ pub fn attach(pid: u32, options: &EventOptions, budget: usize) -> Result<Attache
 
 /// The load bias of the program process `pid` runs, from its mapping of
 /// the start of its file.
-pub fn program_bias(pid: u32) -> Option<u64> {
+pub fn program_bias(pid: u32) -> Option<crate::LoadBias> {
     use std::os::unix::fs::MetadataExt;
     let inode = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?.ino();
     let mapped = mappings(pid)
@@ -614,7 +614,10 @@ pub fn own_vdso() -> Option<(Vec<u8>, u64)> {
         std::os::unix::fs::FileExt::read_exact_at(&memory, buffer, address).is_ok()
     })
     .ok()?;
-    Some((image.data, range.start.wrapping_sub(image.load_bias)))
+    let link = image
+        .load_bias
+        .wrapping_unload(crate::VirtualAddress::new(range.start));
+    Some((image.data, link.get()))
 }
 
 /// Whether an executable mapping is the vDSO's.
@@ -629,7 +632,7 @@ pub fn is_vdso(mmap: &decode::Mmap<'_>) -> bool {
 /// where the process sees other mounts, as in a container. A file deleted
 /// since is still the process's: its mapping's link in `map_files`, which
 /// needs privileges, or for the program itself, its `exe`.
-pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, u64)> {
+pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, crate::LoadBias)> {
     use std::os::unix::ffi::OsStrExt;
     if !mmap.executable || !mmap.path.starts_with(b"/") {
         return None;

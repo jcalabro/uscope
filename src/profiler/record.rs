@@ -23,7 +23,7 @@ use crate::debug_info::{DebugFileSearch, DebugInfo};
 use crate::unwind::UnwindModule;
 use crate::unwind::sample::{FrameRules, SampledState, StackEnd, unwind_sample};
 use crate::{
-    CodeInstanceKind, CodeRole, ImageAddress, InlineFrameLookup, LoadedModule, ModuleId,
+    CodeInstanceKind, CodeRole, ImageAddress, InlineFrameLookup, LoadBias, LoadedModule, ModuleId,
     ModuleImage, ModuleImageId,
 };
 
@@ -439,8 +439,10 @@ impl Processor {
         let end = mmap.start.saturating_add(mmap.length);
         let process = self.builder.process(mmap.pid, mmap.time.cast_signed());
         let image = if perf::is_vdso(mmap) {
-            self.vdso()
-                .map(|(image, link)| (image, mmap.start.wrapping_sub(link)))
+            self.vdso().map(|(image, link)| {
+                let start = crate::VirtualAddress::new(mmap.start);
+                (image, LoadBias::between(ImageAddress::new(link), start))
+            })
         } else {
             perf::identify(mmap).map(|(file, bias)| {
                 let path = PathBuf::from(String::from_utf8_lossy(mmap.path).into_owned());
@@ -483,7 +485,7 @@ impl Processor {
             start: mmap.start.into(),
             end: end.into(),
             file_offset: mmap.file_offset.into(),
-            bias: bias.into(),
+            bias: bias.get().into(),
             time: mmap.time.cast_signed().into(),
         });
     }
@@ -633,7 +635,7 @@ impl Processor {
                 Some(owner) => self.builder.frame(
                     FrameKind::Native,
                     self.images[owner.image].module,
-                    frame.address.get().wrapping_sub(owner.loaded.load_bias),
+                    owner.loaded.load_bias.wrapping_unload(frame.address).get(),
                     role_number(frame.role),
                 ),
                 None => self
@@ -842,7 +844,7 @@ impl Processor {
         let Some(owner) = leaf.module.map(|module| owners[module]) else {
             return;
         };
-        let address = ImageAddress::new(leaf.address.get().wrapping_sub(owner.loaded.load_bias));
+        let address = owner.loaded.load_bias.wrapping_unload(leaf.address);
         let register = self.images[owner.image]
             .info
             .as_ref()
@@ -987,7 +989,11 @@ impl Processor {
         let (module, address, role) = owner.map_or((NONE, address, 0), |owner| {
             (
                 self.images[owner.image].module,
-                address.wrapping_sub(owner.loaded.load_bias),
+                owner
+                    .loaded
+                    .load_bias
+                    .wrapping_unload(crate::VirtualAddress::new(address))
+                    .get(),
                 role,
             )
         });

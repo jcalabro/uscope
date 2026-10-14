@@ -213,6 +213,7 @@ async fn enabling_a_breakpoint_resolves_it_where_its_code_moved() {
             .expect("the library is loaded")
             .module
             .load_bias
+            .get()
     };
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())

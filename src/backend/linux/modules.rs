@@ -14,8 +14,8 @@ use crate::backend::FileIdentity;
 use crate::debug_info::DebugInfo;
 use crate::protocol::DebuggerEvent;
 use crate::{
-    Error, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleImageId, Result,
-    VirtualAddress,
+    Error, ImageAddress, LoadBias, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot,
+    ModuleImageId, Result, VirtualAddress,
 };
 
 use super::breakpoints::MovedCode;
@@ -38,7 +38,7 @@ pub(super) struct ModuleMapping {
 
 /// A module observed for the first time: its file, load bias, and the
 /// identifiers it is given.
-type NewModule = (PathBuf, u64, crate::ModuleId, ModuleImageId);
+type NewModule = (PathBuf, LoadBias, crate::ModuleId, ModuleImageId);
 
 impl<P: InspectionOps> Controller<P> {
     pub(super) fn loaded_module(&self) -> Result<LoadedModule> {
@@ -67,7 +67,7 @@ impl<P: InspectionOps> Controller<P> {
     /// Records how the C library identifies each module's TLS block, from
     /// the loader's link maps in list order, once the registry holds every
     /// module the loader lists.
-    pub(super) fn locate_tls_modules(&mut self, link_maps: &[(u64, VirtualAddress)]) {
+    pub(super) fn locate_tls_modules(&mut self, link_maps: &[(LoadBias, VirtualAddress)]) {
         let has_tls = self
             .modules
             .values()
@@ -113,7 +113,7 @@ impl<P: InspectionOps> Controller<P> {
             .modules
             .get_mut(&crate::ModuleId::new(0))
             .expect("main module is registered");
-        main.loaded = LoadedModule::main(main.image.id(), 0);
+        main.loaded = LoadedModule::main(main.image.id(), LoadBias::default());
         main.tls = None;
         if self.drop_library_locations() {
             self.bump_revision();
@@ -220,9 +220,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         &mut self,
         files: Vec<ModuleMapping>,
         headers: Vec<ModuleMapping>,
-        link_maps: &[(u64, VirtualAddress)],
-    ) -> Vec<(PathBuf, u64)> {
-        let mut observed = Vec::<(PathBuf, u64)>::new();
+        link_maps: &[(LoadBias, VirtualAddress)],
+    ) -> Vec<(PathBuf, LoadBias)> {
+        let mut observed = Vec::<(PathBuf, LoadBias)>::new();
         let mut known = std::mem::take(&mut self.mapped_modules);
         let mut mapped_modules = BTreeMap::new();
         let mut identify = |mapping: ModuleMapping| {
@@ -234,11 +234,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let executable_inode = self.executable_identity.inode;
         // A library with no code maps nothing executable; the loader lists
-        // an object at its first page.
+        // an object at its first page, which holds image address zero.
         let code_less = headers
             .into_iter()
             .filter(|mapping| {
-                link_maps.iter().any(|&(bias, _)| bias == mapping.start)
+                let first_page = VirtualAddress::new(mapping.start);
+                link_maps
+                    .iter()
+                    .any(|&(bias, _)| bias.load(ImageAddress::new(0)) == Some(first_page))
                     && !files.iter().any(|file| file.inode == mapping.inode)
             })
             .collect::<Vec<_>>();
@@ -258,7 +261,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Numbers each of the `observed` modules not yet registered, in the
     /// order they were observed, whether or not it will load.
-    fn number_new_modules(&mut self, observed: Vec<(PathBuf, u64)>) -> Result<Vec<NewModule>> {
+    fn number_new_modules(&mut self, observed: Vec<(PathBuf, LoadBias)>) -> Result<Vec<NewModule>> {
         let mut new = Vec::new();
         for (path, load_bias) in observed {
             let known = self
@@ -305,7 +308,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// The code of each registered library that is now mapped elsewhere:
     /// the vDSO wherever its name is, or a file mapped at one new place and
     /// no longer at its old one. `files` are the files observed mapped.
-    fn moved_code(&self, files: &[(PathBuf, u64)], vdso: Option<&Range<u64>>) -> Vec<MovedCode> {
+    fn moved_code(
+        &self,
+        files: &[(PathBuf, LoadBias)],
+        vdso: Option<&Range<u64>>,
+    ) -> Vec<MovedCode> {
         self.modules
             .values()
             .filter(|module| module.loaded.id != crate::ModuleId::new(0))
@@ -313,9 +320,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let path = module.image.path();
                 let code = module.image.address_range();
                 let bias = module.loaded.load_bias;
-                let from = bias + code.start.get()..bias + code.end.get();
+                let from = bias.wrapping_load(code.start)..bias.wrapping_load(code.end);
                 if path.as_os_str() == VDSO_NAME {
-                    let to = vdso?.start;
+                    let to = VirtualAddress::new(vdso?.start);
                     return (to != from.start).then_some(MovedCode { from, to });
                 }
                 let biases = files
@@ -333,7 +340,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 match (new.next(), new.next()) {
                     (Some(moved), None) => Some(MovedCode {
                         from,
-                        to: moved + code.start.get(),
+                        to: moved.wrapping_load(code.start),
                     }),
                     _ => None,
                 }
@@ -387,7 +394,7 @@ pub(super) fn load_bias(
     executable: &Path,
     image_base: u64,
     identity: FileIdentity,
-) -> Result<u64> {
+) -> Result<LoadBias> {
     load_bias_in(&read_maps(pid)?, executable, image_base, identity)
 }
 
@@ -399,11 +406,12 @@ pub(super) fn load_bias_in(
     executable: &Path,
     image_base: u64,
     identity: FileIdentity,
-) -> Result<u64> {
+) -> Result<LoadBias> {
     parse_maps(maps)?
         .into_iter()
         .find(|mapping| mapping.inode == identity.inode && mapping.file_offset == 0)
         .and_then(|mapping| mapping.start.checked_sub(image_base))
+        .map(LoadBias::new)
         .ok_or_else(|| backend_error(LinuxError::LoadBias(executable.to_owned())))
 }
 
@@ -458,7 +466,7 @@ pub(super) fn process_mappings_in(maps: &str) -> Result<ProcessMappings> {
 /// Resolves the file behind a module mapping and the load bias it was mapped
 /// with. Returns `None` when the file on disk cannot be proven to be the
 /// mapped one.
-pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf, LoadBias)> {
     if mapping.deleted {
         return None;
     }
@@ -485,7 +493,7 @@ pub(super) fn loader_link_maps(
     pid: Pid,
     image: &crate::ModuleImage,
     main: LoadedModule,
-) -> Result<Vec<(u64, VirtualAddress)>> {
+) -> Result<Vec<(LoadBias, VirtualAddress)>> {
     const DYNAMIC_ENTRY_SIZE: u64 = 16;
     const DT_NULL: u64 = 0;
     const DT_DEBUG: u64 = 21;
@@ -532,7 +540,7 @@ pub(super) fn loader_link_maps(
                 "link_map traversal exceeded its bound or formed a cycle".to_owned(),
             )));
         }
-        let load_bias = ptrace.read_word(pid, current.get())?;
+        let load_bias = LoadBias::new(ptrace.read_word(pid, current.get())?);
         result.push((load_bias, current));
         current = VirtualAddress::new(read_word_offset(ptrace, pid, current.get(), 24)?);
     }
@@ -589,7 +597,7 @@ pub(super) fn parse_maps(maps: &str) -> Result<Vec<ModuleMapping>> {
     Ok(mappings)
 }
 
-pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<u64> {
+pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<LoadBias> {
     const PAGE_MASK: u64 = !0xfff;
     let data = fs::read(&mapping.path)?;
     let object = object::File::parse(data.as_slice())
@@ -612,6 +620,7 @@ pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<u64> {
         return mapping
             .start
             .checked_sub(image_start)
+            .map(LoadBias::new)
             .ok_or_else(|| backend_error(LinuxError::LoadBias(mapping.path.clone())));
     }
     Err(backend_error(LinuxError::LoadBias(mapping.path.clone())))

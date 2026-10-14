@@ -219,7 +219,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         self.0.allocate_stop_id()
     }
 
-    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)> {
         self.0.identify_module(mapping)
     }
 
@@ -241,7 +241,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         executable: &Path,
         image_base: u64,
         identity: FileIdentity,
-    ) -> Result<u64> {
+    ) -> Result<crate::LoadBias> {
         let bias = self.0.load_bias(pid, executable, image_base, identity);
         match &bias {
             Ok(bias) => record!("load bias of {pid} -> {bias:#x}"),

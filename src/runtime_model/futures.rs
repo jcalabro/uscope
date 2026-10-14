@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use super::{RuntimeImage, RuntimeStop, records};
 use crate::{
-    CoroutineStateKind, ImageAddress, RecordMemberLayout, SourceLanguage, SourceLocation, TypeKind,
+    CoroutineStateKind, RecordMemberLayout, SourceLanguage, SourceLocation, TypeKind,
     TypeReference, VirtualAddress,
 };
 
@@ -255,7 +255,7 @@ fn held(
             format!("the trait object at {object:#x} is unreadable").into(),
         ));
     };
-    let held = ImageAddress::new(table.wrapping_sub(stop.load_bias()));
+    let held = stop.load_bias().wrapping_unload(VirtualAddress::new(table));
     let Some(held) = image.trait_object_type(held) else {
         return Err(ChainEnd::Broken(
             format!("the vtable at {table:#x} is no future's the program describes").into(),
