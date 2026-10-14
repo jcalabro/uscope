@@ -158,18 +158,8 @@ pub fn set_output(fd: &OwnedFd, ring: &OwnedFd) -> std::io::Result<()> {
 #[derive(Debug)]
 pub struct Ring {
     fd: OwnedFd,
-    base: std::ptr::NonNull<u8>,
-    length: usize,
-    data_size: usize,
+    memory: RingMemory,
 }
-
-// SAFETY: the mapping belongs to the ring alone, and every access to it
-// goes through `&mut self`.
-unsafe impl Send for Ring {}
-
-/// `perf_event_mmap_page` offsets.
-const DATA_HEAD: usize = 1024;
-const DATA_TAIL: usize = 1032;
 
 impl Ring {
     /// Maps `pages` data pages, a power of two, for an event.
@@ -195,9 +185,12 @@ impl Ring {
             .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
         Ok(Self {
             fd,
-            base,
-            length,
-            data_size: pages * page,
+            memory: RingMemory {
+                base,
+                data: page,
+                size: pages * page,
+                owner: Owner::Mapping { length },
+            },
         })
     }
 
@@ -205,13 +198,78 @@ impl Ring {
         &self.fd
     }
 
+    /// Appends every record the kernel has written since the last drain
+    /// to `out` and returns their bytes to the kernel.
+    pub fn drain(&mut self, out: &mut Vec<u8>) -> usize {
+        self.memory.drain(out)
+    }
+}
+
+/// The memory a ring shares with the kernel: a metadata page whose words
+/// at [`DATA_HEAD`] and [`DATA_TAIL`] say what it holds, then its data,
+/// a power of two of bytes.
+#[derive(Debug)]
+pub struct RingMemory {
+    base: std::ptr::NonNull<u8>,
+    /// Where the data begins.
+    data: usize,
+    size: usize,
+    owner: Owner,
+}
+
+/// What a ring's memory is, and so how it is freed.
+#[derive(Debug)]
+enum Owner {
+    /// The kernel's mapping, of this many bytes.
+    Mapping { length: usize },
+    /// A block from [`RingMemory::heap`].
+    Heap(std::ptr::NonNull<[AtomicU64]>),
+}
+
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the owner's pointer is the ring's own memory, as `base` is"
+)]
+// SAFETY: the memory belongs to the ring alone, and every access to it
+// from this side goes through `&mut self`.
+unsafe impl Send for RingMemory {}
+
+/// `perf_event_mmap_page` offsets.
+pub const DATA_HEAD: usize = 1024;
+pub const DATA_TAIL: usize = 1032;
+
+/// Where a heap ring's data begins: just past its metadata words.
+pub const HEAP_DATA: usize = DATA_TAIL + 8;
+
+impl RingMemory {
+    /// A ring over a heap block of [`HEAP_DATA`] bytes of metadata, then
+    /// `size` bytes of data, a power of two, all zero. What the kernel
+    /// does to a ring, a test does through the returned pointer to the
+    /// block's start, with the same orderings.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn heap(size: usize) -> (Self, std::ptr::NonNull<u8>) {
+        assert!(size.is_power_of_two(), "a ring holds a power of two");
+        let words = (HEAP_DATA + size).div_ceil(8);
+        let block: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
+        let block = std::ptr::NonNull::from(Box::leak(block));
+        let base = block.cast::<u8>();
+        let memory = Self {
+            base,
+            data: HEAP_DATA,
+            size,
+            owner: Owner::Heap(block),
+        };
+        (memory, base)
+    }
+
     #[expect(
         clippy::cast_ptr_alignment,
-        reason = "the metadata page is page aligned, and its words at multiples of eight"
+        reason = "the metadata is page or word aligned, and its words at multiples of eight"
     )]
     const fn word(&self, offset: usize) -> &AtomicU64 {
-        // SAFETY: the metadata page is mapped for the ring's life, the
-        // word is aligned, and the kernel accesses it atomically too.
+        // SAFETY: the metadata is the ring's for its life, the word is
+        // aligned, and the kernel accesses it atomically too.
         unsafe { AtomicU64::from_ptr(self.base.as_ptr().add(offset).cast::<u64>()) }
     }
 
@@ -221,22 +279,21 @@ impl Ring {
     pub fn drain(&mut self, out: &mut Vec<u8>) -> usize {
         let head = self.word(DATA_HEAD).load(Ordering::Acquire);
         let tail = self.word(DATA_TAIL).load(Ordering::Relaxed);
-        let size = self.data_size;
+        let size = self.size;
         let Ok(available) = usize::try_from(head.wrapping_sub(tail)) else {
             return 0;
         };
         if available == 0 || available > size {
             return 0;
         }
-        let page = page_size();
         let start = usize::try_from(tail % size as u64).expect("an offset inside the ring");
         let first = available.min(size - start);
         out.reserve(available);
-        // SAFETY: [tail, head) lies inside the data pages, which the kernel
-        // does not write until the tail passes it; the destination has the
+        // SAFETY: [tail, head) lies inside the data, which the kernel does
+        // not write until the tail passes it; the destination has the
         // capacity just reserved, and the two never overlap.
         unsafe {
-            let data = self.base.as_ptr().add(page);
+            let data = self.base.as_ptr().add(self.data);
             let destination = out.as_mut_ptr().add(out.len());
             std::ptr::copy_nonoverlapping(data.add(start), destination, first);
             std::ptr::copy_nonoverlapping(data, destination.add(first), available - first);
@@ -247,12 +304,19 @@ impl Ring {
     }
 }
 
-impl Drop for Ring {
+impl Drop for RingMemory {
     fn drop(&mut self) {
-        // SAFETY: the mapping was made with this address and length and is
-        // unmapped once, here.
-        unsafe {
-            libc::munmap(self.base.as_ptr().cast(), self.length);
+        match self.owner {
+            // SAFETY: the mapping was made with this address and length
+            // and is unmapped once, here.
+            Owner::Mapping { length } => unsafe {
+                libc::munmap(self.base.as_ptr().cast(), length);
+            },
+            // SAFETY: the block was leaked from a box and is taken back
+            // once, here.
+            Owner::Heap(block) => unsafe {
+                drop(Box::from_raw(block.as_ptr()));
+            },
         }
     }
 }

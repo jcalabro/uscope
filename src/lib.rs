@@ -45,6 +45,13 @@ pub use backend::syscall_engines;
 #[cfg(test)]
 mod test_memory;
 pub mod timings;
+/// What the tests of uscope's unsafe code reach it through. They are a
+/// test target of their own, `tests/miri.rs`, so that Miri checks only
+/// them, not the whole crate, each time it runs them.
+#[doc(hidden)]
+pub mod unsafe_parts {
+    pub use crate::backend::perf::sys::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
+}
 #[cfg(feature = "tools")]
 #[doc(hidden)]
 pub mod tools;

@@ -368,14 +368,18 @@ artifact forever.
 `just miri` runs the tests of uscope's unsafe code under Miri, which stops at
 undefined behavior: an access out of bounds, misaligned, or after a free, a
 block freed with the wrong layout, a data race, or a pointer made from an
-integer. Miri cannot start processes or call most C code, so the recipe runs
-only the tests that `miri_tests` in the justfile names. When you add or change
-unsafe code that Miri can reach, add its test there.
+integer. Miri cannot start processes or call most C code, so these tests live
+in their own target, `tests/miri.rs`, and reach the code through
+`uscope::unsafe_parts`. When you add or change unsafe code that Miri can
+reach, test it there. The same tests run natively with the rest of the suite.
+
+A test of their own keeps the loop short: Miri checks only that file, not the
+whole crate, so a warm run takes about two seconds. Tests whose names contain
+`concurrent` run again under several seeds, each a different schedule and
+weak-memory outcome; `just miri_seeds=0..256 miri` tries more.
 
 Under Miri the test process keeps Rust's default allocator. Miri cannot run
-mimalloc, and it checks a freed block's layout only on its own allocator. Most
-of the recipe's 15 seconds go to Miri checking the crate again before it runs
-anything.
+mimalloc, and it checks a freed block's layout only on its own allocator.
 
 ## Choosing the final gate
 

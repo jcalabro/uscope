@@ -94,16 +94,21 @@ test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
     ulimit -c 0
     USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
 
-# The tests that run under Miri: those of uscope's unsafe code that need no
-# process of their own, which Miri cannot start.
-miri_tests := "timings::tests::allocator"
+# How many seeds `just miri` tries its concurrent tests under: about as many
+# as run at once. Try more with `just miri_seeds=0..256 miri`.
+miri_seeds := "0..8"
 
-# Runs the tests of uscope's unsafe code under Miri, which stops at undefined
-# behavior: an access out of bounds, misaligned, or after a free, a block freed
-# with the wrong layout, a data race, a pointer made from an integer. Its
-# sysroot builds under target/. Arguments go to the test harness.
+# Runs tests/miri.rs, the tests of uscope's unsafe code, under Miri, which
+# stops at undefined behavior: an access out of bounds, misaligned, or after a
+# free, a block freed with the wrong layout, a data race, a pointer made from
+# an integer. Tests named `concurrent` run again under many seeds, each a
+# different schedule and weak-memory outcome; seeds run at once, so only a
+# failure's panic and seed, on stderr, are shown. Its sysroot builds under
+# target/. Arguments go to the test harness.
 miri *ARGS:
-    export MIRI_SYSROOT="$PWD/target/miri/sysroot"; cargo miri setup >/dev/null && MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --lib -- {{miri_tests}} "$@"
+    MIRI_SYSROOT="$PWD/target/miri/sysroot" cargo miri setup >/dev/null
+    MIRI_SYSROOT="$PWD/target/miri/sysroot" MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri -- "$@"
+    MIRI_SYSROOT="$PWD/target/miri/sysroot" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet --test miri -- concurrent "$@" 2>&1 >/dev/null | { grep -v '^Trying seed: ' || true; }
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit

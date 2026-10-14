@@ -4,7 +4,7 @@
 //! lifetimes to that CPU's ring.
 
 pub mod decode;
-pub(super) mod sys;
+pub mod sys;
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;

@@ -109,7 +109,7 @@ Each step lists how we know it worked.
   `remove_var` calls, and `env_remove` at each spawn. *Done when* that
   test passes, and the flight recorder's stack-layout reason still holds
   (the debuggee's environment matches a release build's).
-- [ ] **5. `Ring::drain` under Miri.** Let a ring be built over a heap
+- [x] **5. `Ring::drain` under Miri.** Let a ring be built over a heap
   buffer as well as a mapping. Miri tests act as the kernel: records that
   wrap, a full ring, an empty one. *Done when* `just miri` covers them, and
   the profiler benchmark shows no change.
@@ -276,3 +276,18 @@ Decisions, measurements, and surprises, newest last.
   new thread. While nothing is seized, attach now lists again until it
   seizes a thread or finds none it has not tried. A controller test
   pins it.
+- 2026-10-13, step 5: `just miri` took 15 s warm because `cargo miri
+  test --lib` runs Miri's driver over the whole crate each time. Its tests
+  now live in `tests/miri.rs`, which reaches the unsafe code through the
+  hidden `uscope::unsafe_parts`, so Miri checks only that file: about
+  1 s, then 1 s more for the concurrent test under 8 seeds. Past about 8
+  seeds the runs stop overlapping (32 took 10 s), so 8 is the default and
+  `miri_seeds` the knob. The allocator tests moved there from step 1.
+- `Ring` keeps its descriptor and a `RingMemory`, which is the kernel's
+  mapping or, for tests, a heap block; `drain` is the memory's. The tests
+  act as the kernel, writing records and publishing the head, with a
+  thread writing as the ring drains. Each of four mutations fails `just
+  miri`: either ordering made relaxed (a data race), the wrap dropped (an
+  access out of bounds), and the size check dropped (a test fails).
+  `just profile-overhead` shows every workload within its noise.
+
