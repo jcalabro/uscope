@@ -17,13 +17,24 @@ use crate::syscalls::{Abi, CaptureState, SyscallId};
 /// process made a call a catchpoint stops, at that end of it, without a
 /// system-call-stop the debugger could report it at.
 pub fn unseen(kernel: &Kernel) -> Result<(), String> {
-    kernel.catching.unseen.first().map_or(Ok(()), |unseen| {
-        Err(format!(
+    let end = |exit| if exit { "exit" } else { "entry" };
+    if let Some(unseen) = kernel.catching.unseen.first() {
+        return Err(format!(
             "thread {} made system call {} with a catchpoint stopping its {}, but no \
              system-call-stop reported it",
             unseen.tid,
             unseen.call,
-            if unseen.exit { "exit" } else { "entry" }
+            end(unseen.exit)
+        ));
+    }
+
+    kernel.catching.skipped.first().map_or(Ok(()), |skipped| {
+        Err(format!(
+            "thread {} stopped at the {} of system call {}, which a catchpoint stops, and \
+             was resumed with no stop reporting it",
+            skipped.tid,
+            end(skipped.exit),
+            skipped.call
         ))
     })
 }

@@ -285,8 +285,18 @@ impl Kernel {
 
                 thread.state = State::Running;
                 thread.report = None;
+                let (registers, group) = (thread.registers, thread.tgid);
+
+                // Resuming a call a catchpoint stops, though no stop
+                // reported it, is the debugger's mistake; killing it is not.
+                if let Some(caught) = self.catching.unreported.remove(&tid)
+                    && signal.is_none()
+                    && self.catching.stops(caught.call, &registers, caught.exit)
+                {
+                    self.catching.skipped.push(caught);
+                }
+
                 if signal.is_some() {
-                    let group = thread.tgid;
                     self.kill_process(group, super::ExitStatus::Signal(libc::SIGKILL, false));
                 }
             }
@@ -362,6 +372,15 @@ impl Kernel {
         let args = if self.sabotage == Some(Sabotage::MisreportCallArguments) {
             let mut args = args;
             args[1] = args[1].wrapping_add(1);
+            args
+        } else {
+            args
+        };
+
+        #[cfg(test)]
+        let args = if self.sabotage == Some(Sabotage::MisreportFirstCallArgument) {
+            let mut args = args;
+            args[0] = args[0].wrapping_add(1);
             args
         } else {
             args

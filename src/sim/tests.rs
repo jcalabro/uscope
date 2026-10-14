@@ -90,6 +90,18 @@ fn a_skipped_temporary_trap_fails_breakpoint_accounting() {
     ));
 }
 
+/// A debugger that misreads a call's first argument resumes calls an
+/// `$arg0` condition stops without reporting them, which catch accounting
+/// catches.
+#[test]
+fn a_misread_first_argument_fails_catch_accounting() {
+    assert!(fails_with(
+        Sabotage::MisreportFirstCallArgument,
+        "catch accounting",
+        "with no stop reporting it"
+    ));
+}
+
 /// A program released from a trap's stop with its SIGTRAP dies of it,
 /// which transparency catches.
 #[test]

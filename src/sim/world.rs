@@ -187,6 +187,10 @@ pub enum Sabotage {
     /// breakpoint's.
     SkipTemporaryTraps,
 
+    /// `PTRACE_GET_SYSCALL_INFO` reports a call's first argument one
+    /// greater, so the debugger misjudges an `$arg0` condition.
+    MisreportFirstCallArgument,
+
     /// `PTRACE_DETACH` from a stop at a trap passes the trap's SIGTRAP on, as
     /// a debugger that detached with the stop's signal would, so the
     /// released program dies of it.
@@ -1493,7 +1497,17 @@ impl<'a> World<'a> {
             self.account_watches(truth)?;
         }
 
+        self.check_sessions(truth)
+    }
+
+    /// The checks of each session's controller against the kernel, the
+    /// first session's with what its client knows too.
+    fn check_sessions(
+        &mut self,
+        truth: Option<crate::backend::sim_edge::Truth>,
+    ) -> Result<(), Failure> {
         let mut first = truth;
+        let mut reported = Vec::new();
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
@@ -1534,11 +1548,22 @@ impl<'a> World<'a> {
                     .map_err(|message| Failure::debugger("catch stops", message))?
                     .into_iter()
                     .for_each(|mark| marks.hit(mark));
+                if truth.public_stop.is_some() {
+                    reported.extend(truth.reasons.iter().filter_map(|(&tid, reason)| {
+                        matches!(reason, crate::StopReason::Syscall(_)).then_some(tid)
+                    }));
+                }
             }
         }
 
         oracles::output_so_far(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
+        drop(kernel);
+        let mut kernel = self.machine.kernel.borrow_mut();
+        for tid in reported {
+            kernel.catching.unreported.remove(&tid);
+        }
+
         Ok(())
     }
 

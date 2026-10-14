@@ -821,6 +821,8 @@ impl Kernel {
             catching: Catching {
                 rules: Vec::new(),
                 unseen: Vec::new(),
+                unreported: BTreeMap::new(),
+                skipped: Vec::new(),
             },
             served: Vec::new(),
             debug_behavior: DebugBehavior::Faithful,
@@ -1354,6 +1356,22 @@ impl Kernel {
         let thread = self.threads.get_mut(&tid).expect("stopping thread exists");
         if !exit {
             thread.registers.general[RAX] = ENOSYS_RESULT;
+        }
+
+        let debugged = thread.traced() && thread.resumed && self.debugged == Some(thread.tgid);
+        if debugged
+            && self
+                .catching
+                .stops(thread.orig_rax, &thread.registers, exit)
+        {
+            self.catching.unreported.insert(
+                tid,
+                UnseenCatch {
+                    tid,
+                    call: thread.orig_rax,
+                    exit,
+                },
+            );
         }
 
         thread.enter_stop(

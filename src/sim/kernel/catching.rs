@@ -1,6 +1,9 @@
 //! What the kernel follows of the client's catchpoints: the system calls
-//! the debugged process makes that a catchpoint must stop, and those it
-//! made without a system-call-stop to report them.
+//! the debugged process makes that a catchpoint must stop, those it made
+//! without a system-call-stop to report them, and those the debugger
+//! resumed from such a stop without reporting it.
+
+use std::collections::BTreeMap;
 
 use super::Tid;
 use crate::sim::cpu::{RAX, RDI, Registers};
@@ -51,6 +54,13 @@ pub struct UnseenCatch {
 pub struct Catching {
     pub rules: Vec<UserCatch>,
     pub unseen: Vec<UnseenCatch>,
+
+    /// Threads in a system-call-stop a catchpoint stops, which no
+    /// published stop has reported yet.
+    pub unreported: BTreeMap<Tid, UnseenCatch>,
+
+    /// Those the debugger resumed while still unreported.
+    pub skipped: Vec<UnseenCatch>,
 }
 
 impl Catching {
