@@ -41,8 +41,10 @@ pub const MAX_UNCOUNTED: u64 = 1 << 24;
 pub enum Var {
     /// A range's position, or an index a client asked for.
     Integer(i128),
+
     /// A linked structure's node: a pointer's address.
     Node(u64),
+
     /// A kernel's item: a word for each variable.
     Words(Box<[u64]>),
 }
@@ -94,11 +96,13 @@ impl Brent {
         if node == self.tortoise {
             return true;
         }
+
         if self.power == self.steps {
             self.tortoise = node;
             self.power = self.power.saturating_mul(2);
             self.steps = 0;
         }
+
         self.steps += 1;
         false
     }
@@ -113,18 +117,22 @@ enum Level {
     },
     List {
         head: u64,
+
         /// The node to generate next; `None` once it is known to end.
         next: Option<u64>,
         brent: Brent,
+
         /// Whether Brent's algorithm found the next node already visited.
         repeats: bool,
     },
     Inorder {
         /// Nodes whose left subtrees have been entered, deepest last.
         stack: Vec<u64>,
+
         /// A subtree still to enter, or 0.
         pending: u64,
     },
+
     /// A kernel's run, which the scanner holds.
     Kernel,
 }
@@ -135,8 +143,10 @@ enum Level {
 pub struct Cursor {
     levels: Vec<Level>,
     variables: Vec<Var>,
+
     /// Elements generated before the cursor.
     position: u64,
+
     /// Whether the generators are exhausted.
     done: bool,
 }
@@ -201,16 +211,21 @@ impl Checkpoints {
 pub struct Scanner<'b, St, P> {
     scan: &'b BoundScan<St>,
     cursor: Cursor,
+
     /// The variables and `let`s of the started clauses, by position.
     values: Vec<Value<P>>,
     visited: Vec<BTreeSet<u64>>,
+
     /// The kernel clauses' runs, by depth.
     runs: Vec<Option<kernel::Run>>,
+
     /// The count the view declares, which the scan never passes.
     declared: Option<u64>,
+
     /// Whether `values` holds the cursor's clauses' values yet; a cursor
     /// resumed from a checkpoint computes them again.
     restored: bool,
+
     /// Whether a clause is a kernel's, so the scan keeps no checkpoints.
     kernels: bool,
     recordings: Option<Recordings>,
@@ -268,6 +283,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 return Ok(false);
             }
         }
+
         Ok(true)
     }
 
@@ -284,6 +300,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         if self.declared == Some(self.cursor.position) {
             return Ok(None);
         }
+
         if !self.generate(machine)? {
             if let Some(declared) = self.declared {
                 return Err(Failure::Problem(ViewProblem::CountMismatch {
@@ -291,8 +308,10 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     generated: self.cursor.position,
                 }));
             }
+
             return Ok(None);
         }
+
         let index = self.cursor.position;
         self.cursor.position += 1;
         if self.declared.is_none() && self.cursor.position > MAX_UNCOUNTED {
@@ -300,9 +319,11 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 limit: MAX_UNCOUNTED,
             }));
         }
+
         if !self.kernels {
             checkpoints.keep(&self.cursor);
         }
+
         Ok(Some(index))
     }
 
@@ -321,6 +342,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 ));
             }
         }
+
         self.restored = true;
         Ok(())
     }
@@ -346,6 +368,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 }
             }
         }
+
         machine.set_variables(&self.values);
         Ok(true)
     }
@@ -359,12 +382,15 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         if self.cursor.done {
             return Ok(false);
         }
+
         if !self.restored {
             self.restore(machine)?;
         }
+
         if self.cursor.levels.is_empty() {
             self.enter(0, machine)?;
         }
+
         loop {
             machine.charge()?;
             let depth = self.cursor.levels.len() - 1;
@@ -379,17 +405,21 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     self.cursor.done = true;
                     return Ok(false);
                 }
+
                 continue;
             };
+
             self.cursor.variables.truncate(depth);
             value.push(&mut self.values);
             self.cursor.variables.push(value);
             if !self.items(depth, machine)? {
                 continue;
             }
+
             if depth + 1 == self.scan.clauses.len() {
                 return Ok(true);
             }
+
             self.enter(depth + 1, machine)?;
         }
     }
@@ -437,6 +467,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 Level::Kernel
             }
         };
+
         self.cursor.levels.push(level);
         self.visited.push(BTreeSet::new());
         self.runs.truncate(depth);
@@ -473,6 +504,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     Ok(None)
                 }
             }
+
             (
                 Level::List {
                     head,
@@ -485,11 +517,13 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 let Some(current) = *next else {
                     return Ok(None);
                 };
+
                 // A node seen before, in this run or, by Brent's algorithm,
                 // in an earlier one, would be shown again.
                 if *repeats || !visited.insert(current) {
                     return Err(Failure::Problem(ViewProblem::Cycle { at: position }));
                 }
+
                 let following = follow(link, outer, current, machine)?;
                 if following == 0 || following == *head {
                     *next = None;
@@ -497,6 +531,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     *repeats = brent.cycles(following);
                     *next = Some(following);
                 }
+
                 Ok(Some(Var::Node(current)))
             }
             (Level::Inorder { stack, pending }, BoundGenerator::Inorder { left, right, .. }) => {
@@ -505,12 +540,15 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     if !visited.insert(*pending) {
                         return Err(Failure::Problem(ViewProblem::Cycle { at: position }));
                     }
+
                     if stack.len() == MAX_DEPTH as usize {
                         return Err(Failure::Problem(ViewProblem::TooDeep { depth: MAX_DEPTH }));
                     }
+
                     stack.push(*pending);
                     *pending = follow(left, outer, *pending, machine)?;
                 }
+
                 let Some(current) = stack.pop() else {
                     return Ok(None);
                 };
@@ -521,6 +559,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 let Some(Some(run)) = self.runs.get_mut(depth) else {
                     return Err(internal("a kernel's clause has no run"));
                 };
+
                 let item = run
                     .next(&mut Program { machine })
                     .map_err(|error| match error {
@@ -561,6 +600,7 @@ impl<M: Machine> kernel::Host for Program<'_, '_, M> {
         for _ in 0..units {
             self.machine.charge()?;
         }
+
         Ok(())
     }
 }

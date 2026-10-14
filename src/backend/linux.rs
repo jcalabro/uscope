@@ -43,6 +43,7 @@ use crate::protocol::{
     ThreadState as ObservableThreadState, WatchAccess, Watchpoint, WatchpointCapabilities,
     WatchpointId,
 };
+
 use crate::{
     CodeInstanceId, Error, ExecutionContext, LoadedModule, ModuleImage, Result, SourceLocation,
     StackFrameId, ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
@@ -140,9 +141,11 @@ pub fn processes_named(name: &str) -> Result<Vec<crate::ProcessId>> {
         else {
             continue;
         };
+
         if pid == own {
             continue;
         }
+
         // A process that ended meanwhile matches nothing.
         let command = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
         let first_argument = std::fs::read(entry.path().join("cmdline"))
@@ -161,6 +164,7 @@ pub fn processes_named(name: &str) -> Result<Vec<crate::ProcessId>> {
             found.push(crate::ProcessId::new(u64::from(pid)));
         }
     }
+
     found.sort_unstable_by_key(|pid| pid.get());
     Ok(found)
 }
@@ -273,6 +277,7 @@ impl Drop for SessionLease {
         if !self.owns_global_lease {
             return;
         }
+
         assert!(
             LINUX_SESSION_ACTIVE.swap(false, Ordering::AcqRel),
             "Linux tracing session lease was active"
@@ -290,13 +295,17 @@ struct BreakpointSite {
 enum BreakpointOwner {
     User(BreakpointId),
     Plan(ExecutionId),
+
     /// The dynamic loader's report of each change to the loaded libraries.
     Loader,
+
     /// A language runtime's report of an exception.
     Runtime,
+
     /// The entry or a return of a language runtime's code that moves a
     /// watched task's stack.
     StackMove,
+
     /// The entry of an indirect function's resolver, or the return of a
     /// call of one, that a breakpoint on the function waits for.
     Resolver,
@@ -314,6 +323,7 @@ enum NativeThreadState {
 #[derive(Debug, Clone)]
 enum ExpectedStop {
     InitialExec,
+
     /// A process launched through its exec, which has not happened yet.
     AdoptedExec,
     InitialAttach,
@@ -333,32 +343,40 @@ struct TraceThread {
     state: NativeThreadState,
     expected: ExpectedStop,
     pending_signal: Option<PendingSignal>,
+
     /// A signal its runtime tolerates arriving late, held while the thread
     /// stepped or ran without its siblings, until it continues with them.
     held_signal: Option<PendingSignal>,
     reason: Option<StopReason>,
     stopped_at_breakpoint: Option<VirtualAddress>,
+
     /// The site whose trap the thread reported, until it steps over the
     /// site or runs on otherwise. It outlives the site's removal, so that a
     /// breakpoint added there before the thread moves is stepped over too.
     trapped_at: Option<VirtualAddress>,
     awaiting_breakpoint: Option<VirtualAddress>,
     debugger_stop_pending: bool,
+
     /// The watch-plan generation programmed into this thread's debug
     /// registers. `None` means the debugger never programmed them.
     armed: Option<u64>,
+
     /// The watchpoints whose hits this thread stops for since its last
     /// public stop, with each hit's number.
     watch_hits: BTreeMap<WatchpointId, u64>,
+
     /// The system call the thread stopped at the entry of, with what was
     /// read there, while its exit stop is still to come.
     syscall: Option<catchpoints::Entered>,
+
     /// Whether the thread's step makes a system call, which stops at its
     /// entry and exit for the catchpoints.
     stepping_call: bool,
+
     /// Whether the thread is at an event stop inside a system call, which
     /// returns when it next runs.
     inside_call: bool,
+
     /// The thread's name as of its start or the last published stop.
     name: Option<Arc<str>>,
 }
@@ -397,8 +415,10 @@ struct WatchState {
 struct WatchRecord {
     watchpoint: Watchpoint,
     frame: Option<FrameScopeEvidence>,
+
     /// The watched bytes when the debugger last observed them.
     observed: Option<Arc<[u8]>>,
+
     /// For a watch on a task's stack, where on the stack it is.
     task: Option<stack_watches::TaskWatch>,
 }
@@ -415,6 +435,7 @@ struct PendingSignal {
 struct SignalMetadata {
     code: i32,
     sender: Option<i32>,
+
     /// The faulting address of a synchronous fault.
     fault_address: Option<u64>,
 }
@@ -470,16 +491,20 @@ enum ClassifiedStop {
         watch: BTreeSet<WatchpointId>,
     },
     DebuggerRequested,
+
     /// The thread executed a trap whose site was removed before its report
     /// was handled; it has been rewound to the restored instruction.
     RemovedTrap,
+
     /// The thread executed a trap carried by code that moved since the
     /// modules were refreshed; it has been rewound to the trap, which the
     /// refresh takes out.
     CarriedTrap,
+
     /// The thread executed a trap instruction of the program's own, at
     /// this address, which no breakpoint of the debugger's owns.
     ProgramTrap(VirtualAddress),
+
     /// SIGKILL took the thread out of the reported stop; its exit follows.
     Superseded,
     Unclassifiable(RawStopRecord),
@@ -491,69 +516,87 @@ struct StepStart {
     code_instance: Option<CodeInstanceId>,
     physical_instance: Option<CodeInstanceId>,
     activation: Option<Activation>,
+
     /// The stack pointer where the step began. Where no activation is
     /// known, a frame below it was entered by a call, and code above it was
     /// returned to.
     stack_pointer: Option<StackPosition>,
+
     /// For a step over or out, the activation its frame returned to, once
     /// the frame it began in returned short of where the step ends, and
     /// the one that returned to in turn. The step then goes on by single
     /// steps and judges frames by this: a later call can make a new
     /// activation at the returned one's CFA.
     returned_to: Option<Activation>,
+
     /// Whether the step returned into code without source and runs on, to
     /// be ended only by a stop the user sees.
     running_on: bool,
     plan_addresses: BTreeSet<VirtualAddress>,
+
     /// For an advance, the addresses that end it when its thread reaches
     /// one. They are plan sites too, but no step logic retires them.
     targets: BTreeSet<VirtualAddress>,
+
     /// The target an advance's thread stood at without having trapped
     /// there. It arrives there first, which the user's breakpoints count
     /// and which does not end the advance.
     standing: Option<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
+
     /// Where a signal handler returns to the instruction it interrupted,
     /// or a call the step passes returns.
     resume_guard: Option<ResumeGuard>,
+
     /// For a step into one call of a line, that call's instruction; the
     /// step runs the line's other calls to their returns.
     into_call: Option<VirtualAddress>,
+
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
     call_return: Option<(VirtualAddress, StackPosition)>,
+
     /// Whether the step may stop in a language runtime's own code: it began
     /// there, or the session's steps enter the runtime.
     enters_runtime: bool,
+
     /// Where a step over or out traps a panic its task begins: the entries
     /// of the runtime's code that starts one.
     panic_guards: BTreeSet<VirtualAddress>,
+
     /// Whether a step over or out follows the runtime's calls into the
     /// program, as a step in does, since its task began a panic or its
     /// frame returned into code that calls deferred functions.
     following: bool,
+
     /// The return address of code the step leaves, where a plan breakpoint
     /// waits while the stepping thread runs freely, until the step's thread
     /// or task reaches one of its plan's breakpoints. Meanwhile the thread
     /// may run anything, such as another of its runtime's tasks.
     escape: Option<VirtualAddress>,
+
     /// The loops whose bodies, functions of their own, a step over or out
     /// treats as its own code.
     loops: Option<loops::StepLoops>,
+
     /// For a step out of a function's own frame, the function, whose
     /// returned values its stop shows.
     returning: Option<returns::Returning>,
+
     /// What that function returned, read the instant its call returned,
     /// which the step's stop shows though the step goes on past code no
     /// line describes.
     returned: Option<returns::Returned>,
+
     /// For a step into a new task, how far it has followed the task's
     /// start.
     new_task: Option<new_task::NewTask>,
+
     /// For a step over or out of an async function's body, the future it
     /// runs for, which the step follows across the polls of its awaits.
     awaiting: Option<awaits::AwaitStep>,
+
     /// The future the step waited for, once it was dropped and the step
     /// went on in the code that dropped it.
     dropped: Option<awaits::RunningFuture>,
@@ -568,6 +611,7 @@ impl StepStart {
             Some(new_task::NewTask::Watching(starters)) => starters.keys().copied().collect(),
             _ => Vec::new(),
         };
+
         self.plan_addresses
             .iter()
             .chain(&self.panic_guards)
@@ -592,6 +636,7 @@ const fn steps_instructions(kind: StepKind) -> bool {
 struct ResumeGuard {
     address: VirtualAddress,
     stack: StackPosition,
+
     /// Whether a call returns there, so the step may end where it does.
     call: bool,
 }
@@ -601,6 +646,7 @@ struct ReturnTraversal {
     /// A frame's return address, proven by agreeing CFI and ABI stack-slot
     /// sources.
     return_address: VirtualAddress,
+
     /// The activation whose return reaches `return_address`. For a tail call
     /// this is the step's starting activation; for a regular call it is the
     /// nested callee activation.
@@ -630,6 +676,7 @@ struct StepOwner {
     /// The thread the step runs on: the one it began on, until its task
     /// runs on another.
     thread: Pid,
+
     /// The task the step began in, which it follows from thread to thread.
     task: Option<crate::TaskId>,
 }
@@ -641,10 +688,12 @@ enum ActiveKind {
     Step {
         owner: StepOwner,
         kind: StepKind,
+
         /// The kind the client asked for, which the step's stop reports:
         /// a step into a new task runs as a step over until a task starts.
         requested: StepKind,
         start: Box<StepStart>,
+
         /// The stepping thread executed an instruction whose effect on the
         /// step has not been evaluated yet, because a breakpoint repair or
         /// an internal stop intervened.
@@ -671,15 +720,19 @@ struct RepairGroup {
 /// the active execution as if nothing happened.
 struct StopBarrier {
     triggering_thread: Pid,
+
     /// The stop to publish, or `None` while the stop is internal.
     reason: Option<StopReason>,
+
     /// Whether a client paused, so the stop is published as a pause when
     /// every reason it would have published is dropped.
     paused: bool,
+
     /// Why the active execution ended during the stop, such as its
     /// stepping thread exiting. The execution cannot resume, so the stop
     /// publishes this when every other reason is dropped.
     ended: Option<StopReason>,
+
     /// Client edits applied once every thread is stopped.
     edits: Vec<Edit>,
 }
@@ -748,9 +801,11 @@ enum Edit {
         id: crate::CatchpointId,
         reply: Reply<crate::Catchpoint>,
     },
+
     /// Bring modules and breakpoints up to date after the loader changed
     /// the loaded libraries.
     RefreshModules,
+
     /// Set aside the watches of tasks whose stacks a runtime is moving, and
     /// place those whose moves finished on their new stacks.
     FollowStacks,
@@ -761,24 +816,31 @@ struct PublicStop {
     triggering_thread: Pid,
     reason: StopReason,
     presentations: BTreeMap<Pid, FramePresentation>,
+
     /// The thread or task that implicit inspection follows: the triggering
     /// thread until a client selects another.
     selected: ExecutionContext,
+
     /// The thread the selected context runs on: none for a parked task, or
     /// once the thread exits.
     selected_thread: Option<Pid>,
+
     /// Frames selected by clients; an absent context has its innermost
     /// frame selected.
     selected_frames: BTreeMap<ExecutionContext, StackFrameId>,
+
     /// What each thread runs for a language runtime, read once asked for.
     activities: RefCell<BTreeMap<Pid, Option<crate::ThreadActivity>>>,
+
     /// Where each runtime said it keeps the tasks it listed at this stop,
     /// forgotten once the debugger writes memory.
     task_locators: RefCell<BTreeMap<crate::TaskId, u64>>,
+
     /// The sets of tasks the futures threads drive run, found once asked
     /// for, and why some may be missing; forgotten once the debugger
     /// writes memory.
     task_sets: RefCell<Option<runtimes::TaskSets>>,
+
     /// What the function a step out finished returned.
     returned: Option<returns::Returned>,
 }
@@ -810,6 +872,7 @@ fn allocate_stop_id() -> Result<StopId> {
 struct VforkWindow {
     /// The child that shares the memory until it execs or exits.
     child: Pid,
+
     /// Whether the vforking thread has been resumed to let the child run.
     resumed: bool,
 }
@@ -819,33 +882,43 @@ struct Inferior {
     tgid: Pid,
     loaded_module: LoadedModule,
     breakpoints: BTreeMap<VirtualAddress, BreakpointSite>,
+
     /// Every site each execution's plan installed, so that ending the plan
     /// visits only those. A site the plan already released may remain.
     plan_sites: BTreeMap<ExecutionId, BTreeSet<VirtualAddress>>,
     threads: BTreeMap<Pid, TraceThread>,
+
     /// Threads that left the inferior and whose exit status is still due.
     retired_threads: BTreeSet<Pid>,
+
     /// Initial stops of new threads or fork children that arrived before
     /// the event that announces them.
     unowned_stops: BTreeMap<Pid, WaitEvent>,
+
     /// Threads that began exiting before the event that announces them.
     vanished_threads: BTreeSet<Pid>,
+
     /// Sites removed since the address space began, with their original
     /// bytes: a process forked before their removal still holds their traps.
     former_sites: BTreeMap<VirtualAddress, u8>,
+
     /// Listed threads that exited before an attach could seize them, such
     /// as a leader that exited before the rest of its process. No status
     /// of theirs is due.
     unseized_threads: BTreeSet<Pid>,
+
     /// Fork children announced before their initial stop arrived, with the
     /// breakpoint sites each inherited.
     fork_children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
+
     /// Fork children killed, or found dying, as they were released, whose
     /// exits are still due: another process's exit may follow the leader's.
     killed_children: BTreeSet<Pid>,
+
     /// Threads in a vfork that shares this memory, by the thread that
     /// vforked. The traps are lifted while any window is open.
     vfork_windows: BTreeMap<Pid, VforkWindow>,
+
     /// Whether the traps are lifted from the memory every open vfork window
     /// shares, and so must be reinstalled when the last window closes.
     traps_lifted: bool,
@@ -856,16 +929,20 @@ struct Inferior {
     public_stop: Option<PublicStop>,
     next_execution: u64,
     exec_unsupported: bool,
+
     /// The loader's breakpoint, once the loader is known.
     loader_site: Option<VirtualAddress>,
+
     /// The runtime functions whose entry stops for an exception.
     runtime_hooks: BTreeMap<VirtualAddress, language_exceptions::HookSite>,
     stack_moves: stack_watches::StackMoves,
     indirect: indirect::IndirectFunctions,
     watch: WatchState,
+
     /// The signal the debugger sent to end the inferior, which never stops
     /// it whatever its policy.
     terminating: Option<Terminating>,
+
     /// How far an attach to a process another session held has ended the
     /// job-control stop it was held in.
     held: Option<HeldStop>,
@@ -878,8 +955,10 @@ struct Inferior {
 enum HeldStop {
     /// Still stopped, until the attach completes.
     Stopped,
+
     /// `SIGCONT` sent, its delivery not yet seen.
     Continued,
+
     /// Detaching, with `SIGCONT` unblocked in `thread`, which blocked it
     /// with `mask`, so that the thread takes it first. A fork child stops
     /// first inside `fork`, which blocks nearly every signal.
@@ -978,6 +1057,7 @@ impl Inferior {
         if self.threads.get(&self.tgid).is_some_and(stopped) {
             return self.tgid;
         }
+
         self.threads
             .iter()
             .find_map(|(&pid, thread)| stopped(thread).then_some(pid))
@@ -1003,6 +1083,7 @@ impl Inferior {
         if let Some(active) = self.active.as_mut() {
             active.resume_threads.remove(&pid);
         }
+
         let mut interrupted = false;
         for group in &mut self.repairs {
             group.remaining.retain(|&waiting| waiting != pid);
@@ -1011,12 +1092,14 @@ impl Inferior {
                 interrupted = true;
             }
         }
+
         if let Some(stop) = self.public_stop.as_mut() {
             stop.presentations.remove(&pid);
             if stop.selected_thread == Some(pid) {
                 stop.selected_thread = None;
             }
         }
+
         // A barrier is presented from its triggering thread, which must live.
         // An internal stop still has nothing to present. A leader that
         // exited alone stays listed until its process ends.
@@ -1032,6 +1115,7 @@ impl Inferior {
             && let Some(replacement) = replacement
         {
             barrier.triggering_thread = replacement;
+
             // An internal stop stays internal.
             if barrier.reason.is_some() {
                 barrier.reason = Some(StopReason::ThreadExited {
@@ -1040,6 +1124,7 @@ impl Inferior {
                 });
             }
         }
+
         interrupted
     }
 
@@ -1115,12 +1200,14 @@ impl Waiter {
         let Some(thread) = self.thread else {
             return Ok(());
         };
+
         thread.stop.store(true, Ordering::Release);
         thread.handle.thread().unpark();
         while !thread.handle.is_finished() {
             serve();
             thread::sleep(std::time::Duration::from_millis(1));
         }
+
         thread
             .handle
             .join()
@@ -1132,6 +1219,7 @@ impl Waiter {
 enum InferiorOrigin {
     Launched,
     Attached,
+
     /// Seized while waiting to exec the executable, and owned as a launch.
     LaunchedByExec,
     PostMortem,
@@ -1155,6 +1243,7 @@ struct RuntimeModule {
     image: Arc<ModuleImage>,
     unwind: Arc<dyn UnwindInfo>,
     variables: Arc<dyn VariableInfo>,
+
     /// How the C library identifies the module's TLS block, once known.
     tls: Option<TlsModule>,
 }
@@ -1163,62 +1252,91 @@ struct RuntimeModule {
 enum LinuxError {
     #[error("system tracing operation failed: {0}")]
     System(#[from] nix::Error),
+
     #[error("failed to parse executable object: {0}")]
     Object(#[from] object::Error),
+
     #[error("unexpected wait status: {0}")]
     UnexpectedWait(String),
+
     #[error("could not determine load bias for {0}")]
     LoadBias(PathBuf),
+
     #[error("invalid process mapping: {0}")]
     InvalidMapping(String),
+
     #[error("{0} is malformed")]
     ProcFile(String),
+
     #[error("dynamic-loader rendezvous is malformed: {0}")]
     LoaderRendezvous(String),
+
     #[error("another Linux tracing session is already active in this process")]
     SessionActive,
+
     #[error("the target's thread list did not stabilize while attaching")]
     AttachThreadsUnstable,
+
     #[error("unsupported clone created a different thread group {0}")]
     UnsupportedClone(i32),
+
     #[error("floating-point register reads are unsupported by this tracing effect")]
     UnsupportedFloatingRegisters,
+
     #[error("only general registers can be changed")]
     UnsupportedRegisterWrite,
+
     #[error("the inferior replaced its executable image; loading the new image is not supported")]
     UnsupportedExec,
+
     #[error("could not determine the caller frame: {0}")]
     CallerUnavailable(UnwindTermination),
+
     #[error("breakpoint site {0} was not found")]
     BreakpointSiteMissing(VirtualAddress),
+
     #[error("breakpoint site {0} did not have the expected owner")]
     BreakpointOwnerMissing(VirtualAddress),
+
     #[error("logical breakpoint identifiers were exhausted")]
     BreakpointIdExhausted,
+
     #[error("watchpoint identifiers were exhausted")]
     WatchpointIdExhausted,
+
     #[error("watchpoint arming failed ({cause}) and rollback also failed ({recovery})")]
     WatchpointArmRecovery { cause: String, recovery: String },
+
     #[error("loaded module identifiers were exhausted")]
     ModuleIdExhausted,
+
     #[error("module image identifiers were exhausted")]
     ModuleImageIdExhausted,
+
     #[error("breakpoint installation failed ({cause}) and rollback also failed ({recovery})")]
     BreakpointInstallRecovery { cause: String, recovery: String },
+
     #[error("breakpoint removal failed ({cause}) and rollback also failed ({recovery})")]
     BreakpointRemoveRecovery { cause: String, recovery: String },
+
     #[error("resume failed ({cause}) and recovery also failed ({recovery})")]
     ResumeRecovery { cause: String, recovery: String },
+
     #[error("logical memory read of {size} bytes exceeds the {maximum}-byte limit")]
     MemoryReadTooLarge { size: usize, maximum: usize },
+
     #[error("target memory is inaccessible at {address}")]
     MemoryInaccessible { address: VirtualAddress },
+
     #[error("the core dump does not describe thread {0}")]
     UnknownCoreThread(i32),
+
     #[error("the core dump saved no floating-point registers for thread {0}")]
     CoreFloatingRegistersUnsaved(i32),
+
     #[error("the process exited before its first stop: {0:?}")]
     ExitedBeforeStop(ExitStatus),
+
     #[error("the process executed a program other than {}", .0.display())]
     ExecutedAnotherProgram(PathBuf),
 }
@@ -1227,22 +1345,27 @@ struct Controller<P: InspectionOps> {
     _lease: SessionLease,
     executable: Arc<PathBuf>,
     executable_identity: FileIdentity,
+
     /// The C library the executable runs on, whose structures locate TLS.
     c_library: CLibrary,
     expected_process_start_time: Option<u64>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
     modules: BTreeMap<crate::ModuleId, RuntimeModule>,
+
     /// Where loaded modules' separate debug files are found.
     debug_files: crate::debug_info::DebugFileSearch,
+
     /// The canonical path and load bias computed for each mapping, so known
     /// modules are not re-read from disk at every stop.
     mapped_modules: BTreeMap<ModuleMapping, (PathBuf, crate::LoadBias)>,
     next_module_id: u32,
     next_image_id: u32,
     messages: RefCell<mpsc::Receiver<ControllerMessage>>,
+
     /// Messages taken from the queue and not yet served, in arrival order.
     pending: RefCell<VecDeque<ControllerMessage>>,
+
     /// The views values are presented with.
     views: presentation::Views,
     message_sender: mpsc::Sender<ControllerMessage>,
@@ -1252,38 +1375,50 @@ struct Controller<P: InspectionOps> {
     breakpoints: breakpoints::UserBreakpoints,
     next_breakpoint_id: u64,
     next_watchpoint_id: u64,
+
     /// The system-call catchpoints, which outlive any process.
     catchpoints: BTreeMap<crate::CatchpointId, crate::Catchpoint>,
     next_catchpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
     attach_reply: Option<Reply<StopId>>,
+
     /// How many times the attach in progress found threads it had not
     /// traced.
     attach_rescans: u32,
+
     /// Whether the session is ending: wait events then only advance the kill
     /// or detach, and the controller exits once the inferior is gone.
     shutting_down: bool,
     shutdown_reply: Option<Reply<()>>,
+
     /// The client waiting for a killed inferior to be gone.
     kill_reply: Option<Reply<()>>,
+
     /// Fork children still traced after the inferior ended.
     orphans: Option<Orphans>,
+
     /// Where the processes the inferior forks are held, while a receiver
     /// takes them; otherwise they are released.
     held_children: Option<tokio::sync::mpsc::UnboundedSender<crate::HeldChild>>,
+
     /// A launch or attach waiting for those children to be released.
     deferred_start: Option<Start>,
     signals: SignalPolicies,
+
     /// Which exceptions that runtimes report stop the program.
     exception_stops: crate::ExceptionStops,
+
     /// Whether steps stop in a language runtime's own code.
     step_into_runtime: bool,
+
     /// The language runtime each image carries, bound on first need.
     runtime_models: runtimes::RuntimeCache,
     revision: u64,
+
     /// How many messages the controller served, which paces the invariant
     /// checks of a large state.
     messages_served: u64,
+
     /// The description a served request begins with that makes the
     /// controller panic, from [`PANIC_AFTER`], to test what a panic leaves.
     #[cfg(debug_assertions)]
@@ -1297,8 +1432,10 @@ struct Controller<P: InspectionOps> {
 struct Orphans {
     /// The process that forked them.
     parent: Pid,
+
     /// Each child with the traps it may hold.
     children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
+
     /// Children that could not be scrubbed, killed and awaiting their exit.
     killed: BTreeSet<Pid>,
     waiter: Option<Waiter>,
@@ -1309,6 +1446,7 @@ enum Start {
     Launch(crate::LaunchOptions, Reply<ExecutionId>),
     Attach {
         requested: ProcessId,
+
         /// Whether the process is one a session held.
         held: bool,
         reply: Reply<StopId>,
@@ -1366,6 +1504,7 @@ impl<P: InspectionOps> Controller<P> {
             variables: variable_info,
             tls: None,
         };
+
         Self {
             _lease: lease,
             executable: executable.display_path,
@@ -1406,6 +1545,7 @@ impl<P: InspectionOps> Controller<P> {
             runtime_models: RefCell::default(),
             revision: 0,
             messages_served: 0,
+
             #[cfg(debug_assertions)]
             panic_after: std::env::var(PANIC_AFTER).ok(),
         }
@@ -1440,9 +1580,11 @@ impl<P: InspectionOps> Controller<P> {
                 .unwrap_or(preempting);
             return pending.remove(index);
         }
+
         if let Some(message) = pending.pop_front() {
             return Some(message);
         }
+
         drop(pending);
         if block {
             self.messages.borrow_mut().blocking_recv()
@@ -1485,6 +1627,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     return;
                 }
             }
+
             // The controller holds a request sender for its waiter, so the
             // queue never closes; dropping the `Debugger` sends a shutdown
             // request.
@@ -1518,6 +1661,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_wait(status)
             }
         };
+
         if cfg!(debug_assertions) {
             self.messages_served += 1;
             if self
@@ -1527,6 +1671,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.check_invariants();
             }
         }
+
         // A shutdown, whether requested or begun when an attached process
         // failed, ends the controller once nothing is left to release.
         keeps_running && !(self.shutting_down && self.inferior.is_none() && self.orphans.is_none())
@@ -1549,6 +1694,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     reply,
                 });
             }
+
             Request::SetBreakpointCondition {
                 id,
                 condition,
@@ -1556,6 +1702,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_breakpoint_condition(id, condition));
             }
+
             Request::SetBreakpointHitCondition {
                 id,
                 hit_condition,
@@ -1563,6 +1710,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_breakpoint_hit_condition(id, hit_condition));
             }
+
             Request::SetBreakpointLogMessage {
                 id,
                 log_message,
@@ -1579,6 +1727,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::RemoveAllBreakpoints { reply } => {
                 self.edit(Edit::RemoveAllBreakpoints { reply });
             }
+
             Request::AddWatchpoint {
                 spec,
                 access,
@@ -1592,6 +1741,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     reply,
                 });
             }
+
             Request::SetWatchpointCondition {
                 id,
                 condition,
@@ -1599,6 +1749,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.set_watchpoint_condition(id, condition));
             }
+
             Request::SetWatchpointHitCondition {
                 id,
                 hit_condition,
@@ -1618,6 +1769,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::SetExceptionStops { stops, reply } => {
                 self.edit(Edit::SetExceptionStops { stops, reply });
             }
+
             Request::AddCatchpoint {
                 calls,
                 phase,
@@ -1728,6 +1880,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::Pause { process_id, reply } => {
                 let _ = reply.send(self.begin_pause(process_id));
             }
+
             Request::WriteMemory {
                 process_id,
                 stop_id,
@@ -1737,6 +1890,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.write_memory(process_id, stop_id, address, &bytes));
             }
+
             Request::Evaluate {
                 expression,
                 mode: crate::EvaluationMode::Assign,
@@ -1774,6 +1928,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 } else {
                     let _ = reply.send(Err(Error::RequestCancelled));
                 }
+
                 return self.inferior.is_some() || self.orphans.is_some();
             }
             Request::Kill { reply } => self.kill(reply),
@@ -1809,6 +1964,7 @@ impl<P: InspectionOps> Controller<P> {
             } => {
                 let _ = reply.send(self.read_memory(process_id, stop_id, address, byte_count));
             }
+
             Request::Tasks {
                 stop_id,
                 from,
@@ -1832,6 +1988,7 @@ impl<P: InspectionOps> Controller<P> {
                         .ok_or(Error::ModuleNotLoaded(module)),
                 );
             }
+
             Request::Disassemble {
                 query,
                 stop_id,
@@ -1843,6 +2000,7 @@ impl<P: InspectionOps> Controller<P> {
                         .and_then(|pid| self.disassemble(stop_id, pid, query)),
                 );
             }
+
             Request::DescribeAddress {
                 stop_id,
                 address,
@@ -1850,6 +2008,7 @@ impl<P: InspectionOps> Controller<P> {
             } => {
                 let _ = reply.send(self.describe_address(stop_id, address));
             }
+
             Request::StoppedLocation {
                 stop_id,
                 context,
@@ -1867,6 +2026,7 @@ impl<P: InspectionOps> Controller<P> {
             Request::StoppedSelection { reply } => {
                 let _ = reply.send(self.stopped_selection());
             }
+
             Request::Backtrace {
                 stop_id,
                 context,
@@ -1877,6 +2037,7 @@ impl<P: InspectionOps> Controller<P> {
                         .and_then(|root| self.backtrace(stop_id, &root)),
                 );
             }
+
             Request::StepTargets {
                 stop_id,
                 context,
@@ -1887,6 +2048,7 @@ impl<P: InspectionOps> Controller<P> {
                         .and_then(|pid| self.step_targets(stop_id, pid)),
                 );
             }
+
             Request::Registers {
                 stop_id,
                 context,
@@ -1898,6 +2060,7 @@ impl<P: InspectionOps> Controller<P> {
                         .and_then(|root| self.registers(stop_id, &root, frame)),
                 );
             }
+
             Request::Variables {
                 query,
                 limits,
@@ -1922,6 +2085,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::Evaluate {
                 expression,
                 mode,
@@ -1948,6 +2112,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::ExpressionType {
                 expression,
                 stop_id,
@@ -1960,6 +2125,7 @@ impl<P: InspectionOps> Controller<P> {
                         .and_then(|root| self.expression_type(stop_id, &root, frame, &expression)),
                 );
             }
+
             Request::Dereference {
                 reference,
                 limits,
@@ -1976,6 +2142,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::ValueChildren {
                 reference,
                 query,
@@ -1994,6 +2161,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::VisualizerInputs {
                 reference,
                 limits,
@@ -2010,6 +2178,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::Numbers {
                 reference,
                 most_bytes,
@@ -2040,6 +2209,7 @@ impl<P: InspectionOps> Controller<P> {
             Request::CheckViews { reply } => {
                 let _ = reply.send(Ok(self.check_views()));
             }
+
             Request::ExplainView {
                 expression,
                 stop_id,
@@ -2062,6 +2232,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::RecordKernels {
                 expression,
                 stop_id,
@@ -2084,6 +2255,7 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+
             Request::SelectContext {
                 stop_id,
                 context,
@@ -2092,6 +2264,7 @@ impl<P: InspectionOps> Controller<P> {
                 let result = self.select_context(stop_id, context);
                 let _ = reply.send(result);
             }
+
             Request::SelectFrame {
                 stop_id,
                 context,
@@ -2101,6 +2274,7 @@ impl<P: InspectionOps> Controller<P> {
                 let result = self.select_frame(stop_id, context, frame);
                 let _ = reply.send(result);
             }
+
             Request::ResolveWatchTarget {
                 expression,
                 stop_id,
@@ -2120,6 +2294,7 @@ impl<P: InspectionOps> Controller<P> {
                         .ok_or(Error::UnknownSignal(signal)),
                 );
             }
+
             Request::SetSignalPolicy {
                 signal,
                 policy,
@@ -2131,6 +2306,7 @@ impl<P: InspectionOps> Controller<P> {
                         .ok_or(Error::UnknownSignal(signal)),
                 );
             }
+
             Request::AddBreakpoint { .. }
             | Request::SetBreakpointHitCondition { .. }
             | Request::SetBreakpointCondition { .. }
@@ -2176,6 +2352,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.inferior.is_none() && self.orphans.is_some() {
             return self.handle_orphan_wait(status);
         }
+
         if self.shutting_down {
             return self.handle_shutdown_wait(status);
         }
@@ -2186,6 +2363,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) | WaitEvent::Continued(_)
         ))
         .then(|| status.pid());
+
         // A ptrace request failing because SIGKILL took its thread out of a
         // stop is explained by threads that left their stop, by every
         // thread having reached its exit, or by the debugger's own kill.
@@ -2234,6 +2412,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return false;
         };
+
         let mut found = false;
         for (&pid, thread) in &mut inferior.threads {
             if (matches!(thread.state, NativeThreadState::Stopped) || handled == Some(pid))
@@ -2244,6 +2423,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 found = true;
             }
         }
+
         found
     }
 
@@ -2274,10 +2454,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             if expected && self.absorb_untracked_wait(&status) {
                 return Ok(());
             }
+
             return Err(backend_error(LinuxError::UnexpectedWait(format!(
                 "unowned {status:?}"
             ))));
         }
+
         if matches!(inferior.thread(pid)?.expected, ExpectedStop::AdoptedExec) {
             // Until its exec, a process launched through it runs as it
             // would untraced: signals are delivered and job control is
@@ -2332,6 +2514,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if is_superseded(&self.ptrace.signal_metadata(pid)) {
             return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
         }
+
         let thread = self
             .inferior
             .as_ref()
@@ -2340,6 +2523,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if matches!(thread.expected, ExpectedStop::InitialAttach) {
             return self.handle_initial_attach_stop(pid);
         }
+
         let stop = if matches!(thread.state, NativeThreadState::Starting)
             && matches!(thread.expected, ExpectedStop::None)
         {
@@ -2360,6 +2544,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             return self.handle_ptrace_event(pid, libc::PTRACE_EVENT_STOP);
         };
+
         self.handle_classified_stop(pid, stop)
     }
 }
@@ -2380,6 +2565,7 @@ impl<P: InspectionOps> Controller<P> {
                 catchpoints: self.catchpoints.values().cloned().collect(),
             };
         };
+
         let process_id = process_id(inferior.tgid);
         let state = inferior.public_stop.as_ref().map_or_else(
             || InferiorState::Running {
@@ -2525,6 +2711,7 @@ fn validate_resumable(inferior: &Inferior) -> Result<()> {
     {
         return Err(Error::UnclassifiableStop);
     }
+
     validate_image_current(inferior)
 }
 
@@ -2534,6 +2721,7 @@ fn validate_image_current(inferior: &Inferior) -> Result<()> {
     if inferior.exec_unsupported {
         return Err(backend_error(LinuxError::UnsupportedExec));
     }
+
     Ok(())
 }
 

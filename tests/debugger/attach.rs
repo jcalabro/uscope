@@ -27,6 +27,7 @@ async fn attach_discovers_the_executable_and_detaches_without_harming_the_proces
             ..
         } if process_id == process
     ));
+
     // The vDSO, which no file backs, is found where the kernel mapped it.
     let modules = handle.loaded_modules().await.expect("attached modules");
     assert_eq!(
@@ -150,6 +151,7 @@ async fn attach_stops_and_detaches_every_existing_native_thread() {
 #[tokio::test]
 async fn attach_traces_a_process_whose_main_thread_exited() {
     let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach-exited-leader"));
+
     // The zombie leader stays listed but can never be seized.
     wait_for_zombie(child.process_id());
     let mut scenario = Scenario::attached("attach without a leader", child.attach().await);
@@ -162,6 +164,7 @@ async fn attach_traces_a_process_whose_main_thread_exited() {
         }
     ));
     assert_eq!(snapshot.threads.len(), 1, "{:?}", snapshot.threads);
+
     // The TLS lookup reads the address space through the worker.
     let (_, value) = super::globals::tls_location_by_name(&scenario, "worker_value").await;
     assert_eq!(value, 31);
@@ -178,6 +181,7 @@ async fn detaching_waits_for_no_main_thread_that_exited_after_attaching() {
     let _resumed = scenario.start_resuming().await;
     child.release();
     wait_for_zombie(child.process_id());
+
     // Linux reports the main thread's exit only after the worker's, so
     // detaching cannot wait for it.
     scenario.shutdown().await;
@@ -197,6 +201,7 @@ async fn attaching_while_threads_are_created_traces_every_thread() {
     });
     for _ in 0..20 {
         let scenario = Scenario::attached("attach while cloning", child.attach().await);
+
         // With every thread stopped none is inside clone, so the list is
         // complete. An untraced thread would run through breakpoints and
         // die of their traps.
@@ -204,9 +209,11 @@ async fn attaching_while_threads_are_created_traces_every_thread() {
             .expect("list threads")
             .filter_map(|entry| {
                 let path = entry.expect("thread entry").path();
+
                 // A thread may exit while the list is read.
                 let stat = fs::read_to_string(path.join("stat")).ok()?;
                 let status = fs::read_to_string(path.join("status")).ok()?;
+
                 // An exiting thread runs no more of the program, and one that
                 // has exited cannot be seized.
                 let fields = stat
@@ -218,6 +225,7 @@ async fn attaching_while_threads_are_created_traces_every_thread() {
                 if matches!(fields[0], "Z" | "X") || flags & PF_EXITING != 0 {
                     return None;
                 }
+
                 // The tracer is the debugger's controller thread.
                 let tracer = status
                     .lines()
@@ -264,6 +272,7 @@ async fn shutdown_detaches_a_running_attached_process_and_cancels_waiters() {
 
     let status = fs::read_to_string(format!("/proc/{pid}/status")).expect("read target status");
     assert!(status.contains("\nTracerPid:\t0\n"), "{status}");
+
     // A stop left behind by the detach would keep it from finishing.
     child.release();
     assert_eq!(exit_code(child), Some(23));

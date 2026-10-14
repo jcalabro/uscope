@@ -17,6 +17,7 @@ use crate::FloatValue;
 
 /// The widest integer type the language names.
 pub const MAX_WIDTH: u8 = 128;
+
 // A mask shifts a `u128` by its bits less the width.
 const _: () = assert!(MAX_WIDTH as u32 <= u128::BITS);
 
@@ -25,13 +26,17 @@ const _: () = assert!(MAX_WIDTH as u32 <= u128::BITS);
 pub enum NumberError {
     /// The exact result lies outside [−2^127, 2^128 − 1].
     OutOfRange,
+
     /// The divisor of `/` or `%` is zero.
     DivisionByZero,
+
     /// A shift amount is negative, or at least the shifted type's width.
     ShiftAmount,
+
     /// An exact operand of a bit operation does not fit the typed operand's
     /// width as either a signed or an unsigned value.
     DoesNotFit(IntType),
+
     /// A NaN has no integer value.
     NotANumber,
 }
@@ -76,6 +81,7 @@ impl Exact {
         if negative && magnitude > MOST_NEGATIVE {
             return Err(NumberError::OutOfRange);
         }
+
         Ok(Self {
             negative: negative && magnitude != 0,
             magnitude,
@@ -113,6 +119,7 @@ impl Exact {
                 .ok_or(NumberError::OutOfRange)?;
             return Self::new(self.negative, magnitude);
         }
+
         match self.magnitude.cmp(&rhs.magnitude) {
             Ordering::Less => Self::new(rhs.negative, rhs.magnitude - self.magnitude),
             Ordering::Equal => Ok(Self::ZERO),
@@ -127,6 +134,7 @@ impl Exact {
             negative: !rhs.negative && rhs.magnitude != 0,
             magnitude: rhs.magnitude,
         };
+
         negated.add(self)
     }
 
@@ -143,6 +151,7 @@ impl Exact {
         if rhs.is_zero() {
             return Err(NumberError::DivisionByZero);
         }
+
         Self::new(
             self.negative != rhs.negative,
             self.magnitude / rhs.magnitude,
@@ -154,6 +163,7 @@ impl Exact {
         if rhs.is_zero() {
             return Err(NumberError::DivisionByZero);
         }
+
         Self::new(self.negative, self.magnitude % rhs.magnitude)
     }
 
@@ -178,6 +188,7 @@ impl Exact {
             if low == 0 {
                 return Err(NumberError::OutOfRange);
             }
+
             Self::new(true, low.wrapping_neg())
         } else {
             Self::new(false, low)
@@ -197,6 +208,7 @@ impl Exact {
             BitOperator::Or => (left_sign | right_sign, left | right),
             BitOperator::Xor => (left_sign ^ right_sign, left ^ right),
         };
+
         Self::from_twos_complement(sign, low)
     }
 
@@ -206,9 +218,11 @@ impl Exact {
         if self.is_zero() {
             return Ok(self);
         }
+
         if amount >= 128 || self.magnitude.leading_zeros() < amount {
             return Err(NumberError::OutOfRange);
         }
+
         Self::new(self.negative, self.magnitude << amount)
     }
 
@@ -218,9 +232,11 @@ impl Exact {
         if !self.negative {
             return Self::new(false, self.magnitude.checked_shr(amount).unwrap_or(0));
         }
+
         if amount >= 128 {
             return Self::new(true, 1);
         }
+
         // Rounding the magnitude up rounds the value down. The magnitude is
         // at most 2^127, so adding at most 2^127 − 1 cannot overflow.
         let rounded = self.magnitude + ((1 << amount) - 1);
@@ -234,6 +250,7 @@ fn shift_amount(amount: Exact) -> Result<u32, NumberError> {
     if amount.negative {
         return Err(NumberError::ShiftAmount);
     }
+
     Ok(u32::try_from(amount.magnitude).unwrap_or(u32::MAX))
 }
 
@@ -292,6 +309,7 @@ impl fmt::Display for Exact {
         if self.negative {
             formatter.write_str("-")?;
         }
+
         write!(formatter, "{}", self.magnitude)
     }
 }
@@ -323,6 +341,7 @@ impl IntType {
         if width == 0 || width > MAX_WIDTH {
             return None;
         }
+
         Some(Self { width, signed })
     }
 
@@ -356,6 +375,7 @@ impl IntType {
         } else {
             self.width
         };
+
         Exact::from(u128::MAX.checked_shr(128 - u32::from(bits)).unwrap_or(0))
     }
 
@@ -382,6 +402,7 @@ impl IntType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bits {
     ty: IntType,
+
     /// The pattern, with every bit above the width clear.
     raw: u128,
 }
@@ -412,10 +433,12 @@ impl Bits {
             width: ty.width,
             signed: true,
         };
+
         let unsigned = IntType {
             width: ty.width,
             signed: false,
         };
+
         if signed.contains(value) || unsigned.contains(value) {
             Ok(Self::truncate(ty, value))
         } else {
@@ -470,6 +493,7 @@ impl Bits {
             BitOperator::Or => self.raw | rhs.raw,
             BitOperator::Xor => self.raw ^ rhs.raw,
         };
+
         Self::from_raw(self.ty, raw)
     }
 
@@ -478,6 +502,7 @@ impl Bits {
         if amount >= u32::from(self.ty.width) {
             return Err(NumberError::ShiftAmount);
         }
+
         Ok(amount)
     }
 
@@ -494,6 +519,7 @@ impl Bits {
             let shifted = self.value().shr(Exact::from(u128::from(amount)))?;
             return Ok(Self::truncate(self.ty, shifted));
         }
+
         Ok(Self::from_raw(self.ty, self.raw >> amount))
     }
 }
@@ -534,6 +560,7 @@ impl Integer {
             (Self::Typed(left), Self::Exact(right)) => (left, Bits::fitting(left.ty, right)?),
             (Self::Exact(left), Self::Typed(right)) => (Bits::fitting(right.ty, left)?, right),
         };
+
         Ok(Self::Typed(left.bitwise(operator, right)))
     }
 
@@ -630,6 +657,7 @@ pub enum FloatOperator {
     Sub,
     Mul,
     Div,
+
     /// The remainder of truncating division, with the dividend's sign.
     Rem,
 }
@@ -671,13 +699,17 @@ impl Float {
             // The bit patterns are exactly as wide as the narrowing casts.
             #[allow(clippy::cast_possible_truncation, reason = "binary16 has 16 bits")]
             Self::Binary16(value) => FloatValue::Binary16(value.to_bits() as u16),
+
             #[allow(clippy::cast_possible_truncation, reason = "bfloat16 has 16 bits")]
             Self::BFloat16(value) => FloatValue::BFloat16(value.to_bits() as u16),
             Self::Binary128(value) => FloatValue::Binary128(value.to_bits()),
+
             #[allow(clippy::cast_possible_truncation, reason = "binary32 has 32 bits")]
             Self::Binary32(value) => FloatValue::Binary32(value.to_bits() as u32),
+
             #[allow(clippy::cast_possible_truncation, reason = "binary64 has 64 bits")]
             Self::Binary64(value) => FloatValue::Binary64(value.to_bits() as u64),
+
             #[allow(clippy::cast_possible_truncation, reason = "x87 values have 80 bits")]
             Self::X87Extended(value) => {
                 let bits = value.to_bits();
@@ -733,6 +765,7 @@ impl Float {
                 magnitude
             }
         }
+
         match format {
             FloatFormat::Binary16 => Self::Binary16(convert(value)),
             FloatFormat::BFloat16 => Self::BFloat16(convert(value)),
@@ -755,6 +788,7 @@ impl Float {
                 FloatOperator::Rem => left.c_fmod(right).value,
             }
         }
+
         match wider(left.format(), right.format()) {
             FloatFormat::Binary16 => Self::Binary16(apply(operator, left.to(), right.to())),
             FloatFormat::BFloat16 => Self::BFloat16(apply(operator, left.to(), right.to())),
@@ -796,6 +830,7 @@ impl Float {
         fn compare<F: rustc_apfloat::Float>(left: F, right: F) -> Option<Ordering> {
             left.partial_cmp(&right)
         }
+
         match wider(self.format(), other.format()) {
             FloatFormat::Binary16 => compare::<Half>(self.to(), other.to()),
             FloatFormat::BFloat16 => compare::<BFloat>(self.to(), other.to()),
@@ -816,9 +851,11 @@ impl Float {
             } else {
                 Exact::from(value.to_u128_r(128, Round::TowardZero, &mut is_exact).value)
             };
+
             // Negative zero converts exactly to zero.
             (exact, is_exact || value.is_zero())
         }
+
         if self.is_nan() {
             return Err(NumberError::NotANumber);
         }

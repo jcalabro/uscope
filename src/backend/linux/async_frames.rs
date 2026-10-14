@@ -29,6 +29,7 @@ use super::frames::{
     Expanded, FrameOrigin, FrameRegisters, FrameScope, PhysicalStack, ResolvedFrame, RootOrigin,
     StackRoot, UnwindModule,
 };
+
 use super::inspection::variable_context;
 use super::native::InspectionOps;
 use super::{Controller, Inferior, RuntimeModule};
@@ -102,6 +103,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(None);
         };
+
         let runtime_module = self.suspended_module(module, *ty)?;
         let image = runtime_module.image.as_ref();
         let chain = self.with_process_stop(inferior, module, *reader, usage, |stop| {
@@ -146,6 +148,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(stack) = self.async_stack(inferior, root)? else {
             return Ok(None);
         };
+
         let level = id.get() as usize;
         let Some(frame) = stack.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
@@ -153,6 +156,7 @@ impl<P: InspectionOps> Controller<P> {
                 frames: frame_u32(stack.frames.len())?,
             });
         };
+
         Ok(Some(self.suspended_frame(id, frame, &stack.futures[level])))
     }
 
@@ -211,14 +215,17 @@ impl<P: InspectionOps> Controller<P> {
         let FrameKind::Awaited { object, ty } = frame.kind else {
             return None;
         };
+
         let module = self.module_of(ty)?;
         let leaf = futures::AsyncFrame {
             object,
             ty,
             kind: AsyncFrameKind::Leaf,
         };
+
         let resolved = self.suspended_frame(frame.id, frame.clone(), &leaf);
         let scope = self.frame_for(inferior, stop_id, root, &resolved);
+
         // The backtrace is itself the request run control waits behind.
         let mut machine = StopMachine::new(&scope, budget, false);
         let place = StopPlace {
@@ -228,6 +235,7 @@ impl<P: InspectionOps> Controller<P> {
                 storage: ValueStorage::Memory(object),
             },
         };
+
         match machine.present(&place).ok()?.state {
             VariableState::Available {
                 presentation: Some(presentation),
@@ -259,6 +267,7 @@ impl<P: InspectionOps> Controller<P> {
             },
             futures::AsyncFrame { .. } => FrameScope::Unavailable,
         };
+
         let code = frame
             .module
             .zip(frame.instruction)
@@ -303,20 +312,24 @@ impl<P: InspectionOps> Controller<P> {
                 .filter(|runtime| Some(runtime.module.id) == frame.module)
                 .find_map(|runtime| runtime.model.driven_future(function))
         };
+
         let mut polling = false;
         let mut drivers = Vec::new();
         for (index, frame) in expanded.trace.frames.iter().enumerate() {
             if !polling && let Some(variable) = variable_of(frame) {
                 drivers.push((index, variable));
             }
+
             polling |= frame
                 .function
                 .as_ref()
                 .is_some_and(|function| function.coroutine.is_some());
         }
+
         if drivers.is_empty() {
             return Ok(expanded);
         }
+
         // The notes' frame identifiers would be the unspliced trace's.
         debug_assert!(
             expanded.trace.unfollowed.is_empty(),
@@ -329,6 +342,7 @@ impl<P: InspectionOps> Controller<P> {
         let mut futures = expanded.futures.clone();
         let mut unfollowed = expanded.trace.unfollowed.to_vec();
         let mut drivers = drivers.into_iter().peekable();
+
         // Frames of one runtime may each drive the same future, as its
         // scheduler's closure does within its `block_on`: the future shows
         // once, before the innermost frame that reads it, and a frame that
@@ -357,6 +371,7 @@ impl<P: InspectionOps> Controller<P> {
                                 });
                                 futures.push(future);
                             }
+
                             if let Some(reason) = end_reason(&chain.end) {
                                 unfollowed.push(UnfollowedFuture {
                                     driver: here(&frames)?,
@@ -372,23 +387,28 @@ impl<P: InspectionOps> Controller<P> {
                                 reason,
                             });
                         }
+
                         lost.extend(declared);
                     }
                 }
             }
+
             frames.push(frame.clone());
             origins.push(expanded.origins[index]);
         }
+
         if shown.is_empty() {
             unfollowed.extend(unread);
         } else {
             lost.clear();
         }
+
         for (level, frame) in frames.iter_mut().enumerate() {
             let level = frame_u32(level)?;
             frame.level = level;
             frame.id = StackFrameId::new(level);
         }
+
         let spliced = Expanded {
             trace: Backtrace {
                 frames: frames.into(),
@@ -399,6 +419,7 @@ impl<P: InspectionOps> Controller<P> {
             futures,
             lost,
         };
+
         spliced.check_invariants(stack.frames.len());
         Ok(spliced)
     }
@@ -420,6 +441,7 @@ impl<P: InspectionOps> Controller<P> {
         let unread = |why: &dyn std::fmt::Display| -> Arc<str> {
             format!("`{variable}`, which holds the future, {why}").into()
         };
+
         let resolved = self
             .resolved_in(inferior, root, stack, modules, expanded, driver)
             .map_err(|error| Unread::new(unread(&format_args!("cannot be read: {error}")), None))?;
@@ -464,13 +486,16 @@ impl<P: InspectionOps> Controller<P> {
                 ));
             }
         };
+
         let ValueStorage::Memory(object) = located.storage else {
             return Err(Unread::new(unread(&"is not in memory"), declared));
         };
+
         let ty = TypeReference {
             image: module.loaded.image,
             id: located.ty,
         };
+
         // The future a function was passed moves to be pinned, and where
         // it was still reads as a future that never began.
         if !futures::pinned(module.image.as_ref(), ty) {
@@ -479,6 +504,7 @@ impl<P: InspectionOps> Controller<P> {
                 declared,
             ));
         }
+
         let chain = self.with_module_stop(inferior, &module.loaded, root.reader(), |stop| {
             futures::walk(module.image.as_ref(), stop, object, ty)
         });
@@ -498,6 +524,7 @@ impl<P: InspectionOps> Controller<P> {
         let FrameScope::Suspended { ty, .. } = resolved.scope else {
             return Err(Error::VariableContextUnsupported);
         };
+
         let module = self.module_of(ty).ok_or(Error::AddressOutsideModule)?;
         let saved = self.saved_variables(resolved)?;
         let wanted = |variable: &SavedVariable<'_>| match query {
@@ -505,6 +532,7 @@ impl<P: InspectionOps> Controller<P> {
             VariableQuery::Name(name) => **variable.name == **name,
             VariableQuery::Global(_) => false,
         };
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let mut runtime = self.frame_runtime(inferior, root, resolved, module);
         let context = variable_context(stop_id, root.context, resolved.id, module, None);
@@ -513,10 +541,12 @@ impl<P: InspectionOps> Controller<P> {
             if budget.consume_variable_value().is_err() {
                 break;
             }
+
             let located = Located {
                 ty: variable.ty.id,
                 storage: ValueStorage::Memory(variable.address),
             };
+
             let inspected =
                 module
                     .variables
@@ -531,11 +561,13 @@ impl<P: InspectionOps> Controller<P> {
                 state: inspected.state,
             });
         }
+
         if let VariableQuery::Name(name) = query
             && variables.is_empty()
         {
             return Err(Error::VariableNotFound(name.clone()));
         }
+
         Ok(variables)
     }
 
@@ -547,13 +579,16 @@ impl<P: InspectionOps> Controller<P> {
         let FrameScope::Suspended { object, ty, state } = resolved.scope else {
             return Ok(Vec::new());
         };
+
         let module = self.module_of(ty).ok_or(Error::AddressOutsideModule)?;
         let Some(Ok(coroutine)) = module.image.coroutine(ty.id) else {
             return Ok(Vec::new());
         };
+
         let Some(state) = coroutine.state(state) else {
             return Ok(Vec::new());
         };
+
         Ok(saved(coroutine, state, object, ty))
     }
 
@@ -602,6 +637,7 @@ fn saved<'a>(
             let RecordMemberLayout::ByteOffset(offset) = member.layout else {
                 return None;
             };
+
             // A member past the end of memory is no variable to read.
             let address = VirtualAddress::new(object.get().checked_add(offset)?);
             Some(SavedVariable {
@@ -680,6 +716,7 @@ fn async_frame(
             },
         ),
     };
+
     built.segment = StackSegment::Task;
     built
 }
@@ -699,6 +736,7 @@ pub fn resume_address(
     if instances.next().is_some() {
         return None;
     }
+
     let points = image.resume_points(instance.id())?.ok()?;
     Some(points.point(state)?.address)
 }

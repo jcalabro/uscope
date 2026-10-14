@@ -4,6 +4,7 @@ use super::ast::{
     BinaryOp, Builtin, CWord, CastForm, Field, Node, NodeId, NodeKind, Path, Segment, Separator,
     SizeOf, Tag, Tree, TypeBase, TypeName, UnaryOp,
 };
+
 use super::lexer::{Punct, Token, TokenKind, lex};
 use super::{Ambiguity, Dialect, MAX_AMBIGUITIES, Span};
 use crate::eval::error::{ErrorKind, ExpressionError};
@@ -14,8 +15,10 @@ pub const MAX_DEPTH: usize = 64;
 
 /// The most nodes one reading may hold.
 pub const MAX_NODES: usize = 1024;
+
 // A node's identifier is a `u32`.
 const _: () = assert!(MAX_NODES < u32::MAX as usize);
+
 // The casts a reading chooses are a bitmask over its ambiguities.
 const _: () = assert!(MAX_AMBIGUITIES < usize::BITS as usize);
 
@@ -46,9 +49,11 @@ pub fn is_type_word(word: &str) -> bool {
 
 // Binding strengths, loosest first.
 pub const ASSIGN: u8 = 1;
+
 pub const CONDITIONAL: u8 = 2;
 const OR: u8 = 3;
 const AND: u8 = 4;
+
 pub const COMPARISON: u8 = 5;
 const BIT_OR: u8 = 6;
 const BIT_XOR: u8 = 7;
@@ -56,8 +61,11 @@ const BIT_AND: u8 = 8;
 const SHIFT: u8 = 9;
 const ADDITIVE: u8 = 10;
 const MULTIPLICATIVE: u8 = 11;
+
 pub const AS: u8 = 12;
+
 pub const PREFIX: u8 = 13;
+
 pub const POSTFIX: u8 = 14;
 
 /// A binary operator's precedence.
@@ -180,6 +188,7 @@ pub fn parse(text: &str, dialect: Dialect) -> Result<(Vec<Ambiguity>, Readings),
         )
         .with_hint("write casts as `x as T`"));
     }
+
     let mut ambiguity_list = Vec::with_capacity(starts.len());
     for &start in &starts {
         let mut parser = Parser::new(text, &tokens, &starts, 0, dialect);
@@ -191,6 +200,7 @@ pub fn parse(text: &str, dialect: Dialect) -> Result<(Vec<Ambiguity>, Readings),
             span: tokens[start].span.to(close),
         });
     }
+
     let readings: Vec<_> = (0..1_usize << starts.len())
         .map(|casts| Parser::new(text, &tokens, &starts, casts, dialect).expression_tree())
         .collect();
@@ -198,9 +208,11 @@ pub fn parse(text: &str, dialect: Dialect) -> Result<(Vec<Ambiguity>, Readings),
         Some(Err(error)) if readings.iter().all(Result::is_err) => Some(error.clone()),
         _ => None,
     };
+
     if let Some(error) = first_error {
         return Err(error);
     }
+
     Ok((ambiguity_list, readings))
 }
 
@@ -210,15 +222,18 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
         Some(TokenKind::Ident(word)) => Some(word.as_str()),
         _ => None,
     };
+
     let punct = |index: usize| match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::Punct(punct)) => Some(*punct),
         _ => None,
     };
+
     let segment = |index: usize| {
         tokens
             .get(index)
             .is_some_and(|token| is_segment(&token.kind))
     };
+
     let mut starts = Vec::new();
     for open in 0..tokens.len() {
         if punct(open) != Some(Punct::OpenParen)
@@ -232,17 +247,21 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
         {
             continue;
         }
+
         let mut index = open + 1;
         if punct(index) == Some(Punct::ColonColon) {
             index += 1;
         }
+
         if !segment(index) {
             continue;
         }
+
         index += 1;
         while matches!(punct(index), Some(Punct::ColonColon | Punct::Dot)) && segment(index + 1) {
             index += 2;
         }
+
         if punct(index) == Some(Punct::CloseParen)
             && matches!(
                 punct(index + 1),
@@ -252,6 +271,7 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
             starts.push(open);
         }
     }
+
     starts
 }
 
@@ -261,8 +281,10 @@ struct Parser<'tokens> {
     position: usize,
     nodes: Vec<Node>,
     depth: usize,
+
     /// The tokens that begin ambiguities, in order.
     ambiguities: &'tokens [usize],
+
     /// Bit `i` set reads ambiguity `i` as a cast.
     casts: usize,
     dialect: Dialect,
@@ -293,10 +315,12 @@ impl<'tokens> Parser<'tokens> {
         if !matches!(self.peek(), TokenKind::End) {
             return Err(self.unexpected("an operator or the end of the expression"));
         }
+
         let tree = Tree {
             nodes: self.nodes,
             root,
         };
+
         // A range only ever is the whole expression.
         for (index, node) in tree.nodes.iter().enumerate() {
             if matches!(node.kind, NodeKind::Range { .. }) && index != tree.root.0 as usize {
@@ -306,6 +330,7 @@ impl<'tokens> Parser<'tokens> {
                 ));
             }
         }
+
         Ok(tree)
     }
 
@@ -350,6 +375,7 @@ impl<'tokens> Parser<'tokens> {
         if found {
             self.advance();
         }
+
         found
     }
 
@@ -357,6 +383,7 @@ impl<'tokens> Parser<'tokens> {
         if self.peek_punct() == Some(punct) {
             return Ok(self.advance());
         }
+
         Err(self.unexpected(&format!("`{}` {context}", punct.text())))
     }
 
@@ -365,6 +392,7 @@ impl<'tokens> Parser<'tokens> {
             TokenKind::End => "the end of the expression".to_owned(),
             _ => format!("`{}`", self.peek_span().text(self.text)),
         };
+
         ExpressionError::syntax(
             self.peek_span(),
             format!("expected {expected}, found {found}"),
@@ -379,6 +407,7 @@ impl<'tokens> Parser<'tokens> {
                 format!("an expression may have at most {MAX_NODES} parts"),
             ));
         }
+
         let id = NodeId(u32::try_from(self.nodes.len()).unwrap_or(u32::MAX));
         self.nodes.push(Node { kind, span });
         Ok(id)
@@ -397,6 +426,7 @@ impl<'tokens> Parser<'tokens> {
                 format!("an expression may nest at most {MAX_DEPTH} deep"),
             ));
         }
+
         Ok(())
     }
 
@@ -420,6 +450,7 @@ impl<'tokens> Parser<'tokens> {
                 if AS < minimum {
                     break;
                 }
+
                 self.advance();
                 let (ty, _) = self.type_name(false)?;
                 let span = self.span(left).to(ty.span);
@@ -433,14 +464,17 @@ impl<'tokens> Parser<'tokens> {
                 )?;
                 continue;
             }
+
             let Some(punct) = self.peek_punct() else {
                 break;
             };
+
             if let Some(op) = binary_op(punct) {
                 let strength = binary_precedence(op);
                 if strength < minimum {
                     break;
                 }
+
                 self.advance();
                 let right = self.expression(strength + 1)?;
                 let span = self.span(left).to(self.span(right));
@@ -459,6 +493,7 @@ impl<'tokens> Parser<'tokens> {
                 if CONDITIONAL < minimum {
                     break;
                 }
+
                 self.advance();
                 let then = self.expression(CONDITIONAL)?;
                 self.expect(Punct::Colon, "to separate the branches of `?`")?;
@@ -477,6 +512,7 @@ impl<'tokens> Parser<'tokens> {
                 if ASSIGN < minimum {
                     break;
                 }
+
                 self.advance();
                 let value = self.expression(ASSIGN)?;
                 let span = self.span(left).to(self.span(value));
@@ -492,6 +528,7 @@ impl<'tokens> Parser<'tokens> {
                 break;
             }
         }
+
         Ok(left)
     }
 
@@ -514,15 +551,18 @@ impl<'tokens> Parser<'tokens> {
             Some(Punct::OpenParen) => return self.parenthesized(),
             _ => None,
         };
+
         if let Some(op) = op {
             self.advance();
             let operand = self.prefix()?;
             let span = start.to(self.span(operand));
             return self.push(NodeKind::Unary { op, operand }, span);
         }
+
         if self.peek_word() == Some("sizeof") {
             return self.size_of();
         }
+
         let primary = self.primary()?;
         self.postfix(primary)
     }
@@ -538,6 +578,7 @@ impl<'tokens> Parser<'tokens> {
             let close = self.advance();
             return self.push(NodeKind::SizeOf(SizeOf::Type(ty)), start.to(close));
         }
+
         self.position = checkpoint;
         let operand = self.expression(ASSIGN)?;
         let close = self.expect(Punct::CloseParen, "to close `sizeof(`")?;
@@ -589,6 +630,7 @@ impl<'tokens> Parser<'tokens> {
         let (TokenKind::Ident(word) | TokenKind::Quoted(word)) = self.peek().clone() else {
             return Err(self.unexpected(expected));
         };
+
         self.advance();
         Ok(word)
     }
@@ -604,6 +646,7 @@ impl<'tokens> Parser<'tokens> {
                 self.expect(Punct::CloseParen, "to close the cast's type")?;
                 return self.prefix_cast(start, ty);
             }
+
             let inner = self.grouped()?;
             return self.postfix(inner);
         }
@@ -616,6 +659,7 @@ impl<'tokens> Parser<'tokens> {
             self.advance();
             return self.prefix_cast(start, ty);
         }
+
         self.position = open;
         let inner = self.grouped()?;
         self.postfix(inner)
@@ -628,6 +672,7 @@ impl<'tokens> Parser<'tokens> {
                 super::print::type_text(&ty)
             )));
         }
+
         let operand = self.prefix()?;
         let span = start.to(self.span(operand));
         self.push(
@@ -660,6 +705,7 @@ impl<'tokens> Parser<'tokens> {
                     self.advance();
                     NodeKind::Bool(word == "true")
                 }
+
                 // `nil` is Go's spelling of `null`, and means the same.
                 "null" | "nil" => {
                     self.advance();
@@ -685,12 +731,14 @@ impl<'tokens> Parser<'tokens> {
                     } else {
                         NodeKind::Cap(operand)
                     };
+
                     return self.push(kind, span.to(close));
                 }
                 function if view_call && Builtin::parse(function).is_some() => {
                     let Some(function) = Builtin::parse(function) else {
                         return Err(self.unexpected("an operand"));
                     };
+
                     self.advance();
                     self.advance();
                     let operand = self.expression(ASSIGN)?;
@@ -728,6 +776,7 @@ impl<'tokens> Parser<'tokens> {
             }
             TokenKind::Punct(_) | TokenKind::End => return Err(self.unexpected("an operand")),
         };
+
         let span = span.to(self.previous_span());
         if matches!(self.peek(), TokenKind::Punct(Punct::OpenParen))
             && matches!(kind, NodeKind::Name(_))
@@ -737,6 +786,7 @@ impl<'tokens> Parser<'tokens> {
                 "expressions cannot call functions",
             ));
         }
+
         self.push(kind, span)
     }
 
@@ -756,9 +806,11 @@ impl<'tokens> Parser<'tokens> {
                 }
                 _ => break,
             };
+
             self.advance();
             segments.push(self.segment(separator)?);
         }
+
         Ok(Path { global, segments })
     }
 
@@ -771,6 +823,7 @@ impl<'tokens> Parser<'tokens> {
         {
             offset += 2;
         }
+
         offset > 0 && self.peek_at(offset) == &TokenKind::Punct(Punct::ColonColon)
     }
 
@@ -781,6 +834,7 @@ impl<'tokens> Parser<'tokens> {
             TokenKind::Ident(word) if is_operand_word(word) => word.clone(),
             _ => return Err(self.unexpected("a name")),
         };
+
         self.advance();
         Ok(Segment {
             separator,
@@ -804,6 +858,7 @@ impl<'tokens> Parser<'tokens> {
                         } => Field::Index(u32::try_from(value).unwrap_or(u32::MAX)),
                         _ => return Err(self.unexpected("a member name")),
                     };
+
                     self.advance();
                     let span = self.span(base).to(field_span);
                     base = self.push(
@@ -818,11 +873,13 @@ impl<'tokens> Parser<'tokens> {
                 }
                 Some(Punct::OpenBracket) => {
                     self.advance();
+
                     // `[:end]` and `[:]` slice from the start.
                     if self.peek_punct() == Some(Punct::Colon) {
                         base = self.slice(base, None)?;
                         continue;
                     }
+
                     let index = self.expression(ASSIGN)?;
                     if self.peek_punct() == Some(Punct::Colon) {
                         base = self.slice(base, Some(index))?;
@@ -857,6 +914,7 @@ impl<'tokens> Parser<'tokens> {
         } else {
             Some(self.expression(ASSIGN)?)
         };
+
         let close = self.expect(Punct::CloseBracket, "to close the slice")?;
         let span = self.span(base).to(close);
         self.push(NodeKind::Slice { base, start, end }, span)
@@ -883,6 +941,7 @@ impl<'tokens> Parser<'tokens> {
                 break;
             }
         }
+
         let base = if let Some(tag) = self.peek_word().and_then(Tag::parse) {
             self.advance();
             TypeBase::Tagged(tag, self.path(true)?)
@@ -899,13 +958,16 @@ impl<'tokens> Parser<'tokens> {
                 } else {
                     break;
                 }
+
                 self.advance();
             }
+
             words.sort_unstable();
             TypeBase::CWords(words)
         } else {
             TypeBase::Named(self.path(true)?)
         };
+
         let mut end = self.previous_span();
         loop {
             if self
@@ -918,13 +980,16 @@ impl<'tokens> Parser<'tokens> {
             } else {
                 break;
             }
+
             end = self.advance();
         }
+
         let ty = TypeName {
             base,
             pointers,
             span: start.to(end),
         };
+
         let certain = qualified || !is_bare(&ty);
         Ok((ty, certain))
     }

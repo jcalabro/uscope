@@ -11,12 +11,16 @@
 pub enum Completing<'a> {
     /// A member of the value `base` names, after `.` or `->`.
     Member { base: &'a str },
+
     /// A register, after `$`.
     Register,
+
     /// A name inside `qualifier`, after `qualifier::`.
     Qualified { qualifier: &'a str },
+
     /// A name, or, as the line's first word, a command.
     Name { first: bool },
+
     /// Nothing: the text ends in an operator no name follows yet.
     Nothing,
 }
@@ -58,6 +62,7 @@ pub fn completing(typed: &str) -> (Completing<'_>, &str, usize) {
             first: before.trim().is_empty(),
         }
     };
+
     (kind, partial, start)
 }
 
@@ -86,6 +91,7 @@ fn base_start(text: &str) -> Option<usize> {
             }
             b')' => {
                 at = opening(bytes, at - 1, b'(', b')')?;
+
                 // A length or size reads as one operand with its name.
                 while at > 0 && is_name(char::from(bytes[at - 1])) {
                     at -= 1;
@@ -98,15 +104,18 @@ fn base_start(text: &str) -> Option<usize> {
                 while at > 0 && is_name(char::from(bytes[at - 1])) {
                     at -= 1;
                 }
+
                 if at > 0 && bytes[at - 1] == b'$' {
                     at -= 1;
                 }
             }
             _ => {}
         }
+
         if at == end {
             return None;
         }
+
         match JOINERS.iter().find(|joiner| bytes[..at].ends_with(joiner)) {
             // `::name` names the outermost scope.
             Some(&b"::") if at == 2 || !is_name(char::from(bytes[at - 3])) => {
@@ -131,6 +140,7 @@ fn opening(bytes: &[u8], close: usize, open: u8, shut: u8) -> Option<usize> {
             }
         }
     }
+
     None
 }
 

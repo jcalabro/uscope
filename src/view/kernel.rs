@@ -108,6 +108,7 @@ impl Kernel {
                 wasm.len()
             ));
         }
+
         let mut config = Config::default();
         config
             .compilation_mode(CompilationMode::Eager)
@@ -147,6 +148,7 @@ impl Kernel {
                 arguments.len()
             ));
         }
+
         let (store, memory, run, place) =
             catch_unwind(AssertUnwindSafe(|| self.instantiate(arguments)))
                 .map_err(|_| "the WebAssembly runtime failed starting it".to_owned())??;
@@ -273,6 +275,7 @@ fn check_interface(module: &Module) -> Result<(), String> {
                 ));
             }
         };
+
         match import.ty() {
             ExternType::Func(ty) if ty.params() == params && ty.results() == results => {}
             _ => {
@@ -283,6 +286,7 @@ fn check_interface(module: &Module) -> Result<(), String> {
             }
         }
     }
+
     let mut run = false;
     let mut memory = false;
     for export in module.exports() {
@@ -291,6 +295,7 @@ fn check_interface(module: &Module) -> Result<(), String> {
                 if ty.params() != [I32, I32] || ty.results() != [I32] {
                     return Err("its `run` does not take two i32s and return one".to_owned());
                 }
+
                 run = true;
             }
             ("memory", ExternType::Memory(ty)) => {
@@ -299,6 +304,7 @@ fn check_interface(module: &Module) -> Result<(), String> {
                         "its memory starts larger than a kernel's may be, {MAX_MEMORY_BYTES} bytes"
                     ));
                 }
+
                 memory = true;
             }
             ("run" | "memory", _) => {
@@ -310,12 +316,15 @@ fn check_interface(module: &Module) -> Result<(), String> {
             _ => {}
         }
     }
+
     if !run {
         return Err("it exports no `run`".to_owned());
     }
+
     if !memory {
         return Err("it exports no `memory`".to_owned());
     }
+
     Ok(())
 }
 
@@ -335,6 +344,7 @@ pub trait Host {
 pub enum RunError<E> {
     /// The host could not answer: a read failed, or the budget ran out.
     Host(E),
+
     /// The kernel failed, and why.
     Kernel(String),
 }
@@ -344,6 +354,7 @@ enum State {
         run: TypedFunc<(i32, i32), i32>,
         arguments: (i32, i32),
     },
+
     /// Stopped at a call, to be resumed with its answer.
     Called {
         call: TypedResumableCallHostTrap<i32>,
@@ -359,6 +370,7 @@ pub struct Run {
     memory: Memory,
     state: State,
     recording: Option<(Recording, Recordings)>,
+
     /// How the run ended, once it has.
     ended: Option<End>,
 }
@@ -377,6 +389,7 @@ impl Run {
                 End::Stopped => Err(RunError::Kernel("its host stopped it".to_owned())),
             };
         }
+
         let result = self.advance(host);
         let end = match &result {
             Ok(Some(_)) => return result,
@@ -384,11 +397,13 @@ impl Run {
             Err(RunError::Kernel(reason)) => End::Failed(reason.clone()),
             Err(RunError::Host(_)) => End::Stopped,
         };
+
         self.state = State::Ended;
         self.ended = Some(end.clone());
         if let Some((recording, _)) = &mut self.recording {
             recording.end = end;
         }
+
         result
     }
 
@@ -408,10 +423,12 @@ impl Run {
             let Some(step) = step else {
                 return Ok(None);
             };
+
             // A reason is one line, as a recording writes it.
             let trapped = |error: wasmi::Error| {
                 RunError::Kernel(format!("it trapped: {error}").replace('\n', " "))
             };
+
             match step.map_err(trapped)? {
                 TypedResumableCall::Finished(0) => return Ok(None),
                 TypedResumableCall::Finished(status) => {
@@ -435,6 +452,7 @@ impl Run {
                     let Some(&request) = call.host_error().downcast_ref::<Call>() else {
                         return Err(RunError::Kernel("it stopped for no call".to_owned()));
                     };
+
                     match request {
                         Call::Read {
                             address,
@@ -449,6 +467,7 @@ impl Run {
                             if let Some((recording, _)) = &mut self.recording {
                                 recording.events.push(Event::Item(item.to_vec()));
                             }
+
                             self.state = State::Called { call, answer: 1 };
                             return Ok(Some(item));
                         }
@@ -471,6 +490,7 @@ impl Run {
                 "it read {length} bytes at once, and a kernel reads at most {MAX_READ}"
             )));
         }
+
         let start = buffer as usize;
         let size = length as usize;
         if start
@@ -481,6 +501,7 @@ impl Run {
                 "it read into {length} bytes at {buffer:#x}, past its memory"
             )));
         }
+
         let bytes = host.read(address, size).map_err(RunError::Host)?;
         if bytes.len() != size {
             return Err(RunError::Kernel(format!(
@@ -488,10 +509,12 @@ impl Run {
                 bytes.len()
             )));
         }
+
         self.memory.data_mut(&mut self.store)[start..start + size].copy_from_slice(&bytes);
         if let Some((recording, _)) = &mut self.recording {
             recording.events.push(Event::Read { address, bytes });
         }
+
         Ok(length.cast_signed())
     }
 
@@ -503,6 +526,7 @@ impl Run {
                 "it yielded {count} words, and an item holds 1 to {MAX_WORDS}"
             )));
         }
+
         let start = words as usize;
         let bytes = self
             .memory
@@ -571,8 +595,10 @@ pub enum Event {
 pub enum End {
     /// The kernel returned 0.
     Finished,
+
     /// The kernel failed, and why.
     Failed(String),
+
     /// Its host stopped running it: it had the items it wanted, a read
     /// failed, or the budget ran out.
     Stopped,
@@ -601,6 +627,7 @@ impl fmt::Display for Recording {
         for argument in &self.arguments {
             write!(formatter, " {argument:#x}")?;
         }
+
         writeln!(formatter)?;
         for event in &self.events {
             match event {
@@ -609,6 +636,7 @@ impl fmt::Display for Recording {
                     for byte in bytes {
                         write!(formatter, "{byte:02x}")?;
                     }
+
                     writeln!(formatter)?;
                 }
                 Event::Item(words) => {
@@ -616,10 +644,12 @@ impl fmt::Display for Recording {
                     for word in words {
                         write!(formatter, " {word:#x}")?;
                     }
+
                     writeln!(formatter)?;
                 }
             }
         }
+
         match &self.end {
             End::Finished => writeln!(formatter, "end finished"),
             End::Failed(reason) => writeln!(formatter, "end failed {reason}"),
@@ -640,9 +670,11 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
         if line.trim().is_empty() {
             continue;
         }
+
         if line != HEADER {
             return Err(format!("line {number}: expected `{HEADER}`"));
         }
+
         let mut field = |name: &str| match lines.next() {
             Some((number, line)) => line
                 .strip_prefix(name)
@@ -651,6 +683,7 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
                 .ok_or_else(|| format!("line {number}: expected `{name}`")),
             None => Err(format!("the recording ends before its `{name}`")),
         };
+
         let (_, kernel) = field("kernel")?;
         let (number, arguments) = field("arguments")?;
         let arguments = arguments
@@ -659,17 +692,20 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
                 hexadecimal(word).ok_or_else(|| format!("line {number}: `{word}` is no number"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+
         // A run is only what a host could have given and taken.
         if arguments.len() > MAX_ARGUMENTS {
             return Err(format!(
                 "line {number}: a kernel takes at most {MAX_ARGUMENTS} arguments"
             ));
         }
+
         let mut events = Vec::new();
         let end = loop {
             let Some((number, line)) = lines.next() else {
                 return Err("the recording has no end".to_owned());
             };
+
             let bad = || format!("line {number}: `{line}` is no event");
             let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
             match word {
@@ -680,6 +716,7 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
                     if bytes.len() % 2 != 0 || bytes.len() > most {
                         return Err(bad());
                     }
+
                     let bytes = (0..bytes.len())
                         .step_by(2)
                         .map(|at| u8::from_str_radix(bytes.get(at..at + 2)?, 16).ok())
@@ -707,6 +744,7 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
                 _ => return Err(bad()),
             }
         };
+
         recordings.push(Recording {
             kernel,
             arguments,
@@ -714,6 +752,7 @@ pub fn parse_recordings(text: &str) -> Result<Vec<Recording>, String> {
             end,
         });
     }
+
     Ok(recordings)
 }
 
@@ -788,6 +827,7 @@ impl Host for Replayer<'_> {
                 "the kernel does more work than any inspection allows".to_owned(),
             ));
         }
+
         Ok(())
     }
 }
@@ -811,6 +851,7 @@ pub fn replay(kernel: &Kernel, recording: &Recording) -> Result<usize, String> {
         next: 0,
         units: 0,
     };
+
     loop {
         let ended = match run.next(&mut host) {
             Ok(Some(item)) => match recording.events.get(host.next) {
@@ -833,15 +874,18 @@ pub fn replay(kernel: &Kernel, recording: &Recording) -> Result<usize, String> {
             Ok(None) => End::Finished,
             Err(RunError::Kernel(reason)) => End::Failed(reason),
         };
+
         let reproduced = host.next == recording.events.len()
             && (recording.end == End::Stopped || recording.end == ended);
         if reproduced {
             return Ok(host.next);
         }
+
         let ended = match ended {
             End::Failed(reason) => format!("fails: {reason}"),
             _ => "finishes".to_owned(),
         };
+
         return Err(format!(
             "event {}: the kernel {ended}, and the recording {}",
             host.next,
@@ -860,6 +904,7 @@ mod tests {
     /// then `run`, whose body is given, and any other functions.
     struct Wasm {
         imports: Vec<(&'static str, &'static str, u8)>,
+
         /// Each function's type and body, after `run`'s.
         functions: Vec<(u8, Vec<u8>)>,
         memory: Option<u32>,
@@ -885,6 +930,7 @@ mod tests {
                 bytes.push(byte);
                 return;
             }
+
             bytes.push(byte | 0x80);
         }
     }
@@ -943,6 +989,7 @@ mod tests {
                 leb(results.len() as u64, &mut contents);
                 contents.extend(results);
             }
+
             section(1, &contents, &mut bytes);
             let mut contents = Vec::new();
             leb(self.imports.len() as u64, &mut contents);
@@ -951,18 +998,21 @@ mod tests {
                 name(field, &mut contents);
                 contents.extend([0, *ty]);
             }
+
             section(2, &contents, &mut bytes);
             let mut contents = Vec::new();
             leb(self.functions.len() as u64, &mut contents);
             for (ty, _) in &self.functions {
                 contents.push(*ty);
             }
+
             section(3, &contents, &mut bytes);
             if let Some(pages) = self.memory {
                 let mut contents = vec![1, 0];
                 leb(u64::from(pages), &mut contents);
                 section(5, &contents, &mut bytes);
             }
+
             let mut contents = Vec::new();
             leb(self.exports.len() as u64, &mut contents);
             for (field, kind, index) in &self.exports {
@@ -970,12 +1020,14 @@ mod tests {
                 contents.push(*kind);
                 leb(u64::from(*index), &mut contents);
             }
+
             section(7, &contents, &mut bytes);
             if let Some(start) = self.start {
                 let mut contents = Vec::new();
                 leb(u64::from(start), &mut contents);
                 section(8, &contents, &mut bytes);
             }
+
             let mut contents = Vec::new();
             leb(self.functions.len() as u64, &mut contents);
             for (_, body) in &self.functions {
@@ -986,6 +1038,7 @@ mod tests {
                 leb(function.len() as u64, &mut contents);
                 contents.extend(function);
             }
+
             section(10, &contents, &mut bytes);
             bytes
         }
@@ -1166,6 +1219,7 @@ mod tests {
             let error = load(&wasm).expect_err(expected);
             assert!(error.contains(expected), "{error}: not {expected}");
         }
+
         let large =
             Kernel::new("large", "tests", &vec![0; MAX_MODULE_BYTES + 1]).expect_err("large");
         assert!(large.contains("at most 262144"), "{large}");
@@ -1181,6 +1235,7 @@ mod tests {
             (vec![vec![0xfeed]], Ok(()))
         );
         assert!(memory.units > 0, "it paid for its work");
+
         // A read the host cannot make ends the run with the host's error.
         let (_, ended) = items(&kernel, &[0x2000], &mut memory);
         assert_eq!(ended, Err("0x2000 is unmapped".to_owned()));
@@ -1200,6 +1255,7 @@ mod tests {
             budget: Some(10_000),
             ..Memory::default()
         };
+
         assert_eq!(
             items(&kernel, &[], &mut memory).1,
             Err("out of budget".to_owned())
@@ -1209,6 +1265,7 @@ mod tests {
             budget: Some(10_000),
             ..Memory::default()
         };
+
         let _ = items(&kernel, &[], &mut again);
         assert_eq!(again.units, spent);
         let recurses = [0x20, 0, 0x20, 1, 0x10, 2];
@@ -1237,6 +1294,7 @@ mod tests {
             let error = ended.expect_err(expected);
             assert!(error.contains(expected), "{error}: not {expected}");
         }
+
         // A run that failed says so again, rather than seeming to end well.
         let kernel = load(&Wasm::kernel(&i32_const(3))).expect("loads");
         let mut run = kernel.start(&[], None).expect("starts");
@@ -1277,12 +1335,14 @@ mod tests {
             replay(&kernel, &moved[0]),
             Err("event 0: the kernel reads 8 bytes at 0x1000, and the recording reads 8 bytes at 0x1008".to_owned())
         );
+
         // A run its host stopped replays as far as it went.
         let stopped = parse_recordings(
             "uscope-kernel-run 1\nkernel test\narguments 0x1000\nread 0x1000 edfe000000000000\nend stopped\n",
         )
         .expect("parses");
         assert_eq!(replay(&kernel, &stopped[0]), Ok(1));
+
         // What no host could have given or taken is no recording.
         let run = |body: &str| format!("uscope-kernel-run 1\nkernel test\n{body}\nend stopped\n");
         for body in [
@@ -1294,6 +1354,7 @@ mod tests {
         ] {
             assert!(parse_recordings(&run(&body)).is_err(), "{body}");
         }
+
         assert!(parse_recordings(&run("arguments\nitem 0x1")).is_ok());
         assert!(parse_recordings("uscope-kernel-run 1\nkernelfoo test\n").is_err());
     }
@@ -1322,12 +1383,14 @@ mod tests {
                 memory.write(node + 144 + index * 8, &child.to_le_bytes());
                 keys.extend(below);
             }
+
             if index < u64::from(fill) {
                 memory.write(node + 8 + index * 8, &position.to_le_bytes());
                 keys.push(node + 8 + index * 8);
                 *position += 1;
             }
         }
+
         (node, keys)
     }
 
@@ -1352,6 +1415,7 @@ mod tests {
                 let index = (key - node - 8) / 8;
                 assert_eq!(item[1], node + 96 + index * 4);
             }
+
             let values = items
                 .iter()
                 .map(|item| {
@@ -1366,6 +1430,7 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(values, (0..keys.len() as u64).collect::<Vec<_>>());
         }
+
         let mut memory = Memory::default();
         let (root, _) = btree(&mut memory, 1, 2, &mut 0x10000, &mut 0);
         memory.write(root, &12_u16.to_le_bytes());

@@ -78,6 +78,7 @@ fn load(
 
 fn answers(info: &DebugInfo) -> String {
     let mut out = Vec::new();
+
     // The bytes agree, so this checks what binding adds, not every
     // address: the slowest sections, which ask about each, are left out.
     let options = Options {
@@ -87,6 +88,7 @@ fn answers(info: &DebugInfo) -> String {
             .collect(),
         variable_addresses: 0,
     };
+
     crate::tools::dump::dump_info(info, &options, &mut out).unwrap();
     String::from_utf8(out).unwrap()
 }
@@ -101,6 +103,7 @@ fn a_cached_load_answers_as_an_uncached_one() {
     let split = fixture("split/basic-build-id");
     let root = fixture("split/debug-root");
     let altlink = fixture("split/altlink-root");
+
     // Binding is the same for every program, so small ones suffice: a
     // dump's cost grows with the program.
     let cases = [

@@ -39,6 +39,7 @@ fn threads(dap: &mut Dap) -> Vec<(i64, String)> {
 #[test]
 fn goroutines_are_threads_named_where_the_program_has_them() {
     let (mut dap, stopped) = at_checkpoint(json!({}));
+
     // The stop names main's goroutine, whose id is the client's.
     assert_eq!(stopped, 1);
     let listed = threads(&mut dap);
@@ -56,6 +57,7 @@ fn goroutines_are_threads_named_where_the_program_has_them() {
     for (id, name) in &workers {
         assert_eq!(*name, format!("[{id}] main.worker — chan receive"));
     }
+
     // The runtime's own goroutines are left out.
     assert!(
         !listed
@@ -119,6 +121,7 @@ fn launch_options_list_the_runtimes_goroutines_cut_the_list_or_list_threads() {
 
     let (mut dap, stopped) = at_checkpoint(json!({"threads": "system"}));
     let process = i64::from(dap.process_id().expect("a process"));
+
     // The main thread is the process's first.
     assert_eq!(stopped, process);
     let system = threads(&mut dap);
@@ -158,6 +161,7 @@ fn a_hundred_thousand_goroutines_are_cut_with_a_count_of_the_rest() {
         "{:?}",
         &listed[..8]
     );
+
     // main's goroutine and every parked one.
     assert_eq!(
         listed[1000].1,
@@ -189,6 +193,7 @@ fn an_unrecovered_panic_is_shown_where_the_program_panicked() {
         })
         .unwrap_or_else(|| panic!("{trace}"));
     assert_eq!(focused["name"], "main.explode", "{trace}");
+
     // Below it, the program's callers are shown as they are.
     let caller = frames
         .iter()
@@ -214,6 +219,7 @@ fn a_stack_that_crosses_stacks_labels_each_run_of_frames() {
         },
     );
     let stop = dap.stopped(started.mark);
+
     // Main's goroutine stopped on the system stack.
     assert_eq!(stop.thread, 1, "{stop:?}");
     let trace = dap.request("stackTrace", json!({"threadId": 1}));
@@ -243,6 +249,7 @@ fn a_stack_that_crosses_stacks_labels_each_run_of_frames() {
         "{trace}"
     );
     assert_eq!(trace["totalFrames"].as_u64(), Some(names.len() as u64));
+
     // Pages count the labels.
     let page = dap.request(
         "stackTrace",

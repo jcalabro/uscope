@@ -26,6 +26,7 @@ pub async fn integer(scenario: &Scenario, text: &str) -> Option<i128> {
     else {
         panic!("{text}: not a value");
     };
+
     match value.state {
         VariableState::Available {
             value: VariableValue::Scalar(ScalarValue::Signed(value)),
@@ -79,6 +80,7 @@ pub fn frames_to(trace: &Backtrace, last: &str) -> Vec<(String, u64)> {
             break;
         }
     }
+
     frames
 }
 
@@ -103,6 +105,7 @@ pub async fn locals(scenario: &Scenario) -> Vec<(String, Option<i128>, VariableS
                 } => i128::try_from(*value).ok(),
                 _ => None,
             };
+
             (variable.name.to_string(), number, variable.state.clone())
         })
         .collect()

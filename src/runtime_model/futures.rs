@@ -25,8 +25,10 @@ use crate::{
 /// The most futures one chain is followed through, so that corrupted
 /// memory cannot make the walk run on.
 pub const MAX_DEPTH: usize = 256;
+
 /// The most wrappers followed to reach a type's representation.
 const MAX_WRAPPERS: usize = 16;
+
 /// The Rust types that hold a future beside what is no future, by their
 /// path and name, with the way to the future within: each step a member's
 /// name, or within a sum type the name of the variant that holds the
@@ -93,6 +95,7 @@ pub enum AsyncFrameKind {
         kind: CoroutineStateKind,
         location: Option<SourceLocation>,
     },
+
     /// A future that is no coroutine, which the chain waits on.
     Leaf,
 }
@@ -109,17 +112,23 @@ pub struct AwaitChain {
 pub enum ChainEnd {
     /// At a leaf, the future the chain waits on.
     Leaf,
+
     /// At a coroutine that has not begun, and so awaits nothing.
     Unresumed,
+
     /// At a coroutine that has returned or panicked.
     Finished,
+
     /// At a suspended coroutine whose awaited future its debug information
     /// does not name.
     NoAwaitee,
+
     /// The chain could not be followed further, for this reason.
     Broken(Arc<str>),
+
     /// The chain went on past [`MAX_DEPTH`] futures.
     TooDeep,
+
     /// The chain came back to a future it had passed.
     Cycle,
 }
@@ -149,26 +158,32 @@ fn follow(
         if !seen.insert((object, ty)) {
             return ChainEnd::Cycle;
         }
+
         let Some((representation, kind)) = representation(image, ty) else {
             return ChainEnd::Broken(format!("type {:?} has no layout", ty.id).into());
         };
+
         if let Some(coroutine) = image.coroutine(representation) {
             let coroutine = match coroutine {
                 Ok(coroutine) => coroutine,
                 Err(reason) => return ChainEnd::Broken(Arc::clone(reason)),
             };
+
             let Ok(size) = usize::try_from(coroutine.state.size) else {
                 return ChainEnd::Broken("a coroutine's state is too large".into());
             };
+
             let at = object.wrapping_add(coroutine.state.offset);
             let Some(number) = records::read(stop, at, size) else {
                 return ChainEnd::Broken(format!("the future at {object:#x} is unreadable").into());
             };
+
             let Some(state) = coroutine.state(number) else {
                 return ChainEnd::Broken(
                     format!("the future at {object:#x} is in no state, {number}").into(),
                 );
             };
+
             frames.push(AsyncFrame {
                 object,
                 ty,
@@ -185,20 +200,25 @@ fn follow(
                 }
                 CoroutineStateKind::Suspended { .. } => {}
             }
+
             let Some(awaitee) = state.awaitee() else {
                 return ChainEnd::NoAwaitee;
             };
+
             let RecordMemberLayout::ByteOffset(offset) = awaitee.layout else {
                 return ChainEnd::Broken("an awaited future is not at a byte offset".into());
             };
+
             let Some(inner) = object.checked_add(offset) else {
                 return ChainEnd::Broken(
                     format!("the future at {object:#x} awaits no address").into(),
                 );
             };
+
             (object, ty) = (inner, awaitee.type_ref);
             continue;
         }
+
         match kind {
             Shape::Pointer(target) => {
                 let Some(pointer) = records::pointer(stop, object) else {
@@ -206,12 +226,14 @@ fn follow(
                         format!("the pointer at {object:#x} is unreadable").into(),
                     );
                 };
+
                 (object, ty) = (pointer, target);
             }
             Shape::Pinned { pointer, layout } => {
                 let RecordMemberLayout::ByteOffset(offset) = layout else {
                     return ChainEnd::Broken("a pinned pointer is not at a byte offset".into());
                 };
+
                 (object, ty) = (object.wrapping_add(offset), pointer);
             }
             Shape::Wrapper { future, offset } => {
@@ -235,6 +257,7 @@ fn follow(
             }
         }
     }
+
     ChainEnd::TooDeep
 }
 
@@ -255,12 +278,14 @@ fn held(
             format!("the trait object at {object:#x} is unreadable").into(),
         ));
     };
+
     let held = stop.load_bias().wrapping_unload(table);
     let Some(held) = image.trait_object_type(held) else {
         return Err(ChainEnd::Broken(
             format!("the vtable at {table:#x} is no future's the program describes").into(),
         ));
     };
+
     Ok((pointer, held))
 }
 
@@ -283,12 +308,15 @@ fn held_within(
                 )
                 .into());
             }
+
             active.payload
         } else {
             records::field(image, ty, &[step])?
         };
+
         (object, ty) = (object.wrapping_add(found.offset), found.ty);
     }
+
     Ok((object, ty))
 }
 
@@ -296,17 +324,22 @@ fn held_within(
 enum Shape {
     /// A pointer to the future of the target type.
     Pointer(TypeReference),
+
     /// A pin around a pointer of this type, which lies there.
     Pinned {
         pointer: TypeReference,
         layout: RecordMemberLayout,
     },
+
     /// A trait object: where its data pointer and its vtable lie.
     TraitObject { data: u64, vtable: u64 },
+
     /// A record that holds only a coroutine, of this type at this offset.
     Wrapper { future: TypeReference, offset: u64 },
+
     /// One of [`HOLDERS`], with the way to its future.
     Holder(&'static [&'static str]),
+
     /// Anything else, which is a leaf unless it is a coroutine.
     Other,
 }
@@ -328,6 +361,7 @@ fn representation(
                 ty = *target;
                 continue;
             }
+
             TypeKind::Pointer {
                 target: Some(target),
                 ..
@@ -343,6 +377,7 @@ fn representation(
                         .iter()
                         .find(|member| member.name.as_deref() == Some(name))
                 };
+
                 match (pinned, &members[..], member("pointer"), member("vtable")) {
                     (true, [only], ..) => Shape::Pinned {
                         pointer: only.type_ref,
@@ -378,8 +413,10 @@ fn representation(
             }
             _ => Shape::Other,
         };
+
         return Some((ty, shape));
     }
+
     None
 }
 
@@ -399,6 +436,7 @@ fn is_coroutine(image: &dyn RuntimeImage, mut ty: TypeReference) -> bool {
             None => return false,
         }
     }
+
     false
 }
 
@@ -427,6 +465,7 @@ fn holder(info: &crate::TypeInfo) -> Option<&'static [&'static str]> {
     if identity.language != SourceLanguage::Rust {
         return None;
     }
+
     let path = identity.path.iter().map(AsRef::as_ref);
     HOLDERS.iter().find_map(|&(within, base, steps)| {
         (identity.base.as_ref() == base && path.clone().eq(within.iter().copied())).then_some(steps)
@@ -442,6 +481,7 @@ fn points_to_dyn(image: &dyn RuntimeImage, ty: TypeReference) -> bool {
     else {
         return false;
     };
+
     image
         .type_info(*target)
         .is_some_and(|target| trait_object(&target.name).is_some())

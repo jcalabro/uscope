@@ -13,8 +13,10 @@ pub enum ColorChoice {
     /// Detect color support from the output stream and environment.
     #[default]
     Auto,
+
     /// Emit ANSI color even when output is redirected.
     Always,
+
     /// Never emit ANSI color.
     Never,
 }
@@ -87,12 +89,15 @@ pub fn color_enabled(
             if environment.no_color {
                 return false;
             }
+
             if environment.clicolor_force {
                 return true;
             }
+
             if environment.clicolor == Some(false) || batch || !is_terminal {
                 return false;
             }
+
             environment.clicolor == Some(true)
                 || environment.term.as_deref().is_some_and(term_supports_color)
         }
@@ -171,6 +176,7 @@ pub enum ThemeName {
     /// Bright colors, for dark backgrounds.
     #[default]
     Default,
+
     /// Darker colors, for light backgrounds.
     Light,
 }
@@ -230,11 +236,13 @@ impl Palette {
             ThemeName::Default => Self::DEFAULT,
             ThemeName::Light => Self::LIGHT,
         };
+
         for (index, role) in Role::ALL.iter().enumerate() {
             if let Some(spec) = overrides.get(*role) {
                 palette.0[index] = spec.style;
             }
         }
+
         palette
     }
 
@@ -250,8 +258,10 @@ pub enum PathStyle {
     /// Relative to the project root when inside it, else absolute.
     #[default]
     Relative,
+
     /// As the debug information records them.
     Absolute,
+
     /// The file name alone.
     Name,
 }
@@ -261,10 +271,13 @@ pub enum PathStyle {
 pub struct Look {
     pub palette: Palette,
     pub paths: PathStyle,
+
     /// The project root relative paths are shown from.
     pub root: Option<PathBuf>,
+
     /// Whether output may use symbols such as `●` beyond ASCII.
     pub unicode: bool,
+
     /// Whether `file:line` locations are OSC 8 links to their files.
     pub hyperlinks: bool,
 }
@@ -282,6 +295,7 @@ static DEFAULT_LOOK: Look = Look {
 pub struct Renderer {
     color: bool,
     look: &'static Look,
+
     /// Whether values are drawn as having changed.
     changed: bool,
 }
@@ -322,6 +336,7 @@ impl Renderer {
         } else {
             role
         };
+
         Painted {
             style: self.color.then(|| self.look.palette.style(role)),
             value,
@@ -356,6 +371,7 @@ impl Renderer {
         if !self.look.hyperlinks || !path.is_absolute() {
             return text;
         }
+
         let url = file_url(path);
         format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
     }
@@ -380,8 +396,10 @@ pub fn plain(text: &str) -> String {
                 .map_or(sequence.len(), |end| end + 2),
             _ => 0,
         };
+
         rest = &sequence[length..];
     }
+
     plain.push_str(rest);
     plain
 }
@@ -400,6 +418,7 @@ fn file_url(path: &Path) -> String {
             }
         }
     }
+
     url
 }
 
@@ -454,6 +473,7 @@ impl std::str::FromStr for StyleSpec {
                 })?)),
             };
         }
+
         Ok(Self {
             text: text.to_owned(),
             style,
@@ -478,10 +498,12 @@ fn parse_color(word: &str) -> Result<Color, String> {
     if let Some((_, normal, brighter)) = NAMES.iter().find(|(known, ..)| *known == name) {
         return Ok(Color::Ansi(if bright { *brighter } else { *normal }));
     }
+
     if !bright {
         if let Ok(index) = word.parse::<u8>() {
             return Ok(Color::Ansi256(Ansi256Color(index)));
         }
+
         if let Some(hex) = word.strip_prefix('#')
             && hex.len() == 6
             && let Ok(rgb) = u32::from_str_radix(hex, 16)
@@ -490,6 +512,7 @@ fn parse_color(word: &str) -> Result<Color, String> {
             return Ok(Color::Rgb(RgbColor(red, green, blue)));
         }
     }
+
     Err(format!("unknown color '{word}'"))
 }
 

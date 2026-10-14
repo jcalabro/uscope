@@ -16,6 +16,7 @@ use serde::Deserialize;
 pub struct EntryValue {
     pub name: String,
     pub addresses: std::ops::Range<u64>,
+
     /// The register, as the simulated CPU names it.
     pub register: String,
 }
@@ -60,8 +61,10 @@ pub struct Line {
 pub struct Range {
     pub start: u64,
     pub end: u64,
+
     /// The row's line, or `None` for code no source line describes.
     pub line: Option<Line>,
+
     /// Whether the row is a recommended breakpoint location (`is_stmt`).
     pub statement: bool,
 }
@@ -72,17 +75,23 @@ pub struct Facts {
     /// Whether the variant was compiled with optimization, which inlines,
     /// splits, and turns calls into jumps.
     pub optimized: bool,
+
     /// How many inlined calls the debug information describes.
     pub inlined: u64,
+
     /// File names, without directories.
     pub files: Vec<String>,
+
     /// Functions by start address.
     pub functions: Vec<Function>,
+
     /// Rows that describe code, by start address. Rows at one address
     /// before the last describe no instruction.
     pub ranges: Vec<Range>,
+
     /// Where rows mark the beginning of a function's epilogue.
     pub epilogues: std::collections::BTreeSet<u64>,
+
     /// Where location lists say a variable is exactly what a register held
     /// when its function was entered.
     pub entry_values: Vec<EntryValue>,
@@ -96,6 +105,7 @@ impl Facts {
     pub(super) fn new(variant: VariantFacts) -> Result<Self, String> {
         let mut files = Vec::<String>::new();
         let mut ranges = Vec::<Range>::new();
+
         // The row being collapsed: its address, line, and whether it is a
         // statement.
         let mut open: Option<(u64, Option<Line>, bool)> = None;
@@ -132,7 +142,9 @@ impl Facts {
                     Some(Line { file, line })
                 }
             };
+
             let same_address = open.is_some_and(|(start, ..)| start == *address);
+
             // A row of no source ends what came before it at its address.
             if line.is_some()
                 && same_address
@@ -141,6 +153,7 @@ impl Facts {
             {
                 continue;
             }
+
             let statement = line.is_some()
                 && (*statement
                     || same_address
@@ -150,6 +163,7 @@ impl Facts {
             close(&mut open, *address, &mut ranges);
             open = Some((*address, line, statement));
         }
+
         ranges.sort_by_key(|range| range.start);
         let mut functions = variant
             .functions
@@ -167,6 +181,7 @@ impl Facts {
                 variant.name, variant.inlined
             ));
         }
+
         Ok(Self {
             optimized: variant.optimized,
             inlined: variant.inlined,
@@ -298,6 +313,7 @@ mod tests {
         assert_eq!(facts.line_starts("a.c", 4).collect::<Vec<_>>(), [0x10]);
         assert_eq!(facts.function(0x2f).map(|f| f.name.as_str()), Some("f"));
         assert_eq!(facts.function(0x30), None);
+
         // The row at 0x40 does not describe a function that begins after it.
         assert_eq!(facts.range(0x42).map(|range| range.start), None);
     }

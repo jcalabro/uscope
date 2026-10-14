@@ -28,6 +28,7 @@ use super::{
 pub struct PackageInfo {
     /// The path other code imports the package by, such as `net/http`.
     pub path: Arc<str>,
+
     /// The name the package's code declares, such as `http`.
     pub name: Arc<str>,
 }
@@ -48,6 +49,7 @@ pub(super) fn packaged_names<'a>(
             if function.language == SourceLanguage::Ada {
                 return functions::ada_packaged_name(&function.name);
             }
+
             functions::packaged_name(&function.name, NameSyntax::of(function.language), |path| {
                 paths.contains(path)
             })
@@ -66,11 +68,13 @@ fn qualified(view: PackageView<'_>, plain: &str) -> Vec<FunctionId> {
                 debug_assert!(false, "validation checked {function:?} is packaged");
                 continue;
             };
+
             if package == qualifier || view.package_name(package) == Some(qualifier) {
                 found.push(function);
             }
         }
     }
+
     found
 }
 
@@ -112,6 +116,7 @@ impl ModuleImage {
         if found.is_empty() {
             found = self.packaged_functions(location);
         }
+
         let names = self.packages();
         let identity = |function: &Function<'_>| {
             names.packaged_name(function.id()).map_or_else(
@@ -119,6 +124,7 @@ impl ModuleImage {
                 |(package, local)| Identity::Packaged(package, local),
             )
         };
+
         if let Some(file) = file {
             let declared = found
                 .iter()
@@ -131,6 +137,7 @@ impl ModuleImage {
                 .collect::<BTreeSet<_>>();
             found.retain(|function| declared.contains(&identity(function)));
         }
+
         let packaged = found
             .iter()
             .filter_map(|function| names.packaged_name(function.id()))
@@ -144,9 +151,11 @@ impl ModuleImage {
                     .collect(),
             });
         }
+
         if found.is_empty() {
             return Err(Error::FunctionNotFound(location.to_owned()));
         }
+
         Ok(found)
     }
 
@@ -174,15 +183,18 @@ impl ModuleImage {
         {
             return None;
         }
+
         let plain = functions::plain_location(location)?;
         let names = self.packages();
         let locatable = |function: &FunctionId| {
             self.function(*function)
                 .is_some_and(|function| Self::locatable(function))
         };
+
         if qualified(names, &plain).iter().any(locatable) {
             return None;
         }
+
         names
             .with_local_name(&plain)
             .filter(locatable)
@@ -200,11 +212,13 @@ impl ModuleImage {
         let Some(plain) = functions::plain_location(location) else {
             return Vec::new();
         };
+
         let functions = |ids: &mut dyn Iterator<Item = FunctionId>| {
             ids.filter_map(|function| self.function(function))
                 .filter(|function| Self::locatable(*function))
                 .collect::<Vec<_>>()
         };
+
         let names = self.packages();
         let found = functions(&mut qualified(names, &plain).into_iter());
         if found.is_empty() {

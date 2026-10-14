@@ -59,6 +59,7 @@ fn write_data_breakpoints_stop_when_the_value_changes_and_say_how() {
         next_change(&mut dap, stop.thread, &id),
         "watch_i32 changed from 0 to 1"
     );
+
     // Re-sending the same data breakpoint keeps it and its id.
     let again = dap.request(
         "setDataBreakpoints",
@@ -69,12 +70,14 @@ fn write_data_breakpoints_stop_when_the_value_changes_and_say_how() {
         next_change(&mut dap, stop.thread, &id),
         "watch_i32 changed from 1 to 2"
     );
+
     // Clients present `write` as "Break on Value Change": the store of 2
     // over 2 does not stop.
     assert_eq!(
         next_change(&mut dap, stop.thread, &id),
         "watch_i32 changed from 2 to 42"
     );
+
     // An access data breakpoint stops at the load in the next phase that
     // touches the value.
     let frame =
@@ -94,6 +97,7 @@ fn write_data_breakpoints_stop_when_the_value_changes_and_say_how() {
         next_change(&mut dap, stop.thread, &access_id),
         "watch_i32 was accessed; it is 42"
     );
+
     // Cleared, it no longer stops: the next stop is the next phase's
     // breakpoint, although later phases store to the value again.
     dap.request("setDataBreakpoints", json!({"breakpoints": []}));
@@ -122,6 +126,7 @@ fn watching_a_local_from_the_variables_view_ends_with_its_frame() {
         .expect("locals")["variablesReference"]
         .clone();
     dap.request("variables", json!({"variablesReference": locals}));
+
     // VS Code asks about a variable by its list and name.
     let info = dap.request(
         "dataBreakpointInfo",
@@ -141,6 +146,7 @@ fn watching_a_local_from_the_variables_view_ends_with_its_frame() {
     assert!(next_change(&mut dap, stop.thread, &id).ends_with("to 10"));
     assert!(next_change(&mut dap, stop.thread, &id).ends_with("from 10 to 11"));
     assert!(next_change(&mut dap, stop.thread, &id).ends_with("from 11 to 13"));
+
     // Once the function returns, the watch ends and the client hears so.
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
     dap.success(resumed);
@@ -152,6 +158,7 @@ fn watching_a_local_from_the_variables_view_ends_with_its_frame() {
         dap.output_containing(resumed.mark, "console", "was removed")
             .contains("its frame or block is no longer active")
     );
+
     // The stack slot's next use stops once to say the watch ended.
     let ended = dap.stopped(resumed.mark);
     assert_eq!(ended.reason, "data breakpoint");
@@ -181,12 +188,14 @@ fn values_that_cannot_be_watched_say_why_without_failing() {
         json!({"name": "x", "variablesReference": 999_999}),
     );
     assert_eq!(unknown_row["dataId"], Value::Null);
+
     // An address and size can be watched directly.
     let info = dap.request(
         "dataBreakpointInfo",
         json!({"name": "0x1000", "asAddress": true, "bytes": 4}),
     );
     assert_eq!(info["description"], "4 bytes at 0x1000");
+
     // Watching reads alone is something x86 cannot do.
     let set = dap.request(
         "setDataBreakpoints",
@@ -282,6 +291,7 @@ fn the_store_mode_stops_at_every_store_even_of_the_value_held() {
             (&json!(false), &json!(message))
         );
     }
+
     let id = rows[0]["id"].clone();
     for description in [
         "watch_i32 changed from 0 to 1",
@@ -291,6 +301,7 @@ fn the_store_mode_stops_at_every_store_even_of_the_value_held() {
     ] {
         assert_eq!(next_change(&mut dap, stop.thread, &id), description);
     }
+
     dap.finish();
 }
 
@@ -308,6 +319,7 @@ fn data_breakpoints_the_console_disables_or_removes_stay_so_in_the_client() {
         json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "write"}]}),
     );
     let id = breakpoints(&set)[0]["id"].clone();
+
     // A disabled data breakpoint stays the client's, unverified, through
     // the client's next update of the same set.
     let mark = dap.mark();
@@ -328,6 +340,7 @@ fn data_breakpoints_the_console_disables_or_removes_stay_so_in_the_client() {
             breakpoint["message"].clone(),
         )
     };
+
     assert_eq!(row(&disabled["breakpoint"]), unverified);
     let again = dap.request(
         "setDataBreakpoints",
@@ -347,9 +360,11 @@ fn data_breakpoints_the_console_disables_or_removes_stay_so_in_the_client() {
     );
     let removed = dap.event(mark, "breakpoint", |body| body["reason"] == "removed");
     assert_eq!(removed["breakpoint"]["id"], id);
+
     // The client's next update has nothing left to release.
     let cleared = dap.request("setDataBreakpoints", json!({"breakpoints": []}));
     assert_eq!(cleared, json!({"breakpoints": []}));
+
     // The program's later phases raise signals of their own.
     dap.request("setExceptionBreakpoints", json!({"filters": []}));
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
@@ -483,6 +498,7 @@ fn conditions_and_hit_counts_choose_which_changes_stop_and_are_amended_in_place(
             (&json!(false), &json!(message))
         );
     }
+
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
     dap.success(resumed);
     assert_eq!(
@@ -506,6 +522,7 @@ fn conditions_that_unarm_a_data_breakpoint_free_its_register_for_new_ones() {
         .expect("last_call is in memory")
         .to_owned();
     let address = u64::from_str_radix(reference.trim_start_matches("0x"), 16).expect("hex");
+
     // Each byte takes a register of its own.
     let mut bytes = (0..5)
         .map(|offset| {

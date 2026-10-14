@@ -45,6 +45,7 @@ async fn a_breakpoint_set_before_running_stops_there_and_steps_walk_the_source()
     // Sources come from the debug information before the program runs.
     let files = tab.ok("sources", json!(null)).await;
     let path = source_named(&files, "basic.c");
+
     // A page opens a program that has not run on its main function.
     assert_eq!(files["entry"]["path"], path.as_str());
     assert_eq!(files["entry"]["line"], 9);
@@ -177,6 +178,7 @@ async fn a_logpoint_writes_its_message_instead_of_stopping() {
         )
         .await["id"]
         .clone();
+
     // The message changes in place: the same breakpoint, never a second one.
     tab.ok(
         "editBreakpoint",
@@ -202,6 +204,7 @@ async fn a_logpoint_writes_its_message_instead_of_stopping() {
 async fn what_the_console_types_is_the_programs_input() {
     let web = Web::start("input", &["--run", &fixture("output-streams")]);
     let mut tab = web.control("tab").await;
+
     // The program flushes these lines, then waits to read.
     tab.output_until("stdout", "out 3").await;
     tab.ok("input", json!({"text": "y\n"})).await;
@@ -251,6 +254,7 @@ async fn a_viewer_reads_stacks_and_sources_but_cannot_step_or_break() {
             .expect_err("a viewer's change");
         assert_eq!(kind, "forbidden", "{method}");
     }
+
     // Only files the debug information names can be read.
     let (kind, _) = viewer
         .request("source", json!({"path": "/etc/passwd"}))
@@ -275,6 +279,7 @@ async fn a_viewer_reads_stacks_and_sources_but_cannot_step_or_break() {
                 })
         })
         .await;
+
     // Another person's focus and a link's target are opened by others, so
     // neither may lead off this page: a browser reads `//` and `/\` as a host.
     for url in [
@@ -361,6 +366,7 @@ async fn a_thread_jumps_to_a_line_and_registers_change_through_their_rows() {
     let line = |marker: &str| {
         crate::support::source_line("tests/fixtures/c/jump.c", &format!("jump: {marker}"))
     };
+
     tab.ok(
         "addBreakpoint",
         json!({"location": format!("{path}:{}", line("start"))}),

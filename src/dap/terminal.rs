@@ -38,10 +38,12 @@ pub(super) async fn launch(
                  \"internalConsole\"",
         ));
     }
+
     let program = handle.executable().to_owned();
     let failed = |error: &dyn std::fmt::Display| {
         ErrorBody::shown(format!("failed to launch {}: {error}", program.display()))
     };
+
     let socket = LauncherSocket::bind().map_err(|error| failed(&error))?;
     let adapter = std::env::current_exe().map_err(|error| failed(&error))?;
     let mut args = vec![
@@ -62,6 +64,7 @@ pub(super) async fn launch(
         Some(directory) => directory.clone(),
         None => std::env::current_dir().map_err(|error| failed(&error))?,
     };
+
     let env = launch
         .environment
         .iter()
@@ -87,6 +90,7 @@ pub(super) async fn launch(
             "the client could not run it in a terminal: {message}"
         )));
     }
+
     let (mut launcher, process) = tokio::time::timeout(LAUNCHER_TIMEOUT, socket.accept())
         .await
         .map_err(|_| {
@@ -122,6 +126,7 @@ impl LauncherSocket {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+
             // Creating the directory, never reusing one, keeps another
             // user's directory of the same name from being trusted.
             match DirBuilder::new().mode(0o700).create(&directory) {
@@ -130,10 +135,12 @@ impl LauncherSocket {
                 Err(error) => return Err(error),
             }
         };
+
         let socket = Self {
             listener: UnixListener::bind(directory.join("launcher"))?,
             directory,
         };
+
         Ok(socket)
     }
 

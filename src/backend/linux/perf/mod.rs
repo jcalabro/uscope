@@ -21,8 +21,10 @@ use super::modules::{ModuleMapping, identify_mapped_module};
 pub enum Source {
     /// Every `period` of CPU time the program's threads spend in user code.
     Clock { period: Duration },
+
     /// Every execution of the instruction at `address`.
     Breakpoint { address: u64 },
+
     /// No samples: only what the program maps, and its threads.
     Mappings,
 }
@@ -31,10 +33,13 @@ pub enum Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventOptions {
     pub source: Source,
+
     /// Bytes of stack each sample copies, a multiple of eight.
     pub stack_bytes: u32,
+
     /// Data pages of each ring, a power of two.
     pub ring_pages: usize,
+
     /// Whether the rings also say each time a thread leaves its CPU and
     /// comes back.
     pub switches: bool,
@@ -50,18 +55,24 @@ pub enum OpenError {
         paranoid: String,
         source: std::io::Error,
     },
+
     #[error("opening a perf event on CPU {cpu} failed: {source}")]
     Event { cpu: u32, source: std::io::Error },
+
     #[error("mapping a perf ring failed: {0}")]
     Ring(std::io::Error),
+
     #[error(
         "this user's memory for perf rings is in use: {pages} pages per CPU, the fewest that hold two samples, do not fit"
     )]
     RingBudget { pages: usize },
+
     #[error("reading the online CPUs failed: {0}")]
     Cpus(std::io::Error),
+
     #[error("the process cannot be read: {0}")]
     NoProcess(std::io::Error),
+
     #[error(
         "sampling {threads} threads on {cpus} CPUs takes {} events, more than the budget of {budget}",
         threads * cpus
@@ -78,6 +89,7 @@ pub enum OpenError {
 pub struct Events {
     rings: Vec<sys::Ring>,
     pages: usize,
+
     /// Events that write to the rings of others on their CPUs.
     followers: Vec<OwnedFd>,
 }
@@ -131,6 +143,7 @@ impl Events {
         let mut attr = attr(options, 0);
         let mut opened = std::collections::BTreeSet::new();
         let mut owner = None;
+
         // A thread may start another before its own events open, so the
         // threads are listed again until no new one appears.
         loop {
@@ -142,6 +155,7 @@ impl Events {
             if new.is_empty() {
                 break;
             }
+
             if (opened.len() + new.len()) * cpus.len() > budget {
                 return Err(OpenError::TooManyEvents {
                     threads: opened.len() + new.len(),
@@ -149,6 +163,7 @@ impl Events {
                     budget,
                 });
             }
+
             for tid in new {
                 opened.insert(tid);
                 let thread = i32::try_from(tid).unwrap_or(i32::MAX);
@@ -163,15 +178,19 @@ impl Events {
                                 followers: Vec::new(),
                             });
                         }
+
                         Err(OpenError::Event { source, .. })
                             if source.raw_os_error() == Some(libc::ESRCH) => {}
                         Err(error) => return Err(error),
                     }
+
                     continue;
                 };
+
                 events.follow(&attr, thread, &cpus)?;
             }
         }
+
         let events = owner
             .ok_or_else(|| OpenError::NoProcess(std::io::Error::from_raw_os_error(libc::ESRCH)))?;
         record!(
@@ -192,9 +211,11 @@ impl Events {
                 Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
                 Err(source) => return Err(OpenError::Event { cpu, source }),
             };
+
             sys::set_output(&fd, ring.fd()).map_err(|source| OpenError::Event { cpu, source })?;
             self.followers.push(fd);
         }
+
         Ok(())
     }
 
@@ -263,9 +284,11 @@ fn attr(options: &EventOptions, start: u64) -> sys::Attr {
         sample_max_stack: 127,
         ..sys::Attr::default()
     };
+
     if options.switches {
         attr.flags |= flag::CONTEXT_SWITCH;
     }
+
     match options.source {
         Source::Clock { period } => {
             attr.kind = sys::TYPE_SOFTWARE;
@@ -284,6 +307,7 @@ fn attr(options: &EventOptions, start: u64) -> sys::Attr {
             attr.config = sys::COUNT_SW_DUMMY;
         }
     }
+
     attr
 }
 
@@ -314,6 +338,7 @@ fn rings(
                 if pages == fewest {
                     return Err(OpenError::RingBudget { pages });
                 }
+
                 pages /= 2;
             }
             Err(error) => return Err(OpenError::Ring(error)),
@@ -333,6 +358,7 @@ fn threads(pid: u32) -> std::io::Result<Vec<u32>> {
             threads.push(tid);
         }
     }
+
     threads.sort_unstable();
     Ok(threads)
 }
@@ -374,8 +400,10 @@ fn online_cpus() -> std::io::Result<Vec<u32>> {
             text.parse::<u32>()
                 .map_err(|_| std::io::Error::other(format!("CPU list '{}'", text.trim())))
         };
+
         cpus.extend(parse(first)?..=parse(last)?);
     }
+
     Ok(cpus)
 }
 
@@ -439,11 +467,14 @@ pub fn program_bias(pid: u32) -> Option<crate::LoadBias> {
 pub struct Launched {
     pub pid: u32,
     pub events: Events,
+
     /// Ends with the program's exit status, once it exits.
     pub exit: JoinHandle<std::io::Result<ExitStatus>>,
+
     /// Kills the program it was opened for and no later process given its
     /// identifier.
     pub killer: Killer,
+
     /// Says the program executed; it closes without a word when it failed
     /// to, and `exit` holds why.
     pub executed: std::sync::mpsc::Receiver<()>,
@@ -493,10 +524,12 @@ pub fn launch(
         .spawn(move || {
             // Spawning returns once the program executes, or has failed to.
             let spawned = command.spawn();
+
             // The child holds its own copies until it executes.
             drop((pid_write, go_read));
             let mut child = spawned?;
             let _ = executing.send(());
+
             // A task snapshot traces the child from this process, which any
             // wait for it here would take the stops of: wait for its exit
             // alone, then reap it.
@@ -506,6 +539,7 @@ pub fn launch(
             if let Ok(exit) = &exit {
                 sys::wait_readable(exit);
             }
+
             child.wait()
         })
         .map_err(LaunchError::Spawn)?;
@@ -516,10 +550,13 @@ pub fn launch(
             Ok(Err(error)) => error,
             _ => std::io::Error::other("the program did not start"),
         };
+
         return Err(LaunchError::Spawn(error));
     }
+
     let pid = u32::from_le_bytes(pid);
     record!("perf launch: {pid} waits at its gate");
+
     // Until the gate opens the child can neither execute nor exit, so the
     // descriptor names it and no other process.
     let killer = match super::native::pidfd_open(nix::unistd::Pid::from_raw(
@@ -532,22 +569,26 @@ pub fn launch(
             return Err(LaunchError::Spawn(error.into()));
         }
     };
+
     let events = match Events::open(pid, options) {
         Ok(events) => events,
         Err(error) => {
             record!("perf launch: closing {pid}'s gate unopened: {error}");
+
             // Closing the gate unopened ends the child before it executes.
             drop(go_write);
             let _ = spawner.join();
             return Err(LaunchError::Events(error));
         }
     };
+
     if let Err(why) = held(pid) {
         record!("perf launch: closing {pid}'s gate unopened: {why}");
         drop(go_write);
         let _ = spawner.join();
         return Err(LaunchError::Held(why));
     }
+
     write_all(&go_write, &[1])?;
     record!("perf launch: {pid} opened its gate");
     Ok(Launched {
@@ -563,8 +604,10 @@ pub fn launch(
 pub enum LaunchError {
     #[error("starting the program failed: {0}")]
     Spawn(#[from] std::io::Error),
+
     #[error(transparent)]
     Events(OpenError),
+
     #[error("{0}")]
     Held(String),
 }
@@ -637,6 +680,7 @@ pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, crate::LoadBias)> {
     if !mmap.executable || !mmap.path.starts_with(b"/") {
         return None;
     }
+
     let deleted = mmap.path.strip_suffix(b" (deleted)");
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(deleted.unwrap_or(mmap.path)));
     let pid = mmap.pid;
@@ -646,6 +690,7 @@ pub fn identify(mmap: &decode::Mmap<'_>) -> Option<(PathBuf, crate::LoadBias)> {
         let relative = path.strip_prefix("/").unwrap_or(path);
         candidates.push(PathBuf::from(format!("/proc/{pid}/root")).join(relative));
     }
+
     let end = mmap.start.saturating_add(mmap.length);
     candidates.push(PathBuf::from(format!(
         "/proc/{pid}/map_files/{:x}-{end:x}",
@@ -692,6 +737,7 @@ pub fn mappings(pid: u32) -> std::io::Result<Vec<Mapped>> {
         ) else {
             continue;
         };
+
         let path = fields.next().unwrap_or_default().trim_ascii_start();
         let hex = |text: &[u8]| u64::from_str_radix(std::str::from_utf8(text).ok()?, 16).ok();
         let mut bounds = range.splitn(2, |byte| *byte == b'-');
@@ -702,6 +748,7 @@ pub fn mappings(pid: u32) -> std::io::Result<Vec<Mapped>> {
         ) else {
             continue;
         };
+
         let executable = permissions.get(2) == Some(&b'x');
         let inode = std::str::from_utf8(inode)
             .ok()
@@ -717,6 +764,7 @@ pub fn mappings(pid: u32) -> std::io::Result<Vec<Mapped>> {
             });
         }
     }
+
     Ok(mappings)
 }
 
@@ -771,6 +819,7 @@ pub fn tsc_anchor() -> (u64, u64) {
                 + u64::try_from(time.tv_nsec()).unwrap_or(0)
         })
     };
+
     let mut best = (u64::MAX, 0, 0);
     for _ in 0..4 {
         let before = monotonic();
@@ -781,5 +830,6 @@ pub fn tsc_anchor() -> (u64, u64) {
             best = (width, tsc, before + width / 2);
         }
     }
+
     (best.1, best.2)
 }

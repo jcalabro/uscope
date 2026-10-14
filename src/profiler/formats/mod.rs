@@ -19,10 +19,13 @@ use crate::analysis::Granularity;
 pub enum Format {
     /// uscope's own, which keeps everything.
     Usprof,
+
     /// pprof's `profile.proto`, gzipped.
     Pprof,
+
     /// Folded stacks.
     Folded,
+
     /// Chrome's trace event JSON, written only.
     Chrome,
 }
@@ -67,9 +70,11 @@ impl Format {
         if Profile::is_profile(head) {
             return Some(Self::Usprof);
         }
+
         if pprof::is_gzip(head) {
             return Some(Self::Pprof);
         }
+
         Self::of_path(path).filter(|format| *format != Self::Chrome)
     }
 }
@@ -92,6 +97,7 @@ impl Profile {
         if Self::is_profile(bytes) {
             return Self::from_bytes(bytes);
         }
+
         let capture = match std::str::from_utf8(bytes) {
             Ok(text) if !pprof::is_gzip(bytes) => folded::import(text)
                 .map_err(|error| format!("not a profile uscope reads as folded stacks: {error}")),

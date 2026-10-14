@@ -54,20 +54,25 @@ pub fn dump(event: &SyscallEvent) -> Vec<String> {
     let Some((_, shape)) = event.call.name().and_then(shape) else {
         return Vec::new();
     };
+
     let Outcome::Returned(moved) = event.outcome else {
         return Vec::new();
     };
+
     let Ok(moved) = usize::try_from(moved) else {
         return Vec::new();
     };
+
     if moved == 0 {
         return Vec::new();
     }
+
     let mut lines = Vec::new();
     let Some(capture) = event.capture(1) else {
         lines.push(" * not dumped: the buffer was not captured".to_owned());
         return lines;
     };
+
     match (shape, capture.state) {
         (Shape::Message, _) => {
             lines.push(" * not dumped: uscope captures no message's buffers".to_owned());
@@ -85,16 +90,19 @@ pub fn dump(event: &SyscallEvent) -> Vec<String> {
                 if left == 0 {
                     break;
                 }
+
                 let length = usize::try_from(element.len).unwrap_or(usize::MAX).min(left);
                 left -= length;
                 lines.push(format!(" * {length} bytes in buffer {index}"));
                 buffer(&mut lines, element.bytes, length);
             }
+
             if left > 0 {
                 lines.push(format!(" * {left} more bytes in buffers not captured"));
             }
         }
     }
+
     lines
 }
 
@@ -111,10 +119,12 @@ fn buffer(lines: &mut Vec<String>, bytes: &[u8], length: usize) {
                 }
                 None => line.push_str("   "),
             }
+
             if column == 7 {
                 line.push(' ');
             }
         }
+
         line.push(' ');
         for column in 0..16 {
             line.push(match chunk.get(column) {
@@ -123,9 +133,11 @@ fn buffer(lines: &mut Vec<String>, bytes: &[u8], length: usize) {
                 None => ' ',
             });
         }
+
         line.push_str(" |");
         lines.push(line);
     }
+
     if shown.len() < length {
         lines.push(format!(
             " * {} more bytes not captured",

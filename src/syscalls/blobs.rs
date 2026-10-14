@@ -35,9 +35,11 @@ pub fn iovecs(mut blob: &[u8]) -> Vec<Iovec<'_>> {
         let Some(bytes) = blob.get(20..20 + count) else {
             break;
         };
+
         elements.push(Iovec { base, len, bytes });
         blob = &blob[20 + count..];
     }
+
     elements
 }
 
@@ -61,16 +63,20 @@ pub fn strings(blob: &[u8]) -> (Option<u32>, Vec<&[u8]>) {
     let Some(header) = blob.get(..4) else {
         return (None, Vec::new());
     };
+
     let count = u32::from_le_bytes(header.try_into().unwrap_or_default());
     let rest = &blob[4..];
     if rest.is_empty() {
         return ((count != u32::MAX).then_some(count), Vec::new());
     }
+
     let mut elements: Vec<&[u8]> = rest.split(|&byte| byte == 0).collect();
+
     // The terminator of the last element leaves an empty tail.
     if rest.last() == Some(&0) {
         elements.pop();
     }
+
     ((count != u32::MAX).then_some(count), elements)
 }
 
@@ -96,6 +102,7 @@ mod tests {
         push_string(&mut blob, b"-l\0junk");
         assert_eq!(strings(&blob), (Some(3), vec![&b"ls"[..], &b"-l"[..]]));
         assert_eq!(strings(&[]), (None, Vec::new()));
+
         // An empty array, as an empty environment, holds no elements.
         let mut blob = Vec::new();
         start_strings(&mut blob, Some(0));

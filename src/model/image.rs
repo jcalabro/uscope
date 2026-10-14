@@ -31,50 +31,67 @@ pub struct ModuleMetadata {
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
     pub symbol_sources: SymbolTableSources,
+
     /// The GOT slots the loader fills with functions' addresses.
     pub got_slots: Vec<GotSlot>,
     pub types: Arc<[TypeNode]>,
+
     /// Where variables are: expressions and lists of them, with the units
     /// they were read from.
     pub locations: crate::image::locations::LocationsBuilder,
+
     /// The data objects and the functions whose frames show them.
     pub variables: crate::image::variables::Variables,
+
     /// The calls the functions make.
     pub calls: crate::image::calls::Calls,
+
     /// What reading values of some types takes beyond their layout.
     pub type_facts: crate::image::type_facts::TypeFacts,
+
     /// Source files by resolved path.
     pub files: crate::image::lines::Files,
+
     /// Every line-program row and the code each line describes.
     pub lines: crate::image::lines::LineTables,
+
     /// The call-frame sections and Go's table, as unwinding reads them.
     pub unwind: Option<crate::image::unwind::Unwind>,
     pub sections: Vec<SectionInfo>,
+
     /// Where each out-of-line code instance that runs a coroutine goes for
     /// each state, and which variables of async bodies hold their values
     /// on resuming.
     pub resumes: crate::image::resumes::Resumes,
+
     /// Whether each thread gets its own copy of a block of the module's
     /// storage.
     pub thread_local_storage: bool,
+
     /// Integer constants the debug information declares by name, such as a
     /// Go package's `const`s, Rust trait objects' vtables, and the
     /// compilers and versions that produced the debug information, as each
     /// unit names its producer.
     pub declarations: crate::image::declarations::Declarations,
+
     /// The packages whose units the image has.
     pub packages: Vec<PackageInfo>,
+
     /// The separate debug file found for the image, whether it was used or
     /// could not be.
     pub debug_file: Option<crate::DebugFile>,
+
     /// What became of the image's DWARF.
     pub debug_information: crate::DebugInformation,
+
     /// Why the DWARF's locals and parameters were left out, when they
     /// were.
     pub locals_left_out: Option<Arc<str>>,
+
     /// The bytes of the image's `.debug_uscope_views` section, which holds
     /// views for its own types; empty when it has none.
     pub embedded_views: Vec<u8>,
+
     /// Where each thread's copy of each of the image's thread-local
     /// variables is, by name, or why that is unknown.
     pub thread_locals: BTreeMap<Arc<str>, std::result::Result<ThreadLocal, Arc<str>>>,
@@ -87,6 +104,7 @@ pub enum ThreadLocal {
     /// This far from it, fixed when the program was linked, as an
     /// executable's own thread-locals are.
     Offset(i64),
+
     /// As far from it as the word at this address says, which the loader
     /// writes as it loads the image, as a library's code reads its
     /// thread-locals.
@@ -158,6 +176,7 @@ impl<T: Copy + Ord> RangeIndex<T> {
                 if entry.prefix_max_end <= address {
                     return None;
                 }
+
                 if address < entry.end {
                     return Some(entry.value);
                 }
@@ -184,8 +203,10 @@ fn grouped_index<K: Ord, V: Ord>(
         while let Some((_, value)) = entries.next_if(|(next, _)| next.cmp(&key).is_eq()) {
             values.push(value);
         }
+
         grouped.push((key, Arc::from(values)));
     }
+
     grouped.into_iter().collect()
 }
 
@@ -199,6 +220,7 @@ fn global_selectors(image: &ModuleImage) -> Vec<(Arc<str>, GlobalVariableId)> {
         if let Some(linkage_name) = &global.linkage_name {
             selectors.push((Arc::clone(linkage_name), global.id));
         }
+
         if let Some(declaration) = &global.declaration
             && let Some(source) = image.source_file(declaration.file)
         {
@@ -216,6 +238,7 @@ fn global_selectors(image: &ModuleImage) -> Vec<(Arc<str>, GlobalVariableId)> {
             }
         }
     }
+
     selectors
 }
 
@@ -287,6 +310,7 @@ fn seal_image(
     let functions = std::mem::take(&mut metadata.functions);
     let code_instances = std::mem::take(&mut metadata.code_instances);
     let metadata = &metadata;
+
     // Strings are pooled in the order the tables are encoded, which names
     // each, so the tables that pool strings are encoded in turn on this
     // thread while those that pool none are built beside them. Tables are
@@ -345,6 +369,7 @@ fn seal_image(
     if let Some(unwind) = &metadata.unwind {
         crate::image::unwind::add_to(&mut builder, &mut strings, unwind)?;
     }
+
     builder
         .bytes(
             crate::image::TableKind::EmbeddedViews,
@@ -433,6 +458,7 @@ fn type_classes(types: &[TypeNode]) -> std::result::Result<Vec<u32>, SealError> 
         TypeNode::Resolved(info) => Some(info),
         TypeNode::Malformed { .. } => None,
     });
+
     // There are no more classes than types, so each numbers below them.
     u32::try_from(keys.len()).map_err(|_| crate::image::types::TooMany)?;
     let mut classes = foldhash::HashMap::default();
@@ -456,6 +482,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "function IDs are dense and ordered"
         );
     }
+
     for (index, instance) in metadata.code_instances.iter().enumerate() {
         assert_eq!(
             instance.id.index(),
@@ -463,6 +490,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "code instance IDs are dense and ordered"
         );
     }
+
     for (index, symbol) in metadata.symbols.iter().enumerate() {
         assert_eq!(symbol.id.index(), index, "symbol IDs are dense and ordered");
         if let Some(extent) = symbol.extent {
@@ -475,6 +503,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
                 "symbol extents are non-empty code ranges beginning at the symbol"
             );
         }
+
         if let Some(storage) = symbol.storage {
             assert!(
                 symbol.kind == SymbolKind::Data
@@ -485,6 +514,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             );
         }
     }
+
     for (index, section) in metadata.sections.iter().enumerate() {
         assert_eq!(
             section.id.index(),
@@ -496,6 +526,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "sections are non-empty"
         );
     }
+
     for (index, node) in metadata.types.iter().enumerate() {
         assert_eq!(
             node.reference().id.get() as usize,
@@ -524,29 +555,38 @@ pub struct ModuleImage {
     address_range: AddressRange<ImageAddress>,
     got_slots: Arc<[GotSlot]>,
     sections: Arc<[SectionInfo]>,
+
     /// The type graph, decoded as it is asked for.
     types: Arc<crate::image::types::TypeTable>,
     source_files: Arc<[SourceFile]>,
+
     /// Lines, files, symbols, sections, functions, and code, as tables.
     tables: Arc<crate::image::Image>,
+
     /// Symbols by the last part of each name they answer to, built on the
     /// first search for one, since it demangles every symbol.
     symbols_by_last_part: std::sync::OnceLock<HashMap<Box<str>, Vec<SymbolId>>>,
+
     /// The functions that run each coroutine type, by the type's identity,
     /// built on the first search for one.
     coroutine_functions: std::sync::OnceLock<HashMap<u32, Vec<FunctionId>>>,
+
     /// Where each out-of-line instance of a function that begins a panic
     /// begins, found on the first search.
     panic_entries: std::sync::OnceLock<Arc<[ImageAddress]>>,
+
     /// Globals by every selector naming one, built on the first search by
     /// one.
     globals_by_selector: std::sync::OnceLock<BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>>,
+
     /// The dispatches and leads of every decoded coroutine, which no
     /// breakpoint or step stops in.
     resume_code: RangeIndex<CodeInstanceId>,
+
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section, read on first use.
     views: std::sync::OnceLock<Arc<crate::view::ViewSet>>,
+
     /// The separate debug file found for the image.
     debug_file: Option<crate::DebugFile>,
 }
@@ -654,6 +694,7 @@ impl ModuleImage {
             if bytes.is_empty() {
                 return crate::view::ViewSet::empty();
             }
+
             // Views are named after the module's file.
             let module = self
                 .path
@@ -669,6 +710,7 @@ impl ModuleImage {
         if reference.image != self.id {
             return None;
         }
+
         self.types.view().class(reference.id)
     }
 
@@ -964,6 +1006,7 @@ impl ModuleImage {
                 description,
             })
         };
+
         Some(GlobalVariableInfo {
             id: GlobalVariableId::new(u32::try_from(index).ok()?),
             name: entry.object.name().into(),
@@ -1008,6 +1051,7 @@ impl ModuleImage {
         if reference.image != self.id {
             return None;
         }
+
         self.types.node(reference.id)
     }
 
@@ -1025,12 +1069,14 @@ impl ModuleImage {
         name: &str,
     ) -> Vec<(String, crate::IntegerValue, TypeReference)> {
         let view = self.types.view();
+
         // An enumerator's own name is the whole name or what follows a
         // `::` in it.
         let mut candidates = view.with_enumerator(name).collect::<Vec<_>>();
         for (separator, _) in name.match_indices("::") {
             candidates.extend(view.with_enumerator(&name[separator + 2..]));
         }
+
         candidates.sort_unstable();
         candidates.dedup();
         let mut found = Vec::new();
@@ -1038,9 +1084,11 @@ impl ModuleImage {
             let Some(info) = self.type_info(TypeReference { image: self.id, id }) else {
                 continue;
             };
+
             let crate::TypeKind::Enumeration { enumerators, .. } = &info.kind else {
                 continue;
             };
+
             for enumerator in enumerators.iter() {
                 let qualified = format!("{}::{}", info.name, enumerator.name);
                 if enumerator.name.as_ref() == name || qualified == name {
@@ -1048,6 +1096,7 @@ impl ModuleImage {
                 }
             }
         }
+
         found
     }
 
@@ -1118,6 +1167,7 @@ impl ModuleImage {
                     index.entry(class).or_default().push(function.id());
                 }
             }
+
             index
         });
         class(ty)
@@ -1235,6 +1285,7 @@ impl ModuleImage {
                     .collect(),
             });
         };
+
         self.global(*id)
             .ok_or_else(|| Error::internal("the global index names no catalog entry"))
     }
@@ -1428,9 +1479,11 @@ impl ModuleImage {
         if next == line {
             return Some(line);
         }
+
         if self.keeps_line_breakpoints(file) {
             return None;
         }
+
         let lines = self.lines();
         let before = lines.statements(file, 1..=line.get());
         let encloses_request = |instance: CodeInstance<'_>| {
@@ -1438,6 +1491,7 @@ impl ModuleImage {
                 .iter()
                 .any(|key| instance.contains(lines.address(key.row.get())))
         };
+
         self.statement_addresses(file, next)
             .flat_map(|address| self.instances_containing(address))
             .filter(|instance| instance.is_out_of_line())
@@ -1513,6 +1567,7 @@ impl ModuleImage {
                     }
                 }
             }
+
             index
         });
         let mut candidates = [name, crate::demangle::last_part(name)]
@@ -1553,6 +1608,7 @@ impl ModuleImage {
         if matches.next().is_some() {
             return Err(Error::DuplicateSymbol(name.to_owned()));
         }
+
         Ok(symbol)
     }
 
@@ -1565,6 +1621,7 @@ impl ModuleImage {
         if let Some(function) = physical.and_then(|instance| self.function(instance.function())) {
             return function.role();
         }
+
         self.symbolize(address)
             .and_then(|location| self.symbol(location.symbol))
             .map_or(CodeRole::Ordinary, Symbol::role)
@@ -1579,6 +1636,7 @@ impl ModuleImage {
             InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
             InlineFrameLookup::None | InlineFrameLookup::Ambiguous(_) => None,
         };
+
         let function_id = logical_instance
             .and_then(|instance| self.code_instance(instance))
             .or(physical)
@@ -1654,6 +1712,7 @@ impl ModuleImage {
             if !current.contains(address) {
                 return None;
             }
+
             match current.kind() {
                 CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id()),
                 CodeInstanceKind::Inline { call_site: None } => return None,
@@ -1661,9 +1720,11 @@ impl ModuleImage {
                     if Some(current.id()) != physical {
                         return None;
                     }
+
                     break;
                 }
             }
+
             instance = current.parent()?;
         }
 
@@ -1740,6 +1801,7 @@ fn instruction_starts(
             .and_modify(|current: &mut crate::BoundaryEvidence| *current = (*current).min(evidence))
             .or_insert(evidence);
     }
+
     starts.into_iter().collect()
 }
 
@@ -1756,6 +1818,7 @@ fn path_matches(candidate: &Path, requested: &Path) -> bool {
     if requested.is_absolute() {
         return candidate == requested;
     }
+
     let mut candidate = significant(candidate);
     let mut requested = significant(requested).peekable();
     requested.peek().is_some() && requested.all(|component| candidate.next() == Some(component))
@@ -1792,6 +1855,7 @@ mod tests {
         for path in paths {
             files.intern(PathBuf::from(path));
         }
+
         files
     }
 
@@ -1837,6 +1901,7 @@ mod tests {
             }),
             identity: None,
         };
+
         let object = |file, type_info| DataObject {
             debug_info_offset: None,
             kind: crate::VariableKind::Global,
@@ -1859,12 +1924,14 @@ mod tests {
             frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
             malformed: None,
         };
+
         let global = |object, qualified_name: &str, linkage_name: &str| Global {
             object,
             qualified_name: qualified_name.into(),
             linkage_name: Some(linkage_name.into()),
             external: object == 1,
         };
+
         let image = test_image(
             1,
             ModuleMetadata {
@@ -1926,6 +1993,7 @@ mod tests {
         else {
             panic!("the basename is not ambiguous");
         };
+
         assert_eq!(selector, "shared");
         assert_eq!(
             candidates
@@ -1946,6 +2014,7 @@ mod tests {
             image,
             id: TypeId::new(id),
         };
+
         let image = test_image(
             1,
             ModuleMetadata {
@@ -2075,6 +2144,7 @@ mod tests {
             storage: None,
             role: CodeRole::Ordinary,
         };
+
         let section = |id, name: &str, start, end, executable| SectionInfo {
             id: SectionId::new(id),
             name: name.into(),
@@ -2085,6 +2155,7 @@ mod tests {
             executable,
             writable: !executable,
         };
+
         let image = test_image(
             0x100,
             ModuleMetadata {
@@ -2129,6 +2200,7 @@ mod tests {
                 .map(|(address, evidence)| (address.get(), evidence))
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(
             starts(0, 0x100),
             [
@@ -2156,10 +2228,12 @@ mod tests {
             sequence: LineSequenceId::new(sequence),
             ordinal,
         };
+
         let entry = |address, provenance| BreakpointEntry {
             address: ImageAddress::new(address),
             provenance,
         };
+
         let mut physical = instance(0, 0, None, CodeInstanceKind::OutOfLine, &[(0x10, 0x30)]);
         physical.breakpoint_entry = Some(entry(0x10, EntryProvenance::Explicit));
         let mut inline = instance(
@@ -2223,6 +2297,7 @@ mod tests {
                 .recommended_entries_for_instance(CodeInstanceId::new(id))
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(
             entries(0),
             [
@@ -2230,6 +2305,7 @@ mod tests {
                 entry(0x18, EntryProvenance::Statement)
             ]
         );
+
         // Inline instances have no prologue of their own.
         assert_eq!(entries(1), [entry(0x14, EntryProvenance::RangeStart)]);
         assert!(
@@ -2275,6 +2351,7 @@ mod tests {
         else {
             panic!("nested inline chain was not unique")
         };
+
         assert_eq!(
             nested.instances.as_ref(),
             &[CodeInstanceId::new(1), CodeInstanceId::new(2)]
@@ -2321,6 +2398,7 @@ mod tests {
         else {
             panic!("overlapping siblings were not reported as ambiguous")
         };
+
         let mut chains = chains
             .iter()
             .map(|chain| chain.instances.as_ref())
@@ -2434,6 +2512,7 @@ mod tests {
         assert_eq!(symbolized(&image, 0x160), Some(("outer", 0x60)));
         assert_eq!(symbolized(&image, 0x185), Some(("outer", 0x85)));
         assert_eq!(symbolized(&image, 0x1ff), Some(("outer", 0xff)));
+
         // No nearest preceding symbol is guessed for unnamed code.
         assert_eq!(symbolized(&image, 0x200), None);
         assert_eq!(symbolized(&image, 0x240), None);
@@ -2530,6 +2609,7 @@ mod tests {
                 }),
             )
         };
+
         let text = |offset| Some((".text".to_owned(), offset));
         let data = |offset| Some((".data".to_owned(), offset));
         let symbol = |name: &str, kind, offset, provenance| {
@@ -2549,6 +2629,7 @@ mod tests {
             described(0x818),
             (data(0x18), symbol("outer", Data, 0x18, Declared))
         );
+
         // Sized storage wins over an unsized label at the same address.
         assert_eq!(
             described(0x820),

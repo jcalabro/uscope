@@ -39,6 +39,7 @@ pub trait DispatchImage {
     /// The code bytes at `address`, up to `length`; fewer at the end of the
     /// code, and none outside it.
     fn code(&self, address: u64, length: usize) -> Option<&[u8]>;
+
     /// `length` bytes of read-only data at `address`, such as a jump
     /// table's.
     fn data(&self, address: u64, length: usize) -> Option<&[u8]>;
@@ -57,11 +58,13 @@ pub fn decode(
     if states.is_empty() {
         return Err("the coroutine has no states".into());
     }
+
     let contains = |address: u64| {
         ranges
             .iter()
             .any(|range| range.contains(ImageAddress::new(address)))
     };
+
     let mut dispatch = BTreeSet::new();
     let mut points = Vec::with_capacity(states.len());
     for &value in states {
@@ -78,6 +81,7 @@ pub fn decode(
             .into(),
         });
     }
+
     Ok(ResumePoints {
         dispatch: ranges_of(dispatch),
         points: points.into(),
@@ -115,10 +119,12 @@ pub fn flood_all(
         if !within(ip) || visited.contains(&ip) {
             continue;
         }
+
         if visited.len() >= MAX_FLOOD {
             complete = false;
             continue;
         }
+
         visited.insert(ip);
         let Some(bytes) = image
             .code(ip, MAX_INSTRUCTION)
@@ -127,11 +133,13 @@ pub fn flood_all(
             complete = false;
             continue;
         };
+
         let instruction = Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE).decode();
         if instruction.code() == Code::INVALID {
             complete = false;
             continue;
         }
+
         extents.insert((ip, instruction.next_ip()));
         match instruction.flow_control() {
             FlowControl::Next | FlowControl::Call | FlowControl::IndirectCall => {
@@ -148,6 +156,7 @@ pub fn flood_all(
             _ => {}
         }
     }
+
     (ranges_of(extents), complete)
 }
 
@@ -165,9 +174,11 @@ pub fn first_beyond(
         if !within(ip) {
             return Some(ImageAddress::new(ip));
         }
+
         if !visited.insert(ip) {
             return None;
         }
+
         let bytes = image
             .code(ip, MAX_INSTRUCTION)
             .filter(|bytes| !bytes.is_empty())?;
@@ -175,6 +186,7 @@ pub fn first_beyond(
         if instruction.code() == Code::INVALID {
             return None;
         }
+
         ip = match instruction.flow_control() {
             FlowControl::Next
             | FlowControl::Call
@@ -186,6 +198,7 @@ pub fn first_beyond(
             _ => return None,
         };
     }
+
     None
 }
 
@@ -203,6 +216,7 @@ fn ranges_of(extents: BTreeSet<(u64, u64)>) -> Arc<[AddressRange<ImageAddress>]>
             }),
         }
     }
+
     ranges.into()
 }
 
@@ -211,8 +225,10 @@ fn ranges_of(extents: BTreeSet<(u64, u64)>) -> Arc<[AddressRange<ImageAddress>]>
 enum Value {
     Unknown,
     Number(u64),
+
     /// An address this far into the coroutine.
     Object(u64),
+
     /// An address this far from the stack pointer at the function's entry.
     Stack(i64),
 }
@@ -261,10 +277,13 @@ struct Run<'a> {
 enum Next {
     /// To the next instruction.
     Fall,
+
     /// To an address, having moved on a value the state number decided.
     Decided(u64),
+
     /// To an address, on values the state number did not decide.
     Jump(u64),
+
     /// The model cannot follow this instruction, for the reason.
     Stop(&'static str),
 }
@@ -278,12 +297,14 @@ impl<'a> Run<'a> {
                 state: false,
             };
         }
+
         if let Some(rsp) = index(Register::RSP) {
             registers[rsp] = Cell {
                 value: Value::Stack(0),
                 state: false,
             };
         }
+
         Self {
             image,
             member,
@@ -304,6 +325,7 @@ impl<'a> Run<'a> {
             if !contains(ip) {
                 return Err(format!("the dispatch leaves the function at {ip:#x}").into());
             }
+
             let instruction = self.decode(ip)?;
             let next = self.step(&instruction);
             let after = instruction.next_ip();
@@ -321,6 +343,7 @@ impl<'a> Run<'a> {
                     if landing.is_none() {
                         executed.push((ip, after));
                     }
+
                     if !contains(target) {
                         return Err(format!(
                             "state {} leaves the function for {target:#x}",
@@ -328,6 +351,7 @@ impl<'a> Run<'a> {
                         )
                         .into());
                     }
+
                     landing = Some(target);
                     ip = target;
                 }
@@ -342,6 +366,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
+
         landing.map_or_else(
             || Err(format!("no dispatch on the state within {MAX_STEPS} instructions").into()),
             |at| Ok((at, ip, executed)),
@@ -359,6 +384,7 @@ impl<'a> Run<'a> {
         if instruction.code() == Code::INVALID {
             return Err(format!("no instruction at {ip:#x}").into());
         }
+
         Ok(instruction)
     }
 
@@ -374,6 +400,7 @@ impl<'a> Run<'a> {
                 let Some(stack) = self.adjust_stack(-8) else {
                     return Next::Stop("the stack pointer is unknown");
                 };
+
                 self.store_stack(stack, value);
                 Next::Fall
             }
@@ -381,6 +408,7 @@ impl<'a> Run<'a> {
                 let Value::Stack(at) = self.register(Register::RSP).value else {
                     return Next::Stop("the stack pointer is unknown");
                 };
+
                 let value = self.load_stack(at);
                 self.adjust_stack(8);
                 self.write(instruction, 0, value)
@@ -393,6 +421,7 @@ impl<'a> Run<'a> {
                 } else {
                     self.operand(instruction, 1)
                 };
+
                 let source = match (instruction.mnemonic(), source.value) {
                     // A narrower register's value, extended.
                     (Mnemonic::Movzx, Value::Number(number))
@@ -406,6 +435,7 @@ impl<'a> Run<'a> {
                     }
                     _ => source,
                 };
+
                 self.write(instruction, 0, source)
             }
             Mnemonic::Lea => {
@@ -426,11 +456,13 @@ impl<'a> Run<'a> {
                     (Mnemonic::Add, Value::Number(a), Value::Number(b)) => {
                         Value::Number(a.wrapping_add(b) & mask(bits))
                     }
+
                     (Mnemonic::Add, Value::Stack(a), Value::Number(b))
                         if instruction.op0_register() == Register::RSP =>
                     {
                         Value::Stack(a.wrapping_add(b.cast_signed()))
                     }
+
                     (Mnemonic::Sub, Value::Stack(a), Value::Number(b))
                         if instruction.op0_register() == Register::RSP =>
                     {
@@ -447,6 +479,7 @@ impl<'a> Run<'a> {
                     (Mnemonic::Xor, Value::Number(a), Value::Number(b)) => Value::Number(a ^ b),
                     _ => Value::Unknown,
                 };
+
                 self.flags = match value {
                     Value::Number(result) => Some(arithmetic_flags(
                         instruction.mnemonic(),
@@ -458,6 +491,7 @@ impl<'a> Run<'a> {
                     )),
                     _ => None,
                 };
+
                 self.write(instruction, 0, Cell { value, state })
             }
             Mnemonic::Cmp | Mnemonic::Test => {
@@ -482,6 +516,7 @@ impl<'a> Run<'a> {
                     }
                     _ => None,
                 };
+
                 Next::Fall
             }
             _ => self.control(instruction),
@@ -500,14 +535,17 @@ impl<'a> Run<'a> {
                 let Some(flags) = self.flags else {
                     return Next::Stop("a branch on flags the model does not know");
                 };
+
                 let Some(taken) = condition(instruction.condition_code(), flags) else {
                     return Next::Stop("a branch on a condition the model does not know");
                 };
+
                 let target = if taken {
                     instruction.near_branch_target()
                 } else {
                     instruction.next_ip()
                 };
+
                 if flags.state {
                     Next::Decided(target)
                 } else {
@@ -520,6 +558,7 @@ impl<'a> Run<'a> {
                 } else {
                     return Next::Stop("an indirect branch through memory");
                 };
+
                 match target {
                     Cell {
                         value: Value::Number(address),
@@ -547,6 +586,7 @@ impl<'a> Run<'a> {
         let Value::Stack(at) = slot.value else {
             return None;
         };
+
         let moved = at.checked_add(by)?;
         slot.value = Value::Stack(moved);
         Some(moved)
@@ -583,6 +623,7 @@ impl<'a> Run<'a> {
                     },
                 }
             }
+
             OpKind::Immediate8
             | OpKind::Immediate16
             | OpKind::Immediate32
@@ -608,6 +649,7 @@ impl<'a> Run<'a> {
                 state: false,
             };
         }
+
         let base = match instruction.memory_base() {
             Register::None => Cell {
                 value: Value::Number(0),
@@ -615,6 +657,7 @@ impl<'a> Run<'a> {
             },
             register => self.register(register),
         };
+
         let index = match instruction.memory_index() {
             Register::None => Cell {
                 value: Value::Number(0),
@@ -622,6 +665,7 @@ impl<'a> Run<'a> {
             },
             register => self.register(register),
         };
+
         let scale = u64::from(instruction.memory_index_scale());
         let state = base.state || index.state;
         let value = match (base.value, index.value) {
@@ -637,6 +681,7 @@ impl<'a> Run<'a> {
             }
             _ => Value::Unknown,
         };
+
         Cell { value, state }
     }
 
@@ -660,12 +705,14 @@ impl<'a> Run<'a> {
                 let Some(bytes) = self.image.data(at, size) else {
                     return UNKNOWN;
                 };
+
                 let mut word = [0_u8; 8];
                 word[..size].copy_from_slice(bytes);
                 let mut number = u64::from_le_bytes(word);
                 if sign && size < 8 && number >> (size * 8 - 1) & 1 == 1 {
                     number |= !mask(size * 8);
                 }
+
                 Cell {
                     value: Value::Number(number),
                     state: address.state,
@@ -684,6 +731,7 @@ impl<'a> Run<'a> {
                 let Some(slot) = index(register) else {
                     return Next::Stop("a write to a register the model does not know");
                 };
+
                 self.registers[slot] = match (register.size(), cell.value) {
                     (8, _) => cell,
                     (4, Value::Number(number)) => Cell {
@@ -695,6 +743,7 @@ impl<'a> Run<'a> {
                         state: cell.state,
                     },
                 };
+
                 Next::Fall
             }
             OpKind::Memory => match self.address(instruction).value {
@@ -711,6 +760,7 @@ impl<'a> Run<'a> {
                             state: cell.state,
                         }
                     };
+
                     self.store_stack(at, stored);
                     Next::Fall
                 }
@@ -817,20 +867,24 @@ pub fn fuzz(data: &[u8]) {
     /// Code at 0x1000 from the input's tail, and data at 0x2000 from its
     /// head.
     struct Bytes<'a>(&'a [u8], &'a [u8]);
+
     impl DispatchImage for Bytes<'_> {
         fn code(&self, address: u64, length: usize) -> Option<&[u8]> {
             let at = usize::try_from(address.checked_sub(0x1000)?).ok()?;
             let bytes = self.1.get(at..)?;
             Some(&bytes[..bytes.len().min(length)])
         }
+
         fn data(&self, address: u64, length: usize) -> Option<&[u8]> {
             let at = usize::try_from(address.checked_sub(0x2000)?).ok()?;
             self.0.get(at..at.checked_add(length)?)
         }
     }
+
     let Some((&header, rest)) = data.split_first() else {
         return;
     };
+
     let split = rest.len() / 2;
     let image = Bytes(&rest[..split], &rest[split..]);
     let code = rest.len() - split;
@@ -842,6 +896,7 @@ pub fn fuzz(data: &[u8]) {
         offset: u64::from(header & 0x3f),
         size: 1,
     };
+
     let states = (0..u64::from(header >> 6) + 3).collect::<Vec<_>>();
     if let Ok(points) = decode(&image, &ranges, ImageAddress::new(0x1000), state, &states) {
         assert_eq!(points.points.len(), states.len());
@@ -855,6 +910,7 @@ pub fn fuzz(data: &[u8]) {
                 "{point:?}"
             );
         }
+
         for range in points.dispatch.iter() {
             assert!(
                 range.start < range.end && range.end <= ranges[0].end,

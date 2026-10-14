@@ -17,6 +17,7 @@ use crate::support::ExternalProcess;
 
 /// Fields whose values the adapter assigns and the client echoes.
 const ID_FIELDS: [&str; 3] = ["threadId", "frameId", "variablesReference"];
+
 /// Events a client waits for before its next requests.
 const AWAITED_EVENTS: [&str; 4] = ["initialized", "stopped", "exited", "terminated"];
 
@@ -34,6 +35,7 @@ impl Ids {
                         self.learn(value, other, key, in_list);
                     }
                 }
+
                 let identifies = matches!(in_list, "stackFrames" | "threads");
                 if let (true, Some(recorded), Some(live)) = (
                     identifies,
@@ -110,6 +112,7 @@ fn await_live(
             target.process.release();
             target.released = true;
         }
+
         let live = dap.event(crate::dap::Mark::START, event, |_| true);
         ids.learn(&recorded["body"], &live, "", "");
     }
@@ -141,6 +144,7 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
             &format!("\"pid\":\"{}\"", target.process.process_id()),
         );
     }
+
     let messages = text
         .lines()
         .filter_map(|line| {
@@ -149,6 +153,7 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
             Some((direction == "<-", message))
         })
         .collect::<Vec<_>>();
+
     // The adapter messages a client waits for: responses, and the events
     // that change what it may ask.
     let awaited = |message: &Value| {
@@ -161,6 +166,7 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
     if let Some(configuration) = children {
         dap.follow_children(configuration);
     }
+
     let mut ids = Ids::default();
     let mut sent = HashMap::new();
     let mut seen = 0;
@@ -169,6 +175,7 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
         if !from_client || message["type"] != "request" {
             continue;
         }
+
         while seen < index {
             let (from_client, earlier) = &messages[seen];
             seen += 1;
@@ -176,22 +183,26 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
                 await_live(&mut dap, &sent, earlier, &mut ids, &mut target);
             }
         }
+
         let mut message = message.clone();
         ids.rewrite(&mut message);
         let seq = message["seq"].as_u64().expect("seq");
         let command = message["command"].as_str().expect("command");
         sent.insert(seq, dap.send_raw(seq, command, &message.to_string()));
+
         // Anything a client sends after it disconnects reaches no adapter.
         if command == "disconnect" {
             seen = index;
             break;
         }
     }
+
     for (from_client, earlier) in &messages[seen..] {
         if !from_client && awaited(earlier) {
             await_live(&mut dap, &sent, earlier, &mut ids, &mut target);
         }
     }
+
     // The recording ends with its client's disconnect.
     let child = following.then(|| dap.child().0);
     dap.close_stdin();
@@ -199,6 +210,7 @@ fn replay_with(name: &str, mut target: Option<Target>, children: Option<Configur
     if let Some(child) = child {
         child.finish();
     }
+
     if let Some(target) = target {
         // Detached, the process finishes on its own.
         assert_eq!(target.process.wait().code(), Some(23));
@@ -221,6 +233,7 @@ fn vscode_attaching_to_a_process() {
         process: ExternalProcess::spawn(&fixture("attach")),
         released: false,
     };
+
     replay_with("vscode-attach", Some(target), None);
 }
 

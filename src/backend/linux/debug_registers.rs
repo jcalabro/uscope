@@ -11,20 +11,26 @@ use crate::WatchpointId;
 
 /// Address slots provided by DR0-DR3.
 pub const SLOT_COUNT: usize = 4;
+
 /// The widest aligned span one slot can cover on x86-64.
 pub const MAX_SLOT_BYTES: u64 = 8;
+
 /// The debug status register.
 pub const STATUS_REGISTER: usize = 6;
+
 /// The debug control register.
 pub const CONTROL_REGISTER: usize = 7;
+
 /// The architectural DR6 value with no recorded condition, which the kernel
 /// stores as an empty virtual status.
 pub const STATUS_IDLE: u64 = 0xffff_0ff0;
+
 /// DR6 B0-B3: which slots reported a hit.
 const STATUS_HITS: u64 = 0xf;
 
 // Each slot's R/W and LEN fields take four bits of DR7 from bit 16.
 const _: () = assert!(16 + 4 * SLOT_COUNT <= 32, "DR7 has no room for the slots");
+
 // Clearing DR6 must not read as a hit.
 const _: () = assert!(STATUS_IDLE & STATUS_HITS == 0, "idle DR6 reports a hit");
 
@@ -38,6 +44,7 @@ const USER_ADDRESS_LIMIT: u64 = 0x7fff_ffff_f000;
 pub enum SlotAccess {
     /// Data writes only.
     Write,
+
     /// Data reads or writes; x86 has no read-only condition.
     ReadWrite,
 }
@@ -93,10 +100,13 @@ impl Chunk {
 pub enum RangeError {
     /// The range contains no bytes.
     Empty,
+
     /// The range wraps the address space.
     Overflow,
+
     /// The range reaches memory the kernel refuses to watch.
     OutsideUserSpace,
+
     /// Covering the range exactly needs more slots than a thread has.
     TooLarge { required: u64 },
 }
@@ -110,10 +120,12 @@ pub fn split_range(address: u64, length: u64) -> Result<Vec<Chunk>, RangeError> 
     if length == 0 {
         return Err(RangeError::Empty);
     }
+
     let end = address.checked_add(length).ok_or(RangeError::Overflow)?;
     if end > USER_ADDRESS_LIMIT {
         return Err(RangeError::OutsideUserSpace);
     }
+
     let required = chunk_count(address, end);
     if required > SLOT_COUNT as u64 {
         return Err(RangeError::TooLarge { required });
@@ -129,9 +141,11 @@ pub fn split_range(address: u64, length: u64) -> Result<Vec<Chunk>, RangeError> 
         });
         cursor += length.bytes();
     }
+
     if cfg!(debug_assertions) {
         check_exact_cover(address, length, &chunks);
     }
+
     Ok(chunks)
 }
 
@@ -152,15 +166,18 @@ fn chunk_count(address: u64, end: u64) -> u64 {
         cursor += widest_chunk(cursor, end).bytes();
         count += 1;
     }
+
     let aligned_end = end & !(MAX_SLOT_BYTES - 1);
     if cursor < aligned_end {
         count += (aligned_end - cursor) / MAX_SLOT_BYTES;
         cursor = aligned_end;
     }
+
     while cursor < end {
         cursor += widest_chunk(cursor, end).bytes();
         count += 1;
     }
+
     count
 }
 
@@ -232,6 +249,7 @@ impl DebugRegisterPlan {
                 slot.owners.insert(id);
                 continue;
             }
+
             required += 1;
             if let Some(free) = next.slots.iter_mut().find(|slot| slot.is_none()) {
                 *free = Some(Slot {
@@ -241,6 +259,7 @@ impl DebugRegisterPlan {
                 });
             }
         }
+
         let available = self.free_slots();
         if required > available {
             return Err(CapacityError {
@@ -248,9 +267,11 @@ impl DebugRegisterPlan {
                 available,
             });
         }
+
         if cfg!(debug_assertions) {
             next.check_invariants();
         }
+
         Ok(next)
     }
 
@@ -265,9 +286,11 @@ impl DebugRegisterPlan {
                 }
             }
         }
+
         if cfg!(debug_assertions) {
             next.check_invariants();
         }
+
         next
     }
 
@@ -297,6 +320,7 @@ impl DebugRegisterPlan {
                 debug_assert_eq!(fields, 0, "free slot {index} has fields in DR7");
             }
         }
+
         debug_assert_eq!(
             control & !0xffff_00ff,
             0,
@@ -337,6 +361,7 @@ impl DebugRegisterPlan {
         if control != 0 {
             writes.push((CONTROL_REGISTER, control));
         }
+
         writes
     }
 
@@ -348,9 +373,11 @@ impl DebugRegisterPlan {
             if status & (1 << index) == 0 {
                 continue;
             }
+
             let slot = slot.as_ref().ok_or(UnknownSlots { status })?;
             owners.extend(slot.owners.iter().copied());
         }
+
         Ok(owners)
     }
 }
@@ -369,6 +396,7 @@ pub fn fuzz(data: &[u8]) {
         let [kind, id, rest @ ..] = operation else {
             break;
         };
+
         let id = WatchpointId::new(u64::from(*id % 8));
         match kind % 3 {
             0 => {
@@ -382,12 +410,15 @@ pub fn fuzz(data: &[u8]) {
                 } else {
                     SlotAccess::ReadWrite
                 };
+
                 if armed.contains_key(&id) {
                     continue;
                 }
+
                 let Ok(chunks) = split_range(address, length) else {
                     continue;
                 };
+
                 match plan.with_watchpoint(id, &chunks, access) {
                     Ok(next) => {
                         plan = next;
@@ -407,11 +438,14 @@ pub fn fuzz(data: &[u8]) {
                 }
             }
         }
+
         assert_plan_invariants(&plan, &armed);
     }
+
     for id in std::mem::take(&mut armed).into_keys() {
         plan = plan.without_watchpoint(id);
     }
+
     assert!(plan.is_empty());
     assert_eq!(plan.control(), 0);
 }
@@ -430,6 +464,7 @@ fn check_exact_cover(address: u64, length: u64, chunks: &[Chunk]) {
         );
         cursor = chunk.end();
     }
+
     debug_assert_eq!(
         cursor,
         address + length,
@@ -453,6 +488,7 @@ fn assert_plan_invariants(
             assert!(chunks.contains(&slot.chunk) && *access == slot.access);
         }
     }
+
     for (id, (chunks, access)) in armed {
         for chunk in chunks {
             assert_eq!(
@@ -468,6 +504,7 @@ fn assert_plan_invariants(
             );
         }
     }
+
     plan.check_invariants();
 }
 
@@ -484,6 +521,7 @@ mod tests {
             if best[covered] == u64::MAX {
                 continue;
             }
+
             let cursor = address + covered as u64;
             for chunk in [1_u64, 2, 4, 8] {
                 let width = usize::try_from(chunk).expect("chunk width fits usize");
@@ -493,6 +531,7 @@ mod tests {
                 }
             }
         }
+
         best[length]
     }
 
@@ -515,6 +554,7 @@ mod tests {
                 }
             }
         }
+
         assert_eq!(
             split_range(0x1003, 8),
             Ok(vec![
@@ -569,10 +609,12 @@ mod tests {
             address,
             length: ChunkLength::Eight,
         };
+
         let mut plan = DebugRegisterPlan::default();
         plan = plan
             .with_watchpoint(WatchpointId::new(1), &[chunk(0x1000)], SlotAccess::Write)
             .unwrap();
+
         // Observed DR7 readbacks after arming one and four 8-byte write slots.
         assert_eq!(plan.control(), 0x9_0001);
         for (id, address) in [(2, 0x1008), (3, 0x1010), (4, 0x1018)] {
@@ -580,6 +622,7 @@ mod tests {
                 .with_watchpoint(WatchpointId::new(id), &[chunk(address)], SlotAccess::Write)
                 .unwrap();
         }
+
         assert_eq!(plan.control(), 0x9999_0055);
 
         let one_byte = DebugRegisterPlan::default()
@@ -668,6 +711,7 @@ mod tests {
                 length: ChunkLength::Eight,
             }]
         };
+
         let mut plan = DebugRegisterPlan::default();
         for id in 1..=4 {
             plan = plan
@@ -678,6 +722,7 @@ mod tests {
                 )
                 .unwrap();
         }
+
         plan = plan
             .without_watchpoint(WatchpointId::new(2))
             .without_watchpoint(WatchpointId::new(4));
@@ -734,6 +779,7 @@ mod tests {
             state ^= state << 17;
             state
         };
+
         let mut plan = DebugRegisterPlan::default();
         let mut armed = std::collections::BTreeMap::new();
         let mut capacity_errors = 0;
@@ -744,6 +790,7 @@ mod tests {
                     if armed.contains_key(&id) {
                         continue;
                     }
+
                     // Few distinct addresses so identical chunks are shared.
                     let address = 0x1000 + (next() % 24);
                     let length = 1 + next() % 12;
@@ -752,9 +799,11 @@ mod tests {
                     } else {
                         SlotAccess::Write
                     };
+
                     let Ok(chunks) = split_range(address, length) else {
                         continue;
                     };
+
                     match plan.with_watchpoint(id, &chunks, access) {
                         Ok(next_plan) => {
                             plan = next_plan;
@@ -779,8 +828,10 @@ mod tests {
                     }
                 }
             }
+
             assert_plan_invariants(&plan, &armed);
         }
+
         assert!(capacity_errors > 0, "the sequence exercised exhaustion");
     }
 }

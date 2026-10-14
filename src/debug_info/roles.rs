@@ -72,6 +72,7 @@ pub fn function_role(name: &str, trampoline: bool) -> CodeRole {
     if trampoline {
         return CodeRole::Wrapper;
     }
+
     symbol_role(name)
 }
 
@@ -97,10 +98,12 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
             .strip_prefix(path)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
     };
+
     let named = |function: &str| {
         name.strip_prefix(function)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('<'))
     };
+
     // std's code that catches a panic, under which a runtime polls its
     // tasks and a thread runs its closure, is machinery like theirs.
     if within("std::panicking::catch_unwind")
@@ -108,6 +111,7 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     {
         return Some(CodeRole::RuntimeInternal);
     }
+
     // std's and core's code that raises a panic, which a step goes
     // through to the `Drop` impls the panic runs as it unwinds.
     if within("core::panicking")
@@ -117,15 +121,18 @@ pub fn rust_role(namespace: &str, name: &str) -> Option<CodeRole> {
     {
         return Some(CodeRole::Panic);
     }
+
     // `Harness::poll::<T, S>`, which rustc nests in its type, and which
     // stays a function of its own in every build: optimization inlines
     // what calls it, and the vtable's `raw::poll` only jumps to it.
     if namespace == "tokio::runtime::task::harness" && name.starts_with("poll<") {
         return Some(CodeRole::Dispatch);
     }
+
     if within("tokio") || within("mio") {
         return Some(CodeRole::RuntimeInternal);
     }
+
     (within("core::future")
         || within("core::pin")
         || within("core::panic::unwind_safe")
@@ -144,6 +151,7 @@ pub fn abi_wrappers(functions: &[FunctionInfo], source_files: &[PathBuf]) -> Vec
     if !generated.contains(&true) {
         return generated;
     }
+
     let written = functions
         .iter()
         .zip(&generated)
@@ -169,6 +177,7 @@ pub fn link_loop_bodies(functions: &mut [FunctionInfo]) {
     }) {
         by_name.entry(function.name.clone()).or_insert(function.id);
     }
+
     for function in functions
         .iter_mut()
         .filter(|function| function.language == SourceLanguage::Go)
@@ -238,6 +247,7 @@ pub fn go_role(name: &str, facts: Option<GoFunctionFacts>, generated: bool) -> C
     if name == "runtime.sigreturn__sigaction" {
         return CodeRole::SignalTrampoline;
     }
+
     if matches!(
         special,
         Some(
@@ -248,10 +258,12 @@ pub fn go_role(name: &str, facts: Option<GoFunctionFacts>, generated: bool) -> C
     ) {
         return CodeRole::TrapEntry;
     }
+
     let signal_handler = matches!(name, "runtime.sigtramp" | "runtime.cgoSigtramp");
     if facts.is_some_and(|facts| facts.top_frame) && !signal_handler {
         return CodeRole::Outermost;
     }
+
     if facts.is_some_and(|facts| facts.sp_write)
         || matches!(
             special,
@@ -266,18 +278,23 @@ pub fn go_role(name: &str, facts: Option<GoFunctionFacts>, generated: bool) -> C
     {
         return CodeRole::StackSwitch;
     }
+
     if special == Some(SpecialFunction::Wrapper) || generated {
         return CodeRole::Wrapper;
     }
+
     if name == "runtime.gopanic" {
         return CodeRole::Panic;
     }
+
     if name == "runtime.execute" {
         return CodeRole::Dispatch;
     }
+
     if is_runtime_internal(name) {
         return CodeRole::RuntimeInternal;
     }
+
     CodeRole::Ordinary
 }
 
@@ -286,10 +303,12 @@ fn is_runtime_internal(name: &str) -> bool {
     if name.starts_with("internal/runtime/") || name.starts_with("runtime/internal/") {
         return true;
     }
+
     // The runtime's assembly helpers, such as `gogo`, have no package.
     if !name.contains('.') {
         return true;
     }
+
     name.strip_prefix("runtime.")
         .is_some_and(|rest| !is_exported_runtime(rest))
 }

@@ -37,13 +37,16 @@ pub struct SyscallStats {
     pub calls: u64,
     pub errors: u64,
     pub errors_by_errno: BTreeMap<u16, u64>,
+
     /// Calls with a duration, which `total_ns` and the histogram cover.
     pub timed: u64,
     pub total_ns: u64,
+
     /// The shortest timed call, or 0 before any.
     pub min_ns: u64,
     pub max_ns: u64,
     pub log2_ns: Vec<u64>,
+
     /// Bytes read or written, for calls that move them.
     pub bytes: u64,
 }
@@ -56,20 +59,24 @@ impl SyscallStats {
             self.errors += 1;
             *self.errors_by_errno.entry(errno).or_default() += 1;
         }
+
         if let Some(duration) = duration {
             self.min_ns = if self.timed == 0 {
                 duration
             } else {
                 self.min_ns.min(duration)
             };
+
             self.timed += 1;
             self.total_ns = self.total_ns.saturating_add(duration);
             self.max_ns = self.max_ns.max(duration);
             if self.log2_ns.len() < BUCKETS {
                 self.log2_ns.resize(BUCKETS, 0);
             }
+
             self.log2_ns[bucket(duration)] += 1;
         }
+
         self.bytes = self.bytes.saturating_add(bytes);
     }
 
@@ -80,6 +87,7 @@ impl SyscallStats {
         for (&errno, &count) in &other.errors_by_errno {
             *self.errors_by_errno.entry(errno).or_default() += count;
         }
+
         if other.timed > 0 {
             self.min_ns = if self.timed == 0 {
                 other.min_ns
@@ -87,15 +95,18 @@ impl SyscallStats {
                 self.min_ns.min(other.min_ns)
             };
         }
+
         self.timed += other.timed;
         self.total_ns = self.total_ns.saturating_add(other.total_ns);
         self.max_ns = self.max_ns.max(other.max_ns);
         if self.log2_ns.len() < other.log2_ns.len() {
             self.log2_ns.resize(other.log2_ns.len(), 0);
         }
+
         for (into, &count) in self.log2_ns.iter_mut().zip(&other.log2_ns) {
             *into += count;
         }
+
         self.bytes = self.bytes.saturating_add(other.bytes);
     }
 
@@ -113,6 +124,7 @@ impl SyscallStats {
         if self.timed == 0 {
             return None;
         }
+
         #[expect(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
@@ -125,6 +137,7 @@ impl SyscallStats {
             if count == 0 {
                 continue;
             }
+
             if seen + count >= rank {
                 let (low, high) = bucket_range(index);
                 let high = high.min(self.max_ns.saturating_add(1)).max(low + 1);
@@ -138,8 +151,10 @@ impl SyscallStats {
                     (((rank - seen) as f64 - 0.5) / count as f64 * (high - low) as f64) as u64;
                 return Some((low + within).min(self.max_ns));
             }
+
             seen += count;
         }
+
         Some(self.max_ns)
     }
 }
@@ -161,6 +176,7 @@ pub fn moves(call: SyscallId) -> bool {
     let Some(spec) = specs::spec(call) else {
         return false;
     };
+
     spec.args.iter().any(|arg| {
         matches!(
             arg,
@@ -201,6 +217,7 @@ impl Folded {
         for (&(_, call), stats) in &self.by_call {
             calls.entry(call).or_default().merge(stats);
         }
+
         calls
     }
 }
@@ -233,6 +250,7 @@ mod tests {
         for duration in [100, 110, 120, 130, 5_000] {
             stats.add(Outcome::Returned(0), Some(duration), 0);
         }
+
         stats.add(Outcome::Failed(Errno(2)), None, 0);
         assert_eq!((stats.calls, stats.timed, stats.errors), (6, 5, 1));
         let median = stats.quantile_ns(0.5).expect("timed");

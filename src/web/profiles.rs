@@ -18,6 +18,7 @@ use uscope::profiler::{
     Profile, Query, RecordOptions, SampleSource, Side, Source, Transform, Watch, diff_costs,
     diff_trees, record_watched,
 };
+
 use uscope::syscalls::InFlight;
 
 use super::protocol::{
@@ -26,6 +27,7 @@ use super::protocol::{
     ProfileSetting, ProfileSource, ProfileSummary, ProfileTimeline, ProfileTree, RecordPreset,
     RecordProfile, RecordStarted, Request, Role, TransformOp,
 };
+
 use super::session::Failure;
 
 /// The most slices a timeline is cut into.
@@ -40,6 +42,7 @@ pub struct Profiles {
     entries: RwLock<BTreeMap<String, Arc<Entry>>>,
     list: watch::Sender<Arc<ProfileList>>,
     recordings: Mutex<BTreeMap<String, Recorder>>,
+
     /// Counts recordings, so each gets an id of its own.
     recorded: AtomicU64,
 }
@@ -47,8 +50,10 @@ pub struct Profiles {
 struct Entry {
     info: ProfileInfo,
     profile: Arc<Profile>,
+
     /// Its system call trace, read once it is asked for.
     syscalls: std::sync::OnceLock<Arc<super::syscalls::Trace>>,
+
     /// The calls a live trace's threads were blocked in, and when it saw
     /// them, on its clock.
     in_flight: (Vec<InFlight>, u64),
@@ -56,6 +61,7 @@ struct Entry {
 
 struct Recorder {
     stop: Arc<AtomicBool>,
+
     /// Its thread, once started.
     thread: Option<JoinHandle<()>>,
 }
@@ -98,6 +104,7 @@ impl Profiles {
                 path.display()
             );
         }
+
         // A profile recorded with its symbols left for later gets those
         // this host's files and debug directories hold.
         for module in read.profile.symbolize(&uscope::DebugFileOptions::default()) {
@@ -105,6 +112,7 @@ impl Profiles {
                 eprintln!("note: {} keeps its addresses: {why}", module.module);
             }
         }
+
         let name = path.file_name().map_or_else(
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -165,6 +173,7 @@ impl Profiles {
         } else {
             format!("{}.usprof", entry.info.name)
         };
+
         Some((name, entry.profile.to_bytes()))
     }
 
@@ -179,6 +188,7 @@ impl Profiles {
         for recorder in recordings.values() {
             recorder.stop.store(true, Ordering::Relaxed);
         }
+
         for thread in recordings
             .into_values()
             .filter_map(|recorder| recorder.thread)
@@ -248,6 +258,7 @@ impl Profiles {
                         "a system call trace samples no function and keeps no window",
                     ));
                 }
+
                 super::live::options(syscalls)
             })
             .transpose()?;
@@ -286,11 +297,13 @@ impl Profiles {
                         name: &name,
                         started: Some(started),
                     };
+
                     super::live::record(publisher, command, &program, &traced, &stop);
                 }
                 None => profiles.run_recording(&id, &name, command, &options, &stop, started),
             }
         };
+
         let unlisted = self
             .start_recorder(&id, stop, run, |run| {
                 std::thread::Builder::new()
@@ -301,6 +314,7 @@ impl Profiles {
         if let Some(thread) = unlisted {
             let _ = tokio::task::spawn_blocking(move || thread.join()).await;
         }
+
         match starting.await {
             Ok(Ok(())) => Ok(id),
             Ok(Err(message)) => Err(Failure::new(ErrorKind::Failed, message)),
@@ -330,6 +344,7 @@ impl Profiles {
             revision,
             ended,
         };
+
         let recorded = record_watched(
             command,
             options,
@@ -407,6 +422,7 @@ impl Profiles {
                 return Err(error);
             }
         };
+
         Ok(match recordings.get_mut(id) {
             Some(recorder) => {
                 recorder.thread = Some(thread);
@@ -430,6 +446,7 @@ impl Profiles {
         let Some(base) = &query.base else {
             return Ok(None);
         };
+
         if base.profile != query.profile && (query.threads.is_some() || query.tasks.is_some()) {
             return Err(Failure::new(
                 ErrorKind::Invalid,
@@ -437,6 +454,7 @@ impl Profiles {
                  whose rows are this profile's",
             ));
         }
+
         let mut of_base = query.clone();
         of_base.profile.clone_from(&base.profile);
         of_base.range = base.range;
@@ -445,6 +463,7 @@ impl Profiles {
             of_base.threads = None;
             of_base.tasks = None;
         }
+
         Ok(Some((self.entry(&base.profile)?, of_base)))
     }
 
@@ -468,19 +487,24 @@ impl Profiles {
             for weights in &columns[..2] {
                 put_weights(&mut bytes, weights);
             }
+
             for (key, side) in diff.key.iter().zip(&diff.side) {
                 bytes.extend_from_slice(&named.index_on(*side, *key).to_le_bytes());
             }
+
             for depth in &diff.depth {
                 bytes.extend_from_slice(&depth.to_le_bytes());
             }
+
             for weights in &columns[2..] {
                 put_weights(&mut bytes, weights);
             }
+
             let weight = ProfileBaseWeight {
                 weight: base_tree.weight,
                 samples: base_tree.samples,
             };
+
             (diff.len(), Some(weight), named.keys)
         } else {
             let mut named = Named::new(&keys);
@@ -489,11 +513,14 @@ impl Profiles {
             for key in &tree.key {
                 bytes.extend_from_slice(&named.index(*key).to_le_bytes());
             }
+
             for depth in &tree.depth {
                 bytes.extend_from_slice(&depth.to_le_bytes());
             }
+
             (tree.len(), None, named.keys)
         };
+
         let answer = ProfileTree {
             nodes: u32::try_from(nodes).unwrap_or(u32::MAX),
             weight: tree.weight,
@@ -501,6 +528,7 @@ impl Profiles {
             keys,
             base: base_weight,
         };
+
         Ok((to_value(&answer), bytes))
     }
 
@@ -529,9 +557,11 @@ impl Profiles {
                 base: None,
             });
         };
+
         let base_keys = base.profile.keys(granularity);
         let base_costs = base_keys.functions(&resolve_base(&base.profile, &base_keys, &of_base)?);
         let mut diff = diff_costs((&keys, &costs), (&base_keys, &base_costs));
+
         // Most changed share of the samples first.
         let share = |weight: u64, of: u64| {
             if of == 0 {
@@ -540,9 +570,11 @@ impl Profiles {
                 exact(weight) / exact(of)
             }
         };
+
         let change = |cost: &DiffCost| {
             (share(cost.own, costs.weight) - share(cost.base_own, base_costs.weight)).abs()
         };
+
         diff.sort_by(|a, b| change(b).total_cmp(&change(a)));
         let mut named = Named::with_base(&keys, &base_keys);
         let rows = diff
@@ -609,6 +641,7 @@ impl Profiles {
                         "internal: only profile requests come here",
                     ));
                 };
+
                 let id = id.to_owned();
                 let entry = self.entry(&id)?;
                 let trace = entry
@@ -635,6 +668,7 @@ fn sampling(spec: &RecordProfile) -> Result<RecordOptions, Failure> {
     {
         options.source = SampleSource::Function { symbol };
     }
+
     if let Some(seconds) = spec.window {
         options.window = Some(
             std::time::Duration::try_from_secs_f64(seconds)
@@ -645,6 +679,7 @@ fn sampling(spec: &RecordProfile) -> Result<RecordOptions, Failure> {
                 })?,
         );
     }
+
     Ok(options)
 }
 
@@ -856,20 +891,24 @@ fn resolve_in(
             if transform.op == TransformOp::Focus {
                 transforms.push(Transform::Focus(NO_KEY));
             }
+
             continue;
         }
+
         if named.is_empty() {
             return Err(Failure::new(
                 ErrorKind::Invalid,
                 format!("nothing in the profile is named {}", transform.name),
             ));
         }
+
         if transform.op == TransformOp::Focus && named.len() > 1 {
             return Err(Failure::new(
                 ErrorKind::Invalid,
                 format!("{} things are named {}", named.len(), transform.name),
             ));
         }
+
         transforms.extend(named.into_iter().map(|key| match transform.op {
             TransformOp::Focus => Transform::Focus(key),
             TransformOp::Merge => Transform::Merge(key),
@@ -877,6 +916,7 @@ fn resolve_in(
             TransformOp::Collapse => Transform::CollapseRecursion(key),
         }));
     }
+
     Ok(Query {
         source: match query.source {
             ProfileSource::Samples => Source::Samples,
@@ -929,6 +969,7 @@ fn timeline_of(
     } else {
         Lanes::Threads
     };
+
     let lane = |id: u32, weights| ProfileLane {
         thread: (!by_task).then_some(id),
         task: (by_task && id != NO_TASK).then_some(id),
@@ -936,11 +977,13 @@ fn timeline_of(
         blocked: Vec::new(),
         preempted: Vec::new(),
     };
+
     let mut lanes: std::collections::BTreeMap<u32, ProfileLane> = keys
         .density(&resolved, buckets, of)
         .into_iter()
         .map(|(id, weights)| (id, lane(id, weights)))
         .collect();
+
     // Time off a CPU is a thread's.
     if !by_task {
         for off in profile.off_cpu_lanes(&resolved, buckets) {
@@ -951,6 +994,7 @@ fn timeline_of(
             lane.preempted = off.preempted;
         }
     }
+
     let lanes = lanes.into_values().collect();
     Ok(ProfileTimeline {
         range: [range.0 - start, range.1 - start],
@@ -985,6 +1029,7 @@ fn source(
             .or_default()
             .push([u64::from(line.line), line.own, line.total]);
     }
+
     let files = files
         .into_iter()
         .map(|(path, lines)| {
@@ -999,6 +1044,7 @@ fn source(
                 Ok(text) => (Some(text), None),
                 Err(why) => (None, Some(why)),
             };
+
             protocol::ProfileSourceFile {
                 path,
                 lines,
@@ -1022,6 +1068,7 @@ pub(super) fn source_lines(path: &str, first: u64, last: u64) -> Result<Vec<Stri
     if size > MOST_SOURCE_BYTES {
         return Err(format!("{path} is larger than {MOST_SOURCE_BYTES} bytes"));
     }
+
     let bytes = std::fs::read(path).map_err(|error| format!("{path} cannot be read: {error}"))?;
     let skip = usize::try_from(first - 1).unwrap_or(usize::MAX);
     let take = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
@@ -1091,6 +1138,7 @@ fn absolute(profile: &Profile, range: Option<[i64; 2]>) -> (i64, i64) {
 /// Zones folded to a width, and the program's marks, in a range.
 fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<u8>) {
     let (start, _) = profile.span();
+
     // Without a range, the zones' own, with a margin.
     let range = match (query.range, profile.zone_extent()) {
         (None, Some((first, last))) => {
@@ -1099,6 +1147,7 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
         }
         (range, _) => absolute(profile, range),
     };
+
     // Zones under three pixels wide fold together.
     let fold = (range.1 - range.0) * 3 / i64::from(query.width.max(1));
     let blocks = profile.zone_blocks(range, query.threads.as_deref(), fold.max(1));
@@ -1110,13 +1159,16 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
             u32::try_from(names.len() - 1).unwrap_or(u32::MAX)
         })
     };
+
     let mut bytes = Vec::with_capacity(blocks.len() * 36);
     for block in &blocks {
         bytes.extend_from_slice(&exact_time(block.start - start).to_le_bytes());
     }
+
     for block in &blocks {
         bytes.extend_from_slice(&exact_time(block.end - start).to_le_bytes());
     }
+
     let columns: [&dyn Fn(&uscope::profiler::ZoneBlock) -> u32; 2] =
         [&|block| block.thread, &|block| block.depth];
     for column in columns {
@@ -1124,15 +1176,19 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
             bytes.extend_from_slice(&column(block).to_le_bytes());
         }
     }
+
     for block in &blocks {
         bytes.extend_from_slice(&name(block.site, block.value).to_le_bytes());
     }
+
     for block in &blocks {
         bytes.extend_from_slice(&block.count.to_le_bytes());
     }
+
     for block in &blocks {
         bytes.extend_from_slice(&block.flags.to_le_bytes());
     }
+
     let marks = profile
         .program_markers()
         .into_iter()
@@ -1178,6 +1234,7 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
         marks,
         plots,
     };
+
     (to_value(&answer), bytes)
 }
 
@@ -1237,6 +1294,7 @@ const fn exact_time(time: i64) -> f64 {
 /// The keys an answer names, each once, in the order first named.
 struct Named<'a, 'k> {
     keys_of: &'a Keys<'k>,
+
     /// A diff's base's keys, which its nodes from the base name.
     base_of: Option<&'a Keys<'k>>,
     indices: BTreeMap<(bool, u32), u32>,
@@ -1271,10 +1329,12 @@ impl<'a, 'k> Named<'a, 'k> {
         if let Some(index) = self.indices.get(&(from_base, key)) {
             return *index;
         }
+
         let keys = match (side, self.base_of) {
             (Side::Base, Some(base)) => base,
             _ => self.keys_of,
         };
+
         let index = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
         let location = keys.location(key);
         self.keys.push(ProfileKey {
@@ -1352,6 +1412,7 @@ mod tests {
         if let Some(thread) = unlisted {
             thread.join().expect("the recording's thread ends");
         }
+
         assert!(
             profiles
                 .recordings

@@ -43,6 +43,7 @@ fn reported(text: &str, kind: &str) -> Vec<u64> {
     let [fields] = fields[..] else {
         panic!("{kind}: {text}");
     };
+
     fields
         .split('\t')
         .map(|field| field.parse().expect("a number"))
@@ -105,6 +106,7 @@ async fn next_over_an_await_follows_its_task_to_another_thread() {
         let [holder, held] = reported(&text, "holder")[..] else {
             panic!("{fixture}: {text}");
         };
+
         assert_eq!(held, before.get(), "{fixture}");
         let activities = activities(&mut scenario).await;
         assert!(
@@ -125,6 +127,7 @@ async fn next_over_an_await_follows_its_task_to_another_thread() {
             (TaskState::Running, Some(before)),
             "{fixture}"
         );
+
         // The worker that took over the held thread's core is new, and
         // holds a core as the other worker does: it runs the migrated task
         // or is idle.

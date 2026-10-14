@@ -79,6 +79,7 @@ fn a_go_local_is_visible_only_past_its_declarations_line() {
             (range(0x50, 0x60), Some(at(0, 14))),
         ],
     };
+
     let visible = visible_ranges(&code, &[range(0x10, 0x80)], &declared(at(0, 11)));
     assert_eq!(
         visible,
@@ -119,6 +120,7 @@ proptest! {
                 .collect(),
             calls: calls.into_iter().zip(sites).collect(),
         };
+
         let scope = fused(scope);
         let declared = declared(at(0, line));
         let visible = visible_ranges(&code, &scope, &declared);
@@ -134,6 +136,7 @@ proptest! {
                 }
             }
         }
+
         prop_assert_eq!(visible, expected);
     }
 }

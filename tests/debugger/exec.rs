@@ -21,6 +21,7 @@ async fn assert_reexecuted(scenario: &Scenario, reason: &StopReason, argc: i128)
     let StopReason::Breakpoint { hits, .. } = reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits.len(), 1);
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
@@ -39,6 +40,7 @@ async fn assert_vdso_follows_the_image(scenario: &mut Scenario) {
     let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
         panic!("the program is stopped");
     };
+
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
         .await;
@@ -58,6 +60,7 @@ async fn a_program_that_executes_itself_again_is_followed_with_its_breakpoints()
         scenario.run_to_stop().await,
         StopReason::Exec { followed: true }
     );
+
     // The first image's libraries went with it, and the new image's dynamic
     // loader has loaded none yet.
     assert!(
@@ -77,6 +80,7 @@ async fn a_program_that_executes_itself_again_is_followed_with_its_breakpoints()
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits[0].breakpoint, library.id);
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -94,12 +98,15 @@ async fn indirect_functions_wait_again_after_exec() {
     for name in ["strlen", "strcasestr", "wcsnlen", "rawmemchr", "memrchr"] {
         pending_function(&scenario, name).await;
     }
+
     // The loader has functions of these names of its own.
     let mut reason = scenario.run_to_stop().await;
     while let StopReason::Breakpoint { .. } = reason {
         reason = scenario.resume_to_stop().await;
     }
+
     assert_eq!(reason, StopReason::Exec { followed: true });
+
     // Libraries load again, which places the waiting breakpoints anew.
     loop {
         match scenario.resume_to_stop().await {
@@ -111,6 +118,7 @@ async fn indirect_functions_wait_again_after_exec() {
             other => panic!("stopped for {other:?}"),
         }
     }
+
     scenario.shutdown().await;
 }
 
@@ -132,10 +140,12 @@ async fn a_launcher_that_executes_the_program_launches_it() {
             .await;
         if stop_at_entry {
             assert_eq!(reason, StopReason::Entry);
+
             // The launcher runs randomized, as does the program it executes.
             assert_vdso_follows_the_image(&mut scenario).await;
             reason = scenario.resume_to_stop().await;
         }
+
         assert_reexecuted(&scenario, &reason, 3).await;
         assert_eq!(
             scenario.resume_to_stop().await,
@@ -149,6 +159,7 @@ async fn a_launcher_that_executes_the_program_launches_it() {
 #[tokio::test]
 async fn a_launcher_runs_as_it_would_untraced_until_it_executes_the_program() {
     let mut scenario = Scenario::launch("reexec");
+
     // Job control stopping it does not hold the launch back.
     let mut launcher = ExternalProcess::exec_gate(&Scenario::fixture("reexec"), &["one"]);
     let process = launcher.process_id();
@@ -211,6 +222,7 @@ async fn a_launch_through_a_process_that_cannot_execute_the_program_fails() {
         error.to_string().contains("executed a program other than"),
         "{error}"
     );
+
     // Its exec fails, so it exits first.
     let error = failed_launch(Path::new("/nonexistent/program")).await;
     assert!(error.to_string().contains("Code(127)"), "{error}");

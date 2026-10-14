@@ -47,6 +47,7 @@ fn failures_after_a_session_ended_keep_the_adapters_recording() {
             .find(needle)
             .unwrap_or_else(|| panic!("the recording lacks {needle:?}:\n{contents}"))
     };
+
     let order = [
         "request launch",
         "spawn ",

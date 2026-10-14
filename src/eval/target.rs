@@ -40,20 +40,24 @@ pub enum Lookup<O> {
         object: O,
         ty: Result<TypeReference, std::sync::Arc<str>>,
     },
+
     /// An enumerator's value, typed by its enumeration.
     Enumerator {
         value: Exact,
         ty: TypeReference,
     },
+
     /// An exact integer the scope knows, such as an argument a view's
     /// pattern captured.
     Constant(Exact),
+
     /// A value the scope's machine computes once and keeps, of any type,
     /// such as a view's `let`: never a place.
     Bound {
         object: O,
         ty: super::types::Ty,
     },
+
     /// Several things the name could mean, each written as it is selected.
     Ambiguous(Vec<String>),
     NotFound,
@@ -64,6 +68,7 @@ pub enum Lookup<O> {
 pub struct TypeQuery {
     /// The name as written, or a C base type's canonical spelling.
     pub name: String,
+
     /// The tag written before the name, as in `struct S`.
     pub tag: Option<Tag>,
 }
@@ -81,12 +86,16 @@ pub enum TypeLookup {
 pub enum StepKind<'a> {
     /// Through a pointer or reference stored in program memory.
     Deref,
+
     /// To a member of a record, union, or variant.
     Member(&'a str),
+
     /// To an element of an array or slice, holding `available` indices.
     Index { available: usize },
+
     /// To the one base class subobject of a record of the given type.
     Base(TypeReference),
+
     /// To the value a map holds for a key, as the view that presents the
     /// map gives its entries.
     Entry,
@@ -96,8 +105,10 @@ pub enum StepKind<'a> {
 #[derive(Debug, Clone)]
 pub struct Planned<S> {
     pub step: S,
+
     /// The type the step reaches, or `None` when it reaches nothing usable.
     pub result: Option<TypeReference>,
+
     /// How many index values the step takes.
     pub consumed: usize,
 }
@@ -107,6 +118,7 @@ pub struct Planned<S> {
 pub struct Register {
     /// The scope's own number for it.
     pub number: u16,
+
     /// Its width in bits.
     pub width: u8,
 }
@@ -118,8 +130,10 @@ pub struct Register {
 pub struct CallValues {
     /// The arguments, as the call's registers held them.
     pub args: [u64; 6],
+
     /// What the call returned, once it has.
     pub returned: Option<i64>,
+
     /// The path the call names, when it names one and it could be read.
     pub path: Option<Vec<u8>>,
 }
@@ -127,6 +141,7 @@ pub struct CallValues {
 pub trait Scope: TypeSource {
     /// A data object the scope can name.
     type Object: Clone + fmt::Debug;
+
     /// A planned structural step.
     type Step: Clone + fmt::Debug;
 
@@ -215,19 +230,23 @@ impl Key {
                 ),
             ))
         };
+
         let VariableState::Available { value, text, .. } = &key.state else {
             return Err(Stop::missing(key.state.clone()));
         };
+
         let exact = match value {
             VariableValue::Scalar(ScalarValue::Signed(value)) => Some(Exact::from(*value)),
             VariableValue::Scalar(ScalarValue::Unsigned(value)) => Some(Exact::from(*value)),
             VariableValue::Enumeration { value, .. } => Some(Exact::from(*value)),
             _ => None,
         };
+
         let float = match value {
             VariableValue::Scalar(ScalarValue::Floating(value)) => Some(Float::from_value(*value)),
             _ => None,
         };
+
         let equal =
             |ordering: Option<std::cmp::Ordering>| ordering == Some(std::cmp::Ordering::Equal);
         match self {
@@ -253,6 +272,7 @@ impl Key {
                 let Some(text) = text else {
                     return Err(mismatch());
                 };
+
                 let read = text.bytes.as_ref();
                 match text.completion {
                     TextCompletion::Complete => Ok(read == wanted.as_slice()),
@@ -304,8 +324,10 @@ pub enum Stop {
     /// The program state cannot provide the value: an unavailable or
     /// malformed state.
     Missing(Box<VariableState>),
+
     /// The expression asks for something the debugger refuses.
     Refused(Refusal),
+
     /// The debugger itself failed.
     Failed(crate::Error),
 }
@@ -327,6 +349,7 @@ impl From<Refusal> for Stop {
 pub trait Machine: TypeSource {
     type Object;
     type Step;
+
     /// Where a program-typed value is.
     type Place: Clone + fmt::Debug;
 

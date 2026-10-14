@@ -17,6 +17,7 @@ pub enum Language {
     Go,
     Zig,
     Odin,
+
     /// Fortran's free form.
     Fortran,
     D,
@@ -699,8 +700,10 @@ pub fn render(text: &str, spans: &[Span], tab_width: usize, renderer: Renderer) 
                 *column += 1;
             }
         }
+
         expanded
     };
+
     let mut position = 0;
     for (range, kind) in spans {
         let range = range.start.min(text.len())..range.end.min(text.len());
@@ -710,6 +713,7 @@ pub fn render(text: &str, spans: &[Span], tab_width: usize, renderer: Renderer) 
         {
             continue;
         }
+
         output.push_str(&expand(&text[position..range.start], &mut column));
         let role = match kind {
             Kind::Keyword => Role::Keyword,
@@ -717,10 +721,12 @@ pub fn render(text: &str, spans: &[Span], tab_width: usize, renderer: Renderer) 
             Kind::Comment => Role::Comment,
             Kind::Number => Role::Number,
         };
+
         let segment = expand(&text[range.clone()], &mut column);
         output.push_str(&renderer.paint(role, segment).to_string());
         position = range.end;
     }
+
     output.push_str(&expand(&text[position..], &mut column));
     output
 }
@@ -732,6 +738,7 @@ const fn is_identifier(byte: u8) -> bool {
 /// Lexes `text` from its start and returns each line's spans, by line.
 pub fn lex(text: &str, language: Language) -> Vec<Vec<Span>> {
     let tokens = tokens(text.as_bytes(), language);
+
     // Each token is split at the lines it spans.
     let mut lines = Vec::new();
     let mut spans = Vec::new();
@@ -741,25 +748,30 @@ pub fn lex(text: &str, language: Language) -> Vec<Vec<Span>> {
         if byte != b'\n' {
             continue;
         }
+
         let line = line_start..index;
         while let Some((range, kind)) = tokens.peek().cloned() {
             if range.start >= line.end {
                 break;
             }
+
             let start = range.start.max(line.start);
             let end = range.end.min(line.end);
             if start < end {
                 spans.push((start - line.start..end - line.start, kind));
             }
+
             if range.end <= line.end {
                 tokens.next();
             } else {
                 break;
             }
         }
+
         lines.push(std::mem::take(&mut spans));
         line_start = index + 1;
     }
+
     lines
 }
 
@@ -769,6 +781,7 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
     let starts = |index: usize, prefix: &[u8]| text[index.min(text.len())..].starts_with(prefix);
     let mut tokens = Vec::new();
     let mut index = 0;
+
     // Whether only whitespace precedes `index` on its line.
     let mut line_start = true;
     while index < text.len() {
@@ -810,6 +823,7 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
                     matches!(language, Language::Rust | Language::D),
                 )
             };
+
             Some(Kind::String)
         } else if byte == b'\'' {
             if let Some(end) = character_end(text, index, language) {
@@ -827,6 +841,7 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
             while is_identifier(at(index)) {
                 index += 1;
             }
+
             let word = std::str::from_utf8(&text[start..index]).unwrap_or_default();
             let keyword = if language.ignores_case() {
                 language
@@ -836,6 +851,7 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
             } else {
                 language.keywords().contains(&word)
             };
+
             keyword.then_some(Kind::Keyword)
         } else if byte == b'#' && line_start && matches!(language, Language::C | Language::Cpp) {
             // A preprocessor directive's name.
@@ -843,23 +859,28 @@ fn tokens(text: &[u8], language: Language) -> Vec<Span> {
             while matches!(at(index), b' ' | b'\t') {
                 index += 1;
             }
+
             while is_identifier(at(index)) {
                 index += 1;
             }
+
             Some(Kind::Keyword)
         } else {
             index += 1;
             None
         };
+
         if let Some(kind) = kind {
             tokens.push((start..index, kind));
         }
+
         line_start = match text[index - 1] {
             b'\n' => true,
             b' ' | b'\t' => line_start,
             _ => false,
         };
     }
+
     tokens
 }
 
@@ -890,6 +911,7 @@ fn block_comment_end(text: &[u8], start: usize, open: &[u8], close: &[u8], nests
             index += 1;
         }
     }
+
     text.len()
 }
 
@@ -906,6 +928,7 @@ const fn quoted_end(text: &[u8], start: usize, quote: u8, spans_lines: bool) -> 
             _ => index += 1,
         }
     }
+
     text.len()
 }
 
@@ -922,6 +945,7 @@ fn doubled_end(text: &[u8], start: usize, quote: u8) -> usize {
             _ => index += 1,
         }
     }
+
     text.len()
 }
 
@@ -934,12 +958,15 @@ fn character_end(text: &[u8], start: usize, language: Language) -> Option<usize>
         let after_name = start > 0 && (is_identifier(text[start - 1]) || text[start - 1] == b')');
         return (!after_name && text.get(start + 2) == Some(&b'\'')).then_some(start + 3);
     }
+
     if language != Language::Rust {
         return Some(quoted_end(text, start, b'\'', false));
     }
+
     if text.get(start + 1) == Some(&b'\\') {
         return Some(quoted_end(text, start, b'\'', false));
     }
+
     // One character, which may take several bytes, then the closing quote.
     let lead = *text.get(start + 1)?;
     let width = match lead {
@@ -950,6 +977,7 @@ fn character_end(text: &[u8], start: usize, language: Language) -> Option<usize>
         0xf0..=0xf7 => 4,
         _ => return None,
     };
+
     let after = start + 1 + width;
     (text.get(after) == Some(&b'\'')).then_some(after + 1)
 }
@@ -963,9 +991,11 @@ fn raw_string_end(text: &[u8], start: usize, language: Language) -> Option<usize
             if text.get(index) == Some(&b'b') {
                 index += 1;
             }
+
             if text.get(index) != Some(&b'r') {
                 return None;
             }
+
             index += 1;
             let hashes = text[index..]
                 .iter()
@@ -975,6 +1005,7 @@ fn raw_string_end(text: &[u8], start: usize, language: Language) -> Option<usize
             if text.get(index) != Some(&b'"') {
                 return None;
             }
+
             let mut closing = vec![b'"'];
             closing.extend(std::iter::repeat_n(b'#', hashes));
             find(text, index + 1, &closing).map(|end| end + closing.len())
@@ -1042,6 +1073,7 @@ fn number_end(text: &[u8], start: usize) -> usize {
             break;
         }
     }
+
     index
 }
 
@@ -1152,6 +1184,7 @@ mod tests {
     #[test]
     fn each_language_has_its_own_comments_strings_and_case() {
         use Kind::{Comment, Keyword, Number, String};
+
         // Odin's block comments nest, and its raw strings are Go's.
         let odin = "/* a /* b */ c */ x := `r\ns` // done";
         assert_eq!(
@@ -1161,6 +1194,7 @@ mod tests {
                 of(&[("s`", String), ("// done", Comment)]),
             ]
         );
+
         // Fortran's keywords are any case, its comments begin with `!`, and
         // a quote is doubled within its string.
         let fortran = "INTEGER :: n = 3 ! three\nprint *, 'it''s'";
@@ -1171,6 +1205,7 @@ mod tests {
                 of(&[("print", Keyword), ("'it''s'", String)]),
             ]
         );
+
         // D's `/+` comments nest; its strings span lines.
         let d = "/+ a /+ b +/ c +/ auto s = \"one\ntwo\";";
         assert_eq!(
@@ -1184,6 +1219,7 @@ mod tests {
                 of(&[("two\"", String)]),
             ]
         );
+
         // Nim's comments begin with `#`, its block comments nest, and its
         // triple-quoted strings span lines.
         let nim = "#[ a #[ b ]# ]# let s = \"\"\"one\n\"two\"\"\"\" # done";
@@ -1198,6 +1234,7 @@ mod tests {
                 of(&[("\"two\"\"\"\"", String), ("# done", Comment)]),
             ]
         );
+
         // Ada's keywords are any case and its comments begin with `--`; a
         // quote after a name begins an attribute, not a character.
         let ada =

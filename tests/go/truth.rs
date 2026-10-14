@@ -18,6 +18,7 @@ use crate::support::{Scenario, ScratchDir};
 pub struct DumpedTask {
     /// Its status: the reason it waits, or a word such as `running`.
     pub status: String,
+
     /// Its frames, innermost first, without the runtime's own: each a
     /// function and its `file:line`.
     pub frames: Vec<(String, String)>,
@@ -28,8 +29,10 @@ pub struct DumpedTask {
 pub struct Checkpoint {
     /// `runtime.NumGoroutine()`.
     pub count: usize,
+
     /// The goroutine that reached the checkpoint, and its thread.
     pub main: (u64, u64),
+
     /// Every goroutine the program started, by id.
     pub tasks: BTreeMap<u64, DumpedTask>,
 }
@@ -60,6 +63,7 @@ impl Checkpoint {
                 _ => {}
             }
         }
+
         checkpoint
     }
 
@@ -79,29 +83,36 @@ impl Checkpoint {
         if ids.len() != program.len() {
             return Err("a goroutine is listed twice".to_owned());
         }
+
         let dumped = self.tasks.keys().copied().collect::<BTreeSet<_>>();
         if ids != dumped {
             return Err(format!("lists goroutines {ids:?}, not {dumped:?}"));
         }
+
         if program.len() != self.count {
             return Err(format!("lists {}, not {}", program.len(), self.count));
         }
+
         for task in program {
             let dumped = &self.tasks[&task.id.number];
+
             // The runtime describes a goroutine by what it waits for, or
             // by its status.
             if task.detail.as_deref() != Some(dumped.status.as_str()) {
                 return Err(format!("describes {task:?} unlike {dumped:?}"));
             }
+
             let expected = match dumped.status.as_str() {
                 "running" | "syscall" => TaskState::Running,
                 "runnable" => TaskState::Runnable,
                 _ => TaskState::Blocked,
             };
+
             if task.state != expected {
                 return Err(format!("gives {task:?} a state unlike {dumped:?}"));
             }
         }
+
         Ok(())
     }
 }

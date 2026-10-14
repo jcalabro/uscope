@@ -20,14 +20,17 @@ pub const SECTION: &str = ".debug_uscope_views";
 
 /// The kind of a record of view text, and the format this uscope reads.
 pub const VIEW_TEXT: u8 = 1;
+
 pub const VIEW_TEXT_FORMAT: u8 = 1;
 
 /// The kind of a kernel's record, and the format this uscope reads.
 pub const KERNEL: u8 = 2;
+
 pub const KERNEL_FORMAT: u8 = 1;
 
 /// The kind of a renderer's record, and the format this uscope reads.
 pub const RENDERER: u8 = 3;
+
 pub const RENDERER_FORMAT: u8 = 1;
 
 /// How many records one module may carry.
@@ -71,9 +74,11 @@ pub fn view_set(module: &str, bytes: &[u8]) -> ViewSet {
             [(kernel.name, kernel.source, kernel.module)],
         );
     }
+
     for renderer in &renderers {
         set.add_renderers(&renderer.origin, [(renderer.name, renderer.source)]);
     }
+
     // The records' own errors come first.
     set.errors.splice(0..0, errors);
     set
@@ -133,11 +138,13 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
         column: 0,
         message,
     };
+
     while position < bytes.len() {
         if bytes[position] == 0 {
             position += 1;
             continue;
         }
+
         if index == MAX_RECORDS {
             errors.push(error(
                 index,
@@ -145,10 +152,12 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
             ));
             break;
         }
+
         let Some(header) = bytes.get(position..position + 6) else {
             errors.push(error(index, "the record's header is cut short".to_owned()));
             break;
         };
+
         let kind = header[0];
         let format = header[1];
         let length = u32::from_le_bytes([header[2], header[3], header[4], header[5]]);
@@ -163,6 +172,7 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
             ));
             break;
         };
+
         position = start + payload.len();
         match (kind, format) {
             // A record is no larger than a view file may be, so a module
@@ -214,8 +224,10 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
                 format!("the record is of kind {kind}, which this uscope does not read"),
             )),
         }
+
         index += 1;
     }
+
     Records {
         files,
         kernels,

@@ -10,6 +10,7 @@ use super::lines::{
     self, ControlBoundary, FileRecord, LineExtra, LineRange, LineRow, LineSequence, RowAddress,
     StatementKey, row_flags,
 };
+
 use super::{Image, NONE, Placed, strings};
 
 /// Why bytes are not a usable image.
@@ -17,18 +18,25 @@ use super::{Image, NONE, Placed, strings};
 pub enum ImageError {
     #[error("the image is larger than an image may be")]
     TooLarge,
+
     #[error("the image is truncated")]
     Truncated,
+
     #[error("the bytes are not an image")]
     NotAnImage,
+
     #[error("the image's format version is {found}, not {expected}")]
     Format { found: u32, expected: u32 },
+
     #[error("the image was normalized by revision {found}, not {expected}")]
     Normalization { found: u32, expected: u32 },
+
     #[error("the image's records are laid out differently")]
     Layout,
+
     #[error("the image's checksum does not match its contents")]
     Checksum,
+
     #[error("the image is malformed: {0}")]
     Malformed(String),
 }
@@ -68,10 +76,12 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     if !strings::valid_pool(strings, true) {
         return Err(malformed("the string pool is not NUL-terminated UTF-8"));
     }
+
     let paths = image.bytes(TableKind::Paths);
     if !strings::valid_pool(paths, false) {
         return Err(malformed("the path pool is not NUL-terminated"));
     }
+
     let files = image.table::<FileRecord>();
     if files
         .iter()
@@ -79,6 +89,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
     {
         return Err(malformed("a file names no path"));
     }
+
     let lines = || {
         let _phase = crate::span!("validate.lines");
         let tables = Lines {
@@ -88,6 +99,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
             sequences: image.table(),
             ranges: image.table(),
         };
+
         tables.rows(files.len())?;
         tables.extras()?;
         tables.sequences()?;
@@ -95,6 +107,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         tables.statements(image.table())?;
         tables.boundaries(image.table())
     };
+
     let families: [(&'static str, Validation); 12] = [
         ("validate.symbols", super::symbols::validate),
         ("validate.functions", super::functions::validate),
@@ -113,6 +126,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         let _phase = crate::timings::span(name, None, None);
         validate(image).map_err(malformed)
     };
+
     // Each family reads only the image, so a large image's are checked in
     // parallel; a small one's are checked in turn, which takes less than
     // waking the pool's threads. Either way the first to fail in this
@@ -121,6 +135,7 @@ pub(super) fn contents(image: &Image) -> Result<(), ImageError> {
         lines()?;
         return families.iter().try_for_each(family);
     }
+
     let (lines, families) = rayon::join(lines, || {
         families.par_iter().map(family).collect::<Vec<_>>()
     });
@@ -153,15 +168,18 @@ impl Lines<'_> {
         if self.addresses.len() != self.rows.len() {
             return Err(malformed("rows and their addresses differ in number"));
         }
+
         let mut extras = 0;
         for row in self.rows {
             let file = row.file.get();
             if file != NONE && file as usize >= files {
                 return Err(malformed("a row names a file that does not exist"));
             }
+
             if row.flags & !row_flags::ALL != 0 || row.reserved != 0 {
                 return Err(malformed("a row has flags it does not define"));
             }
+
             let wide = row.line.get() == lines::WIDE_LINE || row.column.get() == lines::WIDE_COLUMN;
             if row.flags & row_flags::EXTRA != 0 {
                 extras += 1;
@@ -169,9 +187,11 @@ impl Lines<'_> {
                 return Err(malformed("a row's wide line or column has no extra"));
             }
         }
+
         if extras != self.extras.len() {
             return Err(malformed("rows and their extras differ in number"));
         }
+
         Ok(())
     }
 
@@ -181,6 +201,7 @@ impl Lines<'_> {
         if !strictly_ordered(self.extras, |extra| extra.row.get()) {
             return Err(malformed("row extras are out of order"));
         }
+
         // The row holds its line and column whole unless they are too
         // wide, and its extra repeats them.
         let agrees = |narrow: u64, wide: u64, whole: u64| {
@@ -190,6 +211,7 @@ impl Lines<'_> {
                 whole == narrow
             }
         };
+
         for extra in self.extras {
             let row = self
                 .rows
@@ -203,6 +225,7 @@ impl Lines<'_> {
             {
                 return Err(malformed("an extra disagrees with its row"));
             }
+
             let needed = row.line.get() == lines::WIDE_LINE
                 || row.column.get() == lines::WIDE_COLUMN
                 || extra.operation_index.get() != 0
@@ -212,6 +235,7 @@ impl Lines<'_> {
                 return Err(malformed("a row has an extra it does not need"));
             }
         }
+
         Ok(())
     }
 
@@ -223,6 +247,7 @@ impl Lines<'_> {
             if first != next || count == 0 {
                 return Err(malformed("sequences do not cover the rows in order"));
             }
+
             next = first
                 .checked_add(count)
                 .filter(|end| *end <= self.rows.len())
@@ -234,9 +259,11 @@ impl Lines<'_> {
                 return Err(malformed("a sequence ends before its last row"));
             }
         }
+
         if next != self.rows.len() {
             return Err(malformed("rows lie outside every sequence"));
         }
+
         Ok(())
     }
 
@@ -250,11 +277,13 @@ impl Lines<'_> {
                 return Err(malformed("a line range is empty or names no located row"));
             }
         }
+
         if !strictly_ordered(self.ranges, |range| {
             (range.start.get(), range.end.get(), range.row.get())
         }) {
             return Err(malformed("the line ranges are out of order"));
         }
+
         let mut prefix_max_end = 0;
         for range in self.ranges {
             prefix_max_end = prefix_max_end.max(range.end.get());
@@ -262,6 +291,7 @@ impl Lines<'_> {
                 return Err(malformed("the line ranges' running ends are wrong"));
             }
         }
+
         Ok(())
     }
 
@@ -269,14 +299,17 @@ impl Lines<'_> {
         let indexed = |row: &LineRow| {
             lines::is_public(row) && row.flags & row_flags::STATEMENT != 0 && lines::is_located(row)
         };
+
         if statements.len() != self.rows.iter().filter(|row| indexed(row)).count() {
             return Err(malformed("the statement index misses statements"));
         }
+
         if !strictly_ordered(statements, |key| {
             (key.file.get(), key.line.get(), key.row.get())
         }) {
             return Err(malformed("the statement index is out of order"));
         }
+
         for key in statements {
             let at = key.row.get() as usize;
             let agrees = self.rows.get(at).is_some_and(|row| {
@@ -289,6 +322,7 @@ impl Lines<'_> {
                 return Err(malformed("the statement index disagrees with the rows"));
             }
         }
+
         Ok(())
     }
 
@@ -297,9 +331,11 @@ impl Lines<'_> {
             lines::is_public(row)
                 && row.flags & (row_flags::PROLOGUE_END | row_flags::EPILOGUE_BEGIN) != 0
         };
+
         if boundaries.len() != self.rows.iter().filter(|row| marks(row)).count() {
             return Err(malformed("the boundary index misses boundaries"));
         }
+
         if !boundaries.iter().all(|boundary| {
             self.rows
                 .get(boundary.row.get() as usize)
@@ -307,12 +343,14 @@ impl Lines<'_> {
         }) {
             return Err(malformed("the boundary index names a row that marks none"));
         }
+
         if !strictly_ordered(boundaries, |boundary| {
             let at = boundary.row.get();
             (self.addresses[at as usize].address.get(), at)
         }) {
             return Err(malformed("the boundary index is out of order"));
         }
+
         Ok(())
     }
 }

@@ -66,6 +66,7 @@ fn a_program_launched_in_a_terminal_is_debugged_with_its_streams_in_the_terminal
         json!({"exitCode": 3})
     );
     assert_eq!(dap.terminal_line(), "input: (eof)");
+
     // Nothing the program wrote reached the debug console.
     assert!(dap.output_text(started.mark, "stdout").is_empty());
     assert!(dap.output_text(started.mark, "stderr").is_empty());
@@ -120,6 +121,7 @@ fn a_program_in_an_external_terminal_stops_on_entry_restarts_and_ends_with_the_s
     );
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
     dap.success(resumed);
+
     // Disconnecting kills the program the terminal runs.
     dap.finish();
 }

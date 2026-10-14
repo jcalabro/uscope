@@ -43,6 +43,7 @@ const TAG: u32 = 22;
 
 /// Where the awaited future lies in each coroutine.
 const AWAITEE: u64 = 8;
+
 /// The vtable whose trait object holds an `INNER`.
 const VTABLE: u64 = 0x5000;
 
@@ -159,6 +160,7 @@ fn option(held: u32) -> Vec<TypeInfo> {
         )])),
         members: Arc::new([member(name, ty, 0)]),
     };
+
     vec![
         TypeInfo {
             reference: reference(OPTION),
@@ -375,6 +377,7 @@ impl RuntimeStop for Memory {
             };
             *byte = *read;
         }
+
         true
     }
 
@@ -566,6 +569,7 @@ fn every_end_of_a_chain_is_said() {
         assert_eq!(chain.end, end, "{state}");
         assert_eq!(chain.frames.len(), 1, "{state}");
     }
+
     memory.byte(outer, 9);
     let chain = walk_from(&memory, outer, OUTER);
     assert!(
@@ -600,6 +604,7 @@ fn a_chain_ends_at_a_cycle_and_at_its_depth() {
         memory.byte(at, 7);
         memory.word(at + AWAITEE, at + 0x100);
     }
+
     let deep = walk_from(&memory, 0x1_0000, OUTER);
     assert_eq!(deep.end, ChainEnd::TooDeep);
     assert!(deep.frames.len() < MAX_DEPTH);
@@ -622,8 +627,10 @@ proptest! {
             } else {
                 u64::from(*value % 12)
             };
+
             memory.word(0x1000 + index * 8, word);
         }
+
         let chain = walk_from(&memory, 0x1000, root);
         prop_assert!(chain.frames.len() <= MAX_DEPTH);
     }

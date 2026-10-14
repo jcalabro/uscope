@@ -34,6 +34,7 @@ fn frame_variables(dap: &mut Dap, frame: &Value) -> BTreeMap<String, Value> {
             }
         }
     }
+
     variables
 }
 
@@ -125,6 +126,7 @@ fn assert_children_evaluate(
             );
             *checked += 1;
         }
+
         if depth > 0
             && child["variablesReference"]
                 .as_i64()
@@ -173,6 +175,7 @@ fn records_and_enums_expand_and_their_members_evaluate_to_what_they_show() {
                 );
             }
         }
+
         assert!(checked > 0, "{program} has no members to evaluate");
         finish_running(dap, thread);
     }
@@ -196,6 +199,7 @@ fn step_out_shows_what_the_function_returned() {
         assert_eq!(stopped.reason, "step", "{program}");
         let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
         let variables = frame_variables(&mut dap, &trace["stackFrames"][0]);
+
         // Returned values are listed with the frame's own, and no name
         // reaches them.
         let count = &variables["returned count"];
@@ -239,6 +243,7 @@ fn step_out_shows_what_a_c_function_returned() {
             .find(|member| member["name"] == name)
             .map(|member| member["value"].clone())
     };
+
     assert_eq!(value("d"), Some(json!("0.5")), "{members:?}");
     assert_eq!(value("i"), Some(json!("42")), "{members:?}");
     finish_running(dap, thread);
@@ -267,6 +272,7 @@ fn stack_traces_show_the_functions_that_left_by_tail_calls() {
         ))
         .expect("a line fits")
     };
+
     assert_eq!(
         frames
             .iter()

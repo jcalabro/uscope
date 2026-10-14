@@ -39,6 +39,7 @@ async fn launched(fixture: &str, case: &str, stops: Option<ExceptionStops>) -> L
             )
             .await;
     }
+
     let reason = scenario
         .run_with_to_stop(LaunchOptions {
             arguments: vec![case.into()],
@@ -89,6 +90,7 @@ fn exception(reason: &StopReason, context: &str) -> String {
     let StopReason::LanguageException(exception) = reason else {
         panic!("{context}: {reason:?}");
     };
+
     assert_eq!(exception.kind, LanguageExceptionKind::Raised, "{context}");
     exception.message.to_string()
 }
@@ -125,6 +127,7 @@ async fn check_panic(launched: &mut Launched, context: &str, message: &str, mark
     let InferiorState::Stopped { thread_id, .. } = snapshot.inferior else {
         panic!("{context}: not stopped");
     };
+
     let activity = snapshot
         .threads
         .iter()
@@ -134,6 +137,7 @@ async fn check_panic(launched: &mut Launched, context: &str, message: &str, mark
         Some(ThreadActivity::Task { task, .. }) => Some(task.number),
         _ => None,
     };
+
     assert_eq!(runs, task, "{context}: {activity:?}");
 }
 
@@ -238,6 +242,7 @@ async fn a_panic_with_a_value_names_its_type() {
         let StopReason::LanguageException(raised) = &launched.reason else {
             panic!("{fixture}: {:?}", launched.reason);
         };
+
         assert_eq!(raised.message.as_ref(), "panicked with a value of type i32");
         let value = raised
             .value
@@ -370,5 +375,6 @@ async fn the_panic_machinery_is_marked() {
             "{name}: {roles:?}"
         );
     }
+
     launched.scenario.shutdown().await;
 }

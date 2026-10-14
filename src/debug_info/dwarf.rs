@@ -9,6 +9,7 @@ use gimli::{
     EvaluationResult, Location, RegisterRule, RunTimeEndian, UnwindContext, UnwindExpression,
     UnwindSection, Value,
 };
+
 use object::{Object, ObjectSection, ObjectSegment};
 use rayon::prelude::*;
 
@@ -28,54 +29,76 @@ use crate::{
 enum DwarfError {
     #[error("failed to read debug information: {0}")]
     Io(#[from] std::io::Error),
+
     #[error("malformed ELF file: {0}")]
     Object(#[from] object::Error),
+
     #[error("not an ELF file")]
     NotElf,
+
     #[error(
         "the file is truncated: its ELF headers describe {described} bytes, but it has {length}"
     )]
     Truncated { described: u64, length: u64 },
+
     #[error(
         "it is a relocatable object file, whose DWARF has relocations only a linker applies; \
          debug the executable or shared library it is linked into"
     )]
     Relocatable,
+
     #[error("it is a core dump, not a program; open it as a core dump")]
     CoreDump,
+
     #[error("malformed DWARF: {0}")]
     Dwarf(#[from] gimli::Error),
+
     #[error("its code is for {}, which this debugger does not support", architecture_name(*.0))]
     UnsupportedArchitecture(object::Architecture),
+
     /// An error and the part of the DWARF it was found in.
     #[error("{}", in_context(.error, .context))]
     Context { error: Box<Self>, context: String },
+
     #[error("DWARF references a supplementary file that was not read")]
     UnsupportedSupplementaryReference,
+
     #[error("DWARF reference {0:#x} is outside every unit of the supplementary file")]
     SupplementaryReferenceOutsideUnits(usize),
+
     #[error("{0}")]
     Supplementary(String),
+
     #[error(transparent)]
     LineTables(#[from] crate::image::lines::TooManyRows),
+
     #[error("DWARF entry depth cannot be represented")]
     InvalidEntryDepth,
+
     #[error("DWARF code range is reversed")]
     InvalidRange,
+
     #[error("DWARF debug-info reference {0:#x} is outside every loaded unit")]
     ReferenceOutsideUnits(usize),
+
     #[error("unsupported DWARF reference form")]
     UnsupportedReferenceForm,
+
     #[error("DWARF type signature {0:#018x} has no loaded definition")]
     TypeSignatureMissing(u64),
+
     #[error("DWARF type signature {0:#018x} has multiple definitions")]
     DuplicateTypeSignature(u64),
+
     #[error("DWARF reference targets an unsupported DIE at unit {unit}, offset {offset:#x}")]
     ReferencedFunctionMissing { unit: usize, offset: usize },
+
     #[error("DWARF reference cycle")]
     ReferenceCycle,
+
     #[error("malformed variable type metadata: {0}")]
     MalformedVariable(Arc<str>),
+
     #[error(
         "the debug information needs more than its load budget of {limit} bytes: {what} asked \
          for {requested} more"
@@ -85,13 +108,17 @@ enum DwarfError {
         limit: u64,
         requested: u64,
     },
+
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
+
     #[error(transparent)]
     Binding(crate::image::facts::Unbound),
+
     /// More of something than an image numbers with its `u32` ids.
     #[error("the debug information has more {0} than an image can hold")]
     TooMany(&'static str),
+
     #[error("the debug information does not fit an image: {0}")]
     Seal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -149,6 +176,7 @@ fn parse_object(data: &[u8]) -> std::result::Result<object::File<'_>, DwarfError
     if !data.starts_with(&object::elf::ELFMAG) {
         return Err(DwarfError::NotElf);
     }
+
     object::File::parse(data).map_err(|error| {
         let length = data.len() as u64;
         match elf_headers_end(data) {
@@ -166,15 +194,18 @@ fn elf_headers_end(data: &[u8]) -> Option<u64> {
         2 => false,
         _ => return None,
     };
+
     // The header's size and its fields' offsets differ by class.
     let (header, phoff, shoff, word, phentsize) = match data.get(4)? {
         1 => (52_usize, 0x1c, 0x20, 4, 0x2a),
         2 => (64, 0x20, 0x28, 8, 0x36),
         _ => return None,
     };
+
     if data.len() < header {
         return Some(header as u64);
     }
+
     let field = |at: usize, size: usize| -> Option<u64> {
         let bytes = data.get(at..at + size)?;
         Some((0..size).fold(0, |value, index| {
@@ -182,13 +213,16 @@ fn elf_headers_end(data: &[u8]) -> Option<u64> {
             value << 8 | u64::from(byte)
         }))
     };
+
     let table = |offset: usize, entry: usize| -> Option<u64> {
         let count = field(entry + 2, 2)?;
         if count == 0 {
             return Some(0);
         }
+
         field(offset, word)?.checked_add(field(entry, 2)?.checked_mul(count)?)
     };
+
     let program_headers = table(phoff, phentsize)?;
     let section_headers = table(shoff, phentsize + 4)?;
     Some((header as u64).max(program_headers).max(section_headers))
@@ -205,6 +239,7 @@ fn check_object(object: &object::File<'_>) -> std::result::Result<(), DwarfError
         object::ObjectKind::Core => return Err(DwarfError::CoreDump),
         _ => {}
     }
+
     target_description(object).map(drop)
 }
 
@@ -234,14 +269,18 @@ struct UnitCatalog<'data> {
 )]
 struct Units<'data> {
     units: Vec<gimli::Unit<Reader<'data>>>,
+
     /// The `.debug_info` offset of each of the file's own units and its
     /// index, by offset. DWARF 4's type units are in `.debug_types`, which
     /// `.debug_info` references never name.
     starts: Vec<(usize, usize)>,
+
     /// The same for the supplementary file's units.
     supplementary_starts: Vec<(usize, usize)>,
+
     /// The index of the supplementary file's first unit.
     first_supplementary: usize,
+
     /// The language each unit without its own takes from the units that
     /// refer to it, when they agree; empty when no unit is partial.
     inherited_languages: Vec<Option<gimli::DwLang>>,
@@ -259,6 +298,7 @@ struct Units<'data> {
 pub(super) struct DieWalk<'a, 'data> {
     raw: gimli::EntriesRaw<'a, Reader<'data>>,
     entry: gimli::DebuggingInformationEntry<Reader<'data>>,
+
     /// The DIE [`Self::next`] returned, until it is decoded or skipped.
     pending: Option<(&'a gimli::Abbreviation, WalkedDie)>,
 }
@@ -288,6 +328,7 @@ impl<'a, 'data> DieWalk<'a, 'data> {
         if let Some((abbreviation, _)) = self.pending.take() {
             self.raw.skip_attributes(abbreviation.attributes())?;
         }
+
         // Null entries end children, and pad the unit after its root's.
         while !self.raw.is_empty() {
             let depth = self.raw.next_depth();
@@ -298,10 +339,12 @@ impl<'a, 'data> DieWalk<'a, 'data> {
                     offset,
                     tag: abbreviation.tag(),
                 };
+
                 self.pending = Some((abbreviation, die));
                 return Ok(Some(die));
             }
         }
+
         Ok(None)
     }
 
@@ -314,6 +357,7 @@ impl<'a, 'data> DieWalk<'a, 'data> {
                 self.entry.offset.0 as u64,
             ));
         };
+
         self.entry.tag = abbreviation.tag();
         self.entry.has_children = abbreviation.has_children();
         self.entry.offset = die.offset;
@@ -357,17 +401,20 @@ impl<'data> Units<'data> {
                 let count = units.len();
                 return Ok(Self::catalog(units, count));
             }
+
             let outward = first_error(units.par_iter().map(outward_references).collect())?;
             let count = units.len();
             let mut this = Self::catalog(units, count);
             this.inherit(&outward);
             return Ok(this);
         };
+
         let mut headers = Vec::new();
         let mut unit_headers = supplementary.units();
         while let Some(header) = unit_headers.next()? {
             headers.push(header);
         }
+
         // Where each supplementary unit lies, in offset order.
         let header_at = |offset: gimli::DebugInfoOffset| {
             let after = headers.partition_point(|header| {
@@ -380,6 +427,7 @@ impl<'data> Units<'data> {
             let start = header.debug_info_offset()?.0;
             (offset.0 - start < header.length_including_self()).then_some(index)
         };
+
         let mut outward = first_error(units.par_iter().map(outward_references).collect())?;
         let mut reached = vec![false; headers.len()];
         let mut wave = Vec::new();
@@ -391,6 +439,7 @@ impl<'data> Units<'data> {
                         Outward::Own(offset) if within_supplementary => offset,
                         Outward::Own(_) => continue,
                     };
+
                     if let Some(index) = header_at(offset)
                         && !std::mem::replace(&mut reached[index], true)
                     {
@@ -401,6 +450,7 @@ impl<'data> Units<'data> {
         for references in &outward {
             reach(references, false, &mut wave);
         }
+
         let mut supplementary_units = Vec::new();
         while !wave.is_empty() {
             let loaded = first_error(
@@ -418,10 +468,12 @@ impl<'data> Units<'data> {
                 supplementary_units.push((index, unit, references));
             }
         }
+
         supplementary_units.sort_unstable_by_key(|(index, ..)| *index);
         let first_supplementary = units.len();
         for (_, unit, references) in supplementary_units {
             units.push(unit);
+
             // The supplementary file's references stay within it, and name
             // nothing in another file.
             outward.push(
@@ -434,6 +486,7 @@ impl<'data> Units<'data> {
                     .collect(),
             );
         }
+
         let mut this = Self::catalog(units, first_supplementary);
         this.inherit(&outward);
         Ok(this)
@@ -453,6 +506,7 @@ impl<'data> Units<'data> {
             starts.sort_unstable();
             starts
         };
+
         Self {
             starts: starts_of(&units[..first_supplementary], 0),
             supplementary_starts: starts_of(&units[first_supplementary..], first_supplementary),
@@ -477,6 +531,7 @@ impl<'data> Units<'data> {
                     Outward::Own(offset) => self.containing(offset, false),
                     Outward::Supplementary(offset) => self.containing(offset, true),
                 };
+
                 if let Some(target) = target
                     && target.unit != referrer
                     && referrers[target.unit].last() != Some(&referrer)
@@ -485,6 +540,7 @@ impl<'data> Units<'data> {
                 }
             }
         }
+
         let mut languages = self
             .units
             .iter()
@@ -534,21 +590,25 @@ impl<'data> Units<'data> {
                     round.push((unit, language, directory));
                 }
             }
+
             if round.is_empty() {
                 break;
             }
+
             for (unit, language, directory) in round {
                 if let Some(language) = language {
                     languages[unit] = language;
                     inherited[unit] = language;
                     language_settled[unit] = true;
                 }
+
                 if let Some(directory) = directory {
                     self.units[unit].comp_dir = directory;
                     directory_settled[unit] = true;
                 }
             }
         }
+
         self.inherited_languages = inherited;
     }
 
@@ -560,6 +620,7 @@ impl<'data> Units<'data> {
         } else {
             &self.starts
         };
+
         let after = starts.partition_point(|(start, _)| *start <= offset.0);
         let (_, unit) = *starts.get(after.checked_sub(1)?)?;
         let within = offset.to_unit_offset(&self.units[unit].header)?;
@@ -585,20 +646,24 @@ impl<'data> Units<'data> {
                 parents[unit] = parents[parents[unit]];
                 unit = parents[unit];
             }
+
             unit
         };
+
         for (unit, references) in outward.iter().enumerate() {
             for &reference in references {
                 let target = match reference {
                     Outward::Own(offset) => self.containing(offset, self.is_supplementary(unit)),
                     Outward::Supplementary(offset) => self.containing(offset, true),
                 };
+
                 if let Some(target) = target {
                     let (from, to) = (root(&mut parents, unit), root(&mut parents, target.unit));
                     parents[from.max(to)] = from.min(to);
                 }
             }
         }
+
         Ok((0..self.units.len())
             .map(|unit| root(&mut parents, unit))
             .collect())
@@ -617,6 +682,7 @@ impl<'data> Units<'data> {
         if self.is_supplementary(key.unit) {
             return None;
         }
+
         gimli::UnitOffset(key.offset)
             .to_debug_info_offset(&self.units[key.unit].header)
             .map(|offset| offset.0 as u64)
@@ -655,6 +721,7 @@ fn outward_references(
                 }),
         );
     }
+
     references.sort_unstable();
     references.dedup();
     Ok(references)
@@ -671,6 +738,7 @@ fn unit_dwarf<'a, 'data>(
     let Some(supplementary) = dwarf.sup() else {
         return dwarf;
     };
+
     let section = supplementary.debug_info.reader().slice().as_ptr_range();
     let held = unit
         .header
@@ -689,6 +757,7 @@ fn agreed<T: PartialEq>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
             Some(_) => return None,
         }
     }
+
     agreed
 }
 
@@ -746,6 +815,7 @@ fn die_code_ranges<'data>(
             .or_else(|| high.udata_value().and_then(|size| begin.checked_add(size)));
         ranges.push((begin, end));
     }
+
     Ok(ranges
         .into_iter()
         .filter_map(|(begin, end)| {
@@ -753,6 +823,7 @@ fn die_code_ranges<'data>(
                 start: ImageAddress::new(begin),
                 end: ImageAddress::new(end?),
             };
+
             (range.start < range.end && code.contains(range)).then_some(range)
         })
         .collect())
@@ -772,6 +843,7 @@ pub(super) fn fuzz_expression(data: &[u8]) {
 /// Unwinds by the call-frame sections and Go's table an image keeps.
 struct DwarfUnwindInfo {
     tables: Arc<crate::image::Image>,
+
     /// Go's function table, which unwinds Go code no call-frame information
     /// describes and says where Go frames saved the frame pointer, parsed
     /// on the first unwind that needs it.
@@ -832,10 +904,13 @@ fn load_bytes_on_pool(
 pub(super) enum CacheOutcome {
     /// The load had no cache.
     Off,
+
     /// The cache held the image.
     Hit,
+
     /// The cache held no image, so the load built one and wrote it.
     Miss,
+
     /// The cache held an unusable image, which the load removed before
     /// building and writing another.
     Corrupt,
@@ -862,6 +937,7 @@ fn load_debug_info(
         found: separate,
         rejected,
     } = search.find(path, &object);
+
     // The supplementary file is named by whichever file holds the DWARF.
     let supplementary = separate.as_ref().map_or_else(
         || search.supplementary(path, &object),
@@ -880,6 +956,7 @@ fn load_debug_info(
             .map(|file| Arc::new(file.path.clone())),
         id: image_id,
     };
+
     let built = |tables| bind(&binding, Arc::new(tables)).map_err(DwarfError::Binding);
     let read = |separate: Option<&super::separate::DebugFile>, supplementary: &Supplementary| {
         let rejected = rejected
@@ -887,20 +964,25 @@ fn load_debug_info(
             .map(|(file, reason)| (file, Arc::<str>::from(reason.as_str())));
         read_debug_info(data, separate, rejected.as_ref(), supplementary, limits)
     };
+
     let Some(cache) = cache else {
         let read = read(separate.as_ref(), &supplementary)?;
+
         // What the image was read from is not needed to seal it.
         drop((separate, supplementary, rejected));
         return Ok((built(read.seal()?)?, CacheOutcome::Off));
     };
+
     let phase = crate::span!("cache.read");
     let mut inputs = vec![data];
     inputs.extend(separate.as_ref().map(|file| file.data.as_slice()));
+
     // A rejected file's reason is recorded, so its bytes key the image too.
     inputs.extend(rejected.as_ref().map(|(file, _)| file.data.as_slice()));
     if let Supplementary::Found(file) = &supplementary {
         inputs.push(file.data.as_slice());
     }
+
     let key = crate::cache::Key::of(&inputs);
     let outcome = match cache.get(key) {
         crate::cache::Lookup::Hit { image, stamp } => match bind(&binding, Arc::new(*image)) {
@@ -920,6 +1002,7 @@ fn load_debug_info(
         }
         crate::cache::Lookup::Miss => CacheOutcome::Miss,
     };
+
     drop(phase);
     crate::count!("cache_misses", 1);
     let read = read(separate.as_ref(), &supplementary)?;
@@ -929,6 +1012,7 @@ fn load_debug_info(
     if let Err(error) = cache.put(key, &tables) {
         crate::cache::report(format_args!("{error}"));
     }
+
     drop(phase);
     Ok((built(tables)?, outcome))
 }
@@ -953,8 +1037,10 @@ fn read_debug_info(
             Separate::Unusable(&file.path, Arc::clone(reason))
         })
     };
+
     let image =
         |separate, supplementary, dwarf| load_image(data, separate, supplementary, dwarf, limits);
+
     // The file's own DWARF, or, when it cannot be read, none.
     let own = |separate: Separate<'_>, supplementary| {
         load_image(
@@ -974,6 +1060,7 @@ fn read_debug_info(
             )
         })
     };
+
     match (separate, supplementary) {
         (None, Supplementary::Missing(reason)) => image(
             none_found(),
@@ -991,6 +1078,7 @@ fn read_debug_info(
                 Supplementary::Found(file) => Some(file),
                 Supplementary::None | Supplementary::Missing(_) => None,
             };
+
             image(Separate::Used(separate), supplementary, DwarfUse::Read).or_else(|error| {
                 own(
                     Separate::Unusable(&separate.path, error.to_string().into()),
@@ -1004,6 +1092,7 @@ fn read_debug_info(
 /// Whether a load reads the DWARF of the file that holds it.
 enum DwarfUse {
     Read,
+
     /// It could not be read, for the reason given, so the image is loaded
     /// without it.
     Unusable(Arc<str>),
@@ -1029,6 +1118,7 @@ fn load_sections<'data>(
                 Some(section) => section.uncompressed_data()?,
                 None => Cow::Borrowed(&[][..]),
             };
+
             Ok((id, data))
         })
         .collect::<Vec<std::result::Result<_, DwarfError>>>();
@@ -1046,6 +1136,7 @@ fn load_sections<'data>(
 enum Separate<'a> {
     None,
     Used(&'a super::separate::DebugFile),
+
     /// One found but unusable, for the reason given.
     Unusable(&'a Path, Arc<str>),
 }
@@ -1081,6 +1172,7 @@ fn load_image(
         Separate::Used(file) => Some(object::File::parse(file.data.as_slice())?),
         Separate::None | Separate::Unusable(..) => None,
     };
+
     let dwarf_object = debug_object.as_ref().unwrap_or(&object);
     let supplementary_object = supplementary
         .map(|file| object::File::parse(file.data.as_slice()))
@@ -1094,6 +1186,7 @@ fn load_image(
             0,
         ),
     };
+
     let supplementary_sections = supplementary_object
         .as_ref()
         .map(|supplementary| {
@@ -1102,6 +1195,7 @@ fn load_image(
                     "its dwz supplementary file has another byte order".to_owned(),
                 ));
             }
+
             load_sections(supplementary)
         })
         .transpose()?
@@ -1120,6 +1214,7 @@ fn load_image(
     let mut dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
         EndianSlice::new(section, endian)
     });
+
     // Units a compiler emitted together share their abbreviations: each
     // shared table is read and held once rather than for every unit, which
     // was half a gigabyte for 14,000 units of 2,800 ThinLTO modules.
@@ -1127,6 +1222,7 @@ fn load_image(
     let mut files = Files::default();
     let mut line_tables = LineTables::default();
     let mut headers = Vec::new();
+
     // Where the next unit's header is, which a malformed one names.
     let mut next = 0;
     let mut unit_headers = dwarf.units();
@@ -1136,6 +1232,7 @@ fn load_image(
         next = unit_end(&header);
         headers.push(header);
     }
+
     let mut next = 0;
     let mut type_unit_headers = dwarf.type_units();
     while let Some(header) = type_unit_headers.next().map_err(|error| {
@@ -1144,6 +1241,7 @@ fn load_image(
         next = unit_end(&header);
         headers.push(header);
     }
+
     // Each unit's abbreviations, root DIE, and line program header, in
     // parallel and in order.
     let units = first_error(
@@ -1162,6 +1260,7 @@ fn load_image(
         units,
         code: CodeRanges(super::elf::executable_ranges(&object)),
     };
+
     crate::count!("units", catalog.units.len());
     drop(phase);
 
@@ -1171,12 +1270,14 @@ fn load_image(
         Ok(None) => (None, EmbeddedSymbolTable::Absent),
         Err(error) => (None, unusable_table(&error)),
     };
+
     let phase = crate::span!("functions");
     let mut function_metadata =
         load_function_metadata(&dwarf, &catalog, go_table.as_deref(), &mut files)?;
 
     drop(phase);
     let phase = crate::span!("lines");
+
     // Each unit's line program, decoded in parallel with files of its own,
     // and appended in unit order: interning a unit's files in the order it
     // first names them gives every file the identifier a serial load would.
@@ -1212,6 +1313,7 @@ fn load_image(
     let code = |address: u64, length: usize| {
         code_bytes(&object, address, address.checked_add(length as u64)?)
     };
+
     if let Some(table) = &go_table
         && let Err(error) = super::gopclntab::complete_metadata(
             table,
@@ -1227,6 +1329,7 @@ fn load_image(
         runtime_function_table = unusable_table(&error);
         go_table = None;
     }
+
     // Function and code instance identifiers index their tables.
     for (index, function) in function_metadata.functions.iter().enumerate() {
         debug_assert_eq!(
@@ -1236,6 +1339,7 @@ fn load_image(
             function.id
         );
     }
+
     for (index, instance) in function_metadata.code_instances.iter().enumerate() {
         debug_assert_eq!(
             instance.id.index(),
@@ -1247,6 +1351,7 @@ fn load_image(
 
     drop(phase);
     let phase = crate::span!("prologues");
+
     // The prologue and coroutine analyses below find statements by address.
     let statements = line_tables.statements_by_address();
     super::roles::link_loop_bodies(&mut function_metadata.functions);
@@ -1258,6 +1363,7 @@ fn load_image(
     );
 
     drop(phase);
+
     // Unwinding and symbols need nothing the variables produce, and most of
     // the variables' work runs on one thread, so they are read beside it.
     let (variables, unwind_and_symbols) = rayon::join(
@@ -1279,6 +1385,7 @@ fn load_image(
                     limits.walk_ahead,
                 )
             };
+
             let known = files.paths().len();
             match read(&mut files, variables::Locals::Read) {
                 // Locals are most of what a large program's debug
@@ -1309,6 +1416,7 @@ fn load_image(
             Ok::<_, DwarfError>((unwind, symbols))
         },
     );
+
     // The variables' failure is reported first, as when they were read first.
     let (mut variables, locals_left_out) =
         variables.map_err(|error| error.within(|| "its variables and types".to_owned()))?;
@@ -1325,6 +1433,7 @@ fn load_image(
             function_metadata.functions[function.index()].generics = generics;
         }
     }
+
     let phase = crate::span!("resume_points");
     let coroutines = std::mem::take(&mut variables.coroutines);
     for (instance, ty) in &variables.coroutine_bodies {
@@ -1337,6 +1446,7 @@ fn load_image(
             function_metadata.functions[function.index()].coroutine = Some(*ty);
         }
     }
+
     #[cfg(target_arch = "x86_64")]
     let resume_points = if target.architecture == Architecture::X86_64 {
         decode_resume_points(
@@ -1349,9 +1459,11 @@ fn load_image(
     } else {
         Vec::new()
     };
+
     #[cfg(not(target_arch = "x86_64"))]
     let resume_points = Vec::new();
     drop(statements);
+
     // Which variables an await holds is asked of the module's code.
     #[cfg(target_arch = "x86_64")]
     let held = variables::coroutine::held_ranges(
@@ -1367,6 +1479,7 @@ fn load_image(
     if let Some(table) = &go_table {
         assign_go_symbol_roles(table, &mut symbols.symbols);
     }
+
     Ok(Read {
         target,
         address_range: image_address_range(&object)?,
@@ -1464,11 +1577,13 @@ fn unit_failure(
             header.debug_abbrev_offset().0
         );
     };
+
     let mut entries = header.entries(&abbreviations);
     let line_program = match entries.next_dfs() {
         Ok(Some(root)) => root.attr_value(gimli::DW_AT_stmt_list),
         _ => return format!("the unit at {at}"),
     };
+
     match line_program {
         Some(gimli::AttributeValue::DebugLineRef(offset)) => {
             format!(
@@ -1503,13 +1618,16 @@ fn split_units<'data>(
             first.get_or_insert(unit);
         }
     }
+
     let Some(first) = first else {
         return Ok(None);
     };
+
     let file = match first.dwo_name()? {
         Some(name) => Some(text(unit_dwarf(dwarf, first).attr_string(first, name)?).into_owned()),
         None => None,
     };
+
     let file = |such_as| file.map_or_else(String::new, |file| format!(", {such_as}{file}"));
     let reason = if compile_units == 1 {
         format!(
@@ -1525,6 +1643,7 @@ fn split_units<'data>(
             file("such as ")
         )
     };
+
     Ok(Some(reason.into()))
 }
 
@@ -1539,10 +1658,12 @@ fn unit_producers<'data>(
         let Some(root) = entries.next_dfs()? else {
             continue;
         };
+
         if let Some(producer) = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)? {
             producers.push(producer);
         }
     }
+
     Ok(producers)
 }
 
@@ -1562,6 +1683,7 @@ fn go_packages(
         let Some(root) = entries.next_dfs()? else {
             continue;
         };
+
         if let (Some(path), Some(name)) = (
             string_attribute(dwarf, unit, root, gimli::DW_AT_name)?,
             string_attribute(dwarf, unit, root, DW_AT_GO_PACKAGE_NAME)?,
@@ -1569,6 +1691,7 @@ fn go_packages(
             packages.push(crate::model::PackageInfo { path, name });
         }
     }
+
     Ok(packages)
 }
 
@@ -1589,6 +1712,7 @@ fn assign_go_symbol_roles(table: &super::gopclntab::GoTable, symbols: &mut [crat
         else {
             continue;
         };
+
         if let Ok(name) = table.name(function) {
             symbol.role = super::roles::go_role(&name, Some(function.facts), false);
         }
@@ -1608,6 +1732,7 @@ fn go_code_ranges<'data>(
         let Some(root) = entries.next_dfs()? else {
             continue;
         };
+
         if matches!(
             root.attr_value(gimli::DW_AT_language),
             Some(gimli::AttributeValue::Language(gimli::DW_LANG_Go))
@@ -1615,6 +1740,7 @@ fn go_code_ranges<'data>(
             ranges.extend(die_code_ranges(dwarf, unit, root, &catalog.code)?);
         }
     }
+
     // Merging lets a lookup check only the last range starting at or before
     // an address.
     ranges.sort_unstable_by_key(|range| range.start);
@@ -1625,6 +1751,7 @@ fn go_code_ranges<'data>(
             _ => merged.push(range),
         }
     }
+
     Ok(merged)
 }
 
@@ -1650,6 +1777,7 @@ fn type_signature_index(
         else {
             continue;
         };
+
         if signatures
             .insert(
                 type_signature,
@@ -1663,6 +1791,7 @@ fn type_signature_index(
             return Err(DwarfError::DuplicateTypeSignature(type_signature.0));
         }
     }
+
     Ok(signatures)
 }
 
@@ -1715,7 +1844,9 @@ fn load_unwind_info(
             .unwrap_or_default()
             .into())
     };
+
     let section_data = |name| data_in(object, name);
+
     // A separate debug file may hold the `.debug_frame` the module's file
     // was stripped of.
     let debug_frame = match section_data(".debug_frame")? {
@@ -1725,11 +1856,13 @@ fn load_unwind_info(
         },
         frame => frame,
     };
+
     let address = |name| {
         object
             .section_by_name(name)
             .map(|section| section.address())
     };
+
     let mut unwind = crate::image::unwind::Unwind {
         eh_frame: section_data(".eh_frame")?,
         debug_frame,
@@ -1744,6 +1877,7 @@ fn load_unwind_info(
         go,
         ..Default::default()
     };
+
     let sections = UnwindSections::of(&unwind);
     let indexes = (
         fde_index(&sections.eh_frame(), &sections.bases),
@@ -1807,12 +1941,15 @@ impl<'data> UnwindSections<'data> {
         if let Some(address) = bases.eh_frame {
             gimli_bases = gimli_bases.set_eh_frame(address);
         }
+
         if let Some(address) = bases.text {
             gimli_bases = gimli_bases.set_text(address);
         }
+
         if let Some(address) = bases.got {
             gimli_bases = gimli_bases.set_got(address);
         }
+
         Self {
             eh_frame,
             debug_frame,
@@ -1864,6 +2001,7 @@ where
                 break;
             }
         };
+
         match partial.parse(S::cie_from_offset) {
             Ok(fde) => entries.push((
                 AddressRange {
@@ -1878,6 +2016,7 @@ where
             }
         }
     }
+
     crate::image::unwind::FdeIndex {
         entries: crate::image::index::intervals(entries),
         first_error: first_error.map(|(offset, error)| (offset, error.to_string())),
@@ -1911,6 +2050,7 @@ impl DwarfUnwindInfo {
             .get_or_init(|| {
                 let view = self.view();
                 let (bytes, facts) = view.go()?;
+
                 // The loader parsed these same bytes.
                 let table = super::gopclntab::GoTable::reparse(bytes.into(), facts).ok()?;
                 Some(super::gopclntab::GoUnwind::new(
@@ -1953,6 +2093,7 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
+
         let result = cfa_from_section(
             &sections.debug_frame(),
             view.debug_frame_index(),
@@ -1964,9 +2105,11 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
+
         if let Some(pushed) = view.stub_pushes(address) {
             return stub_cfa(pushed, registers);
         }
+
         self.go()
             .and_then(|go| go.cfa(address, registers))
             .unwrap_or(result)
@@ -2003,21 +2146,25 @@ impl UnwindInfo for DwarfUnwindInfo {
         } else {
             result
         };
+
         let result = match (result, view.stub_pushes(address)) {
             (Err(UnwindTermination::NoUnwindInfo { .. }), Some(pushed)) => {
                 unwind_stub(pushed, registers, clobbered, memory)
             }
             (result, _) => result,
         };
+
         let Some(go) = self.go() else {
             return result;
         };
+
         let result = match result {
             Err(UnwindTermination::NoUnwindInfo { .. }) => go
                 .unwind(address, registers, clobbered, memory)
                 .unwrap_or(result),
             result => result,
         };
+
         result.map(|mut step| {
             go.recover_frame_pointer(address, registers, &mut step, memory);
             step
@@ -2108,6 +2255,7 @@ where
     let return_register = DwarfRegister::from(fde.cie().return_address_register());
     let cfa = cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)?;
     let mut caller = registers.clone();
+
     // A callee may overwrite every register its calling convention does not
     // preserve across calls, so the caller's value survives only where the
     // row says where it was saved. Keeping the callee's value would present
@@ -2127,6 +2275,7 @@ where
         section,
         encoding: fde.cie().encoding(),
     };
+
     for &(register, ref rule) in row.registers() {
         let register = DwarfRegister::from(register);
         match rules.apply(&mut caller, memory, register, rule) {
@@ -2141,6 +2290,7 @@ where
             result => result?,
         }
     }
+
     caller.set(crate::unwind::RSP, cfa.get());
 
     if caller.get(return_register).is_none() {
@@ -2190,6 +2340,7 @@ fn unwind_stub(
     for &register in clobbered {
         caller.remove(register);
     }
+
     caller.set(crate::unwind::RETURN_ADDRESS, return_address);
     caller.set(crate::unwind::RSP, cfa.get());
     Ok(UnwindStep {
@@ -2280,15 +2431,18 @@ where
     let unsupported = |feature: &str| UnwindTermination::UnsupportedUnwindInfo {
         feature: format!("{rule} expression: {feature}").into(),
     };
+
     let corrupt = |error: gimli::Error| UnwindTermination::CorruptUnwindInfo {
         description: format!("{rule} expression: {error}").into(),
     };
+
     let expression = expression.get(section).map_err(corrupt)?;
     let mut evaluation = expression.evaluation(encoding);
     evaluation.set_max_iterations(MAX_UNWIND_EXPRESSION_ITERATIONS);
     if let Some(initial) = initial {
         evaluation.set_initial_value(initial);
     }
+
     let mut result = evaluation.evaluate().map_err(corrupt)?;
     loop {
         result = match result {
@@ -2309,6 +2463,7 @@ where
                 if size == 0 || u32::from(size) > 8 {
                     return Err(unsupported("unsupported memory operand size"));
                 }
+
                 let address = VirtualAddress::new(address);
                 let word = memory
                     .read_u64(address)
@@ -2319,6 +2474,7 @@ where
                 } else {
                     word & ((1 << bits) - 1)
                 };
+
                 evaluation
                     .resume_with_memory(Value::Generic(value))
                     .map_err(corrupt)?
@@ -2336,6 +2492,7 @@ where
     let [piece] = pieces.as_slice() else {
         return Err(unsupported("compound location"));
     };
+
     match piece.location {
         Location::Address { address } => Ok(Evaluated::Address(address)),
         Location::Value {
@@ -2421,6 +2578,7 @@ impl<'data, S: UnwindSection<Reader<'data>>> RuleContext<'_, S> {
                 });
             }
         };
+
         caller.set(register, value);
         Ok(())
     }
@@ -2514,6 +2672,7 @@ impl<V> DieMap<V> {
             );
             self.first = unit;
         }
+
         let index = unit - self.first;
         if index >= self.units.len() {
             self.units.resize_with(index + 1, HashMap::new);
@@ -2585,6 +2744,7 @@ impl<V> DieMap<V> {
             if entries.is_empty() {
                 continue;
             }
+
             let unit = self.unit_mut(first + index);
             if unit.is_empty() {
                 *unit = entries;
@@ -2603,6 +2763,7 @@ enum RawFunctionKind {
 
 struct RawFunction {
     key: DieKey,
+
     /// The language of the unit holding the DIE.
     language: SourceLanguage,
     kind: RawFunctionKind,
@@ -2611,18 +2772,23 @@ struct RawFunction {
     specification: Option<DieKey>,
     name: Option<Arc<str>>,
     linkage_name: Option<Arc<str>>,
+
     /// Whether the DIE says the code only forwards to another function.
     trampoline: bool,
+
     /// Whether the DIE says it is the program's main subprogram.
     main_subprogram: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
+
     /// Its code, held once for its code instance too.
     ranges: Arc<[AddressRange<ImageAddress>]>,
     entry: Option<ImageAddress>,
+
     /// The names of the namespaces enclosing the DIE, outermost first,
     /// joined by `::`, as Rust's debug information nests its functions.
     namespace: Option<Arc<str>>,
+
     /// The type the function returns.
     returns: Option<DieKey>,
 }
@@ -2630,6 +2796,7 @@ struct RawFunction {
 struct FunctionMetadata {
     functions: Vec<FunctionInfo>,
     code_instances: Vec<CodeInstanceInfo>,
+
     /// Maps each concrete function DIE to its code instance so the variable
     /// catalog can attribute scopes to logical frames.
     instance_ids: DieMap<CodeInstanceId>,
@@ -2646,6 +2813,7 @@ fn load_function_metadata<'data>(
     crate::count!("function_dies", raw.len());
     drop(phase);
     let _phase = crate::span!("functions.resolve");
+
     // Each function's definition: where its origin and specification
     // chains end, as an index into `raw`.
     let definitions = first_error(
@@ -2653,6 +2821,7 @@ fn load_function_metadata<'data>(
             .map(|function| definition_of(function.key, &raw))
             .collect(),
     )?;
+
     // The definitions code belongs to. Clang also emits subprograms with
     // no code and no name, only to scope a function's local types.
     let mut concrete = vec![false; raw.len()];
@@ -2661,6 +2830,7 @@ fn load_function_metadata<'data>(
             concrete[*definition] = true;
         }
     }
+
     // Each definition once, in the order DIEs first name it.
     let mut seen = vec![false; raw.len()];
     let order = definitions
@@ -2672,6 +2842,7 @@ fn load_function_metadata<'data>(
         .par_iter()
         .map(|definition| {
             let origin = &raw[*definition];
+
             // Clang names the thunks a multiply inherited virtual function
             // needs only by their linkage names.
             function_name(origin).map(|name| {
@@ -2688,8 +2859,10 @@ fn load_function_metadata<'data>(
             if concrete[definition] {
                 return Err(DwarfError::MissingFunctionName);
             }
+
             continue;
         };
+
         let origin = &raw[definition];
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
@@ -2749,6 +2922,7 @@ fn code_instances(
             count += 1;
         }
     }
+
     if let Some(((function, _), _)) = raw
         .iter()
         .zip(&instances)
@@ -2760,6 +2934,7 @@ fn code_instances(
             offset: function.key.offset,
         });
     }
+
     let code_instances = raw
         .par_iter()
         .zip(&instances)
@@ -2796,6 +2971,7 @@ fn origin_role(origin: &RawFunction, name: &str, futures: &Futures) -> crate::Co
         origin.linkage_name.as_deref().unwrap_or(name),
         origin.trampoline || builds_future(origin, futures),
     );
+
     // What builds a future only wraps, even a runtime's: a step that
     // enters the runtime goes on into the future's body.
     match (&origin.namespace, &origin.name) {
@@ -2830,6 +3006,7 @@ pub(super) fn own_name(language: SourceLanguage, name: &str) -> Option<String> {
         SourceLanguage::Ada => qualified.rsplit('.').next(),
         _ => None,
     };
+
     own.map(str::to_owned).or(written)
 }
 
@@ -2844,6 +3021,7 @@ fn function_name(function: &RawFunction) -> Option<Arc<str>> {
     {
         return Some(written.into());
     }
+
     let name = function.name.clone().or_else(|| {
         function
             .linkage_name
@@ -2924,12 +3102,14 @@ fn assign_go_function_roles(
             let Some(entry) = instance.ranges.first().map(|range| range.start.get()) else {
                 continue;
             };
+
             facts[instance.function.index()] = table
                 .function_containing(entry)
                 .filter(|function| function.entry == entry)
                 .map(|function| function.facts);
         }
     }
+
     for ((function, (facts, generated)), runtime_c) in functions
         .iter_mut()
         .zip(facts.into_iter().zip(generated))
@@ -2961,6 +3141,7 @@ struct UnitFunctions {
 #[derive(Default)]
 struct UnitFiles {
     files: Files,
+
     /// The file each of the line program's file indexes names.
     by_index: HashMap<u64, Option<crate::SourceFileId>>,
 }
@@ -2970,6 +3151,7 @@ struct UnitFiles {
 /// through them all.
 struct RawFunctions {
     units: Vec<Vec<RawFunction>>,
+
     /// The index of each unit's first function, and then of the end.
     starts: Vec<usize>,
 }
@@ -3044,6 +3226,7 @@ fn collect_function_dies<'data>(
         futures.extend(batch.futures);
         renumbered.push((batch.functions, ids));
     }
+
     let units = renumbered
         .into_par_iter()
         .map(|(mut functions, ids)| {
@@ -3055,6 +3238,7 @@ fn collect_function_dies<'data>(
                     location.file = ids[location.file.index()];
                 }
             }
+
             functions
         })
         .collect();
@@ -3073,7 +3257,9 @@ fn collect_unit_functions<'data>(
     if is_type_unit(unit) {
         return Ok(batch);
     }
+
     let language = unit_language(dwarf, units, unit_index)?;
+
     // Only these DIEs are read; every other one's attributes are skipped.
     let wanted = |tag| match tag {
         gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine | gimli::DW_TAG_namespace => {
@@ -3082,8 +3268,10 @@ fn collect_unit_functions<'data>(
         gimli::DW_TAG_structure_type => language == SourceLanguage::Rust,
         _ => false,
     };
+
     let mut entries = unit.entries_raw(None)?;
     let mut entry = gimli::DebuggingInformationEntry::null();
+
     // What the DIEs at each depth are within: the nearest function, and
     // the namespace path, an index into `paths`.
     let mut levels = Vec::<(Option<DieKey>, Option<usize>)>::new();
@@ -3092,11 +3280,13 @@ fn collect_unit_functions<'data>(
     while !entries.is_empty() {
         let depth = entries.next_depth();
         let mut next = entries.clone();
+
         // Null entries end children, and pad the unit after its root's.
         let Some(abbreviation) = next.read_abbreviation()? else {
             entries = next;
             continue;
         };
+
         let depth = usize::try_from(depth).map_err(|_| DwarfError::InvalidEntryDepth)?;
         levels.truncate(depth);
         let (parent, namespace) = levels.last().copied().unwrap_or_default();
@@ -3106,6 +3296,7 @@ fn collect_unit_functions<'data>(
             levels.push((parent, namespace));
             continue;
         }
+
         entries.read_entry(&mut entry)?;
         let entry = &entry;
         let kind = match entry.tag() {
@@ -3113,10 +3304,12 @@ fn collect_unit_functions<'data>(
             gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
             _ => None,
         };
+
         let key = DieKey {
             unit: unit_index,
             offset: entry.offset().0,
         };
+
         // A namespace's children are within its path; an unnamed one's
         // within none.
         let inner = if entry.tag() == gimli::DW_TAG_namespace {
@@ -3130,6 +3323,7 @@ fn collect_unit_functions<'data>(
         } else {
             namespace
         };
+
         levels.push((if kind.is_some() { Some(key) } else { parent }, inner));
         let namespace = namespace.map(|index| &paths[index]);
         if language == SourceLanguage::Rust
@@ -3141,6 +3335,7 @@ fn collect_unit_functions<'data>(
         let Some(kind) = kind else {
             continue;
         };
+
         batch.functions.push(raw_function(
             dwarf,
             catalog,
@@ -3150,6 +3345,7 @@ fn collect_unit_functions<'data>(
             &mut batch.files,
         )?);
     }
+
     Ok(batch)
 }
 
@@ -3235,9 +3431,11 @@ fn future_of(
     if entry.tag() != gimli::DW_TAG_structure_type {
         return Ok(None);
     }
+
     let Some(name) = entry.attr_value(gimli::DW_AT_name) else {
         return Ok(None);
     };
+
     let name = unit_dwarf(dwarf, unit).attr_string(unit, name)?;
     Ok((super::coroutines::coroutine_kind(&text(name))
         == Some(crate::CoroutineKind::AsyncFunction))
@@ -3257,10 +3455,12 @@ fn unit_language(
     let Some(root) = entries.next_dfs()? else {
         return Ok(SourceLanguage::Unknown);
     };
+
     let language = match root.attr_value(gimli::DW_AT_language) {
         Some(gimli::AttributeValue::Language(language)) => Some(language),
         _ => units.inherited_language(unit_index),
     };
+
     let producer = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?;
     let name = str_attribute(dwarf, unit, root, gimli::DW_AT_name)?;
     Ok(variables::source_language(
@@ -3329,6 +3529,7 @@ fn die_reference(
             if units.is_supplementary(unit_index) || units.supplementary_starts.is_empty() {
                 return Err(DwarfError::UnsupportedSupplementaryReference);
             }
+
             units
                 .containing(offset, true)
                 .map(Some)
@@ -3358,14 +3559,17 @@ fn die_reference_with_signatures(
 /// specification chain, as an index into `raw`.
 fn definition_of(start: DieKey, raw: &RawFunctions) -> std::result::Result<usize, DwarfError> {
     let mut index = raw.at(start)?;
+
     // A chain longer than the functions repeats one.
     for _ in 0..=raw.len() {
         let function = &raw[index];
         let Some(next) = function.abstract_origin.or(function.specification) else {
             return Ok(index);
         };
+
         index = raw.at(next)?;
     }
+
     Err(DwarfError::ReferenceCycle)
 }
 
@@ -3380,8 +3584,10 @@ fn containing_instance(
         if let Some(instance) = instances[index] {
             return Some(instance);
         }
+
         key = raw[index].parent;
     }
+
     None
 }
 
@@ -3399,6 +3605,7 @@ fn entry_source_location(
     else {
         return Ok(None);
     };
+
     let Some(line) = entry
         .attr(line_attribute)
         .and_then(gimli::Attribute::udata_value)
@@ -3406,6 +3613,7 @@ fn entry_source_location(
     else {
         return Ok(None);
     };
+
     let file = if let Some(file) = files.by_index.get(&file_index) {
         *file
     } else {
@@ -3420,12 +3628,15 @@ fn entry_source_location(
             }
             None => None,
         };
+
         files.by_index.insert(file_index, file);
         file
     };
+
     let Some(file) = file else {
         return Ok(None);
     };
+
     Ok(Some(SourceLocation {
         file,
         line,
@@ -3448,7 +3659,9 @@ fn load_lines(
     let Some(program) = unit.line_program.clone() else {
         return Ok(());
     };
+
     let (program, sequences) = program.sequences()?;
+
     // Rows name files by index into the program header; resolving a path
     // allocates, so each index is resolved once.
     let mut file_ids = HashMap::new();
@@ -3458,14 +3671,17 @@ fn load_lines(
         if !code.contains_address(ImageAddress::new(sequence.start)) {
             continue;
         }
+
         tables.begin_sequence()?;
         let mut rows = program.resume_from(&sequence);
+
         // The line range being described: its start, the row whose location
         // it has, and whether it begins at a statement.
         let mut open: Option<(u64, u32, bool)> = None;
 
         while let Some((header, row)) = rows.next_row()? {
             let line = row.line().map_or(0, std::num::NonZeroU64::get);
+
             // Only a row with a line names a file: one with line 0 is
             // compiler-generated code, whose file is never shown.
             let file = match row.file(header) {
@@ -3480,6 +3696,7 @@ fn load_lines(
                 }
                 _ => None,
             };
+
             let decoded = Row {
                 address: row.address(),
                 file,
@@ -3496,6 +3713,7 @@ fn load_lines(
                 epilogue_begin: row.epilogue_begin(),
                 end_sequence: row.end_sequence(),
             };
+
             let at = tables.push_row(&decoded)?;
 
             // A row without a location still ends the previous range, so the
@@ -3516,6 +3734,7 @@ fn load_lines(
             {
                 continue;
             }
+
             let statement = row.is_stmt()
                 || open.is_some_and(|(start, _, statement)| start == row.address() && statement);
             close_line_range(&mut open, row.address(), tables)?;
@@ -3555,10 +3774,12 @@ fn source_path(
         {
             path.push(compilation_directory);
         }
+
         path.push(directory);
     } else if let Some(compilation_directory) = compilation_directory {
         path.push(compilation_directory);
     }
+
     path.push(file_name);
 
     Ok(path)
@@ -3581,6 +3802,7 @@ fn close_line_range(
             statement,
         )?;
     }
+
     Ok(())
 }
 
@@ -3607,9 +3829,11 @@ fn refine_proved_prologue_entries(
         {
             continue;
         }
+
         let Some(raw_entry) = instance.breakpoint_entry.map(|entry| entry.address) else {
             continue;
         };
+
         let Some(entry_range) = instance
             .ranges
             .iter()
@@ -3617,9 +3841,11 @@ fn refine_proved_prologue_entries(
         else {
             continue;
         };
+
         let Some(candidate) = first_distinct_source_statement(rows, *entry_range, raw_entry) else {
             continue;
         };
+
         let Some(bytes) = code_bytes(object, raw_entry.get(), candidate.get()) else {
             continue;
         };
@@ -3693,12 +3919,14 @@ fn decode_resume_points(
         let Some(Ok(coroutine)) = function.coroutine.and_then(|ty| coroutines.get(&ty)) else {
             continue;
         };
+
         let header = function.declaration.as_ref().map(|location| location.line);
         let ranges = Arc::clone(&instance.ranges);
         let in_function = |address: u64| {
             let address = ImageAddress::new(address);
             ranges.iter().any(|range| range.contains(address))
         };
+
         // What leads into the body before its first statement carries the
         // header's line, which the dispatch and the argument moves have,
         // or none.
@@ -3708,10 +3936,12 @@ fn decode_resume_points(
                     .line_at(ImageAddress::new(address))
                     .is_none_or(|line| line.get() == 0 || Some(line) == header)
         };
+
         let body_after = |start: ImageAddress| {
             super::dispatch::first_beyond(&image, start, &leading)
                 .filter(|body| in_function(body.get()))
         };
+
         if !matches!(instance.kind, CodeInstanceKind::OutOfLine) {
             // A body inlined into its awaiter is entered straight from the
             // awaiter's code.
@@ -3724,11 +3954,14 @@ fn decode_resume_points(
                     provenance: EntryProvenance::CoroutineBody,
                 });
             }
+
             continue;
         }
+
         let Some(entry) = ranges.iter().map(|range| range.start).min() else {
             continue;
         };
+
         let states = coroutine
             .states
             .iter()
@@ -3755,6 +3988,7 @@ fn decode_resume_points(
                     let Some(state) = coroutine.state(point.state) else {
                         continue;
                     };
+
                     if state.kind == crate::CoroutineStateKind::Unresumed {
                         let body = body_after(point.address).unwrap_or(point.address);
                         point.resumption = [AddressRange {
@@ -3768,6 +4002,7 @@ fn decode_resume_points(
                         });
                         continue;
                     }
+
                     // Resuming runs the code of the state's own line, of the
                     // function's header, and of no line, which includes the
                     // loop polling the awaited future that arriving at the
@@ -3785,14 +4020,17 @@ fn decode_resume_points(
                                 !arrival.iter().any(|range| range.contains(address))
                             }))
                     };
+
                     point.resumption = super::dispatch::flood(&image, point.address, &within);
                 }
+
                 points.points = moved.into();
                 points
             },
         );
         decoded.push((instance.id, points));
     }
+
     decoded
 }
 
@@ -3816,6 +4054,7 @@ fn first_distinct_source_statement(
     if entry_rows.any(|row| row.sequence != entry_row.sequence) {
         return None;
     }
+
     // Line programs collapse equal-address rows by taking the final source
     // attribution. Mirror that rule here, and do not mistake a later row for
     // the same signature line for proof that argument homing has completed.
@@ -3891,6 +4130,7 @@ mod tests {
     use gimli::write::{
         Address, Dwarf as WriteDwarf, EndianVec, LineProgram, LineString, Sections, Unit,
     };
+
     use gimli::{Encoding, Format, LineEncoding, LittleEndian, Register};
 
     use super::*;
@@ -3904,6 +4144,7 @@ mod tests {
             unit: 3,
             offset: 0x40,
         };
+
         let signatures = HashMap::from_iter([(signature, key)]);
         let units = Units::new(Vec::new());
 
@@ -3957,6 +4198,7 @@ mod tests {
             version: 4,
             address_size: 8,
         };
+
         let mut program = LineProgram::new(
             encoding,
             LineEncoding::default(),
@@ -4004,6 +4246,7 @@ mod tests {
                 end: ImageAddress::new(end),
             }])
         };
+
         // A sequence outside the image's code belongs to a discarded function.
         load_lines(&dwarf, &unit, &code(0x200, 0x300), &mut files, &mut tables)
             .expect("load test line program");
@@ -4124,6 +4367,7 @@ mod tests {
                 .map(|(address, value)| (VirtualAddress::new(address), value))
                 .collect(),
         };
+
         // Each expression starts with the CFA on its stack.
         let expressions: [&[u8]; 5] = [
             &[0x38, 0x1c],       // DW_OP_lit8, DW_OP_minus: saved at CFA - 8
@@ -4140,6 +4384,7 @@ mod tests {
                 offset,
                 length: bytes.len(),
             };
+
             offset += bytes.len();
             expression
         });
@@ -4152,6 +4397,7 @@ mod tests {
             }
             .apply(caller, &mut memory, dwarf(register), &rule)
         };
+
         for (register, rule) in [
             (1, RegisterRule::Constant(999)),
             (4, RegisterRule::Register(Register(1))),
@@ -4165,6 +4411,7 @@ mod tests {
         ] {
             apply(&mut caller, 0x1000, register, rule).unwrap();
         }
+
         assert_eq!(caller.get(dwarf(1)), Some(999));
         assert_eq!(
             caller.get(dwarf(4)),
@@ -4229,6 +4476,7 @@ mod tests {
             offset: 0usize,
             length: bytes.len(),
         };
+
         let registers = RegisterFile::new([]);
         let mut memory = TestMemory {
             values: BTreeMap::new(),
@@ -4266,6 +4514,7 @@ mod tests {
             let (start, end) = (fde.start.get(), fde.end.get());
             probes.extend([start.wrapping_sub(1), start, start + 1, end - 1, end]);
         }
+
         // The walk `fde_for_address` makes for each address, made once:
         // the first entry in section order that contains an address
         // answers it, and an entry that does not parse answers every
@@ -4283,10 +4532,12 @@ mod tests {
                 Ok(None) => break None,
                 Err(error) => break Some(error),
             };
+
             let fde = match partial.parse(S::cie_from_offset) {
                 Ok(fde) => fde,
                 Err(error) => break Some(error),
             };
+
             let contained = open
                 .range(fde.initial_address()..)
                 .take_while(|&&address| fde.contains(address))
@@ -4297,6 +4548,7 @@ mod tests {
                 found.insert(address, fde.offset());
             }
         };
+
         for address in probes {
             let walk = found.get(&address).copied().ok_or_else(|| {
                 failure
@@ -4349,14 +4601,17 @@ mod tests {
                     .expect("load the fixture");
                 info.image.image_bytes().to_vec()
             };
+
             let load = |jobs| load_with(jobs, LoadLimits::default());
             let serial = load(1);
+
             // Walks that may run only one unit past those added wait on the
             // adding, and build the same image.
             let waiting = LoadLimits {
                 walk_ahead: 1,
                 ..LoadLimits::default()
             };
+
             assert!(
                 load_with(8, waiting) == serial,
                 "{fixture} differs walking one unit ahead"
@@ -4416,6 +4671,7 @@ mod tests {
             let mut memory = TestMemory {
                 values: std::iter::once((VirtualAddress::new(stack), 0x1234)).collect(),
             };
+
             for offset in offsets {
                 let address = ImageAddress::new(start + offset);
                 let registers = RegisterFile::new([
@@ -4449,6 +4705,7 @@ mod tests {
                     "rax need not"
                 );
             }
+
             let header = info
                 .image
                 .sections()
@@ -4489,15 +4746,18 @@ mod tests {
                 None,
             )
         };
+
         let small = LoadLimits {
             per_input_byte: 0,
             floor: 64 << 10,
             ..LoadLimits::default()
         };
+
         let (over, _) = load(small).expect("a load past its budget");
         let crate::DebugInformation::Unusable { reason } = over.image.debug_information() else {
             panic!("{:?}", over.image.debug_information());
         };
+
         assert!(
             ["types", "data objects", "symbolic names"]
                 .iter()
@@ -4541,11 +4801,13 @@ mod tests {
             .expect("a load")
             .0
         };
+
         let full = load(u64::MAX);
         assert_eq!(
             full.image.debug_information(),
             crate::DebugInformation::Loaded
         );
+
         // A budget too small for the locals but large enough for the rest.
         // Those budgets differ by a factor rather than a margin, which
         // halving the factor between the bounds finds in a few loads.
@@ -4560,10 +4822,12 @@ mod tests {
                 _ => break info,
             }
         };
+
         let crate::DebugInformation::Incomplete { reason } = partial.image.debug_information()
         else {
             panic!("{:?}", partial.image.debug_information());
         };
+
         assert!(
             reason.starts_with("its locals and parameters were left out, as the debug information needs more than its load budget of "),
             "{reason}"
@@ -4576,6 +4840,7 @@ mod tests {
                 .filter(|function| function.coroutine().is_some())
                 .count()
         };
+
         assert_ne!(coroutines(&full), 0);
         assert_eq!(coroutines(&partial), coroutines(&full));
         assert_eq!(
@@ -4591,6 +4856,7 @@ mod tests {
             partial.image.globals().count(),
             full.image.globals().count()
         );
+
         // A frame says why it shows no locals, rather than seeming to have
         // none.
         let run = full
@@ -4689,6 +4955,7 @@ mod tests {
             truncations += usize::from(index.first_error.is_some());
             check_fde_index(&debug_frame, &sections.bases, index.lookup(), &probes);
         }
+
         assert!(indexed > 1000, "the fixtures describe {indexed} functions");
         assert!(
             truncations >= 2,
@@ -4725,6 +4992,7 @@ mod tests {
                 gimli::write::FrameDescriptionEntry::new(Address::Constant(start), length),
             );
         }
+
         let mut written = gimli::write::DebugFrame(EndianVec::new(LittleEndian));
         table.write_debug_frame(&mut written).expect("write");
         let mut bytes = written.0.into_vec();
@@ -4776,6 +5044,7 @@ mod tests {
                 .filter(|section| section.name().is_ok_and(|name| name.starts_with(".debug_")))
                 .map(|section| section.uncompressed_data().expect("a section").len() as u64)
                 .sum::<u64>();
+
             // Totals count every thread's blocks, so that work spread
             // over worker threads counts too.
             start_totals();

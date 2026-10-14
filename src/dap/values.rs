@@ -14,8 +14,10 @@ use crate::present::{Expand, Row};
 pub struct Options {
     /// Whether to include each value's type.
     pub types: bool,
+
     /// Whether to include memory references.
     pub memory: bool,
+
     /// Whether to show integers in hexadecimal.
     pub hex: bool,
 }
@@ -43,6 +45,7 @@ pub fn variable(
             row.type_name.as_deref().unwrap_or("<unknown type>").into(),
         );
     }
+
     if let Some((module, location)) = row.declaration.clone() {
         variable.insert(
             "declarationLocationReference".to_owned(),
@@ -51,9 +54,11 @@ pub fn variable(
                 .into(),
         );
     }
+
     if let Some(path) = row.evaluate_name() {
         variable.insert("evaluateName".to_owned(), path.to_string().into());
     }
+
     let mut reference = 0;
     if let Some(details) = row.details {
         match details.expand {
@@ -65,9 +70,11 @@ pub fn variable(
                 if let Some(count) = counts.indexed {
                     variable.insert("indexedVariables".to_owned(), count.into());
                 }
+
                 if let Some(count) = counts.named {
                     variable.insert("namedVariables".to_owned(), count.into());
                 }
+
                 reference = references.variables(Variables::Children {
                     context,
                     reference: children,
@@ -85,6 +92,7 @@ pub fn variable(
             }
             None => {}
         }
+
         // A pointer to a function leads to the function's code.
         if let Some(address) = details.code {
             variable.insert(
@@ -92,27 +100,33 @@ pub fn variable(
                 references.location(Location::Code(address))?.into(),
             );
         }
+
         if options.memory
             && let Some(address) = details.memory
         {
             variable.insert("memoryReference".to_owned(), format!("{address:#x}").into());
         }
+
         let mut attributes = Vec::new();
         if !details.editable {
             attributes.push("readOnly");
         }
+
         if details.constant {
             attributes.push("constant");
         }
+
         if details.text_view {
             attributes.push("rawString");
         }
+
         let kind = if details.aggregate { "class" } else { "data" };
         variable.insert(
             "presentationHint".to_owned(),
             json!({"kind": kind, "attributes": attributes}),
         );
     }
+
     variable.insert("variablesReference".to_owned(), reference.into());
     Ok(variable)
 }
@@ -135,11 +149,13 @@ pub fn register(
     {
         variable.insert("evaluateName".to_owned(), format!("${name}").into());
     }
+
     let attributes = if innermost && value.bytes.is_some() {
         json!([])
     } else {
         json!(["readOnly"])
     };
+
     variable.insert(
         "presentationHint".to_owned(),
         json!({"kind": "data", "attributes": attributes}),

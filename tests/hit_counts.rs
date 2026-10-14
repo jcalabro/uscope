@@ -17,12 +17,16 @@ const MATRIX: [&str; 4] = [
     "hit-counts-clang-o2",
     "hit-counts-gcc-o2-nopie",
 ];
+
 /// Unoptimized variants, whose line tables make source steps predictable.
 const UNOPTIMIZED: [&str; 2] = ["hit-counts-gcc-o0", "hit-counts-clang-o0"];
+
 /// How many times `hit-counts.c` calls `counted`.
 const CALLS: u64 = 40;
+
 /// What `hit-counts.c` adds to its second `shared` argument.
 const SECOND_SITE_OFFSET: u64 = 1000;
+
 /// How many times `hit-count-threads.c` reaches `contended`.
 const CONTENDED_HITS: u64 = 4 * 100;
 
@@ -84,6 +88,7 @@ async fn wait_for_hits(scenario: &Scenario, id: BreakpointId, count: u64) {
         if hit_count >= count {
             return;
         }
+
         assert!(
             Instant::now() < deadline,
             "breakpoint {id} reached {hit_count} of {count} hits"
@@ -123,6 +128,7 @@ async fn sites(scenario: &Scenario, breakpoint: &Breakpoint) -> Vec<VirtualAddre
         let BreakpointLocation::Image(image) = resolved.location else {
             panic!("function breakpoints resolve in the image");
         };
+
         let main = scenario
             .operation("modules", scenario.handle().loaded_modules())
             .await
@@ -130,6 +136,7 @@ async fn sites(scenario: &Scenario, breakpoint: &Breakpoint) -> Vec<VirtualAddre
             .module;
         sites.push(main.virtual_address(image).expect("relocate site"));
     }
+
     sites
 }
 
@@ -148,6 +155,7 @@ async fn colocated_hit_conditions_each_count_every_hit() {
         let added = add(&scenario, "counted", text).await;
         conditions.push((added.id, condition(text)));
     }
+
     // Readding a spec and condition returns the existing breakpoint.
     assert_eq!(add(&scenario, "counted", "%7").await.id, conditions[3].0);
     let first = breakpoint(&mut scenario, conditions[0].0).await;
@@ -157,6 +165,7 @@ async fn colocated_hit_conditions_each_count_every_hit() {
     let site = sites(&scenario, &first).await;
     while let StopReason::Breakpoint { address, hits } = &reason {
         assert_eq!([*address], site[..]);
+
         // The program's own call number names the hit.
         let hit = global(&scenario, "last_call").await + 1;
         let stopping = conditions
@@ -171,6 +180,7 @@ async fn colocated_hit_conditions_each_count_every_hit() {
         for &(id, _) in &conditions {
             assert_eq!(breakpoint(&mut scenario, id).await.hit_count, hit);
         }
+
         stopped_at.push(hit);
         reason = scenario.resume_to_stop().await;
     }
@@ -180,6 +190,7 @@ async fn colocated_hit_conditions_each_count_every_hit() {
     for (id, _) in conditions {
         assert_eq!(breakpoint(&mut scenario, id).await.hit_count, CALLS);
     }
+
     scenario.shutdown().await;
 }
 
@@ -286,6 +297,7 @@ async fn a_thread_kept_stopped_steps_over_a_breakpoint_replaced_where_it_hit_one
     else {
         panic!("expected a stop, got {:?}", snapshot.inferior);
     };
+
     scenario.remove_breakpoint(first.id).await;
 
     // The main thread waits to join the workers, so it runs until paused.
@@ -339,6 +351,7 @@ async fn one_breakpoints_hits_are_numbered_across_all_its_locations() {
                     0
                 }
         };
+
         let mut reason = scenario.run_to_stop().await;
         let sites = sites(&scenario, &shared).await;
         let mut expected = 3;
@@ -448,6 +461,7 @@ async fn skipped_hits_deep_inside_a_call_are_transparent_to_next() {
         while line(&scenario).await != source_line("caller(call);") {
             scenario.step_to_stop(StepKind::OverSource).await;
         }
+
         let counted = add(&scenario, "counted", "==2").await;
 
         assert_eq!(
@@ -482,6 +496,7 @@ async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
         arguments: vec!["1".into(), "0".into()],
         ..uscope::LaunchOptions::default()
     };
+
     assert!(matches!(
         scenario.run_with_to_stop(options).await,
         StopReason::Breakpoint { .. }
@@ -491,6 +506,7 @@ async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
     while line(&scenario).await != calls_main {
         scenario.step_to_stop(StepKind::OverSource).await;
     }
+
     // `bump` traps on the instruction its epilogue follows.
     let bump = add(&scenario, "bump", "==1000").await;
 
@@ -528,6 +544,7 @@ async fn a_step_onto_a_skipped_site_stops_there_and_counts_the_hit_once() {
         for call in 1..=2 {
             scenario.step_to_stop(StepKind::OverSource).await;
             assert_eq!(line(&scenario).await, source_line("shared(call);"));
+
             // The source step reaches the skipped site's statement and ends
             // there, counting the hit the trap reported.
             assert_eq!(
@@ -552,6 +569,7 @@ async fn a_step_onto_a_skipped_site_stops_there_and_counts_the_hit_once() {
                     2 * call - 1
                 );
             }
+
             // Continuing passes the second site once, then reaches the
             // next call.
             assert_eq!(
@@ -563,6 +581,7 @@ async fn a_step_onto_a_skipped_site_stops_there_and_counts_the_hit_once() {
             );
             assert_eq!(breakpoint(&mut scenario, body.id).await.hit_count, 2 * call);
         }
+
         scenario.shutdown().await;
     }
 }
@@ -592,6 +611,7 @@ async fn a_next_ending_on_a_skipped_site_steps_over_it_before_running_on() {
         for call in 1..=2 {
             scenario.step_to_stop(StepKind::OverSource).await;
             assert_eq!(line(&scenario).await, source_line("shared(call);"));
+
             // The step's own trap and the skipped breakpoint share the site.
             assert_eq!(
                 scenario.step_to_stop(StepKind::OverSource).await,
@@ -602,6 +622,7 @@ async fn a_next_ending_on_a_skipped_site_steps_over_it_before_running_on() {
             );
             assert_eq!(line(&scenario).await, destination, "{fixture}");
             assert_eq!(breakpoint(&mut scenario, skipped.id).await.hit_count, call);
+
             // Leaving the site runs its instruction instead of trapping again.
             let site = program_counter(&scenario).await;
             scenario.step_to_stop(StepKind::OverSource).await;
@@ -615,6 +636,7 @@ async fn a_next_ending_on_a_skipped_site_steps_over_it_before_running_on() {
                 }]
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -629,6 +651,7 @@ async fn concurrent_hits_are_each_counted_exactly_once() {
     let mut reason = scenario.run_to_stop().await;
     while matches!(reason, StopReason::Breakpoint { .. }) {
         assert_eq!(hits(&reason).len(), 1, "{reason:?}");
+
         // A sibling may have stopped at the site with a hit of its own.
         for thread in scenario.snapshot().await.threads.iter() {
             if let ThreadState::Stopped {
@@ -638,6 +661,7 @@ async fn concurrent_hits_are_each_counted_exactly_once() {
                 accepted.extend(hits(thread_reason).iter().map(|hit| hit.hit_count));
             }
         }
+
         reason = scenario.resume_to_stop().await;
     }
 
@@ -682,6 +706,7 @@ async fn signals_during_internal_stops_are_reported_and_no_hit_is_lost() {
     );
     assert_eq!(signals, 24);
     let calls = global(&scenario, "calls").await;
+
     // The program sends its last signal once this many calls were made.
     assert!(calls >= 24 * 20, "workers called while signals arrived");
     assert_eq!(
@@ -708,6 +733,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_skipped_hits() {
     assert_eq!(paused, StopReason::Pause);
     let at_pause = breakpoint(&mut scenario, spun.id).await.hit_count;
     let spins = global(&scenario, "spins").await;
+
     // A thread stopped at the site has a counted hit it has not executed.
     assert!(
         spins <= at_pause && at_pause <= spins + 4,
@@ -729,6 +755,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_skipped_hits() {
     let [hit] = hits(&stop) else {
         panic!("one breakpoint stopped: {stop:?}");
     };
+
     assert_eq!(hit.breakpoint, spun.id);
     assert!(hit.hit_count > amended.hit_count);
     assert_eq!(
@@ -753,6 +780,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_skipped_hits() {
 #[tokio::test]
 async fn attached_processes_skip_hits_and_detach_mid_run_unharmed() {
     let child = support::ExternalProcess::spawn_running(&Scenario::fixture("hit-count-spin"));
+
     // Every thread exists before the first attach, so all survive to the second.
     let tasks = format!("/proc/{}/task", child.process_id());
     support::wait_until("the fixture started its workers", || {
@@ -766,9 +794,11 @@ async fn attached_processes_skip_hits_and_detach_mid_run_unharmed() {
         let [hit] = hits(&reason) else {
             panic!("one breakpoint stopped: {reason:?}");
         };
+
         assert_eq!(hit.breakpoint, spun.id);
         assert_eq!(hit.hit_count, 50 * stop);
     }
+
     let spins = global(&scenario, "spins").await;
 
     // Detaching while hits are being skipped removes every trap first.
@@ -814,6 +844,7 @@ async fn hit_counts_start_again_in_each_process() {
         );
         assert_eq!(breakpoint(&mut scenario, counted.id).await.hit_count, CALLS);
     }
+
     scenario.shutdown().await;
 }
 
@@ -896,6 +927,7 @@ async fn stepping_one_instruction_through_a_skipped_trap_counts_it_once_and_move
             assert!(program_counter(&scenario).await < site, "{fixture}");
             scenario.step_to_stop(StepKind::Instruction).await;
         }
+
         assert_eq!(breakpoint(&mut scenario, counted.id).await.hit_count, 0);
 
         // The next single step executes the trap, which counts the hit, and
@@ -930,11 +962,13 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
         for function in ["counted", "caller", "main"] {
             skipped.push(add(&scenario, function, "==1000000").await.id);
         }
+
         for line in 1..=31 {
             let spec = BreakpointSpec::Source {
                 path: "hit-counts.c".into(),
                 line: uscope::LineNumber::new(line).expect("one-based"),
             };
+
             match scenario
                 .attempt(
                     "skipping line breakpoint",
@@ -948,6 +982,7 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
                 Err(error) => panic!("{fixture}: line {line}: {error}"),
             }
         }
+
         assert!(
             skipped.len() >= 3 + MIN_LINE_BREAKPOINTS,
             "{fixture}: only {} breakpoints skip hits",
@@ -992,8 +1027,10 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
             stops.push((reason, VirtualAddress::new(0)));
             break;
         }
+
         stops.push((reason, program_counter(&scenario).await));
     }
+
     let snapshot = scenario.snapshot().await;
     let skipped_hits = snapshot
         .breakpoints

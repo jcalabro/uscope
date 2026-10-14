@@ -29,6 +29,7 @@ async fn stopped_at(scenario: &mut Scenario, markers: &[&str]) -> StopReason {
             })
             .await;
     }
+
     scenario
         .run_with_to_stop(LaunchOptions {
             stdout: Some(Stdio::null()),
@@ -96,6 +97,7 @@ async fn step_into_an_await_stops_at_the_futures_first_line() {
                 reason = scenario.resume_to_stop().await;
             }
         }
+
         scenario.shutdown().await;
     }
 }

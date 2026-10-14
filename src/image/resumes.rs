@@ -30,6 +30,7 @@ pub struct Resumes {
     /// Where each code instance that runs a coroutine goes for each
     /// state, or why that is unknown.
     pub points: Vec<Decoded>,
+
     /// For a variable of an async body, by its entry's offset, and each
     /// suspended state of the body's future: the code where the variable
     /// still holds what it held before the state's await. A later entry
@@ -45,6 +46,7 @@ pub struct ResumeRecord {
     pub instance: U32,
     pub dispatch: Span<CodeRange>,
     pub points: Span<ResumePointRecord>,
+
     /// Why the points are unknown, or [`NONE`].
     pub malformed: U32,
 }
@@ -126,6 +128,7 @@ pub fn add_to(
             points: Span::EMPTY,
             malformed: NONE.into(),
         };
+
         match decoded {
             Ok(decoded) => {
                 record.dispatch = pooled(&mut ranges, &decoded.dispatch)?;
@@ -140,8 +143,10 @@ pub fn add_to(
             }
             Err(why) => record.malformed = strings.push(why).ok_or(TooMany)?.0.into(),
         }
+
         records.push(record);
     }
+
     let mut held = resumes.held.iter().rev().collect::<Vec<_>>();
     held.sort_by_key(|(key, _)| *key);
     held.dedup_by_key(|(key, _)| *key);
@@ -203,6 +208,7 @@ impl<'a> ResumeView<'a> {
         if record.malformed.get() != NONE {
             return Some(Err(self.strings.get(StrId(record.malformed.get())).into()));
         }
+
         Some(Ok(ResumePoints {
             dispatch: self.ranges(record.dispatch).collect(),
             points: record
@@ -231,6 +237,7 @@ impl<'a> ResumeView<'a> {
             } else {
                 &[]
             };
+
             self.ranges(record.dispatch)
                 .chain(
                     points
@@ -281,6 +288,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a coroutine's resume points are malformed".into());
     }
+
     if !view
         .points
         .iter()
@@ -288,6 +296,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a resume point is malformed".into());
     }
+
     if !view.held.iter().all(|held| held.ranges.within(ranges))
         || !view.held.is_sorted_by(|earlier, later| {
             (earlier.offset.get(), earlier.state.get()) < (later.offset.get(), later.state.get())
@@ -295,5 +304,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a held range is malformed".into());
     }
+
     Ok(())
 }

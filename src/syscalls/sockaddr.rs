@@ -4,9 +4,13 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub const AF_UNSPEC: u16 = 0;
+
 pub const AF_UNIX: u16 = 1;
+
 pub const AF_INET: u16 = 2;
+
 pub const AF_INET6: u16 = 10;
+
 pub const AF_NETLINK: u16 = 16;
 
 /// A parsed socket address.
@@ -22,12 +26,14 @@ pub enum SocketAddress {
         flow: u32,
         scope: u32,
     },
+
     /// A path, an abstract name (starting with NUL), or unnamed.
     Unix(Vec<u8>),
     Netlink {
         pid: u32,
         groups: u32,
     },
+
     /// A family the parser does not know, with its bytes after the family.
     Other {
         family: u16,
@@ -66,6 +72,7 @@ impl SocketAddress {
                         .unwrap_or_default()
                         .to_vec()
                 };
+
                 Self::Unix(path)
             }
             AF_NETLINK => Self::Netlink {

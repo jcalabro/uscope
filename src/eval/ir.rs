@@ -56,6 +56,7 @@ impl<O: Clone, S: Clone> Program<O, S> {
         let Op::At { address, pointee } = &self.root.op else {
             return None;
         };
+
         let Op::Offset {
             pointer,
             count,
@@ -65,11 +66,13 @@ impl<O: Clone, S: Clone> Program<O, S> {
         else {
             return None;
         };
+
         let indexes = match &count.op {
             Op::Bound(object) | Op::Object(object) => index(object),
             Op::Load(place) => matches!(&place.op, Op::Object(object) if index(object)),
             _ => false,
         };
+
         indexes.then(|| {
             (
                 Self {
@@ -158,6 +161,7 @@ pub enum Constant {
     Integer(Integer),
     Float(Float),
     Bool(bool),
+
     /// A pointer's address, `0` for `null`.
     Pointer(u64),
     Text(Vec<u8>),
@@ -168,14 +172,18 @@ pub enum Constant {
 pub enum Comparison {
     Integers,
     Floats,
+
     /// A float on the left, an integer on the right.
     FloatInteger,
+
     /// An integer on the left, a float on the right.
     IntegerFloat,
     Addresses,
     Bools,
+
     /// A place's text on the left, a string on the right.
     Text,
+
     /// Two strings.
     Texts,
 }
@@ -185,18 +193,24 @@ pub enum Comparison {
 pub enum Conversion {
     /// Truncates an integer to a type's width.
     Truncate(IntType),
+
     /// Rounds an integer to the nearest float.
     IntegerToFloat(FloatFormat),
+
     /// Truncates toward zero and saturates; NaN is refused.
     FloatToInteger(IntType),
     FloatToFloat(FloatFormat),
+
     /// Whether a value is nonzero.
     Truth,
     BoolToInteger(IntType),
+
     /// An address as an integer of a type's width.
     PointerToInteger(IntType),
+
     /// An integer as an address.
     IntegerToPointer,
+
     /// A pointer as another pointer: the address is kept.
     PointerToPointer,
 }
@@ -207,8 +221,10 @@ pub enum Length {
     /// A slice's run-time length, or the first dimension's of an array
     /// bounded at run time.
     Slice,
+
     /// The length in bytes of text.
     Text,
+
     /// The length of a string the expression computed.
     Bytes,
 }
@@ -218,6 +234,7 @@ pub enum Length {
 pub enum Capacity {
     /// The capacity a slice's descriptor records.
     Slice,
+
     /// The `capacity` field of the view that presents the value.
     Presented,
 }
@@ -226,16 +243,20 @@ pub enum Capacity {
 pub enum Op<O, S> {
     /// A data object's storage.
     Object(O),
+
     /// A value the machine computes once and keeps, which is not a place.
     Bound(O),
+
     /// The value a map at `base` holds for `key`, through a planned step.
     Entry {
         base: Box<Node<O, S>>,
         step: S,
         key: Box<Node<O, S>>,
     },
+
     /// The id of the stopped thread's task.
     Task,
+
     /// A structural step from a place, with its index values. A step that
     /// `follows` a pointer, as a dereference or a slice's element does,
     /// leaves the storage of the place it starts from.
@@ -245,6 +266,7 @@ pub enum Op<O, S> {
         indices: Vec<Node<O, S>>,
         follows: bool,
     },
+
     /// Whether the tagged union at `base` holds the variant whose member
     /// `step` reaches, `negate`d for `!=`.
     Holds {
@@ -252,34 +274,42 @@ pub enum Op<O, S> {
         step: S,
         negate: bool,
     },
+
     /// The place a computed pointer to a program type points at.
     At {
         address: Box<Node<O, S>>,
         pointee: TypeReference,
     },
+
     /// The place a computed pointer to a language type points at.
     Raw {
         address: Box<Node<O, S>>,
     },
+
     /// The value at a place.
     Load(Box<Node<O, S>>),
     Register(Register),
     Constant(Constant),
+
     /// The address of a place.
     AddressOf(Box<Node<O, S>>),
+
     /// The address of an array's first element.
     Decay(Box<Node<O, S>>),
+
     /// Exact negation of an integer.
     Negate(Box<Node<O, S>>),
     FloatNegate(Box<Node<O, S>>),
     Not(Box<Node<O, S>>),
     BitNot(Box<Node<O, S>>),
+
     /// Exact `+ - * / %`.
     Arithmetic {
         op: BinaryOp,
         left: Box<Node<O, S>>,
         right: Box<Node<O, S>>,
     },
+
     /// Float arithmetic in the node's format.
     FloatArithmetic {
         op: FloatOperator,
@@ -302,12 +332,14 @@ pub enum Op<O, S> {
         left: Box<Node<O, S>>,
         right: Box<Node<O, S>>,
     },
+
     /// `&&` when `and`, otherwise `||`, of truth values.
     Logical {
         and: bool,
         left: Box<Node<O, S>>,
         right: Box<Node<O, S>>,
     },
+
     /// `?:`; `places` when both branches are places of one type.
     Choose {
         condition: Box<Node<O, S>>,
@@ -319,6 +351,7 @@ pub enum Op<O, S> {
         operand: Box<Node<O, S>>,
         conversion: Conversion,
     },
+
     /// A pointer moved by a number of elements of `scale` bytes.
     Offset {
         pointer: Box<Node<O, S>>,
@@ -326,6 +359,7 @@ pub enum Op<O, S> {
         scale: u64,
         backward: bool,
     },
+
     /// How many elements of `scale` bytes lie between two pointers.
     Difference {
         left: Box<Node<O, S>>,
@@ -340,14 +374,17 @@ pub enum Op<O, S> {
         operand: Box<Node<O, S>>,
         how: Capacity,
     },
+
     /// A value converted to the node's type, refused unless the type holds
     /// it exactly.
     Fit(Box<Node<O, S>>),
+
     /// Stores a fitted value in a place: only ever the whole expression.
     Assign {
         target: Box<Node<O, S>>,
         value: Box<Node<O, S>>,
     },
+
     /// `base[start..end]`, or `base[start:end]` of an array or slice: a
     /// bound left out is the first element, or the end.
     Range {
@@ -355,6 +392,7 @@ pub enum Op<O, S> {
         start: Option<Box<Node<O, S>>>,
         end: Option<Box<Node<O, S>>>,
     },
+
     /// `base[start:end]` of text: the bytes between, as a string.
     TextSlice {
         base: Box<Node<O, S>>,

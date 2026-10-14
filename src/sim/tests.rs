@@ -8,6 +8,7 @@ use super::{Corpus, Settings, describe_failure, run};
 
 /// How many fixed seeds the gate runs.
 const GATE_SEEDS: u64 = 2000;
+
 /// How many seeds the determinism check runs twice.
 const DETERMINISM_SEEDS: u64 = 32;
 
@@ -23,8 +24,10 @@ fn fixed_seeds_pass_every_oracle() {
         if outcome.failure.is_some() {
             failures.push(describe_failure(&outcome));
         }
+
         marks.add(&outcome.marks);
     }
+
     assert!(
         failures.is_empty(),
         "{} of {GATE_SEEDS} seeds failed; the first:\n{}",
@@ -66,6 +69,7 @@ fn first_failure_with(sabotage: Sabotage) -> &'static str {
         sabotage: Some(sabotage),
         ..Settings::default()
     };
+
     (0..GATE_SEEDS)
         .find_map(|seed| run(seed, &corpus, &settings).failure)
         .map(|failure| {
@@ -165,16 +169,19 @@ fn some_failure_saying(sabotage: Sabotage, check: &str, saying: &str, allowed: &
         sabotage: Some(sabotage),
         ..Settings::default()
     };
+
     for seed in 0..GATE_SEEDS {
         let Some(failure) = run(seed, &corpus, &settings).failure else {
             continue;
         };
+
         assert_eq!(failure.kind, FailureKind::Debugger, "{failure}");
         assert!(allowed.contains(&failure.check), "{failure}");
         if failure.check == check && failure.message.contains(saying) {
             return;
         }
     }
+
     panic!("no sabotaged run failed {check} saying {saying:?}");
 }
 

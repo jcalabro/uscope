@@ -47,12 +47,16 @@ struct RawSymbol {
     binding: SymbolBinding,
     exported: bool,
     size: u64,
+
     /// The image's executable section that defines a code symbol.
     code_section: Option<(u64, u64)>,
+
     /// The image's allocated section that defines a data symbol.
     storage_section: Option<(u64, u64)>,
+
     /// Whether a table defines the symbol without a version.
     unversioned: bool,
+
     /// The versions the dynamic table defines the symbol in, each with
     /// whether it is the name's default version, which the static linker
     /// binds new references to.
@@ -71,9 +75,11 @@ pub fn load_symbols(
         code: image_sections(object, is_code),
         storage: image_sections(object, holds_storage),
     };
+
     let mut raw = BTreeMap::new();
 
     collect(object, object.symbols(), &sections, false, &mut raw);
+
     // A separate debug file keeps the static table its module was stripped
     // of, with the module's section headers, which match by identity as an
     // embedded object's do.
@@ -86,6 +92,7 @@ pub fn load_symbols(
             &mut raw,
         );
     }
+
     let embedded_table = object
         .section_by_name(".gnu_debugdata")
         .map_or(EmbeddedSymbolTable::Absent, |section| {
@@ -124,9 +131,11 @@ pub fn load_thread_locals(
     let object::File::Elf64(elf) = object else {
         return BTreeMap::new();
     };
+
     if object.architecture() != object::Architecture::X86_64 {
         return BTreeMap::new();
     }
+
     let endian = elf.endian();
     let mut offsets = BTreeMap::<Arc<str>, Option<u64>>::new();
     for symbol in object.symbols().chain(object.dynamic_symbols()) {
@@ -135,9 +144,11 @@ pub fn load_thread_locals(
         {
             continue;
         }
+
         let Ok(name) = symbol.name() else {
             continue;
         };
+
         // Two variables of one name, such as two files' statics, are told
         // apart by neither.
         let address = symbol.address();
@@ -150,6 +161,7 @@ pub fn load_thread_locals(
             })
             .or_insert(Some(address));
     }
+
     if offsets.is_empty() {
         return BTreeMap::new();
     }
@@ -165,6 +177,7 @@ pub fn load_thread_locals(
         {
             continue;
         }
+
         let base = match relocation.target() {
             object::RelocationTarget::Absolute => Some(0),
             object::RelocationTarget::Symbol(index) => object
@@ -174,6 +187,7 @@ pub fn load_thread_locals(
                 .map(|symbol| symbol.address()),
             _ => None,
         };
+
         if let Some(offset) = base.and_then(|base| base.checked_add_signed(relocation.addend())) {
             slots.insert(offset, ImageAddress::new(address));
         }
@@ -195,10 +209,12 @@ pub fn load_thread_locals(
         if !executable {
             return Err("the library's code reaches it only through the loader".into());
         }
+
         let (start, size, align) = tls.ok_or("the image has no thread-local storage")?;
         if start % align != 0 {
             return Err("the image's thread-local storage is misaligned".into());
         }
+
         let block = size
             .checked_next_multiple_of(align)
             .and_then(|block| i64::try_from(block).ok())
@@ -206,6 +222,7 @@ pub fn load_thread_locals(
         let offset = i64::try_from(offset).map_err(|_| "its offset is too large")?;
         Ok(ThreadLocal::Offset(offset - block))
     };
+
     offsets
         .into_iter()
         .map(|(name, offset)| {
@@ -235,6 +252,7 @@ fn is_executable(elf: &object::read::elf::ElfFile64<'_>) -> bool {
     {
         return true;
     }
+
     elf.elf_section_table()
         .dynamic(endian, elf.data())
         .ok()
@@ -264,6 +282,7 @@ fn collect_embedded(
         Ok(data) => data,
         Err(reason) => return EmbeddedSymbolTable::Unusable { reason },
     };
+
     match object::File::parse(data.as_slice()) {
         Ok(embedded) if embedded.architecture() == object.architecture() => {
             collect(&embedded, embedded.symbols(), sections, false, raw);
@@ -289,6 +308,7 @@ pub fn has_thread_local_storage(object: &object::File<'_>) -> bool {
             segment.p_type(endian) == elf::PT_TLS && segment.p_memsz(endian).into() != 0
         })
     }
+
     match object {
         object::File::Elf32(file) => any_tls(file),
         object::File::Elf64(file) => any_tls(file),
@@ -306,11 +326,13 @@ pub fn load_sections(object: &object::File<'_>) -> Vec<SectionInfo> {
             let SectionFlags::Elf { sh_flags } = section.flags() else {
                 return None;
             };
+
             if sh_flags & u64::from(elf::SHF_ALLOC) == 0
                 || section.kind() == object::SectionKind::UninitializedTls
             {
                 return None;
             }
+
             let start = section.address();
             let end = start.checked_add(section.size())?;
             let name = String::from_utf8_lossy(section.name_bytes().ok()?).into_owned();
@@ -359,6 +381,7 @@ pub(super) fn executable_ranges(object: &object::File<'_>) -> Vec<AddressRange<I
             end: ImageAddress::new(start.checked_add(size)?),
         })
     };
+
     let sections = image_sections(object, is_code)
         .into_iter()
         .filter_map(|section| range(section.start, section.end - section.start))
@@ -366,6 +389,7 @@ pub(super) fn executable_ranges(object: &object::File<'_>) -> Vec<AddressRange<I
     if !sections.is_empty() {
         return sections;
     }
+
     object
         .segments()
         .filter(|segment| {
@@ -404,9 +428,11 @@ fn image_section<'data>(
     let SectionFlags::Elf { sh_flags } = section.flags() else {
         return None;
     };
+
     if !accept(sh_flags) {
         return None;
     }
+
     let start = section.address();
     Some(ImageSection {
         name: section.name_bytes().ok()?,
@@ -430,6 +456,7 @@ fn decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, Arc<str>> {
                     self.limit
                 )));
             }
+
             self.data.extend_from_slice(bytes);
             Ok(bytes.len())
         }
@@ -443,6 +470,7 @@ fn decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, Arc<str>> {
         data: Vec::new(),
         limit,
     };
+
     lzma_rs::xz_decompress(&mut io::BufReader::new(compressed), &mut output)
         .map_err(|error| Arc::from(format!("the section is not a valid xz stream: {error}")))?;
     Ok(output.data)
@@ -462,9 +490,11 @@ fn collect<'data, S>(
         let SymbolSection::Section(index) = symbol.section() else {
             continue;
         };
+
         let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
             continue;
         };
+
         let kind = match st_info & 0xf {
             elf::STT_FUNC => SymbolKind::Function,
             elf::STT_GNU_IFUNC => SymbolKind::IndirectFunction,
@@ -474,15 +504,18 @@ fn collect<'data, S>(
             // symbol's value is an offset into a TLS block, not an address.
             _ => continue,
         };
+
         let binding = match st_info >> 4 {
             elf::STB_GLOBAL | elf::STB_GNU_UNIQUE => SymbolBinding::Global,
             elf::STB_WEAK => SymbolBinding::Weak,
             elf::STB_LOCAL => SymbolBinding::Local,
             _ => continue,
         };
+
         let Ok(name) = symbol.name_bytes() else {
             continue;
         };
+
         if name.is_empty() {
             continue;
         }
@@ -502,6 +535,7 @@ fn collect<'data, S>(
             .and_then(|section| image_section(section, holds_storage))
             .filter(|section| image_sections.storage.contains(section))
             .map(|section| (section.start, section.end));
+
         // Symbols are keyed by their name bytes so that names which are not
         // UTF-8 stay distinct.
         let entry = raw
@@ -517,6 +551,7 @@ fn collect<'data, S>(
                 versions: Vec::new(),
             });
         entry.exported |= exported;
+
         // The dynamic table's versions are read separately.
         entry.unversioned |= !exported;
     }
@@ -534,18 +569,22 @@ fn collect_versions(object: &object::File<'_>, raw: &mut BTreeMap<(Box<[u8]>, u6
             .map(|versions| (elf.endian(), versions)),
         _ => None,
     };
+
     for symbol in object.dynamic_symbols() {
         let Ok(name) = symbol.name_bytes() else {
             continue;
         };
+
         let Some(entry) = raw.get_mut(&(Box::from(name), symbol.address())) else {
             continue;
         };
+
         let version = versions.as_ref().and_then(|(endian, versions)| {
             let index = versions.version_index(*endian, symbol.index());
             if index.is_local() || index.is_global() {
                 return None;
             }
+
             let version = versions.version(index).ok().flatten()?;
             Some((Box::from(version.name()), !index.is_hidden()))
         });
@@ -572,6 +611,7 @@ fn distinguish_versions(
         for (name, _) in raw.keys() {
             *addresses.entry(name).or_default() += 1;
         }
+
         let shared = addresses
             .into_iter()
             .filter(|(_, count)| *count > 1)
@@ -582,6 +622,7 @@ fn distinguish_versions(
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(symbol);
             }
+
             // A static table may already hold the versioned spelling.
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let existing: &mut RawSymbol = entry.get_mut();
@@ -590,11 +631,13 @@ fn distinguish_versions(
                 existing.versions.extend(symbol.versions);
             }
         };
+
         for ((name, address), mut symbol) in raw {
             if !shared.contains(&name) {
                 add((name, address), symbol);
                 continue;
             }
+
             let separator: &[u8] = if default { b"@@" } else { b"@" };
             let (respelled, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut symbol.versions)
                 .into_iter()
@@ -611,13 +654,16 @@ fn distinguish_versions(
                     },
                 );
             }
+
             symbol.versions = kept;
             if symbol.unversioned || !symbol.versions.is_empty() {
                 add((name, address), symbol);
             }
         }
+
         spelled
     }
+
     respell(respell(raw, false), true)
 }
 
@@ -632,11 +678,13 @@ fn got_slots(object: &object::File<'_>) -> Vec<GotSlot> {
     if object.architecture() != object::Architecture::X86_64 {
         return Vec::new();
     }
+
     let mut slots = Vec::new();
     for (slot, relocation) in object.dynamic_relocations().into_iter().flatten() {
         let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
             continue;
         };
+
         let target = match (r_type, relocation.target()) {
             (
                 elf::R_X86_64_JUMP_SLOT | elf::R_X86_64_GLOB_DAT,
@@ -654,6 +702,7 @@ fn got_slots(object: &object::File<'_>) -> Vec<GotSlot> {
                 .map(|resolver| GotTarget::Indirect(ImageAddress::new(resolver))),
             _ => None,
         };
+
         if let Some(target) = target {
             slots.push(GotSlot {
                 address: ImageAddress::new(slot),
@@ -661,6 +710,7 @@ fn got_slots(object: &object::File<'_>) -> Vec<GotSlot> {
             });
         }
     }
+
     slots
 }
 
@@ -672,6 +722,7 @@ fn collect_plt(
     let object::File::Elf64(elf) = object else {
         return;
     };
+
     let endian = elf.endian();
 
     // An indirect function is named by its exported symbol first, then by
@@ -681,12 +732,14 @@ fn collect_plt(
         if symbol.kind != SymbolKind::IndirectFunction {
             continue;
         }
+
         let candidate = (!symbol.exported, &name[..]);
         resolvers
             .entry(*address)
             .and_modify(|best| *best = (*best).min(candidate))
             .or_insert(candidate);
     }
+
     let targets = slots
         .iter()
         .filter_map(|slot| {
@@ -694,6 +747,7 @@ fn collect_plt(
                 GotTarget::Import(name) => Box::from(name.as_bytes()),
                 GotTarget::Indirect(resolver) => Box::from(resolvers.get(&resolver.get())?.1),
             };
+
             Some((slot.address.get(), name))
         })
         .collect::<BTreeMap<_, _>>();
@@ -705,9 +759,11 @@ fn collect_plt(
         let Ok(section_name @ (b".plt" | b".plt.sec" | b".plt.got")) = section.name_bytes() else {
             continue;
         };
+
         let Ok(code) = section.data() else {
             continue;
         };
+
         let start = section.address();
         let declared = section.elf_section_header().sh_entsize(endian);
         let entry_size = match declared {
@@ -715,19 +771,23 @@ fn collect_plt(
             _ if section_name == b".plt.got" => 8,
             _ => 16,
         };
+
         let Ok(entry_bytes) = usize::try_from(entry_size) else {
             continue;
         };
+
         // A section past the last address is malformed, and its stubs
         // have no addresses.
         let Some(end) = start.checked_add(code.len() as u64) else {
             continue;
         };
+
         for (index, entry) in code.chunks_exact(entry_bytes).enumerate() {
             let address = start + index as u64 * entry_size;
             let Some(name) = got_slot(entry, address).and_then(|slot| targets.get(&slot)) else {
                 continue;
             };
+
             let mut stub = name.to_vec();
             stub.extend_from_slice(b"@plt");
             raw.entry((stub.into(), address)).or_insert(RawSymbol {
@@ -762,12 +822,14 @@ pub fn plt_frames(
     let object::File::Elf64(elf) = object else {
         return Vec::new();
     };
+
     let endian = elf.endian();
     let sections = || {
         elf.sections().filter_map(move |section| {
             let name @ (b".plt" | b".plt.sec" | b".plt.got") = section.name_bytes().ok()? else {
                 return None;
             };
+
             let code = section.data().ok()?;
             let declared = section.elf_section_header().sh_entsize(endian);
             let entry_size: usize = match declared {
@@ -775,13 +837,16 @@ pub fn plt_frames(
                 _ if name == b".plt.got" => 8,
                 _ => 16,
             };
+
             let header = usize::from(name == b".plt");
+
             // A section past the last address is malformed, and its stubs
             // have no addresses.
             section.address().checked_add(code.len() as u64)?;
             Some((section.address(), code, entry_size, header))
         })
     };
+
     let entries = sections()
         .map(|(_, code, size, _)| code.len() / size)
         .sum::<usize>();
@@ -792,12 +857,15 @@ pub fn plt_frames(
             if !uncovered(ImageAddress::new(address)) {
                 continue;
             }
+
             if frames.capacity() == 0 {
                 frames.reserve_exact(entries * MOST_STUB_INSTRUCTIONS);
             }
+
             stub_frames(entry, address, &mut frames);
         }
     }
+
     frames
 }
 
@@ -814,6 +882,7 @@ fn stub_frames(code: &[u8], address: u64, frames: &mut Vec<(AddressRange<ImageAd
             start: ImageAddress::new(instruction.ip()),
             end: ImageAddress::new(instruction.next_ip()),
         };
+
         let words = match instruction.mnemonic() {
             _ if instruction.is_invalid() => break,
             Mnemonic::Endbr64 | Mnemonic::Nop => 0,
@@ -831,6 +900,7 @@ fn stub_frames(code: &[u8], address: u64, frames: &mut Vec<(AddressRange<ImageAd
             {
                 0
             }
+
             Mnemonic::Push
                 if matches!(
                     instruction.op0_kind(),
@@ -851,6 +921,7 @@ fn stub_frames(code: &[u8], address: u64, frames: &mut Vec<(AddressRange<ImageAd
             }
             _ => break,
         };
+
         frames.push((range, pushed));
         pushed += words;
         if pushed > crate::image::unwind::MOST_STUB_PUSHES {
@@ -858,6 +929,7 @@ fn stub_frames(code: &[u8], address: u64, frames: &mut Vec<(AddressRange<ImageAd
             break;
         }
     }
+
     // A stub leaves by a jump; code that reaches none is no stub.
     if !jumps {
         frames.truncate(first);
@@ -874,6 +946,7 @@ fn got_slot(code: &[u8], address: u64) -> Option<u64> {
         if instruction.is_invalid() {
             return None;
         }
+
         if instruction.mnemonic() == Mnemonic::Jmp
             && instruction.op0_kind() == OpKind::Memory
             && instruction.is_ip_rel_memory_operand()
@@ -881,6 +954,7 @@ fn got_slot(code: &[u8], address: u64) -> Option<u64> {
             return Some(instruction.ip_rel_memory_address());
         }
     }
+
     None
 }
 
@@ -914,6 +988,7 @@ fn normalize(
             (address, spelling, name, symbol, (extent, storage))
         })
         .collect::<Vec<_>>();
+
     // Lossily spelled names may repeat at one address, so their bytes break
     // the tie and keep the order deterministic.
     symbols.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
@@ -978,6 +1053,7 @@ fn extent(
     if address < section_start || address >= section_end {
         return None;
     }
+
     let (end, provenance) = if size == 0 {
         let after = address.checked_add(1)?;
         let mut end = section_end;
@@ -995,6 +1071,7 @@ fn extent(
         if end > section_end {
             return None;
         }
+
         (end, SymbolExtentProvenance::Declared)
     };
 
@@ -1021,9 +1098,11 @@ pub(super) fn fuzz(data: &[u8]) {
     } else {
         fuzz_object(data)
     };
+
     let Ok(object) = object::File::parse(bytes.as_slice()) else {
         return;
     };
+
     let table = load_symbols(&object, None, &unwind);
     let sections = image_sections(&object, is_code);
     let storage_sections = image_sections(&object, holds_storage);
@@ -1041,9 +1120,11 @@ pub(super) fn fuzz(data: &[u8]) {
                 section.start <= storage.start.get() && storage.end.get() <= section.end
             }));
         }
+
         let Some(extent) = symbol.extent else {
             continue;
         };
+
         assert!(matches!(
             symbol.kind,
             SymbolKind::Function | SymbolKind::IndirectFunction
@@ -1054,6 +1135,7 @@ pub(super) fn fuzz(data: &[u8]) {
             section.start <= extent.range.start.get() && extent.range.end.get() <= section.end
         }));
     }
+
     assert!(
         table.symbols.windows(2).all(|pair| {
             let left = (pair[0].address, &pair[0].name);
@@ -1126,6 +1208,7 @@ fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8])
             assert!(containing.is_empty(), "an extent contains {address:#x}");
             continue;
         };
+
         let found = image
             .symbol(found.symbol)
             .expect("found symbols are cataloged");
@@ -1164,12 +1247,14 @@ fn assert_description(image: &crate::ModuleImage, symbols: &[SymbolInfo], addres
                 .all(|section| !section.range.contains(address))
         );
     }
+
     let code = image.symbolize(address);
     let names = |symbol: &SymbolInfo| {
         symbol.storage.is_some_and(|storage| {
             storage.contains(address) || (storage.is_empty() && storage.start == address)
         })
     };
+
     match &description.symbol {
         Some(symbol) if code.is_none() => {
             let symbol = image.symbol(symbol.symbol).expect("cataloged symbol");
@@ -1219,8 +1304,10 @@ fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
                     end: ImageAddress::new(end),
                 });
             }
+
             continue;
         }
+
         let st_type = [
             elf::STT_FUNC,
             elf::STT_GNU_IFUNC,
@@ -1235,6 +1322,7 @@ fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
             2 => write::SymbolSection::Section(data_section),
             _ => write::SymbolSection::Absolute,
         };
+
         object.add_symbol(write::Symbol {
             name: NAMES[usize::from(record[5]) % NAMES.len()].to_vec(),
             value,
@@ -1257,6 +1345,7 @@ fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
             },
         });
     }
+
     (object.write().unwrap_or_default(), unwind)
 }
 
@@ -1326,6 +1415,7 @@ mod tests {
             data: object.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data),
             tls: object.add_section(Vec::new(), b".tdata".to_vec(), object::SectionKind::Tls),
         };
+
         object.append_section_data(sections.text, &[0xcc; 0x40], 16);
         object.append_section_data(sections.data, &[0; 0x10], 8);
         object.append_section_data(sections.tls, &[0; 0x10], 8);
@@ -1337,6 +1427,7 @@ mod tests {
             );
             object.append_section_data(section, data, 1);
         }
+
         for spec in symbols(&sections) {
             object.add_symbol(write::Symbol {
                 name: spec.name.to_vec(),
@@ -1356,6 +1447,7 @@ mod tests {
                 },
             });
         }
+
         object.write().expect("write test object")
     }
 
@@ -1459,6 +1551,7 @@ mod tests {
                 ("unsized_last", Function, Global, Some((0x3c, 0x40))),
             ]
         );
+
         // Identifiers are dense in address-then-name order.
         assert!(table.symbols.iter().enumerate().all(|(index, symbol)| {
             symbol.id == SymbolId::new(u32::try_from(index).expect("test symbol count"))
@@ -1480,6 +1573,7 @@ mod tests {
                 .and_then(|symbol| symbol.extent)
                 .map(|extent| extent.provenance)
         };
+
         assert_eq!(provenance("sized"), Some(SymbolExtentProvenance::Declared));
         assert_eq!(
             provenance("unsized"),
@@ -1538,6 +1632,7 @@ mod tests {
                 },
             });
         }
+
         let bytes = object.write().expect("write test object");
         let object = object::File::parse(bytes.as_slice()).expect("parse test object");
 
@@ -1630,6 +1725,7 @@ mod tests {
                 &[],
             )
         };
+
         let with_embedded = |payload: Vec<u8>| {
             object(
                 Architecture::X86_64,
@@ -1678,6 +1774,7 @@ mod tests {
                 other => panic!("expected an unusable table, got {other:?}"),
             }
         };
+
         assert!(unusable(b"not xz".to_vec()).contains("xz stream"));
         assert!(unusable(xz(b"not an object")).contains("malformed"));
         assert!(
@@ -1707,16 +1804,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+
         let jump_through_got = [0xff, 0x25, 0, 0, 0, 0];
         let push_index = [0x68, 1, 0, 0, 0];
         let jump_to_header = [0xe9, 0, 0, 0, 0];
         let endbr64 = [0xf3, 0x0f, 0x1e, 0xfa];
+
         // GNU ld and lld: through the GOT, or before binding on to the
         // header with the stub's index pushed.
         assert_eq!(
             frames(&[&jump_through_got[..], &push_index, &jump_to_header].concat()),
             [(0, 6, 0), (6, 11, 0), (11, 16, 1)]
         );
+
         // GNU ld's lazy half of an IBT stub, and its `.plt.sec` half.
         assert_eq!(
             frames(&[&endbr64[..], &push_index, &[0xf2], &jump_to_header].concat()),
@@ -1726,16 +1826,19 @@ mod tests {
             frames(&[&endbr64[..], &[0xf2], &jump_through_got, &[0x66, 0x90]].concat()),
             [(0, 4, 0), (4, 11, 0), (11, 13, 0)]
         );
+
         // mold: the index in r11, and padding no stub runs.
         assert_eq!(
             frames(&[&[0x41, 0xbb, 1, 0, 0, 0][..], &jump_through_got, &[0xcc; 4]].concat()),
             [(0, 6, 0), (6, 12, 0)]
         );
+
         // `.plt.got`.
         assert_eq!(
             frames(&[&jump_through_got[..], &[0x66, 0x90]].concat()),
             [(0, 6, 0), (6, 8, 0)]
         );
+
         // What moves the stack otherwise, or never jumps, is no stub.
         assert_eq!(
             frames(&[&[0x48, 0x83, 0xec, 0x08][..], &jump_through_got].concat()),

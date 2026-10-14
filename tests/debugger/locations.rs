@@ -230,6 +230,7 @@ async fn a_member_pointing_at_a_value_with_no_address_is_an_implicit_pointer() {
                 VariableUnavailableReason::OptimizedOut(OptimizedOutReason::EmptyLocation)
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -256,6 +257,7 @@ async fn parameters_held_only_on_entry_are_recovered_from_their_callers() {
                 ("removed_parameter", "used", 100),
             ]
         };
+
         for &(function, name, value) in expected {
             select(&scenario, function).await;
             assert_eq!(
@@ -269,6 +271,7 @@ async fn parameters_held_only_on_entry_are_recovered_from_their_callers() {
                 "{variant}: {function} {name}"
             );
         }
+
         if gcc {
             // `main`'s caller is the C library's, which describes no calls.
             select(&scenario, "main").await;
@@ -278,6 +281,7 @@ async fn parameters_held_only_on_entry_are_recovered_from_their_callers() {
                 "{variant}"
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -286,6 +290,7 @@ async fn parameters_held_only_on_entry_are_recovered_from_their_callers() {
 async fn entry_values_follow_the_one_possible_chain_of_tail_calls() {
     for variant in ["gcc-o2", "gcc-o2-nopie"] {
         let mut scenario = stopped(variant, &["tail"]).await;
+
         // `main` called `relay`, which jumped to `tail_target` passing its
         // own argument plus one: the only way `relay` reaches it.
         select(&scenario, "tail_target").await;
@@ -314,6 +319,7 @@ async fn an_entry_value_lost_further_out_says_whose_caller_lost_it() {
 
     for variant in VARIANTS {
         let scenario = stopped(variant, &["a", "b", "c"]).await;
+
         // `forwarded` was called by `forwarding`, which passed on what its
         // own caller, `main`, passed it through a pointer.
         let lost = if variant.starts_with("gcc") {
@@ -329,6 +335,7 @@ async fn an_entry_value_lost_further_out_says_whose_caller_lost_it() {
             // Clang's says the target was in a register the call clobbered.
             UnknownTarget
         };
+
         select(&scenario, "forwarded").await;
         assert_eq!(
             unavailable(&scenario, "value").await,
@@ -343,6 +350,7 @@ async fn an_entry_value_lost_further_out_says_whose_caller_lost_it() {
 async fn a_library_function_recovers_what_the_program_passed_it() {
     for variant in VARIANTS {
         let scenario = stopped(variant, &["library"]).await;
+
         // `main` called `locations_in_library` through the procedure linkage
         // table: its call site names the library function only by symbol.
         select(&scenario, "locations_in_library").await;
@@ -366,6 +374,7 @@ async fn a_library_function_recovers_what_the_program_passed_it() {
             else {
                 panic!("{variant}: stop has no value");
             };
+
             assert_eq!(stop.address, callback, "{variant}");
         } else {
             // Clang's call site does not say what it passed.
@@ -375,6 +384,7 @@ async fn a_library_function_recovers_what_the_program_passed_it() {
                 "{variant}"
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -383,6 +393,7 @@ async fn a_library_function_recovers_what_the_program_passed_it() {
 async fn tail_calls_another_module_may_have_taken_are_not_followed() {
     for variant in VARIANTS {
         let scenario = stopped(variant, &["interposed"]).await;
+
         // `main` called the library's `locations_interposing`, which jumped
         // to `locations_interposed` through its procedure linkage table. The
         // program defines one too, which took the jump and passed on 114
@@ -406,6 +417,7 @@ async fn tail_calls_another_module_may_have_taken_are_not_followed() {
 async fn a_call_through_a_kept_pointer_says_where_it_went() {
     for variant in VARIANTS {
         let scenario = stopped(variant, &["pointer"]).await;
+
         // `main` keeps the pointer it calls `forwarding` through in a
         // register its callees preserve, which its call site names.
         select(&scenario, "forwarded").await;
@@ -414,6 +426,7 @@ async fn a_call_through_a_kept_pointer_says_where_it_went() {
             select(&scenario, "forwarding").await;
             assert_eq!(integer(&scenario, "value").await, 2, "{variant}");
         }
+
         scenario.shutdown().await;
     }
 }

@@ -31,10 +31,13 @@ use crate::{
 
 /// The most instructions a window may request before its address.
 pub const MAX_WINDOW_BEFORE: u32 = 1024;
+
 /// The most instructions a window may request from its address onward.
 pub const MAX_WINDOW_AFTER: u32 = 4096;
+
 /// The most instructions one function disassembly decodes across its ranges.
 pub const MAX_FUNCTION_INSTRUCTIONS: usize = 32768;
+
 /// How far before an address the engine looks for a known instruction start.
 pub const MAX_BACKWARD_DISTANCE: u64 = 64 * 1024;
 
@@ -46,6 +49,7 @@ pub enum AssemblySyntax {
     /// Intel syntax: destination first, `qword ptr [rbp-0x8]`.
     #[default]
     Intel,
+
     /// AT&T syntax as GNU tools print it: source first, `-0x8(%rbp)`.
     Att,
 }
@@ -56,18 +60,25 @@ pub enum AssemblySyntax {
 pub enum InstructionTokenKind {
     /// The operation name.
     Mnemonic,
+
     /// An instruction prefix such as `lock` or `rep`.
     Prefix,
+
     /// A size or other keyword such as `qword ptr`.
     Keyword,
+
     /// A register name.
     Register,
+
     /// An immediate value or displacement.
     Number,
+
     /// An absolute code or data address, such as a branch target.
     Address,
+
     /// Separators, brackets, and operators.
     Punctuation,
+
     /// Whitespace and other text.
     Text,
 }
@@ -77,6 +88,7 @@ pub enum InstructionTokenKind {
 pub struct InstructionToken {
     /// What the text is.
     pub kind: InstructionTokenKind,
+
     /// The rendered text.
     pub text: Arc<str>,
 }
@@ -87,22 +99,31 @@ pub struct InstructionToken {
 pub enum ControlFlow {
     /// Execution continues with the next instruction.
     Sequential,
+
     /// An unconditional jump to a target encoded in the instruction.
     Jump,
+
     /// A conditional jump to a target encoded in the instruction.
     ConditionalJump,
+
     /// A jump to a target computed at run time.
     IndirectJump,
+
     /// A call to a target encoded in the instruction.
     Call,
+
     /// A call to a target computed at run time.
     IndirectCall,
+
     /// A return to the caller.
     Return,
+
     /// A software interrupt or system call.
     Interrupt,
+
     /// The start, abort, or end of a hardware transaction.
     Transaction,
+
     /// An instruction that always raises an exception, such as `ud2`.
     Exception,
 }
@@ -112,6 +133,7 @@ pub enum ControlFlow {
 pub enum InstructionReferenceKind {
     /// The target of a direct jump or call.
     BranchTarget,
+
     /// The address of a memory operand that the instruction alone
     /// determines, such as a program-counter-relative operand.
     MemoryOperand,
@@ -122,8 +144,10 @@ pub enum InstructionReferenceKind {
 pub struct InstructionReference {
     /// Why the instruction refers to the address.
     pub kind: InstructionReferenceKind,
+
     /// The referenced process address.
     pub address: VirtualAddress,
+
     /// The module, section, and symbol containing the address.
     pub description: AddressDescription,
 }
@@ -145,27 +169,34 @@ pub enum IndirectTarget {
         /// The target and the module, section, and symbol containing it.
         target: AddressDescription,
     },
+
     /// The target is loaded from memory.
     Memory {
         /// The memory holding the target and what contains it.
         slot: AddressDescription,
+
         /// The target and the module, section, and symbol containing it.
         target: AddressDescription,
     },
+
     /// The memory holding the target is unreadable.
     Unreadable {
         /// The memory holding the target and what contains it.
         slot: AddressDescription,
+
         /// The first unreadable address.
         address: VirtualAddress,
+
         /// Why the memory is unreadable.
         reason: MemoryReadUnavailableReason,
     },
+
     /// The target depends on a register whose value the stop does not
     /// determine for this instruction: it is not the instruction the selected
     /// thread is about to execute, or that thread is inside a system call the
     /// kernel will restart.
     NeedsRegisters,
+
     /// The debugger does not compute targets of this form: a far transfer, a
     /// return from an interrupt or system call, or a branch whose operand
     /// size differs between processor vendors.
@@ -177,10 +208,13 @@ pub enum IndirectTarget {
 pub struct DecodedInstruction {
     /// The rendered instruction, in order.
     pub tokens: Arc<[InstructionToken]>,
+
     /// How the instruction transfers control.
     pub flow: ControlFlow,
+
     /// The addresses the instruction encodes.
     pub references: Arc<[InstructionReference]>,
+
     /// For an indirect jump, call, or return, where it transfers control in
     /// the stopped state.
     pub indirect_target: Option<Arc<IndirectTarget>>,
@@ -211,9 +245,11 @@ impl DecodedInstruction {
 pub enum InstructionContent {
     /// A valid instruction.
     Decoded(DecodedInstruction),
+
     /// One byte that begins no valid instruction. Decoding continues at the
     /// next byte.
     Invalid,
+
     /// The readable prefix of an instruction whose remaining bytes are
     /// unreadable.
     Truncated,
@@ -224,13 +260,17 @@ pub enum InstructionContent {
 pub struct DisassembledInstruction {
     /// The address of the first byte.
     pub address: VirtualAddress,
+
     /// The bytes as the program sees them; debugger breakpoint traps are
     /// never shown.
     pub bytes: Arc<[u8]>,
+
     /// What the bytes are.
     pub content: InstructionContent,
+
     /// The module, section, and symbol containing the instruction.
     pub location: AddressDescription,
+
     /// The source line containing the instruction, when known. The source
     /// file belongs to the image of the instruction's module.
     pub source: Option<SourceLocation>,
@@ -249,12 +289,16 @@ impl DisassembledInstruction {
 pub enum BoundaryEvidence {
     /// A stopped thread is about to execute the instruction.
     ProgramCounter,
+
     /// Debug information begins a function's address range there.
     FunctionRange,
+
     /// A code symbol begins there.
     CodeSymbol,
+
     /// An executable section begins there.
     SectionStart,
+
     /// The disassembled range ends there.
     RangeEnd,
 }
@@ -281,8 +325,10 @@ impl fmt::Display for BoundaryEvidence {
 pub struct BoundaryConflict {
     /// The known instruction start.
     pub boundary: VirtualAddress,
+
     /// Why the boundary is known.
     pub evidence: BoundaryEvidence,
+
     /// The decoded instruction that overlaps the boundary.
     pub instruction: VirtualAddress,
 }
@@ -292,13 +338,16 @@ pub struct BoundaryConflict {
 pub enum BlockCompletion {
     /// Decoding reached the end of the range.
     Complete,
+
     /// Memory became unreadable before the range ended.
     Unreadable {
         /// The first unreadable address.
         address: VirtualAddress,
+
         /// Why the memory is unreadable.
         reason: MemoryReadUnavailableReason,
     },
+
     /// The instruction limit was reached; decoding would continue here.
     Limited {
         /// The first instruction start not decoded.
@@ -312,11 +361,14 @@ pub struct DisassemblyBlock {
     /// The decoded range: for a function, the debug-information range or
     /// symbol extent; for a window, the decoded instructions.
     pub range: AddressRange<VirtualAddress>,
+
     /// The decoded instructions in address order. An instruction overlaps
     /// the next only where a conflict reports it.
     pub instructions: Arc<[DisassembledInstruction]>,
+
     /// Known instruction starts that decoded instructions overlapped.
     pub conflicts: Arc<[BoundaryConflict]>,
+
     /// Whether decoding covered the whole range.
     pub completion: BlockCompletion,
 }
@@ -327,12 +379,14 @@ pub enum ContextShortfall {
     /// No known instruction start precedes the earliest decoded instruction
     /// within the search distance.
     NoKnownBoundary,
+
     /// Decoding forward from the preceding known start overlapped this known
     /// boundary, so the instructions before it are unproven.
     Desynchronized {
         /// The boundary that decoding did not land on.
         boundary: VirtualAddress,
     },
+
     /// The memory between the preceding known start and the earliest
     /// decoded instruction is unreadable.
     Unreadable {
@@ -346,21 +400,26 @@ pub enum ContextShortfall {
 pub enum TargetBoundary {
     /// The address is itself a known instruction start.
     Known(BoundaryEvidence),
+
     /// Decoding forward from a known instruction start landed exactly on it.
     Reached {
         /// The known start decoding began at.
         from: VirtualAddress,
+
         /// Why that start is known.
         evidence: BoundaryEvidence,
     },
+
     /// Decoding forward from the nearest known instruction start overlapped
     /// the address, which therefore probably lies inside an instruction.
     Crossed {
         /// The known start decoding began at.
         from: VirtualAddress,
+
         /// The decoded instruction containing the address.
         instruction: VirtualAddress,
     },
+
     /// The address could not be checked.
     Unverified(ContextShortfall),
 }
@@ -373,10 +432,12 @@ pub enum FunctionOrigin {
         /// The function instance.
         instance: CodeInstanceId,
     },
+
     /// Only a code symbol describes the function.
     Symbol {
         /// The symbol.
         symbol: SymbolId,
+
         /// How the end of the symbol's extent was determined.
         provenance: SymbolExtentProvenance,
     },
@@ -387,8 +448,10 @@ pub enum FunctionOrigin {
 pub struct DisassembledFunction {
     /// The loaded module containing the function.
     pub module: ModuleId,
+
     /// The source-level name for debug information, or the linker name.
     pub name: Arc<str>,
+
     /// How the function was identified.
     pub origin: FunctionOrigin,
 }
@@ -409,17 +472,22 @@ pub enum DisassemblyView {
     Function {
         /// The function.
         function: DisassembledFunction,
+
         /// One block per range.
         blocks: Arc<[DisassemblyBlock]>,
     },
+
     /// Instructions before and from one address.
     Window {
         /// The address the window is centered on.
         address: VirtualAddress,
+
         /// What proves that the address begins an instruction.
         boundary: TargetBoundary,
+
         /// Why fewer instructions than requested precede the address.
         leading: Option<ContextShortfall>,
+
         /// The instructions before and from the address.
         block: DisassemblyBlock,
     },
@@ -430,12 +498,16 @@ pub enum DisassemblyView {
 pub struct Disassembly {
     /// The debugger revision at which the bytes were read.
     pub revision: u64,
+
     /// The stopped snapshot that authorized the read.
     pub stop_id: StopId,
+
     /// The target the instructions were decoded for.
     pub target: TargetDescription,
+
     /// The syntax the instructions were rendered in.
     pub syntax: AssemblySyntax,
+
     /// The decoded instructions.
     pub view: DisassemblyView,
 }
@@ -445,14 +517,17 @@ pub struct Disassembly {
 pub enum DisassemblyRange {
     /// Every address range of the function containing an address.
     Function(VirtualAddress),
+
     /// Instructions around an address the caller asserts begins one: up to
     /// `before` instructions proven to precede it, then `after` instructions
     /// beginning with it.
     Window {
         /// The address.
         address: VirtualAddress,
+
         /// The instructions to show before the address.
         before: u32,
+
         /// The instructions to show from the address onward.
         after: u32,
     },
@@ -463,6 +538,7 @@ pub enum DisassemblyRange {
 pub struct DisassemblyQuery {
     /// The code to decode.
     pub range: DisassemblyRange,
+
     /// The syntax to render instructions in.
     pub syntax: AssemblySyntax,
 }
@@ -505,10 +581,13 @@ pub trait CodeSource {
 pub enum RawIndirect {
     /// `size` bytes at `address`, in the target's byte order, hold the target.
     Load { address: u64, size: usize },
+
     /// A register holds the target.
     Value(u64),
+
     /// The target depends on registers that were not supplied.
     NeedsRegisters,
+
     /// The decoder does not compute this form's target.
     Unsupported,
 }
@@ -520,11 +599,14 @@ pub enum RawDecode {
         tokens: Vec<InstructionToken>,
         flow: ControlFlow,
         references: Vec<(InstructionReferenceKind, u64)>,
+
         /// Present exactly for an indirect jump, call, or return.
         indirect: Option<RawIndirect>,
     },
+
     /// The bytes begin no valid instruction.
     Invalid,
+
     /// The bytes are a valid prefix of a longer instruction.
     Incomplete,
 }
@@ -581,6 +663,7 @@ enum Until {
     /// At a known boundary, which the last instruction must not cross, or
     /// after `limit` instructions.
     Boundary { end: u64, limit: usize },
+
     /// After `count` instructions.
     Count(usize),
 }
@@ -590,12 +673,16 @@ enum Until {
 enum SweepEnd {
     /// The last instruction ended exactly at the boundary.
     Reached,
+
     /// The last instruction, at this address, crossed the boundary.
     Crossed { instruction: u64 },
+
     /// The requested number of instructions was decoded.
     Counted,
+
     /// The limit was reached before the boundary.
     Limited { next: u64 },
+
     /// Memory became unreadable at this address.
     Unreadable {
         address: u64,
@@ -682,6 +769,7 @@ impl<'a> Engine<'a> {
                     ));
                 }
             };
+
             blocks.push(DisassemblyBlock {
                 range: *range,
                 instructions: sweep.instructions.into(),
@@ -689,6 +777,7 @@ impl<'a> Engine<'a> {
                 completion,
             });
         }
+
         Ok(blocks)
     }
 
@@ -724,6 +813,7 @@ impl<'a> Engine<'a> {
                 .last()
                 .map_or(address, DisassembledInstruction::end),
         };
+
         Ok(Window {
             boundary: leading.boundary,
             shortfall: leading.shortfall,
@@ -770,6 +860,7 @@ impl<'a> Engine<'a> {
                             evidence,
                         });
                     }
+
                     collected += sweep.instructions.len();
                     segments.push(sweep.instructions);
                     end = start.get();
@@ -785,6 +876,7 @@ impl<'a> Engine<'a> {
                             instruction: VirtualAddress::new(instruction),
                         });
                     }
+
                     shortfall = Some(ContextShortfall::Desynchronized {
                         boundary: VirtualAddress::new(end),
                     });
@@ -801,6 +893,7 @@ impl<'a> Engine<'a> {
                 }
             }
         }
+
         let boundary = match known.get(&address) {
             Some(&evidence) => TargetBoundary::Known(evidence),
             None => boundary.unwrap_or_else(|| {
@@ -882,16 +975,19 @@ impl<'a> Engine<'a> {
                             "only unreadable memory leaves an instruction incomplete",
                         ));
                     };
+
                     if view.bytes.is_empty() {
                         break SweepEnd::Unreadable {
                             address: position,
                             reason,
                         };
                     }
+
                     truncated = Some(reason);
                     (InstructionContent::Truncated, view.bytes.len())
                 }
             };
+
             let next = position + length as u64;
             instructions.push(self.instruction(address, &view.bytes[..length], content));
 
@@ -901,6 +997,7 @@ impl<'a> Engine<'a> {
                 Until::Boundary { end, .. } => next.min(end),
                 Until::Count(_) => next,
             };
+
             let overlapped = starts
                 .range(VirtualAddress::new(position + 1)..VirtualAddress::new(limit))
                 .next();
@@ -927,6 +1024,7 @@ impl<'a> Engine<'a> {
                 (None, _) => position = next,
             }
         };
+
         Ok(Sweep {
             instructions,
             conflicts,
@@ -992,6 +1090,7 @@ impl<'a> Engine<'a> {
                 let chunk = self.read_chunk(chunk_start)?;
                 self.chunks.insert(chunk_start, chunk);
             }
+
             let chunk = &self.chunks[&chunk_start];
             let offset = usize::try_from(current - chunk_start)
                 .map_err(|_| Error::internal("a chunk offset is larger than READ_CHUNK"))?;
@@ -1001,12 +1100,14 @@ impl<'a> Engine<'a> {
                         "only an unreadable chunk is shorter than a chunk",
                     ));
                 };
+
                 if offset == chunk.bytes.len() {
                     return Ok(View {
                         bytes,
                         unreadable: Some(reason),
                     });
                 }
+
                 // Readable memory may begin after the chunk's unreadable
                 // prefix ends, so read this address directly.
                 let wanted = length - bytes.len();
@@ -1018,10 +1119,12 @@ impl<'a> Engine<'a> {
                 bytes.extend_from_slice(&read.bytes);
                 return Ok(View { bytes, unreadable });
             }
+
             let take = (chunk.bytes.len() - offset).min(length - bytes.len());
             bytes.extend_from_slice(&chunk.bytes[offset..offset + take]);
             current += take as u64;
         }
+
         Ok(View {
             bytes,
             unreadable: None,
@@ -1042,6 +1145,7 @@ impl<'a> Engine<'a> {
         } else {
             None
         };
+
         Ok(Chunk {
             bytes: read.bytes,
             unreadable,

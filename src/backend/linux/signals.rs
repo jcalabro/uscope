@@ -21,13 +21,21 @@ pub struct Signal(i32);
 
 impl Signal {
     pub const SIGINT: Self = Self(libc::SIGINT);
+
     pub const SIGTRAP: Self = Self(libc::SIGTRAP);
+
     pub const SIGKILL: Self = Self(libc::SIGKILL);
+
     pub const SIGTERM: Self = Self(libc::SIGTERM);
+
     pub const SIGCONT: Self = Self(libc::SIGCONT);
+
     pub const SIGSTOP: Self = Self(libc::SIGSTOP);
+
     pub const SIGTSTP: Self = Self(libc::SIGTSTP);
+
     pub const SIGTTIN: Self = Self(libc::SIGTTIN);
+
     pub const SIGTTOU: Self = Self(libc::SIGTTOU);
 
     /// The highest signal number Linux delivers.
@@ -67,12 +75,14 @@ impl Signal {
         if let Ok(number) = name.parse::<i32>() {
             return Self::new(number);
         }
+
         let upper = name.to_ascii_uppercase();
         let full = if upper.starts_with("SIG") {
             upper
         } else {
             format!("SIG{upper}")
         };
+
         // Linux defines these names as aliases of others.
         let alias = match full.as_str() {
             "SIGPOLL" => Some(libc::SIGPOLL),
@@ -80,6 +90,7 @@ impl Signal {
             "SIGCLD" => Some(libc::SIGCHLD),
             _ => None,
         };
+
         alias
             .and_then(Self::new)
             .or_else(|| Self::all().find(|signal| signal.name() == full))
@@ -98,7 +109,9 @@ impl Signal {
 #[cfg(test)]
 impl Signal {
     pub const SIGSEGV: Self = Self(libc::SIGSEGV);
+
     pub const SIGURG: Self = Self(libc::SIGURG);
+
     pub const SIGUSR1: Self = Self(libc::SIGUSR1);
 }
 
@@ -107,6 +120,7 @@ impl Signal {
 #[derive(Debug, Default)]
 pub struct SignalPolicies {
     changed: BTreeMap<Signal, SignalPolicy>,
+
     /// Signals a loaded runtime handles as part of the program's own work.
     handled: BTreeSet<i32>,
 }
@@ -127,6 +141,7 @@ impl SignalPolicies {
         } else {
             self.changed.insert(signal, policy);
         }
+
         previous
     }
 
@@ -140,6 +155,7 @@ impl SignalPolicies {
         if self.handled.contains(&signal.0) {
             return QUIET_POLICY;
         }
+
         default_policy(signal)
     }
 }
@@ -207,9 +223,11 @@ fn signal_code_name(signal: i32, code: i32) -> Option<&'static str> {
         -6 => Some("SI_TKILL"),
         _ => None,
     };
+
     if generic.is_some() {
         return generic;
     }
+
     let names: &[&str] = match signal {
         libc::SIGSEGV => &["SEGV_MAPERR", "SEGV_ACCERR", "SEGV_BNDERR", "SEGV_PKUERR"],
         libc::SIGBUS => &[
@@ -242,6 +260,7 @@ fn signal_code_name(signal: i32, code: i32) -> Option<&'static str> {
         libc::SIGTRAP => &["TRAP_BRKPT", "TRAP_TRACE", "TRAP_BRANCH", "TRAP_HWBKPT"],
         _ => &[],
     };
+
     usize::try_from(code)
         .ok()
         .and_then(|code| code.checked_sub(1))
@@ -271,14 +290,19 @@ impl From<NixSignal> for Signal {
 pub enum WaitEvent {
     /// The thread exited with this status code.
     Exited(Pid, i32),
+
     /// The thread was killed by a signal, possibly dumping core.
     Signaled(Pid, Signal, bool),
+
     /// The thread stopped for a signal.
     Stopped(Pid, Signal),
+
     /// The thread stopped for a ptrace event, reported with this signal.
     PtraceEvent(Pid, Signal, i32),
+
     /// The thread stopped at a system call while tracing system calls.
     PtraceSyscall(Pid),
+
     /// A stopped thread was resumed by `SIGCONT`.
     Continued(Pid),
 }
@@ -308,10 +332,12 @@ impl WaitEvent {
             ))
         } else if libc::WIFSTOPPED(status) {
             let stop = libc::WSTOPSIG(status);
+
             // PTRACE_O_TRACESYSGOOD marks system-call stops with bit 7.
             if stop == libc::SIGTRAP | 0x80 {
                 return Ok(Self::PtraceSyscall(pid));
             }
+
             let event = (status >> 16) & 0xff;
             if event == 0 {
                 Ok(Self::Stopped(pid, signal(stop)?))
@@ -341,6 +367,7 @@ mod tests {
             WaitEvent::decode(pid, libc::SIGSEGV | 0x80),
             Ok(WaitEvent::Signaled(pid, Signal::SIGSEGV, true))
         );
+
         // A real-time signal, which nix cannot represent.
         assert_eq!(
             WaitEvent::decode(pid, (35 << 8) | 0x7f),

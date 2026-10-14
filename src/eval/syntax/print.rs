@@ -6,10 +6,12 @@ use super::ast::{
     CastForm, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase, TypeName,
     UnaryOp,
 };
+
 use super::parser::{
     AS, ASSIGN, COMPARISON, CONDITIONAL, POSTFIX, PREFIX, assignment_text, binary_precedence,
     binary_text, is_bare, is_name_word,
 };
+
 use crate::eval::number::Float;
 
 /// Printed where a node has no text of its own, which no reading's node
@@ -21,6 +23,7 @@ pub fn print(tree: &Tree) -> String {
         tree,
         out: String::new(),
     };
+
     printer.node(tree.root());
     printer.out
 }
@@ -60,8 +63,10 @@ pub fn path_text(path: &Path) -> String {
                 Separator::Dot => ".",
             });
         }
+
         out.push_str(&name_text(&segment.name));
     }
+
     out
 }
 
@@ -124,6 +129,7 @@ impl Printer<'_> {
             tree: self.tree,
             out: String::new(),
         };
+
         printer.child(id, minimum);
         printer.out
     }
@@ -139,12 +145,14 @@ impl Printer<'_> {
                 } else {
                     strength
                 };
+
                 self.child(*left, left_minimum);
                 self.out.push(' ');
                 self.out.push_str(binary_text(*op));
                 self.out.push(' ');
                 self.child(*right, strength + 1);
             }
+
             NodeKind::Conditional {
                 condition,
                 then,
@@ -188,19 +196,23 @@ impl Printer<'_> {
                 if let Some(start) = start {
                     self.child(*start, ASSIGN);
                 }
+
                 self.out.push(':');
                 if let Some(end) = end {
                     self.child(*end, ASSIGN);
                 }
+
                 self.out.push(']');
             }
             NodeKind::SizeOf(SizeOf::Type(ty)) => {
                 self.out.push_str("sizeof(");
+
                 // A bare name alone would be measured as a value if it
                 // names one; a qualifier keeps it a type.
                 if is_bare(ty) {
                     self.out.push_str("const ");
                 }
+
                 self.out.push_str(&type_text(ty));
                 self.out.push(')');
             }
@@ -216,6 +228,7 @@ impl Printer<'_> {
                 self.out.push_str(&name_text(member));
                 self.out.push(')');
             }
+
             NodeKind::ContainerOf {
                 pointer,
                 ty,
@@ -282,6 +295,7 @@ impl Printer<'_> {
                     Some(character) => escape_char(&mut self.out, character),
                     None => {}
                 }
+
                 self.out.push('\'');
             }
             NodeKind::Text(bytes) => {
@@ -304,10 +318,12 @@ impl Printer<'_> {
             UnaryOp::AddressOf => "&",
         });
         let operand = self.child_text(operand, PREFIX);
+
         // `& &x` must not read as `&&`.
         if op == UnaryOp::AddressOf && operand.starts_with('&') {
             self.out.push(' ');
         }
+
         self.out.push_str(&operand);
     }
 
@@ -318,10 +334,12 @@ impl Printer<'_> {
             self.out.push_str(&as_type_text(ty));
             return;
         }
+
         self.out.push('(');
         self.out.push_str(&type_text(ty));
         self.out.push(')');
         let operand = self.child_text(operand, PREFIX);
+
         // `(T)-x` with a bare name would also read as subtraction.
         if is_bare(ty) && operand.starts_with(['-', '*', '&']) {
             let _ = write!(self.out, "({operand})");
@@ -340,6 +358,7 @@ impl Printer<'_> {
         } else {
             self.child(base, POSTFIX);
         }
+
         self.out.push_str(if arrow { "->" } else { "." });
         match field {
             Field::Named(name) => self.out.push_str(&name_text(name)),
@@ -357,6 +376,7 @@ impl Printer<'_> {
             crate::FloatValue::Binary64(bits) => {
                 let _ = write!(self.out, "{:?}", f64::from_bits(bits));
             }
+
             // Literals are never x87 values.
             _ => {
                 let _ = write!(self.out, "{value}");
@@ -388,6 +408,7 @@ fn escape_bytes(out: &mut String, bytes: &[u8]) {
                 escape_char(out, character);
             }
         }
+
         for byte in chunk.invalid() {
             let _ = write!(out, "\\x{byte:02x}");
         }

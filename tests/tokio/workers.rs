@@ -25,22 +25,28 @@ const BUILDS: [&str; 4] = [
     "tokio-workers-1.52-o0",
     "tokio-workers-1.52-o3",
 ];
+
 /// A build whose symbols are mangled as rustc did before v0, naming no
 /// generic arguments, where tokio's functions are told apart by their
 /// debug information.
 const LEGACY: &str = "tokio-workers-legacy";
+
 /// A build with `tokio_unstable`, which records where each task was
 /// spawned, and gives each task's vtable one more offset.
 const UNSTABLE: &str = "tokio-workers-unstable";
+
 /// A build with `tokio_unstable` and tokio's `tracing` feature, which
 /// wraps each task's future in tracing's `Instrumented`.
 const TRACED: &str = "tokio-workers-traced";
+
 /// A build whose tokio locks with the `parking_lot` crate, whose mutex is
 /// laid out as std's is not.
 const PARKING_LOT: &str = "tokio-workers-parking-lot";
+
 /// A build that spawns some tasks' futures wrapped as programs wrap what
 /// they spawn, which the walk passes through to the futures within.
 const WRAPPED: &str = "tokio-workers-wrapped";
+
 /// Builds that describe no types: lines only, and symbols only.
 const UNTYPED: [&str; 2] = ["tokio-workers-lines", "tokio-workers-stripped"];
 
@@ -67,6 +73,7 @@ impl Workers {
     async fn stopped_at(fixture: &str, current: bool, spec: BreakpointSpec) -> Self {
         let scratch = ScratchDir::new("workers");
         let output = scratch.path().join("stdout");
+
         // A build without types cannot say what its threads do, which is
         // what its own test checks.
         let mut scenario = if UNTYPED.contains(&fixture) {
@@ -74,6 +81,7 @@ impl Workers {
         } else {
             checked(fixture)
         };
+
         scenario.add_breakpoint_spec(spec).await;
         let reason = scenario
             .run_with_to_stop(LaunchOptions {
@@ -163,15 +171,19 @@ pub async fn activities(scenario: &mut Scenario) -> BTreeMap<ThreadId, ThreadAct
 struct Truth {
     /// Each async task's awaits, innermost first.
     tasks: BTreeMap<u64, Vec<String>>,
+
     /// The values each task recorded, by name.
     values: BTreeMap<u64, BTreeMap<String, String>>,
+
     /// The blocking closure running, and its thread.
     running: Option<(u64, ThreadId)>,
     queued: Option<u64>,
+
     /// Tasks the current-thread runtime has not polled since they were
     /// woken or spawned.
     woken: Option<u64>,
     spawned: Option<u64>,
+
     /// The thread that reached the checkpoint.
     main: Option<ThreadId>,
 }
@@ -206,6 +218,7 @@ impl Truth {
                 _ => {}
             }
         }
+
         truth
     }
 
@@ -218,6 +231,7 @@ impl Truth {
             "middle" | "top" => tag.to_owned(),
             _ => "leaf".to_owned(),
         };
+
         let mut awaits = self
             .tasks
             .iter()
@@ -232,6 +246,7 @@ impl Truth {
         if let Some(spawned) = self.spawned {
             awaits.insert(spawned, vec![("top".into(), line(SOURCE, "async fn top("))]);
         }
+
         awaits
     }
 
@@ -250,6 +265,7 @@ impl Truth {
         let Some(described) = described else {
             return false;
         };
+
         match tag.map(String::as_str) {
             Some("channel") => described == "receiving; senders: 1",
             Some("sleep") => ["sleeping until +59m", "sleeping until +1h0m"]
@@ -292,17 +308,21 @@ impl Truth {
         for &id in self.tasks.keys() {
             expected.insert(id, (TaskState::Blocked, WAITS_FOR.into(), None));
         }
+
         for id in self.woken.iter().chain(&self.spawned) {
             expected.insert(*id, (TaskState::Runnable, "runnable".into(), None));
         }
+
         if let Some((id, thread)) = self.running {
             let running = "running a blocking closure".into();
             expected.insert(id, (TaskState::Running, running, Some(thread)));
         }
+
         if let Some(id) = self.queued {
             let queued = "queued in the blocking pool".into();
             expected.insert(id, (TaskState::Runnable, queued, None));
         }
+
         expected
     }
 
@@ -324,10 +344,12 @@ impl Truth {
             if listed.insert(task.id.number, entry).is_some() {
                 return Err(format!("task {} is listed twice", task.id.number));
             }
+
             if task.internal {
                 return Err(format!("task {} is the runtime's own", task.id.number));
             }
         }
+
         let expected = self.expected();
         if listed == expected {
             Ok(())
@@ -348,6 +370,7 @@ async fn tasks_are_listed_exactly(current: bool) {
         let mut workers = Workers::parked(fixture, current).await;
         let truth = workers.truth();
         assert_eq!(truth.tasks.len(), 8, "{fixture}: {truth:?}");
+
         // Small pages cross from one page to the next mid-shard.
         let (tasks, gaps) = workers.tasks(3).await;
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
@@ -430,6 +453,7 @@ async fn check_threads(
             ThreadActivity::Unknown(reason) => panic!("thread {id}: {reason}"),
         }
     }
+
     let main = truth.main.expect("the checkpoint's thread");
     assert_eq!(
         activities.get(&main),
@@ -465,6 +489,7 @@ async fn a_task_at_a_breakpoint_runs_on_its_thread(current: bool) {
         else {
             panic!("{fixture}: not stopped");
         };
+
         // The program spawns tasks and blocking closures while its tasks
         // run, so a list or the pool may be changing at the stop, which
         // the list says, and nothing else.
@@ -516,6 +541,7 @@ async fn tokios_machinery_is_marked(current: bool) {
                 .map(|file| file.path.display().to_string())
                 .unwrap_or_default()
         };
+
         let mut dispatch = None;
         for (index, frame) in trace.frames.iter().enumerate() {
             let (path, role) = (path(frame), frame.role);
@@ -532,6 +558,7 @@ async fn tokios_machinery_is_marked(current: bool) {
                 }
             }
         }
+
         // The innermost poll of a task is this task's: its own functions
         // lie within it. A worker is itself a blocking task, polled below.
         let dispatch = dispatch.unwrap_or_else(|| panic!("{fixture}: no dispatch: {trace:#?}"));
@@ -547,6 +574,7 @@ async fn tokios_machinery_is_marked(current: bool) {
                 "{fixture}: {name} {at:?} {dispatch}"
             );
         }
+
         workers.scenario.shutdown().await;
     }
 }
@@ -604,6 +632,7 @@ async fn each_task_began_in_the_function_it_spawned() {
                     "{fixture} {current}: {task:#?}"
                 );
             }
+
             workers.scenario.shutdown().await;
         }
     }
@@ -654,6 +683,7 @@ async fn check_awaits(
     let InferiorState::Stopped { stop_id, .. } = scenario.snapshot().await.inferior else {
         panic!("{context}: not stopped");
     };
+
     for (id, frames) in &truth.awaits() {
         let task = tasks
             .iter()
@@ -664,6 +694,7 @@ async fn check_awaits(
             execution: ExecutionContext::Task(task.id),
             frame,
         };
+
         let context = format!("{context} task {id}");
         let handle = scenario.handle();
         let trace = scenario
@@ -680,6 +711,7 @@ async fn check_awaits(
                 let FrameKind::Async { .. } = frame.kind else {
                     return None;
                 };
+
                 Some((
                     frame.function.as_ref()?.name.to_string(),
                     frame.source.as_ref().map_or(0, |source| source.line.get()),
@@ -693,6 +725,7 @@ async fn check_awaits(
             (Some(*id) == truth.spawned) != matches!(first.kind, FrameKind::Awaited { .. }),
             "{context}: {first:#?}"
         );
+
         // The future it awaits says what for, as does the list of tasks of
         // one waiting.
         if let FrameKind::Awaited { .. } = first.kind {
@@ -702,6 +735,7 @@ async fn check_awaits(
                 assert_eq!(task.detail.as_deref(), described, "{context}");
             }
         }
+
         // A suspended frame runs no code, and has no registers.
         let refused = handle.at(view(first.id)).registers().await;
         assert!(
@@ -727,10 +761,12 @@ pub async fn check_saved_local(
     let Some(name) = frame.function.as_ref().map(|function| &function.name) else {
         return;
     };
+
     let local = format!("{name}_local");
     let Some(value) = recorded.get(&local) else {
         return;
     };
+
     let handle = scenario.handle();
     let variables = scenario
         .operation("task variables", handle.at(view).variables())
@@ -747,6 +783,7 @@ pub async fn check_saved_local(
         } => Some(shown.to_string()),
         _ => None,
     };
+
     assert_eq!(
         unsigned(&found.state).as_ref(),
         Some(value),
@@ -759,6 +796,7 @@ pub async fn check_saved_local(
     let Evaluation::Value { value: printed, .. } = evaluated else {
         panic!("{context} {name}: {evaluated:?}");
     };
+
     assert_eq!(
         unsigned(&printed.state).as_ref(),
         Some(value),
@@ -784,6 +822,7 @@ async fn a_build_without_types_refuses_tasks_and_says_why() {
             error.contains(&format!("the program describes no type {context}")),
             "{fixture}: {error}"
         );
+
         // A stripped build keeps no source paths to read tokio's version
         // from either.
         assert_eq!(
@@ -797,6 +836,7 @@ async fn a_build_without_types_refuses_tasks_and_says_why() {
                 "{fixture}: thread {id}: {activity:?}"
             );
         }
+
         let trace = backtrace(&workers.scenario).await;
         let names = trace
             .frames
@@ -852,6 +892,7 @@ async fn a_cores_tasks_are_those_the_program_reported() {
             } else {
                 format!("{fixture}.core")
             };
+
             let log = Scenario::fixture(&format!("{core}.log"));
             let log = std::fs::read_to_string(&log)
                 .unwrap_or_else(|error| panic!("read {}: {error}", log.display()));
@@ -884,6 +925,7 @@ async fn every_type_of_a_large_program_is_read_and_named_once() {
         } else {
             312
         };
+
         for (name, size) in [
             (
                 "tokio::runtime::scheduler::multi_thread::worker::Shared",
@@ -898,6 +940,7 @@ async fn every_type_of_a_large_program_is_read_and_named_once() {
                 "{fixture}: {name}"
             );
         }
+
         workers.scenario.shutdown().await;
     }
 }

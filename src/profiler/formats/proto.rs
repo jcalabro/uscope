@@ -29,6 +29,7 @@ impl<'a> Iterator for Fields<'a> {
         if self.bytes.is_empty() {
             return None;
         }
+
         Some(self.field())
     }
 }
@@ -60,9 +61,11 @@ impl<'a> Fields<'a> {
                 ));
             }
         };
+
         if number == 0 {
             return Err("a field is numbered 0".to_owned());
         }
+
         Ok((number, value))
     }
 }
@@ -74,6 +77,7 @@ fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8], String> {
             bytes.len()
         ));
     }
+
     let (taken, rest) = bytes.split_at(length);
     *bytes = rest;
     Ok(taken)
@@ -91,6 +95,7 @@ fn varint(bytes: &mut &[u8]) -> Result<u64, String> {
             return Ok(value);
         }
     }
+
     Err("a varint is longer than ten bytes".to_owned())
 }
 
@@ -122,6 +127,7 @@ impl<'a> Value<'a> {
             }
             value => into.push(value.number(field)?),
         }
+
         Ok(())
     }
 }
@@ -163,6 +169,7 @@ impl Message {
         for value in values {
             put_varint(&mut packed, value);
         }
+
         if !packed.is_empty() {
             self.bytes(field, &packed);
         }
@@ -178,5 +185,6 @@ fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
         bytes.push((value as u8) | 0x80);
         value >>= 7;
     }
+
     bytes.push(value as u8);
 }

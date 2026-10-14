@@ -52,9 +52,11 @@ pub(super) fn select(
                     crate::UnsupportedVariableFeature::AlternativeLocations.into(),
                 ));
             }
+
             return Ok(Some(expression));
         }
     }
+
     let mut defaults = list.entries().filter(|(range, _)| range.is_none());
     let expression = defaults.next().map(|(_, expression)| expression);
     if defaults.next().is_some() {
@@ -62,11 +64,13 @@ pub(super) fn select(
             "multiple default locations were supplied".into(),
         ));
     }
+
     if address.is_none() && expression.is_none() && !list.is_empty() {
         return Err(LocationSelectionError::Unavailable(
             VariableUnavailableReason::NoInstructionContext,
         ));
     }
+
     Ok(expression)
 }
 
@@ -85,6 +89,7 @@ pub(super) fn copy_optional_location(
     let Some(value) = value else {
         return Metadata::Absent(absence);
     };
+
     match copy_location(dwarf, pool, unit_index, unit, value) {
         Ok(location) => Metadata::Value(location),
         Err(error) => Metadata::Malformed(error.to_string().into()),
@@ -104,12 +109,14 @@ pub(super) fn copy_data_object_value(
             Err(error) => Metadata::Malformed(error.to_string().into()),
         };
     }
+
     if let Some(value) = entry.attr_value(gimli::DW_AT_const_value) {
         return match copy_constant(value) {
             Ok(value) => Metadata::Value(ValueDescription::Constant(Box::new(value))),
             Err(error) => Metadata::Malformed(error),
         };
     }
+
     Metadata::Absent(MetadataAbsence::NoLocation)
 }
 
@@ -126,12 +133,14 @@ pub(super) fn copy_data_object_value_with_origins(
     if !matches!(value, Metadata::Absent(_)) {
         return value;
     }
+
     for (origin_unit, origin) in chain {
         let value = copy_data_object_value(dwarf, pool, *origin_unit, &units[*origin_unit], origin);
         if !matches!(value, Metadata::Absent(_)) {
             return value;
         }
     }
+
     Metadata::Absent(MetadataAbsence::NoLocation)
 }
 
@@ -188,10 +197,12 @@ fn copy_location_with(
         let expression = copy_expression(dwarf, pool, unit_index, unit, expression)?;
         return pool.list(&[(None, expression)]).map_err(too_large);
     }
+
     let mut locations = dwarf
         .attr_locations(unit, value)?
         .ok_or(DwarfError::UnsupportedReferenceForm)?;
     let mut entries = Vec::new();
+
     // Iterate raw entries so DW_LLE_default_location keeps its fallback
     // semantics (range: None) instead of becoming a 0..u64::MAX range that
     // conflicts with every specific entry.
@@ -200,6 +211,7 @@ fn copy_location_with(
         let Some(location) = locations.convert_raw(raw)? else {
             continue;
         };
+
         if is_default {
             entries.push((
                 None,
@@ -207,9 +219,11 @@ fn copy_location_with(
             ));
             continue;
         }
+
         if location.range.begin > location.range.end {
             return Err(DwarfError::InvalidRange);
         }
+
         if location.range.begin < location.range.end {
             entries.push((
                 Some(AddressRange {
@@ -220,6 +234,7 @@ fn copy_location_with(
             ));
         }
     }
+
     pool.list(&entries).map_err(too_large)
 }
 
@@ -243,11 +258,13 @@ pub(super) fn copy_expression(
         if procedures.iter().any(|(known, _)| *known == offset) {
             continue;
         }
+
         if procedures.len() == MAX_PROCEDURES {
             return Err(DwarfError::MalformedVariable(
                 "an expression calls too many procedures".into(),
             ));
         }
+
         // A procedure elsewhere stays missing, and running it unsupported.
         let Some(entry_offset) =
             gimli::DebugInfoOffset(usize::try_from(offset).map_err(|_| DwarfError::InvalidRange)?)
@@ -255,6 +272,7 @@ pub(super) fn copy_expression(
         else {
             continue;
         };
+
         let entry = unit.entry(entry_offset)?;
         let location = entry
             .attr_value(gimli::DW_AT_location)
@@ -272,8 +290,10 @@ pub(super) fn copy_expression(
                 )?);
             }
         }
+
         procedures.push((offset, location));
     }
+
     pool.expression(
         &bytes,
         u32::try_from(unit_index).map_err(|_| DwarfError::InvalidRange)?,
@@ -318,9 +338,11 @@ fn indexed_addresses(
         else {
             continue;
         };
+
         let address = unit_dwarf(dwarf, unit).address(unit, index)?;
         addresses.push((index.0 as u64, address));
     }
+
     Ok(addresses)
 }
 
@@ -338,14 +360,17 @@ fn calls(
         let gimli::Operation::Call { offset } = operation else {
             continue;
         };
+
         let offset = match offset {
             gimli::DieReference::UnitRef(offset) => offset.to_debug_info_offset(&unit.header),
             gimli::DieReference::DebugInfoRef(offset) => Some(offset),
         };
+
         if let Some(offset) = offset {
             called.push(offset.0 as u64);
         }
     }
+
     Ok(called)
 }
 
@@ -359,10 +384,12 @@ pub(super) fn load_evaluation_units(
         .into_par_iter()
         .map(|index| evaluation_unit(units, index))
         .collect::<Vec<_>>();
+
     // The first unit to fail fails the load, as when they were read in turn.
     for recorded in recorded {
         pool.unit(&recorded?).map_err(too_large)?;
     }
+
     Ok(())
 }
 
@@ -384,6 +411,7 @@ fn evaluation_unit(
         language: units.inherited_language(index),
         ..EvaluationUnit::default()
     };
+
     let mut walk = DieWalk::new(unit)?;
     while let Some(die) = walk.next()? {
         if !matches!(
@@ -392,6 +420,7 @@ fn evaluation_unit(
         ) {
             continue;
         }
+
         let entry = walk.decode()?;
         if entry.tag() == gimli::DW_TAG_compile_unit {
             if let Some(gimli::AttributeValue::Language(value)) =
@@ -399,14 +428,18 @@ fn evaluation_unit(
             {
                 recorded.language = Some(value);
             }
+
             continue;
         }
+
         let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
             continue;
         };
+
         let Ok(raw_encoding) = base_type_encoding(entry) else {
             continue;
         };
+
         let encoding = gimli::DwAte(raw_encoding);
         if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
             recorded
@@ -414,6 +447,7 @@ fn evaluation_unit(
                 .push((entry.offset().0 as u64, value_type));
         }
     }
+
     Ok(recorded)
 }
 

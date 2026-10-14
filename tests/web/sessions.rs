@@ -27,6 +27,7 @@ async fn a_loaded_program_waits_for_continue_then_runs_to_its_exit_with_output()
     let session = loaded["session"].as_str().expect("a session").to_owned();
 
     tab.ok("continue", json!({})).await;
+
     // The program reads its input until it ends.
     tab.ok("input", json!({"text": "", "eof": true})).await;
     assert!(
@@ -48,6 +49,7 @@ async fn a_loaded_program_waits_for_continue_then_runs_to_its_exit_with_output()
             .is_some_and(|text| text.contains("exited")),
         "{exited}"
     );
+
     // A continue starts it again.
     tab.ok("continue", json!({})).await;
     tab.ok("input", json!({"text": "", "eof": true})).await;
@@ -128,6 +130,7 @@ async fn a_tab_that_joins_late_sees_the_recent_output_once() {
     let program = fixture("output-streams");
     let web = Web::start("late", &["--run", &program]);
     let mut early = web.control("early").await;
+
     // Input reaches only a program that has been launched.
     early.inferior("running").await;
     early.ok("input", json!({"text": "", "eof": true})).await;
@@ -135,6 +138,7 @@ async fn a_tab_that_joins_late_sees_the_recent_output_once() {
     early.inferior("exited").await;
     let mut late = web.control("late").await;
     let output = late.output_until("stdout", "stdin: eof").await;
+
     // The burst pushed the first lines out of the history it keeps.
     assert!(!output.contains("out 1"), "{output:.80}");
     assert_eq!(output.matches("burst done").count(), 1);
@@ -191,6 +195,7 @@ async fn the_picker_replaces_one_session_with_another_only_when_asked() {
         json!({"program": fixture("basic"), "replace": true}),
     )
     .await;
+
     // The answer follows the new session's state, so the page can open it.
     let second = tab.latest_state().expect("a state").clone();
     assert!(
@@ -211,6 +216,7 @@ async fn the_picker_replaces_one_session_with_another_only_when_asked() {
         .expect_err("a missing program");
     assert_eq!(kind, "failed");
     assert!(message.contains("/nonexistent/program"), "{message}");
+
     // An answer never arrives ahead of the state its request left behind.
     let state = tab.latest_state().expect("a state");
     assert!(state["session"].is_null(), "{state}");
@@ -248,6 +254,7 @@ async fn attaching_from_the_picker_and_ending_leaves_the_process_running() {
     tab.ok("end", json!(null)).await;
     tab.state("nothing debugged", |state| state["session"].is_null())
         .await;
+
     // Detached, it runs on: released, it exits with its own status.
     process.release();
     assert_eq!(process.wait().code(), Some(23));
@@ -261,6 +268,7 @@ async fn an_attached_process_resumes_at_once_with_resume_and_runs_on_after() {
     let mut tab = web.control("tab").await;
     let running = tab.inferior("running").await;
     assert_eq!(running["target"]["kind"], "attach");
+
     // Not in a tracing stop: blocked on its own read, as before the attach.
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
     let state = status
@@ -292,6 +300,7 @@ async fn interrupting_the_server_kills_the_program_it_launched() {
 async fn the_page_is_served_while_the_program_loads() {
     let scratch = ScratchDir::new("web-loading");
     let program = scratch.path().join("kvstore");
+
     // Loading reads the FIFO, which blocks until something writes it.
     nix::unistd::mkfifo(&program, nix::sys::stat::Mode::S_IRWXU).expect("create FIFO");
     let web = Web::start("loading", &[program.to_str().expect("a UTF-8 path")]);
@@ -315,6 +324,7 @@ async fn the_page_is_served_while_the_program_loads() {
 #[tokio::test]
 async fn interrupting_the_server_while_it_starts_the_program_shuts_it_down() {
     let program = fixture("spin");
+
     // The link is printed before the program starts, so this lands mid-launch.
     let mut web = Web::start("early-shutdown", &["--run", &program]);
     let status = web.interrupt();
@@ -373,6 +383,7 @@ fn foreign_sysroot(core: &std::path::Path, root: &std::path::Path) {
         } else {
             recorded.to_owned()
         };
+
         let target = root.join(
             recorded
                 .strip_prefix("/")
@@ -381,6 +392,7 @@ fn foreign_sysroot(core: &std::path::Path, root: &std::path::Path) {
         std::fs::create_dir_all(target.parent().expect("a parent")).expect("create directories");
         std::fs::copy(&source, &target).expect("copy a module");
     }
+
     drop(debugger);
 }
 
@@ -388,6 +400,7 @@ fn foreign_sysroot(core: &std::path::Path, root: &std::path::Path) {
 async fn a_core_from_another_machine_opens_with_its_files_from_a_sysroot() {
     let core = Scenario::fixture("core-foreign/crash.core");
     let core_path = core.to_str().expect("a UTF-8 path").to_owned();
+
     // This machine has another build at the executable's recorded path.
     let web = Web::start("core-without-sysroot", &["--core", &core_path]);
     let mut tab = web.control("tab").await;

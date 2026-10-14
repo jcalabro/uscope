@@ -29,6 +29,7 @@ fn segments(trace: &Backtrace) -> Vec<(StackSegment, Vec<String>)> {
             _ => segments.push((frame.segment, vec![name])),
         }
     }
+
     segments
 }
 
@@ -61,6 +62,7 @@ async fn stop_where(
             reason = scenario.resume_to_stop().await;
             continue;
         }
+
         assert!(
             matches!(reason, StopReason::Breakpoint { .. }),
             "{fixture}: {reason:?}"
@@ -69,6 +71,7 @@ async fn stop_where(
         let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
             panic!("{fixture}: not stopped");
         };
+
         let hit = snapshot.threads.iter().filter(|thread| {
             matches!(
                 thread.state,
@@ -91,8 +94,10 @@ async fn stop_where(
                 return trace;
             }
         }
+
         reason = scenario.resume_to_stop().await;
     }
+
     panic!("{fixture}: no stop was the one sought");
 }
 
@@ -146,6 +151,7 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         panic!("{fixture}: not stopped");
     };
+
     for thread in snapshot.threads.iter() {
         let trace = scenario
             .operation(
@@ -162,6 +168,7 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
             .into_iter()
             .map(|(segment, _)| segment)
             .collect::<Vec<_>>();
+
         // A stack moves outward only, from a signal stack to a system stack
         // and from either to the task the thread runs, each once: runs of
         // frames on one stack are already merged.
@@ -190,6 +197,7 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
             // Every thread of a Go program runs the runtime's scheduler.
             ThreadActivity::Outside => panic!("{context}: outside the runtime"),
         };
+
         assert_eq!(stacks.last(), Some(&last), "{context}");
         if last != StackSegment::Thread {
             assert!(
@@ -197,6 +205,7 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
                 "{context}: {stacks:?}"
             );
         }
+
         if last == StackSegment::Task {
             let outermost = trace
                 .frames
@@ -230,6 +239,7 @@ async fn a_growing_stack_unwinds_onto_its_goroutine() {
             ),
             "{context}"
         );
+
         // The goroutine is in the prologue of the call that needed more
         // stack, below every call before it.
         let (segment, task) = &found[1];
@@ -291,6 +301,7 @@ async fn a_thread_switching_to_a_goroutine_unwinds_on_its_system_stack() {
         let [(segment, names)] = found.as_slice() else {
             panic!("{context}");
         };
+
         // The scheduler has made the goroutine the thread's own before it
         // switches to it.
         assert_eq!(*segment, StackSegment::System, "{context}");
@@ -323,6 +334,7 @@ async fn a_thread_given_to_another_goroutine_ends_where_the_last_switched() {
         let [(StackSegment::System, names)] = found.as_slice() else {
             panic!("{context}");
         };
+
         assert_eq!(
             names.last().map(String::as_str),
             Some("runtime.mcall"),
@@ -341,6 +353,7 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
         let mut scenario = crate::invariants::checked(fixture);
         let start = scenario.add_breakpoint("main.stats").await;
         scenario.run_to_stop().await;
+
         // The program holds the vDSO's clock_gettime itself.
         let expression = Expression::parse("runtime.vdsoClockgettimeSym").expect("an expression");
         let clock = scenario
@@ -349,6 +362,7 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
         let Evaluation::Value { value, .. } = clock else {
             panic!("{fixture}: {clock:?}");
         };
+
         let VariableState::Available {
             value: VariableValue::Scalar(ScalarValue::Unsigned(address)),
             ..
@@ -356,6 +370,7 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
         else {
             panic!("{fixture}: {value:?}");
         };
+
         scenario.remove_breakpoint(start.id).await;
         scenario
             .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(
@@ -363,6 +378,7 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
             )))
             .await;
         let reason = scenario.resume_to_stop().await;
+
         // A goroutine's call, not the scheduler's on an idle thread.
         let trace = stop_where(&mut scenario, reason, fixture, |segments| {
             segments.windows(2).any(|pair| {
@@ -382,6 +398,7 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
                     .map(|function| function.name.as_ref())
             })
             .collect::<Vec<_>>();
+
         // The vDSO's frame has no function, and its caller's is named.
         assert_eq!(functions[0], None, "{context}");
         assert_eq!(functions[1], Some("runtime.nanotime1"), "{context}");
@@ -465,12 +482,14 @@ async fn a_signal_handler_unwinds_onto_the_frame_it_interrupted() {
             ])),
             "{context}"
         );
+
         // The trampoline's instruction and the interrupted frame's are
         // their own, not return addresses.
         let trampoline = found[0].1.len() - 1;
         for frame in &trace.frames[trampoline..=trampoline + 1] {
             assert_eq!(frame.kind, FrameKind::Signal, "{context}");
         }
+
         assert_eq!(found.len(), 2, "{context}");
         assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
         scenario.shutdown().await;
@@ -492,9 +511,11 @@ async fn a_signal_on_the_system_stack_unwinds_onto_its_goroutine() {
         let ExecutionContext::Thread(thread) = trace.context else {
             panic!("{fixture}: {trace:#?}");
         };
+
         let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
             panic!("{fixture}: not stopped");
         };
+
         support::signal_thread(process_id, thread, nix::libc::SIGUSR1);
         scenario.remove_all_breakpoints().await;
         scenario.add_breakpoint("runtime.sighandler").await;
@@ -603,9 +624,11 @@ async fn a_pointer_below_its_frames_stack_pointer_is_stale() {
             let handle = scenario.handle().clone();
             async move { handle.evaluate(&expression).await.expect(text) }
         };
+
         let Evaluation::Value { value, .. } = evaluate("pointer").await else {
             panic!("{fixture}: pointer is no value");
         };
+
         let VariableState::Available {
             value: VariableValue::Address(pointer),
             ..
@@ -613,9 +636,11 @@ async fn a_pointer_below_its_frames_stack_pointer_is_stale() {
         else {
             panic!("{fixture}: {value:?}");
         };
+
         let Evaluation::Value { value, .. } = evaluate("*pointer").await else {
             panic!("{fixture}: *pointer is no value");
         };
+
         assert_eq!(
             value.state,
             VariableState::Unavailable(VariableUnavailableReason::BelowStackPointer {

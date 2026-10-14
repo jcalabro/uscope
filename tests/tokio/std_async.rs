@@ -113,10 +113,12 @@ async fn a_function_breakpoint_binds_an_async_body() {
             assert!(ids.len() <= 2, "{fixture}: {ids:?}");
             reason = scenario.resume_to_stop().await;
         }
+
         assert!(
             matches!(reason, StopReason::Exited { .. }),
             "{fixture}: {reason:?}"
         );
+
         // Optimization may leave the argument without a location, but
         // never with another value.
         assert_eq!(ids.len(), 2, "{fixture}");
@@ -126,6 +128,7 @@ async fn a_function_breakpoint_binds_an_async_body() {
                 "{fixture}: {ids:?}"
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -161,6 +164,7 @@ async fn await_lines_stop_on_arrival_only() {
                 assert!(stops <= arrivals, "{fixture} {marker}");
                 reason = scenario.resume_to_stop().await;
             }
+
             assert!(
                 matches!(reason, StopReason::Exited { .. }),
                 "{fixture} {marker}: {reason:?}"
@@ -176,8 +180,10 @@ async fn await_lines_stop_on_arrival_only() {
 enum Expected {
     /// An integer with this value.
     Integer(i128),
+
     /// A value that is not an integer.
     Other,
+
     /// No value: it was last written before the await at this marker's
     /// line, which this poll resumed from, and the future did not keep it.
     NotSaved(&'static str),
@@ -201,6 +207,7 @@ async fn an_async_frame_lists_its_variables_once_with_current_values() {
         ] {
             scenario.add_breakpoint_spec(at(marker)).await;
         }
+
         let mut reason = scenario
             .run_with_to_stop(LaunchOptions {
                 stdout: Some(Stdio::null()),
@@ -243,7 +250,9 @@ async fn an_async_frame_lists_its_variables_once_with_current_values() {
                 }
                 other => panic!("{fixture}: stopped in {other}"),
             };
+
             check_variables(fixture, &function, &locals(&scenario).await, &expected);
+
             // The body's future, which the compiler passes it unnamed, is
             // `$future`.
             let future = evaluated(&scenario, "$future").await;
@@ -262,6 +271,7 @@ async fn an_async_frame_lists_its_variables_once_with_current_values() {
             );
             reason = scenario.resume_to_stop().await;
         }
+
         assert!(
             matches!(reason, StopReason::Exited { .. }),
             "{fixture}: {reason:?}"
@@ -289,12 +299,14 @@ fn check_variables(
             "{fixture} {function}: {listed:#?}"
         );
     }
+
     // Optimization may leave a variable without a value, but never with a
     // wrong one, or list it twice.
     for (name, value, state) in listed {
         let Some((_, expected)) = expected.iter().find(|(known, _)| known == name) else {
             panic!("{fixture} {function}: {name} listed: {listed:#?}");
         };
+
         let unavailable = matches!(state, VariableState::Unavailable(_));
         let correct = match expected {
             Expected::Integer(truth) => *value == Some(*truth) || unavailable,
@@ -308,6 +320,7 @@ fn check_variables(
                 ) || (fixture.ends_with("o3") && unavailable)
             }
         };
+
         assert!(correct, "{fixture} {function}: {name} = {state:?}");
         assert_eq!(
             listed.iter().filter(|(other, _, _)| other == name).count(),
@@ -380,9 +393,11 @@ async fn a_future_prints_as_its_state() {
             else {
                 panic!("{fixture} {marker}: {future:?}");
             };
+
             let ValueChildren::Available(reference) = &presentation.children else {
                 panic!("{fixture} {marker}: {presentation:?}");
             };
+
             let page = scenario
                 .operation(
                     "children",
@@ -460,8 +475,10 @@ async fn next_over_an_await_in_a_loop_goes_round_the_loop() {
             assert_eq!(function, "walk", "{fixture}: {lines:?}");
             lines.push((line, integer(&scenario, "total").await));
         }
+
         let body = line(SOURCE, "// STEP: walk-body");
         let wait = line(SOURCE, "// AWAIT: walk");
+
         // Each pass adds the step to the total, then awaits again.
         let passes = lines
             .iter()
@@ -497,8 +514,10 @@ async fn finish_from_an_async_function_returns_to_its_own_awaiter() {
             ("middle".to_owned(), line(SOURCE, "// AWAIT: middle")),
             "{fixture}"
         );
+
         // The awaiter is the one whose `ready(13)` returned 14.
         assert_eq!(integer(&scenario, "first").await, Some(14), "{fixture}");
+
         // Its last poll returned what the function did.
         let returned = scenario
             .operation("variables", scenario.handle().variables())

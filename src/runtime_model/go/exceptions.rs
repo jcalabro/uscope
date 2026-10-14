@@ -50,6 +50,7 @@ const PANIC: ExceptionFilter = ExceptionFilter {
 
 /// The most panics one chain is read through.
 const MAX_PANICS: usize = 64;
+
 /// The longest message read; the runtime prints longer ones in full, so
 /// one longer is refused rather than cut.
 const MAX_MESSAGE: u64 = 1 << 16;
@@ -59,14 +60,18 @@ const MAX_MESSAGE: u64 = 1 << 16;
 pub struct Hooks {
     /// `gopanic(e any)`, as any panic begins.
     panic: Option<ImageAddress>,
+
     /// `fatalpanic(msgs *_panic)`, as a panic nothing recovered ends the
     /// program.
     fatal_panic: Option<ImageAddress>,
+
     /// `throw(s string)` and `fatal(s string)`, the runtime's fatal errors.
     throws: Vec<ImageAddress>,
+
     /// `fatalsignal(sig uint32, ...)`, a signal the runtime cannot turn
     /// into a panic.
     fatal_signal: Option<ImageAddress>,
+
     /// Every one of them, with what it reports.
     all: Vec<RuntimeHook>,
 }
@@ -117,18 +122,22 @@ pub struct Layout {
     recovered: u64,
     repanicked: u64,
     goexit: u64,
+
     /// `abi.Type`'s kind, flags, and the offset of its name.
     kind: u64,
     flags: u64,
     name: u64,
     extra_star: u64,
     kinds: Kinds,
+
     /// The tables of each module's types, which a type's name is in.
     tables: TypeTables,
+
     /// `runtime.sigtable`, and where each entry's name is.
     signals: ImageAddress,
     signal_stride: u64,
     signal_name: u64,
+
     /// `errorAddressString.msg`, the text of the runtime's error for a
     /// fault at an address, which a program that never faults may lack.
     address_error_text: Option<u64>,
@@ -212,10 +221,12 @@ pub fn exception(
             .get(register)
             .ok_or_else(|| Arc::<str>::from("the runtime's arguments are unavailable"))
     };
+
     let reader = Reader {
         stop,
         layout: layout.as_ref().map_err(Arc::clone)?,
     };
+
     if Some(hook) == hooks.fatal_panic {
         let panic = argument(RAX)?;
         let message = reader.panics(panic, 0)?;
@@ -224,12 +235,14 @@ pub fn exception(
             value: Some(format!("(*(runtime._panic*){panic:#x}).arg").into()),
         });
     }
+
     if Some(hook) == hooks.panic {
         return Ok(RuntimeException {
             message: reader.raised(argument(RAX)?, argument(RBX)?)?.into(),
             value: None,
         });
     }
+
     if hooks.throws.contains(&hook) {
         let text = reader.text(argument(RAX)?, argument(RBX)?)?;
         return Ok(RuntimeException {
@@ -237,12 +250,14 @@ pub fn exception(
             value: None,
         });
     }
+
     if Some(hook) == hooks.fatal_signal {
         return Ok(RuntimeException {
             message: reader.signal(argument(RAX)? & u64::from(u32::MAX))?,
             value: None,
         });
     }
+
     Err("no exception is reported there".into())
 }
 
@@ -268,6 +283,7 @@ impl Reader<'_> {
         if depth == MAX_PANICS {
             return Err(format!("more than {MAX_PANICS} panics are chained").into());
         }
+
         let layout = self.layout;
         let field = |offset: u64| panic.wrapping_add(offset);
         let flag = |offset: u64, what| Ok::<_, Arc<str>>(self.byte(field(offset), what)? != 0);
@@ -278,16 +294,20 @@ impl Reader<'_> {
             let previous = |offset: u64, what| {
                 Ok::<_, Arc<str>>(self.byte(link.wrapping_add(offset), what)? != 0)
             };
+
             if previous(layout.repanicked, "a panic's state")? {
                 return Ok(printed);
             }
+
             if !previous(layout.goexit, "a panic's state")? {
                 printed.push('\t');
             }
         }
+
         if flag(layout.goexit, "a panic's state")? {
             return Ok(printed);
         }
+
         let arg = field(layout.arg);
         let value = self.panic_value(
             self.word(arg, "a panic's value")?,
@@ -303,6 +323,7 @@ impl Reader<'_> {
             (true, false) => printed.push_str(" [recovered]"),
             _ => {}
         }
+
         printed.push('\n');
         Ok(printed)
     }
@@ -316,14 +337,17 @@ impl Reader<'_> {
         if ty == 0 {
             return Ok("panic: nil".to_owned());
         }
+
         let name = self.type_name(ty)?;
         if PREDECLARED.contains(&name.as_str()) {
             return Ok(format!("panic: {}", self.panic_value(ty, data)?));
         }
+
         let text = |address: u64| match self.scalar(self.layout.kinds.string, address)? {
             Some(Scalar::Text(text)) => Ok(indented(&text)),
             _ => Err(Arc::<str>::from("the runtime error's text is unreadable")),
         };
+
         Ok(match (name.as_str(), self.layout.address_error_text) {
             ("runtime.plainError", _) => format!("panic: {}", text(data)?),
             ("runtime.errorString", _) => format!("panic: runtime error: {}", text(data)?),
@@ -340,18 +364,21 @@ impl Reader<'_> {
         if ty == 0 {
             return Ok("nil".to_owned());
         }
+
         let kind = self.byte(ty.wrapping_add(self.layout.kind), "a type's kind")?;
         let name = self.type_name(ty)?;
         let Some(value) = self.scalar(kind, data)? else {
             // `printanycustomtype` prints any other value by its address.
             return Ok(format!("({name}) {data:#x}"));
         };
+
         if PREDECLARED.contains(&name.as_str()) {
             return Ok(match value {
                 Scalar::Text(text) => indented(&text),
                 Scalar::Number(number) => number,
             });
         }
+
         Ok(match value {
             Scalar::Text(text) => format!("{name}(\"{}\")", indented(&text)),
             // A complex number prints with its own parentheses.
@@ -368,6 +395,7 @@ impl Reader<'_> {
             read_unsigned(self.stop, VirtualAddress::new(data), size)
                 .ok_or_else(|| Arc::<str>::from("the panic's value is unreadable"))
         };
+
         let signed = |size: usize| -> Result<Option<Scalar>, Arc<str>> {
             let shift = 64 - size * 8;
             #[expect(
@@ -377,6 +405,7 @@ impl Reader<'_> {
             let value = ((read(size)? << shift) as i64) >> shift;
             Ok(Some(Scalar::Number(value.to_string())))
         };
+
         let unsigned =
             |size: usize| Ok::<_, Arc<str>>(Some(Scalar::Number(read(size)?.to_string())));
         let single = |bits: u64| {
@@ -384,6 +413,7 @@ impl Reader<'_> {
                 .map(|bits| f64::from(f32::from_bits(bits)))
                 .map_err(|_| Arc::<str>::from("the panic's value is unreadable"))
         };
+
         Ok(match kind {
             kind if kind == kinds.boolean => Some(Scalar::Number((read(1)? != 0).to_string())),
             kind if kind == kinds.int || kind == kinds.int64 => signed(8)?,
@@ -434,10 +464,12 @@ impl Reader<'_> {
                 format!("a {length}-byte message is longer than the debugger reads").into(),
             );
         }
+
         let mut bytes = vec![0; usize::try_from(length).map_err(|_| "a message is too long")?];
         if !self.stop.read(VirtualAddress::new(data), &mut bytes) {
             return Err("the message is unreadable".into());
         }
+
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -452,6 +484,7 @@ impl Reader<'_> {
         )
         .ok_or("a type's name is unreadable")?;
         let name = layout.tables.base(self.stop, ty)?.wrapping_add(offset);
+
         // A name is a flags byte, its length as a varint, then its bytes.
         let mut length = 0_u64;
         let mut at = name.wrapping_add(1);
@@ -463,11 +496,13 @@ impl Reader<'_> {
                 break;
             }
         }
+
         let text = self.text(at, length)?;
         let flags = self.byte(ty.wrapping_add(layout.flags), "a type's flags")?;
         if flags & layout.extra_star != 0 {
             return Ok(text.get(1..).unwrap_or_default().to_owned());
         }
+
         Ok(text)
     }
 
@@ -532,10 +567,13 @@ fn go_digits(value: f64, single: bool) -> Option<String> {
     if value.is_nan() {
         return Some("NaN".to_owned());
     }
+
     if value.is_infinite() {
         return Some(if value > 0.0 { "+Inf" } else { "-Inf" }.to_owned());
     }
+
     let negative = value.is_sign_negative();
+
     // Rust's `{:e}` prints the same shortest digits.
     #[expect(
         clippy::cast_possible_truncation,
@@ -546,6 +584,7 @@ fn go_digits(value: f64, single: bool) -> Option<String> {
     } else {
         format!("{:e}", value.abs())
     };
+
     let (mantissa, exponent) = scientific.split_once('e')?;
     let digits = mantissa.replace('.', "");
     let exponent: i64 = exponent.parse().ok()?;
@@ -553,6 +592,7 @@ fn go_digits(value: f64, single: bool) -> Option<String> {
     if digits == "0" {
         return Some(format!("{sign}0"));
     }
+
     let count = i64::try_from(digits.len()).ok()?;
     if !(-4..6).contains(&exponent) {
         let (first, rest) = digits.split_at(1);
@@ -563,6 +603,7 @@ fn go_digits(value: f64, single: bool) -> Option<String> {
             exponent.unsigned_abs()
         ));
     }
+
     // The decimal point falls after `exponent + 1` digits.
     let point = exponent + 1;
     let mut text = sign.to_owned();
@@ -579,6 +620,7 @@ fn go_digits(value: f64, single: bool) -> Option<String> {
         text.push('.');
         text.push_str(fraction);
     }
+
     Some(text)
 }
 
@@ -591,6 +633,7 @@ fn go_complex(real: f64, imaginary: f64, single: bool) -> String {
     } else {
         "+"
     };
+
     format!("({}{sign}{imaginary}i)", go_float(real, single))
 }
 
@@ -620,6 +663,7 @@ mod tests {
         ] {
             assert_eq!(go_float(value, single), printed, "{value}");
         }
+
         assert_eq!(go_complex(1.5, -2.0, false), "(1.5-2i)");
         assert_eq!(go_complex(0.1, 3.0, true), "(0.1+3i)");
     }

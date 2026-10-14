@@ -45,6 +45,7 @@ impl Random {
 fn request(random: &mut Random, thread: Option<i64>, started: bool) -> (&'static str, Value) {
     let thread = thread.map_or_else(|| random.number(), Value::from);
     let path = source("c/hot-calls.c");
+
     // Before a program starts, a launch or attach would wait for
     // configurationDone like any other.
     match random.below(if started { 35 } else { 32 }) {
@@ -162,19 +163,24 @@ fn random_requests_in_every_state_are_answered_once_and_harm_nothing() {
         let rounds =
             std::env::var("CHAOS_ROUNDS").map_or(60, |rounds| rounds.parse().expect("rounds"));
         dap.initialize(Profile::VsCode);
+
         // Before anything is launched.
         bursts(&mut dap, &mut random, 10, false);
+
         // While the launch waits for configuration and starts the program.
         let launch = dap.send("launch", json!({"program": fixture("hot-calls")}));
         let done = dap.send("configurationDone", Value::Null);
         bursts(&mut dap, &mut random, 10, true);
         dap.response(launch);
         dap.response(done);
+
         // While it runs and stops, restarts, or ends.
         bursts(&mut dap, &mut random, rounds, true);
+
         // After it has ended.
         end_program(&mut dap);
         bursts(&mut dap, &mut random, 10, true);
+
         // The adapter still works after all of that.
         let threads = dap.request("threads", Value::Null);
         assert!(!threads["threads"].as_array().expect("threads").is_empty());
@@ -222,6 +228,7 @@ fn end_program(dap: &mut Dap) {
     if ended(dap) {
         return;
     }
+
     // A termination already under way can end the program meanwhile, so
     // any of these may fail; the terminated event decides either way.
     let path = source("c/hot-calls.c");
@@ -238,11 +245,13 @@ fn end_program(dap: &mut Dap) {
         let sent = dap.send(command, arguments);
         dap.response(sent);
     }
+
     loop {
         let (kind, body) = dap.next_event(mark, &["stopped", "terminated"]);
         if kind == "terminated" {
             return;
         }
+
         // The program may already be gone again.
         let resumed = dap.send("continue", json!({"threadId": body["threadId"]}));
         dap.response(resumed);

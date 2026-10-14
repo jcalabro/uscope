@@ -10,6 +10,7 @@ use crate::debug_info::{
     CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRegister,
     VariableRuntime, VariableRuntimeError,
 };
+
 use crate::inspection::InspectionBudget;
 use crate::{
     EntryValueUnavailableReason, ImageAddress, ModuleId, SymbolBinding, SymbolKind,
@@ -31,8 +32,10 @@ const MAX_ENTRY_VALUE_DEPTH: usize = 16;
 pub(super) struct FrameAt {
     /// The physical activation, innermost first.
     pub(super) activation: usize,
+
     /// The module describing its code, and its address in that image.
     pub(super) code: Option<(ModuleId, ImageAddress)>,
+
     /// How many callers away from the inspected frame it is.
     pub(super) depth: usize,
 }
@@ -43,6 +46,7 @@ pub(super) struct Callers<'a, P: InspectionOps> {
     controller: &'a Controller<P>,
     inferior: &'a Inferior,
     root: StackRoot,
+
     /// The activations unwound so far, and how many were asked for: fewer
     /// means the stack ended.
     stack: RefCell<Option<(PhysicalStack, usize)>>,
@@ -97,6 +101,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
                 .map_err(|error| VariableRuntimeError::Fatal(error.to_string().into()))?;
             *stack = Some((unwound, requested));
         }
+
         Ok(stack
             .as_ref()
             .and_then(|(stack, _)| stack.frames.get(index))
@@ -116,6 +121,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         if frame.depth == 0 {
             return value;
         }
+
         // A caller asks for its own entry value to say what it passed, and
         // what its caller lacks is not what the frame's caller lacks.
         value.map_err(|error| match error {
@@ -137,6 +143,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         if frame.depth >= MAX_ENTRY_VALUE_DEPTH {
             return Err(VariableUnavailableReason::EvaluationLimit.into());
         }
+
         let frame_module = self.module(module)?;
         let entry = self.entry(frame, module, budget)?;
         self.with_caller(
@@ -150,6 +157,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
                     site: entry.site,
                     caller_runtime,
                 };
+
                 chain.value(&entry.tail_calls.links, parameter, module, budget)
             },
         )
@@ -183,10 +191,12 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             code: Some(code),
             depth: 0,
         };
+
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let Ok(entry) = self.entry(frame, code.0, &mut budget) else {
             return Vec::new();
         };
+
         entry
             .tail_calls
             .jumps
@@ -209,16 +219,19 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         let Some((_, code)) = frame.code.filter(|(code_module, _)| *code_module == module) else {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
         };
+
         let frame_module = self.module(module)?;
 
         let caller_index = frame.activation + 1;
         let Some(caller_frame) = self.activation(caller_index)? else {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
         };
+
         // An interrupted frame did not call the frame above it.
         if caller_frame.context.signal_frame {
             return Err(unavailable(EntryValueUnavailableReason::NoCaller));
         }
+
         let return_address = caller_frame.context.instruction;
         let modules = self.controller.unwind_modules(self.inferior);
         let lookup = return_address
@@ -229,21 +242,25 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
         let Some((unwind_module, caller_code)) = unwind_module_for(&modules, lookup) else {
             return Err(unavailable(EntryValueUnavailableReason::NoCallSite));
         };
+
         let caller = self.module(unwind_module.loaded.id)?;
         let caller_return = caller
             .loaded
             .image_address(return_address)
             .map_err(|_| unavailable(EntryValueUnavailableReason::NoCallSite))?;
+
         // Reading the caller's frame costs far more than asking whether a
         // call returns where it does.
         if !caller.variables.may_describe_call_site(caller_return) {
             return Err(unavailable(EntryValueUnavailableReason::NoCallSite));
         }
+
         let caller_at = FrameAt {
             activation: caller_index,
             code: Some((caller.loaded.id, caller_code)),
             depth: frame.depth + 1,
         };
+
         let site = self
             .with_caller(caller, &caller_frame, caller_at, |caller_runtime| {
                 caller
@@ -302,6 +319,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
             callers: Some(Rc::clone(self)),
             below_stack_pointer,
         };
+
         read(&mut caller_runtime)
     }
 
@@ -352,6 +370,7 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
                 }));
             }
         }
+
         Ok(())
     }
 
@@ -401,13 +420,16 @@ impl<'a, P: InspectionOps> Callers<'a, P> {
                 {
                     continue;
                 }
+
                 let address = module.loaded.virtual_address(symbol.address()).ok()?;
                 if found.is_some_and(|found| found != address) {
                     return None;
                 }
+
                 found = Some(address);
             }
         }
+
         found
     }
 }
@@ -445,10 +467,12 @@ impl<P: InspectionOps> Chain<'_, '_, '_, P> {
             None => (self.caller, None),
             Some((last, rest)) => (self.callee, Some((*last, rest))),
         };
+
         // A parameter entry names a parameter only within its own module.
         if matches!(parameter, EntryParameter::Parameter(_)) && module.loaded.id != requester {
             return Err(unavailable(EntryValueUnavailableReason::NoParameter));
         }
+
         match runtime_links {
             None => {
                 let site = self.site;

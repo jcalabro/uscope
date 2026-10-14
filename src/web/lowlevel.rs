@@ -17,12 +17,14 @@ use super::protocol::{
     self, BranchTarget, Disassembled, ErrorKind, FrameAt, Instruction, Memory, Module, Register,
     SignalPolicy, SourceLine, Token, WatchAccess,
 };
+
 use super::session::Failure;
 use crate::cli::format::{code_name, reference_name, register_bytes};
 
 /// Instructions shown around an address no function holds.
 const WINDOW_BEFORE: u32 = 32;
 const WINDOW_AFTER: u32 = 96;
+
 /// The most bytes one request reads or writes.
 const MOST_BYTES: u64 = 16 * 1024;
 
@@ -63,6 +65,7 @@ pub async fn disassemble(
         .iter()
         .position(|frame| frame.id == context.frame)
         .ok_or_else(|| Failure::new(ErrorKind::Invalid, "the frame is gone"))?;
+
     // The frame's own code is marked where it is; other code, nowhere.
     let (shown, marked) = if let Some(text) = &request.address {
         (address(text)?, None)
@@ -75,6 +78,7 @@ pub async fn disassemble(
         })?;
         (executing, Some(executing.get()))
     };
+
     let query = |range| DisassemblyQuery {
         range,
         syntax: match request.syntax {
@@ -82,6 +86,7 @@ pub async fn disassemble(
             Some(protocol::Syntax::Intel) | None => uscope::AssemblySyntax::Intel,
         },
     };
+
     let disassembly = match view
         .disassemble(query(DisassemblyRange::Function(shown)))
         .await
@@ -96,6 +101,7 @@ pub async fn disassemble(
         }
         result => result?,
     };
+
     let modules = handle.loaded_modules().await?;
     let (function, blocks) = match &disassembly.view {
         DisassemblyView::Function { function, blocks } => {
@@ -103,6 +109,7 @@ pub async fn disassemble(
         }
         DisassemblyView::Window { block, .. } => (None, vec![block.clone()]),
     };
+
     let mut instructions = Vec::new();
     let mut notes = Vec::new();
     let mut line = None;
@@ -116,6 +123,7 @@ pub async fn disassemble(
             line = starts;
             instructions.push(present(instruction, source, &modules));
         }
+
         match block.completion {
             BlockCompletion::Complete => {}
             BlockCompletion::Unreadable { address, reason } => {
@@ -126,6 +134,7 @@ pub async fn disassemble(
             }
         }
     }
+
     let marked = marked.and_then(|wanted| {
         blocks
             .iter()
@@ -193,6 +202,7 @@ fn present(
     for (index, byte) in instruction.bytes.iter().enumerate() {
         let _ = write!(bytes, "{}{byte:02x}", if index == 0 { "" } else { " " });
     }
+
     let symbol = instruction
         .location
         .module
@@ -236,6 +246,7 @@ fn present(
                 }
                 _ => {}
             }
+
             (
                 tokens,
                 None,
@@ -246,6 +257,7 @@ fn present(
         InstructionContent::Invalid => (Vec::new(), Some("(bad)".to_owned()), None, None),
         InstructionContent::Truncated => (Vec::new(), Some("(truncated)".to_owned()), None, None),
     };
+
     Instruction {
         address: hex(instruction.address.get()),
         bytes,
@@ -290,6 +302,7 @@ pub async fn read_memory(
     for byte in read.bytes.iter() {
         let _ = write!(bytes, "{byte:02x}");
     }
+
     Ok(Memory {
         address: hex(start.get()),
         bytes,
@@ -313,6 +326,7 @@ pub async fn write_memory(
     if text.is_empty() || !text.len().is_multiple_of(2) || text.len() as u64 > MOST_BYTES * 2 {
         return Err(invalid());
     }
+
     let bytes = (0..text.len())
         .step_by(2)
         .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
@@ -328,6 +342,7 @@ pub async fn write_memory(
             format!("only {written} of {} bytes could be written", bytes.len()),
         ));
     }
+
     Ok(written)
 }
 
@@ -376,6 +391,7 @@ pub async fn add_watchpoint(
                 "an expression is watched in a frame; name the stop and thread",
             ));
         };
+
         let expression = Expression::parse(target).map_err(super::values::expression_failure)?;
         let context = inspect::context(
             handle,
@@ -388,6 +404,7 @@ pub async fn add_watchpoint(
             handle.at(context).resolve_watch_target(&expression).await?,
         ))
     };
+
     let options = WatchpointOptions {
         condition: given(request.condition)
             .map(|text| uscope::Condition::parse(&text))
@@ -397,12 +414,14 @@ pub async fn add_watchpoint(
             .transpose()?,
         enabled: true,
     };
+
     let access = match request.access {
         WatchAccess::Change => uscope::WatchAccess::Change,
         WatchAccess::Write => uscope::WatchAccess::Write,
         WatchAccess::ReadWrite => uscope::WatchAccess::ReadWrite,
         WatchAccess::Read => uscope::WatchAccess::Read,
     };
+
     Ok(handle
         .add_watchpoint_with(spec, access, options)
         .await?
@@ -446,6 +465,7 @@ pub async fn signals(handle: &DebuggerHandle) -> Result<Vec<SignalPolicy>, Failu
             pass: policy.pass,
         });
     }
+
     Ok(signals)
 }
 
@@ -471,6 +491,7 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
         Err(uscope::Error::NotRunning) => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
+
     let mut modules = Vec::with_capacity(loaded.modules.len());
     for record in loaded.modules.iter() {
         let image = images.get(record.module.id).await;
@@ -508,5 +529,6 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
                 .and_then(crate::present::debug_information::dwarf_problem),
         });
     }
+
     Ok(modules)
 }

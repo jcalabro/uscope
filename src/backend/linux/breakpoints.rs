@@ -12,6 +12,7 @@ use crate::protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, ConditionOwner, DebuggerEvent,
     ExecutionId, HitCondition, ResolvedBreakpointLocation, StopReason,
 };
+
 use crate::{BreakpointLocation, Error, LineNumber, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
@@ -41,6 +42,7 @@ impl UserBreakpoints {
                 self.specs.remove(&breakpoint.spec);
             }
         }
+
         breakpoint
     }
 
@@ -82,6 +84,7 @@ impl UserBreakpoints {
         if !self.specs.contains_key(spec) {
             return None;
         }
+
         self.list.iter().find(|breakpoint| {
             breakpoint.spec == *spec
                 && breakpoint.hit_condition == options.hit_condition
@@ -138,6 +141,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(existing) = self.breakpoints.identical(&spec, &options) {
             return Ok(existing.clone());
         }
+
         // Only a function breakpoint can wait on an indirect function's
         // resolver.
         let follows_resolvers = self.follows_resolvers(&spec);
@@ -173,6 +177,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if follows_resolvers {
             self.sync_resolvers()?;
         }
+
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -231,12 +236,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(Error::FunctionNotFound(_) | Error::SourceFileNotFound(_)) if pending => {
                     Arc::from([])
                 }
+
                 // A function the program imports is in a library yet to
                 // load.
                 Err(Error::FunctionNotFound(name)) if self.imports_function(&name) => Arc::from([]),
                 Err(error) => return Err(error),
             },
         };
+
         Ok(Breakpoint {
             id,
             spec,
@@ -259,6 +266,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<Arc<[ResolvedBreakpointLocation]>> {
         let mut locations = Vec::new();
         let mut failure = None;
+
         // Whether a module knows the spec but has no code for it yet, as
         // one whose indirect function's resolver has yet to choose.
         let mut known = false;
@@ -292,6 +300,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         });
                     }
                 }
+
                 // A module without the name or file is not a failure, but
                 // one with the file and no code at the line is, unless
                 // another module has code for it.
@@ -310,11 +319,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         if locations.is_empty() && !known {
             return Err(
                 failure.unwrap_or_else(|| Error::internal("the program itself was searched"))
             );
         }
+
         Ok(locations.into())
     }
 
@@ -355,6 +366,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 thread.stopped_at_breakpoint = Some(address);
             }
         }
+
         Ok(())
     }
 
@@ -372,10 +384,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or_else(|| Error::internal("live sites have an inferior"))?;
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
+
         self.breakpoints.remove(index);
         if self.follows_resolvers(&breakpoint.spec) {
             self.sync_resolvers()?;
         }
+
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -400,18 +414,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         if current.enabled == enabled {
             return Ok(current.clone());
         }
+
         let mut breakpoint = current.clone();
         breakpoint.enabled = enabled;
         if enabled {
             if self.follows_resolvers(&breakpoint.spec) {
                 self.learn_from_got(Some(&breakpoint.spec));
             }
+
             // A spec that resolves nowhere now is kept pending, as one
             // whose library unloaded is.
             breakpoint.locations = self
                 .resolve_breakpoint(id, breakpoint.spec.clone(), true)?
                 .locations;
         }
+
         if self.sites_live() {
             let inferior = self
                 .inferior
@@ -424,10 +441,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
             }
         }
+
         self.breakpoints[index] = breakpoint.clone();
         if self.follows_resolvers(&breakpoint.spec) {
             self.sync_resolvers()?;
         }
+
         self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
@@ -439,6 +458,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(false);
         };
+
         let hit = inferior
             .threads
             .values()
@@ -451,6 +471,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .collect::<BTreeSet<_>>();
         let stopped =
             |breakpoint: &Breakpoint| breakpoint.temporary && hit.contains(&breakpoint.id);
+
         // Every trap is lifted before any breakpoint is forgotten, so one
         // that fails to lift leaves them all.
         for breakpoint in self
@@ -460,11 +481,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             remove_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
+
         let mut removed = false;
         while let Some(index) = self.breakpoints.iter().position(stopped) {
             self.breakpoints.remove(index);
             removed = true;
         }
+
         Ok(removed)
     }
 
@@ -472,6 +495,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.breakpoints.is_empty() {
             return Ok(Arc::from([]));
         }
+
         if self.sites_live() {
             let inferior = self
                 .inferior
@@ -499,18 +523,23 @@ impl<P: LinuxTraceOps> Controller<P> {
                             }));
                         }
                     }
+
                     for (pid, address) in stopped_at {
                         inferior.thread_mut(pid)?.stopped_at_breakpoint = address;
                     }
+
                     return Err(cause);
                 }
+
                 removed.push(breakpoint.clone());
             }
         }
+
         let removed: Arc<[Breakpoint]> = self.breakpoints.take().into();
         if self.sites_live() {
             self.sync_resolvers()?;
         }
+
         self.publish_breakpoints_changed();
         Ok(removed)
     }
@@ -574,6 +603,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Arc::from([]);
         };
+
         let owners = site
             .owners
             .iter()
@@ -591,6 +621,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if !owners.contains(&breakpoint.id) {
                 continue;
             }
+
             breakpoint.hit_count = breakpoint.hit_count.saturating_add(1);
             if breakpoint
                 .hit_condition
@@ -606,10 +637,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ));
             }
         }
+
         let reason = StopReason::Breakpoint {
             address,
             hits: Arc::from([]),
         };
+
         let mut stopping = Vec::new();
         for (hit, condition, log_message) in candidates {
             if let Some(condition) = condition {
@@ -624,6 +657,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     }
                 }
             }
+
             if let Some(message) = log_message {
                 let parts = self.log_parts(pid, &message, &reason);
                 self.publish_hit_event(pid, |revision, process_id, thread_id| {
@@ -637,8 +671,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 });
                 continue;
             }
+
             stopping.push(hit);
         }
+
         stopping.sort_unstable_by_key(|hit| hit.breakpoint);
         stopping.into()
     }
@@ -752,6 +788,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return;
         };
+
         self.bump_revision();
         let _ = self.events.send(event(
             self.revision,
@@ -789,6 +826,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(recorded) = inferior.plan_sites.get(&execution) else {
             return Ok(());
         };
+
         let addresses = recorded
             .iter()
             .copied()
@@ -803,6 +841,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for address in addresses {
             self.remove_breakpoint_owner(address, owner)?;
         }
+
         self.inferior
             .as_mut()
             .ok_or(Error::NotRunning)?
@@ -830,6 +869,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 })
                 .collect::<Vec<_>>()
         };
+
         let mut installed = Vec::new();
         for address in new_addresses {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -838,6 +878,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if self.lost_to_sigkill(&error) {
                     return Err(error);
                 }
+
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 for address in installed.into_iter().rev() {
                     if let Err(recovery) =
@@ -850,10 +891,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                         }));
                     }
                 }
+
                 return Err(error);
             }
+
             installed.push(address);
         }
+
         Ok(())
     }
 
@@ -861,6 +905,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(());
         };
+
         let removed: Vec<_> = inferior
             .repairs
             .iter()
@@ -872,6 +917,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.ptrace
                 .reinstall_breakpoint(pid, &mut inferior.breakpoints, address)?;
         }
+
         inferior.repairs.clear();
         Ok(())
     }
@@ -888,8 +934,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(false);
         };
+
         let pid = inferior.memory_thread();
         let mut lost = Vec::new();
+
         // Traps come out of moved code first, since one may have landed on
         // another site's address.
         for (&address, site) in &inferior.breakpoints {
@@ -900,6 +948,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 continue;
             };
+
             let destination = destination.get();
             if site.original_byte != BREAKPOINT_OPCODE
                 && memory_byte(&self.ptrace, pid, destination)? == Some(BREAKPOINT_OPCODE)
@@ -911,14 +960,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     (word & !0xff) | u64::from(site.original_byte),
                 )?;
             }
+
             lost.push(address);
         }
+
         let installed = inferior
             .breakpoints
             .iter()
             .filter(|&(address, site)| site.installed && !lost.contains(address))
             .map(|(&address, site)| (address, site.original_byte))
             .collect::<Vec<_>>();
+
         // A process may have thousands of sites, most sharing a page with
         // others, which one read covers.
         let page = |address: VirtualAddress| address.get() / PAGE_BYTES;
@@ -939,6 +991,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     ),
                     None => memory_byte(&self.ptrace, pid, address.get())?,
                 };
+
                 // A trap over a trap cannot tell whether the memory changed.
                 if byte != Some(BREAKPOINT_OPCODE)
                     && (byte.is_none() || original_byte != BREAKPOINT_OPCODE)
@@ -954,6 +1007,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(site) = inferior.breakpoints.remove(&address) else {
                 continue;
             };
+
             forget_removed_site(inferior, address, site.original_byte);
             for owner in site.owners {
                 match owner {
@@ -972,6 +1026,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         for &(id, address) in &lost_locations {
             let Some(breakpoint) = self
                 .breakpoints
@@ -980,6 +1035,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 continue;
             };
+
             breakpoint.locations = breakpoint
                 .locations
                 .iter()
@@ -989,6 +1045,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .cloned()
                 .collect();
         }
+
         Ok(!lost_locations.is_empty())
     }
 }
@@ -1014,6 +1071,7 @@ impl MovedCode {
         if !self.from.contains(&address) {
             return None;
         }
+
         self.to
             .get()
             .checked_add(address.get() - self.from.start.get())
@@ -1067,6 +1125,7 @@ fn resolve_in_image(
                 path: path.clone(),
                 line: line.get(),
             };
+
             let Some(line) = image.breakpoint_line(source.id, *line) else {
                 if image.statement_addresses(source.id, *line).next().is_none()
                     && image.keeps_line_breakpoints(source.id)
@@ -1079,14 +1138,17 @@ fn resolve_in_image(
                         after: after.map(LineNumber::get),
                     });
                 }
+
                 return Err(unavailable());
             };
+
             let mut addresses = image
                 .statement_addresses(source.id, line)
                 .collect::<Vec<_>>();
             if addresses.is_empty() {
                 return Err(unavailable());
             }
+
             // A coroutine's dispatch and the code leading from it into a
             // state run as it resumes, not as execution arrives at the
             // line; code a compiler generated, such as the glue dropping a
@@ -1106,7 +1168,9 @@ fn resolve_in_image(
             if !arrivals.is_empty() {
                 addresses = arrivals;
             }
+
             addresses.sort_unstable();
+
             // Like gdb, stop where the line begins in each instance of its
             // code, not again at its later statements, such as the use of
             // a call's result or a loop's condition.
@@ -1124,12 +1188,14 @@ fn resolve_in_image(
                             .any(|other| other.parent() == Some(instance.id()))
                     })
                     .map(|instance| instance.id());
+
                 // The line is the innermost instance's code, so a stop there
                 // presents that instance's frame.
                 if innermost.is_none_or(|instance| seen.insert(instance)) {
                     locations.push((address, innermost.into_iter().collect()));
                 }
             }
+
             Ok(locations)
         }
     }
@@ -1151,6 +1217,7 @@ fn symbol_locations(
         if symbol.extent().is_none() {
             continue;
         }
+
         match symbol.kind() {
             crate::SymbolKind::Function => {
                 entries.insert(symbol.address());
@@ -1162,9 +1229,11 @@ fn symbol_locations(
             crate::SymbolKind::Data | crate::SymbolKind::Unknown => {}
         }
     }
+
     if entries.is_empty() && !indirect {
         return Err(Error::FunctionNotFound(name.to_owned()));
     }
+
     Ok(entries
         .into_iter()
         .map(|address| (address, Arc::from([])))
@@ -1181,6 +1250,7 @@ fn function_locations<'a>(
     for function in functions {
         instances.extend(function.instances());
     }
+
     if instances.is_empty()
         || instances.iter().any(|instance| {
             image
@@ -1191,6 +1261,7 @@ fn function_locations<'a>(
     {
         return Err(Error::LocationUnavailable);
     }
+
     let mut by_address = BTreeMap::<_, Vec<_>>::new();
     for instance in instances {
         for entry in image.recommended_entries_for_instance(instance.id()) {
@@ -1200,6 +1271,7 @@ fn function_locations<'a>(
                 .push(instance.id());
         }
     }
+
     Ok(by_address
         .into_iter()
         .map(|(address, code_instances)| (address, code_instances.into()))
@@ -1280,6 +1352,7 @@ pub(super) fn install_logical_breakpoint(
 
             return Err(cause);
         }
+
         installed.push(address);
     }
 
@@ -1324,10 +1397,13 @@ pub(super) fn remove_logical_breakpoint(
                     }));
                 }
             }
+
             return Err(cause);
         }
+
         removed.push(address);
     }
+
     Ok(())
 }
 
@@ -1344,6 +1420,7 @@ pub(super) fn lift_all_traps(ptrace: &dyn LinuxTraceOps, inferior: &mut Inferior
     for address in installed {
         ptrace.remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
     }
+
     debug_assert!(
         inferior.breakpoints.values().all(|site| !site.installed),
         "lifting every trap left one in place"
@@ -1365,6 +1442,7 @@ pub(super) fn reinstall_all_traps(
     for address in lifted {
         ptrace.reinstall_breakpoint(pid, &mut inferior.breakpoints, address)?;
     }
+
     debug_assert!(
         inferior.breakpoints.values().all(|site| site.installed),
         "reinstalling every trap left one lifted"
@@ -1383,12 +1461,14 @@ pub(super) fn forget_removed_site(
         .former_sites
         .entry(address)
         .or_insert(original_byte);
+
     // With the original instruction restored, no thread needs a repair step.
     for thread in inferior.threads.values_mut() {
         if thread.stopped_at_breakpoint == Some(address) {
             thread.stopped_at_breakpoint = None;
         }
     }
+
     inferior.repairs.retain(|group| group.address != address);
 }
 
@@ -1406,6 +1486,7 @@ pub(super) fn remove_breakpoint_owner_from(
         if !site.owners.contains(&owner) {
             return Err(backend_error(LinuxError::BreakpointOwnerMissing(address)));
         }
+
         site.owners.len() == 1
     };
 
@@ -1428,5 +1509,6 @@ pub(super) fn remove_breakpoint_owner_from(
             "{owner:?} owned the site at {address}, then did not"
         );
     }
+
     Ok(())
 }

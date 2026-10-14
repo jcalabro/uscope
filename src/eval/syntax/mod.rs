@@ -19,6 +19,7 @@ use std::sync::Arc;
 use ast::Path;
 pub use ast::Tree;
 pub(super) use parser::binary_text;
+
 pub(super) use print::path_text;
 
 use super::error::ExpressionError;
@@ -64,6 +65,7 @@ impl Span {
 pub enum Dialect {
     /// The console's, for hovers, watches, conditions, and `print`.
     Console,
+
     /// A view's, which may also call the built-in functions views use, such
     /// as `inner(x)` (`docs/views.md`).
     View,
@@ -78,6 +80,7 @@ pub const MAX_AMBIGUITIES: usize = 4;
 #[derive(Debug, Clone)]
 pub struct Ambiguity {
     pub name: Path,
+
     /// The name and its parentheses.
     pub span: Span,
 }
@@ -92,6 +95,7 @@ pub struct Expression {
 struct Parsed {
     text: String,
     ambiguities: Vec<Ambiguity>,
+
     /// One reading per combination: bit `i` of the index is set when
     /// ambiguity `i` reads as a cast.
     readings: Vec<Result<Tree, ExpressionError>>,
@@ -296,11 +300,13 @@ fn check_invariants_in(text: &str, dialect: Dialect) -> Result<(), String> {
         }
         Err(error) => return Err(format!("{error:?} points outside `{text}`")),
     };
+
     for casts in 0..1 << expression.ambiguities().len() {
         if let Ok(tree) = expression.reading(casts) {
             tree.check_spans(text)?;
         }
     }
+
     let printed = expression.to_string();
     let reparsed = match Expression::parse_in(&printed, dialect) {
         Ok(reparsed) => reparsed,
@@ -308,14 +314,17 @@ fn check_invariants_in(text: &str, dialect: Dialect) -> Result<(), String> {
         Err(error) if error.kind == super::error::ErrorKind::Limit => return Ok(()),
         Err(error) => return Err(format!("`{printed}` from `{text}`: {error}")),
     };
+
     if !reparsed.same_shape(&expression) {
         return Err(format!(
             "`{text}` printed as `{printed}`, which reads differently"
         ));
     }
+
     if reparsed.to_string() != printed {
         return Err(format!("`{printed}` printed again as `{reparsed}`"));
     }
+
     Ok(())
 }
 

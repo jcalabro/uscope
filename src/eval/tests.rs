@@ -36,6 +36,7 @@ fn rows() -> Vec<Row<'static>> {
                     world = Some(name.trim());
                     continue;
                 }
+
                 let (expression, outcome) = row
                     .split_once(" => ")
                     .unwrap_or_else(|| panic!("line {}: `{row}` has no ` => `", index + 1));
@@ -49,6 +50,7 @@ fn rows() -> Vec<Row<'static>> {
             _ => {}
         }
     }
+
     rows
 }
 
@@ -100,14 +102,17 @@ fn evaluate(world_name: &str, text: &str) -> String {
     let failure = |error: &ExpressionError| {
         format!("error {} at `{}`", error.kind.name(), error.span.text(text))
     };
+
     let expression = match Expression::parse(text) {
         Ok(expression) => expression,
         Err(error) => return failure(&error),
     };
+
     let program = match bind(&expression, &world, mode) {
         Ok(program) => program,
         Err(error) => return failure(&error),
     };
+
     let outcome = match run(&program, &mut world) {
         Ok(outcome @ (Outcome::Assign { .. } | Outcome::AssignRegister { .. })) => {
             // The value is the target read again.
@@ -118,6 +123,7 @@ fn evaluate(world_name: &str, text: &str) -> String {
                 } => world.write_register(&register, &bytes),
                 _ => unreachable!("matched above"),
             }
+
             let target = text.split_once('=').map_or(text, |(target, _)| {
                 target.trim_end_matches(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>'])
             });
@@ -127,6 +133,7 @@ fn evaluate(world_name: &str, text: &str) -> String {
         }
         outcome => outcome,
     };
+
     match outcome {
         Ok(Outcome::Value { value, cause }) => {
             let name = value
@@ -176,8 +183,10 @@ fn every_example_in_the_reference_holds() {
                 Ok(expression) => failures.push(format!("{context}: reads as `{expression}`")),
                 Err(error) => failures.push(format!("{context}: {error}")),
             }
+
             continue;
         }
+
         let parsed = || match Expression::parse(row.expression) {
             Ok(_) => "parsed".to_owned(),
             Err(error) => format!(
@@ -186,6 +195,7 @@ fn every_example_in_the_reference_holds() {
                 error.span.text(row.expression)
             ),
         };
+
         let actual = row
             .world
             .map_or_else(parsed, |world| evaluate(world, row.expression));
@@ -196,12 +206,14 @@ fn every_example_in_the_reference_holds() {
             }
             None => row.outcome.to_owned(),
         };
+
         if actual != expected {
             failures.push(format!(
                 "{context}\n    expected {expected}\n    actual   {actual}"
             ));
         }
     }
+
     assert!(
         failures.is_empty(),
         "{} rows disagree:\n{}",
@@ -423,10 +435,12 @@ proptest::proptest! {
         let Ok(expression) = Expression::parse(&text) else {
             return Ok(());
         };
+
         let mut world = super::fake::memory();
         let Ok(program) = bind(&expression, &world, Mode::Read) else {
             return Ok(());
         };
+
         let expected = super::types::type_info(&world, program.result()).name;
         let first = run(&program, &mut world);
         let second = run(&program, &mut world);
@@ -470,11 +484,14 @@ fn the_evaluator_stays_pure() {
             pending.extend(entries.map(|entry| entry.expect("a directory entry").path()));
             continue;
         }
+
         let test_file = path.file_name().is_some_and(|name| name == "tests.rs");
         if test_file || path.extension().is_none_or(|extension| extension != "rs") {
             continue;
         }
+
         let source = std::fs::read_to_string(&path).expect("read a source file");
+
         // Code compiled only for tests or the fuzzer may use anything.
         let source = source.split("#[cfg(test)]").next().unwrap_or_default();
         for forbidden in FORBIDDEN {
@@ -484,7 +501,9 @@ fn the_evaluator_stays_pure() {
                 path.display()
             );
         }
+
         checked += 1;
     }
+
     assert!(checked >= 6, "the evaluator's sources were found");
 }

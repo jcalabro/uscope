@@ -22,38 +22,60 @@ use super::memory::{AddressSpace, MemoryFault};
 const MAX_INSTRUCTION_BYTES: usize = 15;
 
 pub const SIGILL: i32 = 4;
+
 pub const SIGFPE: i32 = 8;
+
 pub const SIGSEGV: i32 = 11;
+
 /// `si_code` of an invalid opcode.
 const ILL_ILLOPN: i32 = 2;
+
 /// `si_code` of an integer division by zero or overflow.
 const FPE_INTDIV: i32 = 1;
+
 /// `si_code` of a fault the kernel raised without an address, such as a
 /// general-protection fault.
 pub const SI_KERNEL: i32 = 0x80;
 
 pub const CARRY: u64 = 1 << 0;
+
 pub const PARITY: u64 = 1 << 2;
+
 pub const ADJUST: u64 = 1 << 4;
+
 pub const ZERO: u64 = 1 << 6;
+
 pub const SIGN: u64 = 1 << 7;
+
 pub const DIRECTION: u64 = 1 << 10;
+
 pub const OVERFLOW: u64 = 1 << 11;
+
 /// The flags arithmetic instructions compute.
 pub const STATUS_FLAGS: u64 = CARRY | PARITY | ADJUST | ZERO | SIGN | OVERFLOW;
 
 /// General registers in encoding order, as indices into
 /// [`Registers::general`].
 pub const RAX: usize = 0;
+
 pub const RCX: usize = 1;
+
 pub const RDX: usize = 2;
+
 pub const RSP: usize = 4;
+
 pub const RBP: usize = 5;
+
 pub const RSI: usize = 6;
+
 pub const RDI: usize = 7;
+
 pub const R8: usize = 8;
+
 pub const R9: usize = 9;
+
 pub const R10: usize = 10;
+
 pub const R11: usize = 11;
 
 /// One thread's user-visible register state.
@@ -90,13 +112,17 @@ impl From<MemoryFault> for Fault {
 pub enum Outcome {
     /// The instruction ran; `rip` names the next one.
     Completed,
+
     /// A `syscall`: `rip` is past it, `rcx` and `r11` hold what the CPU
     /// saved, and the kernel must now serve the call.
     Syscall,
+
     /// An `int3`, with `rip` past it.
     Breakpoint,
+
     /// The instruction faulted without changing anything; `rip` names it.
     Fault(Fault),
+
     /// The simulator does not model this instruction, described as text.
     Unsupported(String),
 }
@@ -106,13 +132,16 @@ pub enum Outcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Other,
+
     /// A call, which pushed `return_address` at `slot`.
     Call {
         return_address: u64,
         slot: u64,
     },
+
     /// A return, to the address now in `rip`.
     Return,
+
     /// A jump taken from the instruction at `from`, which ends at `next`,
     /// to the address now in `rip`.
     Jump {
@@ -156,6 +185,7 @@ impl Accesses {
 pub struct Executed {
     pub outcome: Outcome,
     pub flow: Flow,
+
     /// The accesses of an instruction that completed.
     pub accesses: Accesses,
 }
@@ -184,10 +214,12 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed
         flow: Flow::Other,
         accesses: Accesses::default(),
     };
+
     let instruction = match decode(registers.rip, memory) {
         Ok(instruction) => instruction,
         Err(fault) => return failed(Outcome::Fault(fault)),
     };
+
     let mut next = *registers;
     next.rip = instruction.next_ip();
     let accesses = std::cell::Cell::new(Accesses::default());
@@ -215,6 +247,7 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed
                 }
                 _ => Flow::Other,
             };
+
             Executed {
                 outcome,
                 flow,
@@ -301,6 +334,7 @@ impl Registers {
                 (*slot & !mask) | (value & mask)
             }
         };
+
         Some(())
     }
 }

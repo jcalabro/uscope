@@ -5,6 +5,7 @@ use super::*;
 /// Adds walks to a list, holding until it is told to stop holding.
 struct Log {
     added: Vec<Option<usize>>,
+
     /// The unit at which the walk apart stops holding.
     fails_at: Option<usize>,
 }
@@ -22,6 +23,7 @@ fn groups() -> (Vec<usize>, Vec<Vec<usize>>) {
     for (unit, group) in [0, 1, 0, 3, 3, 5, 3].into_iter().enumerate() {
         members[group].push(unit);
     }
+
     (vec![0, 1, 3, 5], members)
 }
 
@@ -35,6 +37,7 @@ fn run(workers: usize, ahead: usize, fails_at: Option<usize>) -> (usize, Log) {
         added: Vec::new(),
         fails_at,
     };
+
     let in_order = InOrder::new(&order, &members, log, ahead);
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -61,6 +64,7 @@ fn units_after_the_walk_stops_holding_are_added_unwalked() {
         let (added, log) = run(workers, 1, Some(2));
         assert_eq!(added, 7, "every unit is still added");
         assert_eq!(&log.added[..3], [Some(0), Some(1), Some(2)]);
+
         // Units in groups claimed before the walk stopped holding may
         // have been walked; none claimed after it was.
         assert_eq!(log.added[5], None, "group 5 begins only after unit 2");
@@ -78,6 +82,7 @@ fn a_panicking_walk_ends_the_walk() {
             added: Vec::new(),
             fails_at: None,
         };
+
         let in_order = InOrder::new(&order, &members, log, 1);
         let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             std::thread::scope(|scope| {

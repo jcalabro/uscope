@@ -10,7 +10,9 @@ const SYS_WRITE: u64 = 1;
 const SYS_SCHED_YIELD: u64 = 24;
 const SYS_GETPID: u64 = 39;
 const SYS_CLONE: u64 = 56;
+
 pub(super) const SYS_FORK: u64 = 57;
+
 pub(super) const SYS_EXECVE: u64 = 59;
 const SYS_EXIT: u64 = 60;
 const SYS_WAIT4: u64 = 61;
@@ -29,6 +31,7 @@ pub struct Served {
     pub tgid: Tgid,
     pub number: u32,
     pub args: [u64; 6],
+
     /// What it returned, or `None` for one that ended its thread.
     pub returned: Option<i64>,
 }
@@ -80,6 +83,7 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
         reason = "exit statuses are ints, the low half of the register"
     )]
     let code = argument(RDI) as i32;
+
     // The call `orig_rax` names, which a tracer at its entry may change.
     let result = match kernel.threads[&tid].orig_rax {
         SYS_WRITE => write(kernel, tid, argument(RDI), argument(RSI), argument(RDX)),
@@ -105,6 +109,7 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
         SYS_EXIT => {
             inside_call(kernel, tid);
             let group = kernel.threads[&tid].tgid;
+
             // K-EXIT-6: the last thread to begin exiting starts a group exit
             // with its status, without disturbing any other thread.
             let last = kernel
@@ -118,9 +123,11 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
                     .group_exit
                     .get_or_insert(ExitStatus::Code(code));
             }
+
             if tid == group.leader() {
                 kernel.leader_exits.insert(tid, code);
             }
+
             kernel.reach_exit(tid, ExitStatus::Code(code));
             return false;
         }
@@ -129,6 +136,7 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
             let group = kernel.threads[&tid].tgid;
             kernel.happenings.push(Happening::GroupExit { tid });
             kernel.kill_process(group, ExitStatus::Code(code));
+
             // The caller is already in the kernel, and goes straight on to
             // its exit.
             let exit = kernel.processes[&group]
@@ -142,6 +150,7 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
             return false;
         }
     };
+
     set_result(kernel, tid, result);
     false
 }
@@ -171,11 +180,13 @@ fn write(kernel: &mut Kernel, tid: Tid, fd: u64, buffer: u64, count: u64) -> u64
     if fd != 1 && fd != 2 {
         return failure(Errno::EBADF);
     }
+
     let group = kernel.threads[&tid].tgid;
     let process = &kernel.processes[&group];
     let Some(bytes) = process.space.read_user(buffer, count) else {
         return failure(Errno::EFAULT);
     };
+
     let root = process.root;
     kernel
         .outputs
@@ -195,9 +206,11 @@ fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
         kernel.gap(format!("clone with flags {flags:#x}"));
         return;
     }
+
     let creator = &kernel.threads[&parent];
     let traced = creator.traced() && creator.options.trace_clone;
     let child = kernel.allocate_tid();
+
     // The thread begins where its creator returns from the call, but none
     // of its creator's calls is on its stack.
     let shadow = kernel.new_shadow();
@@ -206,6 +219,7 @@ fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
     if stack != 0 {
         thread.registers.general[RSP] = stack;
     }
+
     kernel.threads.insert(child, thread);
     kernel.happenings.push(Happening::Cloned { parent, child });
     let result = u64::try_from(child).expect("thread ids are positive");

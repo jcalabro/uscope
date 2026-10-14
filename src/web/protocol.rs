@@ -22,6 +22,7 @@ pub const VERSION: u32 = 1;
 pub enum Role {
     /// Run, stop, and choose what to debug.
     Control,
+
     /// Watch, and move one's own focus.
     View,
 }
@@ -32,6 +33,7 @@ pub enum Role {
 pub struct Envelope {
     /// Chosen by the tab; the answer carries it back.
     pub id: u64,
+
     #[serde(flatten)]
     pub request: Request,
 }
@@ -46,141 +48,204 @@ pub use syscalls::*;
 pub enum Request {
     /// Names this connection for everyone else's presence list.
     SetName(SetName),
+
     /// A link that joins this session with the given access.
     Share(Share),
+
     /// Paths that complete a partly typed one, for the picker.
     CompletePath(CompletePath),
+
     /// This user's processes, for attaching.
     Processes,
+
     /// Loads a program to launch, ending any current session.
     Launch(Launch),
+
     /// Attaches to a process, ending any current session.
     Attach(Attach),
+
     /// Opens a core dump, ending any current session.
     OpenCore(OpenCore),
+
     /// Ends the current session: a launched program is killed, an attached
     /// one detached.
     End,
+
     /// Starts a launched program that has not started, or continues a
     /// stopped one.
     Continue(Continue),
+
     /// Stops a running program.
     Pause,
+
     /// Kills the program, which can then be started again.
     Kill,
+
     /// Kills the program and starts it again.
     Restart,
+
     /// Steps one thread of a stop.
     Step(Step),
+
     /// The calls of a thread's line at a stop that a step into can go
     /// into.
     StepTargets(ThreadAt),
+
     /// Moves one thread of a stop, without running it, to resume at a
     /// location in its function.
     Jump(Jump),
+
     /// Says where this tab is looking, for everyone's presence list.
     SetFocus(SetFocus),
+
     /// A thread's stack at a stop.
     Backtrace(ThreadAt),
+
     /// Every source file the debug information names.
     Sources,
+
     /// One source file's text, and the lines a breakpoint can stop at.
     Source(SourcePath),
+
     /// Adds a breakpoint.
     AddBreakpoint(AddBreakpoint),
+
     /// Replaces a breakpoint's condition, hit condition, and log message.
     EditBreakpoint(EditBreakpoint),
     RemoveBreakpoint(BreakpointRef),
+
     /// Writes to the program's standard input, or closes it.
     Input(Input),
+
     /// A frame's arguments and locals, and the statics of its source file.
     Scopes(FrameAt),
+
     /// A window of what a row expands to.
     Children(ChildrenOf),
+
     /// Evaluates an expression in a frame without changing the program.
     Evaluate(Evaluate),
+
     /// Assigns a value to what a path names.
     SetValue(SetValue),
+
     /// Completes a console line.
     Complete(Complete),
+
     /// Runs a console line: an expression, which may assign, or one of
     /// uscope's commands, in the tab's frame.
     Console(ConsoleLine),
+
     /// The instructions of the function holding an address, or around it.
     Disassemble(Disassemble),
+
     /// Bytes of the program's memory at a stop.
     ReadMemory(ReadMemory),
+
     /// Writes bytes to the program's memory at a stop.
     WriteMemory(WriteMemory),
+
     /// A frame's registers.
     Registers(FrameAt),
+
     /// Stops when memory an expression names, or an address range, changes
     /// or is accessed.
     AddWatchpoint(AddWatchpoint),
+
     /// Replaces a watchpoint's condition and hit condition.
     EditWatchpoint(EditWatchpoint),
     RemoveWatchpoint(WatchpointRef),
+
     /// What the debugger does with each signal.
     Signals,
+
     /// Changes what the debugger does with one signal.
     SetSignal(SignalPolicy),
+
     /// The modules the program has loaded.
     Modules,
+
     /// Functions whose names hold the query, best matches first.
     Functions(FunctionQuery),
+
     /// The tasks of the program's runtimes at a stop.
     Tasks(StopAt),
+
     /// The inputs of a drawing of a value, which the page's renderer draws.
     Draw(Draw),
+
     /// A renderer's JavaScript, by its digest.
     Renderer(RendererRef),
+
     /// Every renderer a drawing may name, for drawing a value with any.
     Renderers,
+
     /// Reads the session's view files, and the renderers beside them,
     /// again.
     ReloadViews,
+
     /// What a profile holds: its threads, span, and accounts.
     Profile(ProfileRef),
+
     /// A profile's call tree under a query; its columns go in the binary
     /// frame before the answer.
     ProfileTree(ProfileQuery),
+
     /// What each function costs under a query.
     ProfileFunctions(ProfileQuery),
+
     /// How a query's samples fall over time, per thread.
     ProfileTimeline(ProfileTimelineQuery),
+
     /// Each thread's zones in a range, folded to a width; their columns
     /// go in the binary frame before the answer.
     ProfileZones(ProfileZonesQuery),
+
     /// The spread of one site's zone lengths.
     ProfileZoneStats(ProfileZoneStatsQuery),
+
     /// A function's samples on its source lines, with the lines' text.
     ProfileLines(ProfileFunctionQuery),
+
     /// A function's samples on its instructions.
     ProfileCode(ProfileFunctionQuery),
+
     /// Records a program, publishing its profile as it goes.
     RecordProfile(RecordProfile),
+
     /// Ends a recording, killing its program.
     StopRecording(ProfileRef),
+
     /// What a profile's system calls cost, grouped.
     SyscallSummary(SyscallSummaryQuery),
+
     /// Calls per slice of time, stacked.
     SyscallRate(SyscallRateQuery),
+
     /// Calls by time and latency.
     SyscallHeatmap(SyscallHeatmapQuery),
+
     /// One call's latency, errors, and callers.
     SyscallDetail(SyscallDetailQuery),
+
     /// A page of the trace as strace prints it.
     SyscallLog(SyscallLogQuery),
+
     /// One call of the trace, expanded.
     SyscallCall(SyscallCallQuery),
+
     /// Each thread's time in calls.
     SyscallLanes(SyscallLanesQuery),
+
     /// What the calls did with files.
     SyscallFiles(SyscallQuery),
+
     /// What the calls did over sockets.
     SyscallNetwork(SyscallQuery),
+
     /// The processes the trace saw.
     SyscallProcesses(SyscallQuery),
+
     /// What a live trace's threads are blocked in.
     SyscallInFlight(SyscallInFlightQuery),
 }
@@ -202,6 +267,7 @@ pub struct SetName {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Share {
     pub role: Role,
+
     /// The page path the link opens, such as `/s/k7q2`.
     pub to: String,
 }
@@ -218,20 +284,26 @@ pub struct CompletePath {
 #[serde(rename_all = "camelCase")]
 pub struct Launch {
     pub program: String,
+
     #[serde(default)]
     pub arguments: Vec<String>,
+
     /// The program's working directory, instead of the server's.
     #[serde(default)]
     pub cwd: Option<String>,
+
     /// Variables set in the program's environment, in order.
     #[serde(default)]
     pub environment: Vec<(String, String)>,
+
     /// Stop at the program's first instruction when it starts.
     #[serde(default)]
     pub stop_at_entry: bool,
+
     /// Start the program at once instead of waiting for a continue.
     #[serde(default)]
     pub run: bool,
+
     /// End a current session to make way. Without it, a current session
     /// fails the request with `busy`.
     #[serde(default)]
@@ -242,6 +314,7 @@ pub struct Launch {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Attach {
     pub pid: u64,
+
     #[serde(default)]
     pub replace: bool,
 }
@@ -250,9 +323,11 @@ pub struct Attach {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct OpenCore {
     pub core: String,
+
     /// The executable that wrote the dump, when the recorded one is wrong.
     #[serde(default)]
     pub executable: Option<String>,
+
     #[serde(default)]
     pub replace: bool,
 }
@@ -272,16 +347,19 @@ pub struct Step {
     /// The stop being stepped from, which must still be current.
     pub stop: u64,
     pub thread: u64,
+
     /// The task stepped, which runs on the thread.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
+
     /// The frame a step out leaves; every other step starts from the
     /// innermost frame.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: u32,
     pub kind: StepKind,
+
     /// For a step into, the one call of the line to go into, in
     /// hexadecimal, as `stepTargets` lists it; the line's other calls run
     /// to their returns.
@@ -296,9 +374,11 @@ pub struct Jump {
     /// The stop the thread is moved at, which must still be current.
     pub stop: u64,
     pub thread: u64,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
+
     /// `FILE:LINE`, or another location a breakpoint takes.
     pub location: String,
 }
@@ -309,12 +389,16 @@ pub struct Jump {
 pub enum StepKind {
     /// To the next source line, running calls through.
     Over,
+
     /// To the next source line, entering calls.
     Into,
+
     /// Until the frame returns.
     Out,
+
     /// One instruction, entering calls.
     Instruction,
+
     /// One instruction, running calls through.
     OverInstruction,
 }
@@ -332,6 +416,7 @@ pub struct SetFocus {
 pub struct Focus {
     /// The page path and query, such as `/s/k7q2/stop/12/t/41872/f/1`.
     pub url: String,
+
     /// Such as `frame 1, serve_conn`.
     pub label: String,
 }
@@ -368,6 +453,7 @@ pub const fn execution(thread: u64, task: Option<TaskKey>) -> uscope::ExecutionC
 pub struct ThreadAt {
     pub stop: u64,
     pub thread: u64,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
@@ -379,6 +465,7 @@ pub struct ThreadAt {
 pub struct FrameAt {
     pub stop: u64,
     pub thread: u64,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
@@ -420,8 +507,10 @@ pub struct Evaluate {
 pub struct SetValue {
     #[serde(flatten)]
     pub at: FrameAt,
+
     /// The expression that names what changes, a row's `path`.
     pub path: String,
+
     /// An expression for the new value.
     pub value: String,
 }
@@ -431,16 +520,20 @@ pub struct SetValue {
 pub struct Complete {
     /// The line up to the cursor.
     pub text: String,
+
     /// The frame whose names complete; absent when nothing is stopped.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub stop: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub thread: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
@@ -450,16 +543,20 @@ pub struct Complete {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ConsoleLine {
     pub line: String,
+
     /// The frame the line runs in; absent when nothing is stopped.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub stop: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub thread: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
@@ -470,11 +567,13 @@ pub struct ConsoleLine {
 pub struct Disassemble {
     #[serde(flatten)]
     pub at: FrameAt,
+
     /// The address to show, as hexadecimal; the frame's own code when
     /// absent.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub address: Option<String>,
+
     /// Intel unless AT&T is asked for.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -494,6 +593,7 @@ pub enum Syntax {
 pub struct ReadMemory {
     /// The stop the bytes are read at, which must be current.
     pub stop: u64,
+
     /// As hexadecimal, such as `0x7ffff7a3e010`.
     pub address: String,
     pub count: u64,
@@ -504,6 +604,7 @@ pub struct ReadMemory {
 pub struct WriteMemory {
     pub stop: u64,
     pub address: String,
+
     /// The bytes, as pairs of hexadecimal digits.
     pub bytes: String,
 }
@@ -515,22 +616,28 @@ pub struct AddWatchpoint {
     /// An expression in the frame, or `0xADDRESS:BYTES`.
     pub target: String,
     pub access: WatchAccess,
+
     /// The frame an expression is resolved in; an address range needs none.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub stop: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub thread: Option<u64>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub task: Option<TaskKey>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub frame: Option<u32>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
@@ -541,9 +648,11 @@ pub struct AddWatchpoint {
 #[serde(rename_all = "camelCase")]
 pub struct EditWatchpoint {
     pub id: u64,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
@@ -562,8 +671,10 @@ pub struct WatchpointRef {
 pub enum WatchAccess {
     /// A store that changes the value.
     Change,
+
     /// Every store, even of the same value.
     Write,
+
     /// Every load or store.
     ReadWrite,
     Read,
@@ -574,6 +685,7 @@ pub enum WatchAccess {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SignalPolicy {
     pub signal: u64,
+
     /// Such as `SIGUSR1`; filled in by the server.
     #[serde(default)]
     pub name: String,
@@ -586,6 +698,7 @@ pub struct SignalPolicy {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FunctionQuery {
     pub query: String,
+
     /// How many to return; 50 when absent, and never more than 200.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -605,13 +718,16 @@ pub struct SourcePath {
 pub struct AddBreakpoint {
     /// A function, `FILE:LINE`, `FILE:FUNCTION`, or `0xADDRESS`.
     pub location: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
+
     /// Which hits stop, such as `>=5` or `%10`.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
+
     /// A message to log instead of stopping, with expressions in braces.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -623,13 +739,16 @@ pub struct AddBreakpoint {
 #[serde(rename_all = "camelCase")]
 pub struct EditBreakpoint {
     pub id: u64,
+
     /// Absent to remove.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub condition: Option<String>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub hit_condition: Option<String>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub log_message: Option<String>,
@@ -645,6 +764,7 @@ pub struct BreakpointRef {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Input {
     pub text: String,
+
     /// Close the input after the text, so the program reads its end.
     #[serde(default)]
     pub eof: bool,
@@ -657,22 +777,30 @@ pub struct Input {
 pub enum ServerMessage {
     /// The first message on every connection.
     Hello(Hello),
+
     /// The whole debugger state, sent on connecting and at every change.
     State(Arc<State>),
+
     /// A request succeeded.
     Result {
         id: u64,
+
         #[cfg_attr(test, ts(type = "unknown"))]
         result: Value,
     },
+
     /// A request failed.
     Error { id: u64, error: ErrorBody },
+
     /// Bytes the program wrote.
     Output(Output),
+
     /// Who is connected.
     Presence(Presence),
+
     /// Something another participant did.
     Notice(Notice),
+
     /// The profiles the server serves, sent on connecting and whenever
     /// they change.
     Profiles(ProfileList),
@@ -691,13 +819,17 @@ pub struct ProfileInfo {
     /// Derived from a file's bytes, so a link names the same profile
     /// whenever a server serves it; a recording's is its own.
     pub id: String,
+
     /// The file it was read from, or the program recorded.
     pub name: String,
+
     /// Whether it is being recorded, and grows.
     pub recording: bool,
+
     /// Counts the profiles published under this id: each answer about it
     /// is of the newest.
     pub revision: u32,
+
     /// How a recorded program ended, once it has.
     pub ended: Option<String>,
 }
@@ -706,6 +838,7 @@ pub struct ProfileInfo {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileRef {
     pub profile: String,
+
     /// The revision the tab has seen, which keeps its cached answers
     /// apart; the server answers from the newest.
     #[serde(default)]
@@ -719,26 +852,33 @@ pub struct ProfileRef {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RecordProfile {
     pub program: String,
+
     #[serde(default)]
     pub arguments: Vec<String>,
+
     /// Where it runs: the server's directory when absent.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub cwd: Option<String>,
+
     /// Variables added to its environment, as `[name, value]` pairs.
     #[serde(default)]
     pub environment: Vec<(String, String)>,
+
     #[serde(default)]
     pub preset: RecordPreset,
+
     /// Samples each call of the function this names instead of CPU time.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub function: Option<String>,
+
     /// Keeps only the last this many seconds, which the page then shows
     /// and saves.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub window: Option<f64>,
+
     /// Traces system calls instead of sampling.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -751,9 +891,11 @@ pub struct RecordProfile {
 pub enum RecordPreset {
     /// 49 samples a second: safe in production.
     Production,
+
     /// 999 samples a second, with a deep stack copy.
     #[default]
     Development,
+
     /// 9999 samples a second.
     Maximum,
 }
@@ -771,50 +913,63 @@ pub struct RecordStarted {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileQuery {
     pub profile: String,
+
     /// The revision the tab has seen, which keeps its cached answers
     /// apart; the server answers from the newest.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
     pub revision: u32,
+
     /// Samples taken in `[start, end)`, in nanoseconds from the profile's
     /// start, or all.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub range: Option<[i64; 2]>,
+
     /// Samples of these threads, by row, or of all.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
+
     /// What the query aggregates.
     #[serde(default)]
     pub source: ProfileSource,
+
     /// Samples or waits of these tasks, by row, or of any; `null` in the
     /// list is what no snapshot named.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub tasks: Option<Vec<Option<u32>>>,
+
     /// Roots each path at its task.
     #[serde(default)]
     pub by_task: bool,
+
     /// Samples or waits that carry each of these labels, `key=value`.
     #[serde(default)]
     pub labels: Vec<String>,
+
     /// Roots each path, outside any task, at its label of this key.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub by_label: Option<String>,
+
     /// Applied in order, to keys by the names views show.
     #[serde(default)]
     pub transforms: Vec<ProfileTransform>,
+
     /// Paths from the innermost frame out: a tree of callers.
     #[serde(default)]
     pub invert: bool,
+
     /// The frames threads ran, rather than each async task's own stack.
     #[serde(default)]
     pub native: bool,
+
     #[serde(default)]
     pub granularity: ProfileGranularity,
+
     /// What a tree or functions answer compares itself with.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -827,6 +982,7 @@ pub struct ProfileQuery {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileBase {
     pub profile: String,
+
     /// Nanoseconds from that profile's start, or all of it.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
@@ -848,6 +1004,7 @@ pub enum ProfileSource {
     /// The samples.
     #[default]
     Samples,
+
     /// Where task snapshots found tasks waiting.
     Waits,
 }
@@ -865,10 +1022,13 @@ pub struct ProfileTransform {
 pub enum TransformOp {
     /// Keeps samples through the function, rooted at it.
     Focus,
+
     /// Removes the function, giving its cost to its callers.
     Merge,
+
     /// Removes the samples through the function.
     Drop,
+
     /// Merges the function's calls of itself.
     Collapse,
 }
@@ -880,10 +1040,13 @@ pub enum ProfileGranularity {
     /// Each function, inlined ones too.
     #[default]
     Function,
+
     /// Each function as compiled, its inlined functions in it.
     Physical,
+
     /// Each source line of each function.
     Line,
+
     /// Each instruction.
     Address,
 }
@@ -912,8 +1075,10 @@ pub struct ProfileLines {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileSourceFile {
     pub path: Option<String>,
+
     /// Each line with samples: its number, own weight, and total weight.
     pub lines: Vec<[u64; 3]>,
+
     /// The file's text from line `first`, around those lines, as the file
     /// reads now; `None`, with why, when it cannot be read.
     pub first: u32,
@@ -928,6 +1093,7 @@ pub struct ProfileCode {
     pub weight: u64,
     pub module: Option<String>,
     pub blocks: Vec<ProfileCodeBlock>,
+
     /// Sampled addresses no decoded instruction holds: address, own, and
     /// total.
     pub unplaced: Vec<[u64; 3]>,
@@ -947,6 +1113,7 @@ pub struct ProfileCodeBlock {
 pub struct ProfileInstruction {
     pub address: u64,
     pub text: String,
+
     /// The function a direct jump or call goes to.
     pub target: Option<String>,
     pub own: u64,
@@ -959,8 +1126,10 @@ pub struct ProfileInstruction {
 pub struct ProfileTimelineQuery {
     #[serde(flatten)]
     pub query: ProfileQuery,
+
     /// Slices of the query's range, or of the whole profile.
     pub buckets: u32,
+
     /// Lanes of tasks rather than threads; waits are always of tasks.
     #[serde(default)]
     pub task_lanes: bool,
@@ -972,58 +1141,80 @@ pub struct ProfileTimelineQuery {
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
+
     /// The program recorded.
     pub program: Option<String>,
+
     /// What a sample weighs: `nanoseconds` of CPU time, `executions`,
     /// `bytes`, or what an imported profile counts.
     pub unit: String,
+
     /// What made the samples, such as a clock or an imported pprof file.
     pub source: Option<String>,
+
     /// Whether the samples carry their times and threads, which an
     /// imported pprof or folded profile's do not.
     pub timed: bool,
     pub samples: u64,
     pub weight: u64,
+
     /// System calls its trace holds, which the Syscalls view shows.
     pub syscalls: u64,
+
     /// Records of calls the trace's engine lost.
     pub syscalls_lost: u64,
+
     /// Nanoseconds from the first sample to the last.
     pub duration: i64,
     pub threads: Vec<ProfileThread>,
+
     /// Samples the kernel dropped.
     pub lost: u64,
+
     /// Times the kernel throttled sampling.
     pub throttles: u64,
+
     /// Stacks that ended short of their outermost frame, by reason.
     pub truncations: Vec<ProfileCount>,
+
     /// How the profile was recorded, by setting.
     pub settings: Vec<ProfileSetting>,
+
     /// Nanoseconds of CPU time uscope spent recording, and the part of it
     /// spent reading debug information.
     pub recorder_cpu: u64,
     pub recorder_loading: u64,
+
     /// Spans not sampled, in nanoseconds from the start.
     pub gaps: Vec<[i64; 2]>,
+
     /// Each change the budget made, from the start.
     pub budget_changes: Vec<ProfileMarker>,
+
     /// The tasks task snapshots found, most weight first.
     pub tasks: Vec<ProfileTask>,
+
     /// Task snapshots taken, the nanoseconds they held the program
     /// stopped, and the samples they named the task of.
     pub snapshots: u64,
     pub snapshot_pause: u64,
     pub task_samples: u64,
+
     /// Each time a snapshot failed or missed tasks, from the start.
     pub snapshot_problems: Vec<ProfileMarker>,
+
     /// The weight of every wait the snapshots found.
     pub waited: u64,
+
     /// What the recording read of the program's instrumentation, and lost.
     pub probes: ProfileProbes,
+
     /// Each zone site name's and label key's zones, most time first.
     pub zone_sites: Vec<ProfileZoneSite>,
+
     /// Every key a sample's or task's label may have.
     pub label_keys: Vec<String>,
+
     /// Why modules' instrumentation could not be read.
     pub probe_problems: Vec<ProfileMarker>,
 }
@@ -1033,14 +1224,19 @@ pub struct ProfileSummary {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileProbes {
     pub events: u64,
+
     /// Records threads overwrote before uscope read them.
     pub overwritten: u64,
+
     /// Events no ring could take.
     pub no_ring: u64,
+
     /// Events a signal handler dropped mid-write.
     pub interrupted: u64,
+
     /// Records that broke the probes ABI.
     pub malformed: u64,
+
     /// Values plotted.
     pub plotted: u64,
 }
@@ -1049,12 +1245,15 @@ pub struct ProfileProbes {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileZoneSite {
     pub name: String,
+
     /// Whether its zones are a label's spans.
     pub label: bool,
     pub count: u64,
+
     /// Nanoseconds, all of them and the longest.
     pub total: u64,
     pub longest: u64,
+
     /// Zones of it whose begin or end was not seen, or did not nest.
     pub flagged: u64,
 }
@@ -1063,18 +1262,22 @@ pub struct ProfileZoneSite {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileZonesQuery {
     pub profile: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
     pub revision: u32,
+
     /// Nanoseconds from the profile's start, or all of it.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub range: Option<[i64; 2]>,
+
     /// Of these threads, by row, or of all.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
+
     /// The pixels the range is drawn across: zones under three pixels wide
     /// fold together.
     pub width: u32,
@@ -1090,8 +1293,10 @@ pub struct ProfileZones {
     pub range: [i64; 2],
     pub blocks: u32,
     pub names: Vec<String>,
+
     /// The program's messages, frames, and triggers in the range.
     pub marks: Vec<ProfileMark>,
+
     /// Each plotted series in the range, by name.
     pub plots: Vec<ProfilePlot>,
 }
@@ -1100,14 +1305,18 @@ pub struct ProfileZones {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfilePlot {
     pub name: String,
+
     /// How many values it drew, and how many were not finite.
     pub values: u64,
     pub unshown: u64,
+
     /// A bin a pixel wide each: the time from the start of its first
     /// value, its first, last, lowest, and highest values.
     pub bins: Vec<[f64; 5]>,
+
     /// The value before the range, which holds into it.
     pub held: Option<f64>,
+
     /// Whether a value follows the range, so the last holds to its end.
     pub continues: bool,
 }
@@ -1116,9 +1325,11 @@ pub struct ProfilePlot {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileMark {
     pub thread: u32,
+
     /// Nanoseconds from the start.
     pub time: i64,
     pub kind: ProfileMarkKind,
+
     /// Its site's name.
     pub name: String,
     pub text: Option<String>,
@@ -1137,15 +1348,19 @@ pub enum ProfileMarkKind {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileZoneStatsQuery {
     pub profile: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
     pub revision: u32,
+
     /// A zone site's name, or a label's key.
     pub name: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub range: Option<[i64; 2]>,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
@@ -1163,10 +1378,13 @@ pub struct ProfileZoneStats {
     pub p90: u64,
     pub p99: u64,
     pub max: u64,
+
     /// Buckets of equal ratio: each its lowest length and how many.
     pub histogram: Vec<[u64; 2]>,
+
     /// The longest, longest first.
     pub longest: Vec<ProfileZoneAt>,
+
     /// For a label: each value's time and count, most time first.
     pub values: Vec<ProfileLabelValue>,
 }
@@ -1175,6 +1393,7 @@ pub struct ProfileZoneStats {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileZoneAt {
     pub thread: u32,
+
     /// Nanoseconds from the start.
     pub start: i64,
     pub end: i64,
@@ -1193,8 +1412,10 @@ pub struct ProfileLabelValue {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileTask {
     pub row: u32,
+
     /// As views name it: its runtime's noun, number, and labels.
     pub name: String,
+
     /// The weight of the samples that ran it, and the nanoseconds of
     /// waiting snapshots found it in.
     pub weight: u64,
@@ -1218,6 +1439,7 @@ pub struct ProfileThread {
     pub name: Option<String>,
     pub samples: u64,
     pub weight: u64,
+
     /// Nanoseconds off its CPU, blocked and preempted.
     pub blocked: u64,
     pub preempted: u64,
@@ -1244,10 +1466,12 @@ pub struct ProfileSetting {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileTree {
     pub nodes: u32,
+
     /// The weight of every sample the query kept.
     pub weight: u64,
     pub samples: u64,
     pub keys: Vec<ProfileKey>,
+
     /// For a diff, its base's weight, whose own and total weights by node
     /// follow the columns as two more of `f64`s.
     pub base: Option<ProfileBaseWeight>,
@@ -1260,8 +1484,10 @@ pub struct ProfileKey {
     /// How views name it, which transforms take.
     pub name: String,
     pub kind: ProfileKeyKind,
+
     /// The module's file name.
     pub module: Option<String>,
+
     /// Where it is in the source.
     pub file: Option<String>,
     pub line: Option<u32>,
@@ -1273,14 +1499,19 @@ pub struct ProfileKey {
 pub enum ProfileKeyKind {
     Function,
     Line,
+
     /// Code no symbols describe.
     Address,
+
     /// Where a stack ended early.
     Truncation,
+
     /// An async task's root.
     Task,
+
     /// A task a query by task roots paths at.
     Group,
+
     /// A label value a query by label roots paths at.
     Label,
 }
@@ -1289,9 +1520,11 @@ pub enum ProfileKeyKind {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ProfileFunctions {
     pub weight: u64,
+
     /// Most own weight first, or, for a diff, most changed share first.
     pub rows: Vec<ProfileCost>,
     pub keys: Vec<ProfileKey>,
+
     /// For a diff, its base's weight.
     pub base: Option<ProfileBaseWeight>,
 }
@@ -1304,6 +1537,7 @@ pub struct ProfileCost {
     pub key: u32,
     pub own: u64,
     pub total: u64,
+
     /// For a diff, the key's weights in its base.
     pub base_own: u64,
     pub base_total: u64,
@@ -1334,11 +1568,14 @@ pub struct ProfileLane {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Hello {
     pub version: u32,
+
     /// This connection's number, unique while the server runs.
     pub connection: u32,
     pub role: Role,
+
     /// The name others see until the tab chooses one.
     pub name: String,
+
     /// The server's working directory, which relative paths start from.
     pub cwd: String,
 }
@@ -1350,21 +1587,27 @@ pub struct State {
     /// Identifies what is being debugged; a new program, process, or core
     /// dump gets a new one. Absent when nothing is.
     pub session: Option<String>,
+
     /// What is being debugged.
     pub target: Option<Target>,
+
     /// Slow work under way, such as loading debug information.
     pub busy: Option<String>,
+
     /// The debugger revision this state reflects.
     pub revision: u64,
     pub inferior: Inferior,
     pub threads: Vec<Thread>,
     pub breakpoints: Vec<Breakpoint>,
+
     /// The latest stops of this session, oldest first.
     pub stops: Vec<StopEntry>,
+
     /// Counts changes made to the program's values, which make values read
     /// earlier at the same stop out of date.
     pub writes: u64,
     pub watchpoints: Vec<Watchpoint>,
+
     /// Counts changes to settings that publish nothing else, such as
     /// signal policies.
     pub settings: u64,
@@ -1393,10 +1636,13 @@ impl State {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Target {
     pub kind: TargetKind,
+
     /// The executable's path.
     pub program: String,
+
     /// A launched program's arguments.
     pub arguments: Vec<String>,
+
     /// An attached process, or the process a core dump recorded.
     pub pid: Option<u64>,
 }
@@ -1422,18 +1668,23 @@ pub enum Inferior {
     },
     Stopped {
         pid: u64,
+
         /// The stop's number, which requests about it carry.
         stop: u64,
+
         /// The thread whose event caused the stop.
         thread: u64,
         reason: StopReason,
+
         /// Where that thread stopped.
         place: Option<Place>,
     },
+
     /// The program ended; it can be started again.
     Exited {
         description: String,
     },
+
     /// The debugger let an attached process go.
     Detached {
         pid: u64,
@@ -1445,6 +1696,7 @@ pub enum Inferior {
 pub struct StopReason {
     /// A short machine-readable kind, such as `breakpoint` or `pause`.
     pub kind: String,
+
     /// The reason as the CLI says it.
     pub description: String,
 }
@@ -1456,6 +1708,7 @@ pub struct Place {
     /// The instruction's address, in hexadecimal.
     pub address: String,
     pub function: Option<String>,
+
     /// The source file, as the debug information records it.
     pub path: Option<String>,
     pub line: Option<u64>,
@@ -1469,8 +1722,10 @@ pub struct StopEntry {
     pub thread: u64,
     pub reason: StopReason,
     pub place: Option<Place>,
+
     /// Who ran the program to it, when someone did.
     pub by: Option<String>,
+
     /// What they did, such as `stepped over`.
     pub action: Option<String>,
 }
@@ -1480,13 +1735,16 @@ pub struct StopEntry {
 #[serde(rename_all = "camelCase")]
 pub struct Breakpoint {
     pub id: u64,
+
     /// What it was set at, as it was asked for.
     pub location: String,
     pub condition: Option<String>,
     pub hit_condition: Option<String>,
     pub log_message: Option<String>,
+
     /// Hits in the current process, including those that did not stop.
     pub hits: u64,
+
     /// Where it resolved; none while no loaded code has it.
     pub places: Vec<Place>,
 }
@@ -1513,18 +1771,24 @@ pub struct ErrorBody {
 pub enum ErrorKind {
     /// The stop a request named has passed.
     StaleStop,
+
     /// The request needs a stopped program.
     NotStopped,
+
     /// This connection's role does not allow the request.
     Forbidden,
+
     /// Something is already being debugged, and the request did not ask to
     /// replace it.
     Busy,
+
     /// The request was malformed.
     Invalid,
+
     /// The request cannot work for this session, such as running a core
     /// dump.
     Unsupported,
+
     /// The debugger tried and failed.
     Failed,
 }
@@ -1542,6 +1806,7 @@ pub struct Output {
 pub enum Stream {
     Stdout,
     Stderr,
+
     /// Messages logpoints wrote.
     Log,
 }
@@ -1567,6 +1832,7 @@ pub struct Notice {
     /// Who did it.
     pub connection: u32,
     pub name: String,
+
     /// What they did, such as `continued`.
     pub text: String,
 }
@@ -1601,6 +1867,7 @@ pub enum PathKind {
 #[serde(rename_all = "camelCase")]
 pub struct Processes {
     pub processes: Vec<Process>,
+
     /// Yama's `ptrace_scope`, when the kernel has it: at 1 or more,
     /// attaching to a process that is not a child may be refused.
     pub ptrace_scope: Option<u8>,
@@ -1610,6 +1877,7 @@ pub struct Processes {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Process {
     pub pid: u64,
+
     /// The command line, or the process's name when it has none.
     pub command: String,
 }
@@ -1619,6 +1887,7 @@ pub struct Process {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Backtrace {
     pub frames: Vec<Frame>,
+
     /// Why the stack ends early, when the unwinder could not finish it.
     pub incomplete: Option<String>,
 }
@@ -1628,15 +1897,19 @@ pub struct Backtrace {
 pub struct Frame {
     /// Its number, counting from the innermost frame.
     pub index: u32,
+
     /// The function, symbol, or address.
     pub name: String,
     pub kind: FrameKind,
+
     /// The instruction or return address, in hexadecimal; for a suspended
     /// task's frame, where it resumes, if that is known.
     pub address: Option<String>,
+
     /// The file name of the module the code is in.
     pub module: Option<String>,
     pub source: Option<SourceLine>,
+
     /// For a frame that drives a future whose awaits the stack does not
     /// show in full, why.
     pub unfollowed: Option<String>,
@@ -1647,14 +1920,19 @@ pub struct Frame {
 #[serde(rename_all = "camelCase")]
 pub enum FrameKind {
     Physical,
+
     /// A call the compiler inlined into the frame below it.
     Inline,
+
     /// A signal handler's trampoline.
     Signal,
+
     /// A function that left by a tail call to the frame below it.
     TailCall,
+
     /// An async function of a suspended task, which its future holds.
     Async,
+
     /// The future a suspended task's innermost async function awaits.
     Awaited,
 }
@@ -1673,6 +1951,7 @@ pub struct SourceLine {
 pub struct SourceFiles {
     /// Paths as the debug information records them, sorted.
     pub files: Vec<String>,
+
     /// Where the program's main function is declared, when it has one.
     pub entry: Option<SourceLine>,
 }
@@ -1682,6 +1961,7 @@ pub struct SourceFiles {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Functions {
     pub functions: Vec<FunctionMatch>,
+
     /// Whether more functions match than were returned.
     pub more: bool,
 }
@@ -1690,6 +1970,7 @@ pub struct Functions {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FunctionMatch {
     pub name: String,
+
     /// Where it is declared, when the debug information says.
     pub path: Option<String>,
     pub line: Option<u64>,
@@ -1700,9 +1981,11 @@ pub struct FunctionMatch {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SourceText {
     pub path: String,
+
     /// The file read, which a source map may have moved.
     pub read: String,
     pub text: String,
+
     /// The lines a breakpoint can stop at, in order.
     pub breakable: Vec<u64>,
 }
@@ -1727,6 +2010,7 @@ pub struct Scope {
     pub key: ScopeKey,
     pub name: String,
     pub rows: Vec<Row>,
+
     /// Why the scope's rows could not be read, when they could not.
     pub problem: Option<String>,
 }
@@ -1746,21 +2030,29 @@ pub enum ScopeKey {
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     pub name: String,
+
     /// The value's summary, or why there is none.
     pub text: String,
+
     #[serde(rename = "type")]
     pub type_name: Option<String>,
+
     /// An expression that evaluates the value again.
     pub path: Option<String>,
     pub children: Option<Children>,
+
     /// Whether `setValue` can change it.
     pub editable: bool,
+
     /// The address of its natural memory, as hexadecimal.
     pub memory: Option<String>,
+
     /// How many bytes the value occupies there, when it is stored there.
     pub memory_bytes: Option<u64>,
+
     /// A row that only says where reading stopped short.
     pub truncated: bool,
+
     /// The renderers of the drawings the value's view offers, each once.
     pub drawings: Vec<String>,
 }
@@ -1770,8 +2062,10 @@ pub struct Row {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Children {
     pub handle: u64,
+
     /// How many children are elements, when it is known.
     pub indexed: Option<u64>,
+
     /// How many are named, when it is known.
     pub named: Option<u64>,
 }
@@ -1796,6 +2090,7 @@ pub struct Completions {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Completion {
     pub label: String,
+
     /// `keyword`, `value`, `variable`, or `field`.
     pub kind: String,
 }
@@ -1815,10 +2110,12 @@ pub struct ConsoleResult {
 pub struct Watchpoint {
     pub id: u64,
     pub access: WatchAccess,
+
     /// The expression it watches, when it was given one.
     pub expression: Option<String>,
     pub address: String,
     pub bytes: u64,
+
     /// Such as `thread 41872's frame at 0x7ffe…, until it returns` for a
     /// local, which ends with its frame; empty for a global.
     pub scope: String,
@@ -1833,10 +2130,12 @@ pub struct Watchpoint {
 pub struct Disassembled {
     /// The function shown, when the code shown is one.
     pub function: Option<String>,
+
     /// The frame's instruction: its program counter, or, in a caller, the
     /// call it returns to after.
     pub marked: Option<String>,
     pub instructions: Vec<Instruction>,
+
     /// What the code shown leaves out, such as unreadable memory.
     pub notes: Vec<String>,
 }
@@ -1845,18 +2144,25 @@ pub struct Disassembled {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Instruction {
     pub address: String,
+
     /// Its bytes, as hexadecimal pairs separated by spaces.
     pub bytes: String,
+
     /// Its text in pieces; empty when the bytes decode to nothing.
     pub tokens: Vec<Token>,
+
     /// Why there is no instruction, when there is none.
     pub invalid: Option<String>,
+
     /// Where a branch goes, which a page can follow.
     pub target: Option<BranchTarget>,
+
     /// What its operands name, such as a function or a global.
     pub comment: Option<String>,
+
     /// The symbol it is in, with its offset, such as `main+12`.
     pub symbol: Option<String>,
+
     /// Its source line, when it starts one.
     pub source: Option<SourceLine>,
 }
@@ -1883,8 +2189,10 @@ pub struct BranchTarget {
 pub struct Draw {
     #[serde(flatten)]
     pub at: FrameAt,
+
     /// The value's `path`, which evaluates it.
     pub path: String,
+
     /// The renderer: one whose drawing the value's view offers, or else any
     /// renderer, which then draws the value itself as its `values`.
     pub renderer: String,
@@ -1902,6 +2210,7 @@ pub struct RendererRef {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RendererInfo {
     pub name: String,
+
     /// The file or module record it was loaded from, or `built-in`.
     pub origin: String,
     pub digest: String,
@@ -1928,15 +2237,19 @@ pub struct RendererList {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Drawing {
     pub renderer: RendererInfo,
+
     /// Whether the value's view offers the drawing; otherwise the renderer
     /// draws the value itself as its `values`.
     pub offered: bool,
+
     /// Each input, by name, in order; none when a problem kept any part of
     /// them from being read.
     pub inputs: Option<Vec<DrawInput>>,
+
     /// Why the inputs could not be read whole: the first part that could
     /// not, and why.
     pub problem: Option<String>,
+
     /// How many bytes the binary frame sent just before this answer holds:
     /// the bytes and numbers the inputs' `bytes` and `numbers` lie in.
     pub bytes: u64,
@@ -1947,6 +2260,7 @@ pub struct Drawing {
 pub struct DrawInput {
     pub name: String,
     pub value: Datum,
+
     /// The part of the drawn value the input is, when it is one.
     pub path: Option<String>,
 }
@@ -1959,15 +2273,18 @@ pub enum Datum {
     Bool {
         b: bool,
     },
+
     /// An integer of at most 32 bits, or one the view writes, such as
     /// `64`, that a double holds exactly.
     Int {
         i: i64,
     },
+
     /// An integer of 64 or 128 bits, a pointer, or an address, in decimal.
     Big {
         big: String,
     },
+
     /// A float, as the shortest text that reads back as its nearest
     /// double: `NaN`, `Infinity`, and `-Infinity` included.
     Float {
@@ -1976,11 +2293,13 @@ pub enum Datum {
     Text {
         s: String,
     },
+
     /// An enumeration's value and the enumerator it equals.
     Enum {
         name: Option<String>,
         value: Box<Self>,
     },
+
     /// The variant a sum type holds, and its payload.
     Sum {
         variant: String,
@@ -1992,6 +2311,7 @@ pub enum Datum {
     List {
         items: Vec<Self>,
     },
+
     /// Numbers of one kind, `count` of them at `offset` in the drawing's
     /// bytes, little-endian.
     Numbers {
@@ -1999,11 +2319,13 @@ pub enum Datum {
         offset: u64,
         count: u64,
     },
+
     /// `length` bytes at `offset` in the drawing's bytes.
     Bytes {
         offset: u64,
         length: u64,
     },
+
     /// A map's entries, each a key and a value, in its view's order.
     Entries {
         entries: Vec<(Self, Self)>,
@@ -2033,8 +2355,10 @@ pub enum NumberKind {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Memory {
     pub address: String,
+
     /// The bytes read, as hexadecimal pairs with no separator.
     pub bytes: String,
+
     /// The first address that could not be read, when the read stopped
     /// short.
     pub unreadable: Option<String>,
@@ -2054,8 +2378,10 @@ pub struct StepCall {
     /// The call instruction's address, in hexadecimal, which names it to a
     /// step.
     pub call: String,
+
     /// The function it calls, when something names it.
     pub callee: Option<String>,
+
     /// The address a direct call calls, in hexadecimal; none for an
     /// indirect call.
     pub target: Option<String>,
@@ -2068,9 +2394,11 @@ pub struct TaskList {
     /// What the runtimes call a task, such as `task` or `goroutine`.
     pub noun: Option<String>,
     pub tasks: Vec<Task>,
+
     /// Whether there are more tasks than those listed, which the list
     /// leaves out to stay small.
     pub more: bool,
+
     /// Why the list may be missing tasks, or describe some wrongly.
     pub gaps: Vec<String>,
 }
@@ -2080,16 +2408,21 @@ pub struct TaskList {
 pub struct Task {
     pub key: TaskKey,
     pub state: TaskState,
+
     /// The code the program wrote that it is in, as the CLI says it.
     pub place: String,
+
     /// The frame of that code in the task's stack, which choosing the task
     /// shows; absent for a task that runs only its runtime's code.
     pub frame: Option<Frame>,
+
     /// The runtime's own words for what it does or waits for.
     pub detail: Option<String>,
+
     /// Labels the program or runtime gave it, such as `{runtime: "local
     /// set 3"}`.
     pub labels: Option<String>,
+
     /// The thread running it.
     pub thread: Option<u64>,
 }
@@ -2115,9 +2448,11 @@ pub struct Registers {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Register {
     pub name: String,
+
     /// As hexadecimal; absent where a caller's frame did not save it.
     pub value: Option<String>,
     pub bits: u16,
+
     /// `pc`, `sp`, or `fp`.
     pub role: Option<String>,
 }
@@ -2141,17 +2476,22 @@ pub struct Module {
     pub id: u64,
     pub name: String,
     pub path: String,
+
     /// Where it is loaded, as hexadecimal.
     pub start: Option<String>,
     pub end: Option<String>,
+
     /// `debug` with debug information, `symbols` with only a symbol table,
     /// or `none`.
     pub symbols: String,
+
     /// The separate file its debug information came from, when its own
     /// file was stripped of it.
     pub debug_file: Option<String>,
+
     /// Why the separate debug file found for it could not be used.
     pub debug_file_problem: Option<String>,
+
     /// Why not all of its debug information could be read.
     pub debug_information_problem: Option<String>,
 }
@@ -2374,6 +2714,7 @@ mod tests {
             text.push_str(&declare(&config));
             text.push('\n');
         }
+
         text
     }
 
@@ -2386,6 +2727,7 @@ mod tests {
             std::fs::write(GENERATED, &expected).expect("write the generated protocol");
             return;
         }
+
         let actual = std::fs::read_to_string(GENERATED).unwrap_or_default();
         assert!(
             actual == expected,
@@ -2411,6 +2753,7 @@ mod tests {
         else {
             panic!("a launch");
         };
+
         assert_eq!(launch.environment, [("A".to_owned(), "1".to_owned())]);
         assert!(!launch.replace && !launch.run);
         assert!(

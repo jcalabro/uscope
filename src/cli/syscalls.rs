@@ -41,6 +41,7 @@ use crate::present::syscalls::{
 pub enum EngineArg {
     /// eBPF in the kernel: no stops, needs `CAP_BPF` and `CAP_PERFMON`.
     Bpf,
+
     /// ptrace with a seccomp filter: exact, unprivileged, slower.
     Ptrace,
 }
@@ -74,76 +75,98 @@ pub struct SyscallsArgs {
     /// raw=, verbose=, or abbrev=. A bare set means trace=.
     #[arg(short = 'e', value_name = "EXPR")]
     expressions: Vec<String>,
+
     /// Trace the running process PID; repeat it, or separate pids with
     /// commas.
     #[arg(short = 'p', long = "attach-pid", value_name = "PID")]
     pids: Vec<String>,
+
     /// Trace children too (the default); twice, with -o, writes each
     /// process to FILE.PID.
     #[arg(short = 'f', action = clap::ArgAction::Count)]
     follow: u8,
+
     /// Trace only the targets, not the processes they create.
     #[arg(long, conflicts_with = "follow")]
     no_follow: bool,
+
     /// Stop tracing a process when it calls SYSCALL; only execve.
     #[arg(short = 'b', value_name = "SYSCALL")]
     detach_on: Option<String>,
+
     /// Count calls, errors, and time, and print a table at the end
     /// instead of the calls.
     #[arg(short = 'c', conflicts_with = "summary_too")]
     summary_only: bool,
+
     /// Print the calls and the table.
     #[arg(short = 'C')]
     summary_too: bool,
+
     /// Time calls by wall clock, from entry to exit. uscope always does.
     #[arg(short = 'w')]
     wall_clock: bool,
+
     /// Sort the table by a column: time, calls, errors, name, p99, or
     /// nothing.
     #[arg(short = 'S', value_name = "SORTBY", default_value = "time")]
     sort: String,
+
     /// The table's columns, separated by commas: time-percent, total-time,
     /// min-time, max-time, avg-time, calls, errors, name, p50, p90, p99,
     /// bytes, errnos.
     #[arg(short = 'U', value_name = "COLUMNS")]
     columns: Option<String>,
+
     /// Print what descriptors refer to; twice adds sockets' endpoints.
     #[arg(short = 'y', action = clap::ArgAction::Count)]
     decode_fds: u8,
+
     /// Bytes of each string shown.
     #[arg(short = 's', value_name = "SIZE", default_value_t = 32)]
     string_limit: usize,
+
     /// Print non-ASCII strings in hex; twice, every string.
     #[arg(short = 'x', action = clap::ArgAction::Count)]
     hex: u8,
+
     /// How constants print.
     #[arg(short = 'X', value_enum, value_name = "FORMAT")]
     constants: Option<ConstantsArg>,
+
     /// Print whole structures and environments.
     #[arg(short = 'v')]
     verbose: bool,
+
     /// Align results at COLUMN, as strace does.
     #[arg(short = 'a', value_name = "COLUMN", default_value_t = 40)]
     column: usize,
+
     /// Print each call's number.
     #[arg(short = 'n')]
     numbers: bool,
+
     /// Name each argument as the kernel does.
     #[arg(short = 'N')]
     arg_names: bool,
+
     /// Print each process's command name beside its pid.
     #[arg(short = 'Y')]
     comm: bool,
+
     /// Print the time of day; twice, with microseconds; three times, as
     /// seconds since the epoch.
     #[arg(short = 't', action = clap::ArgAction::Count)]
     timestamps: u8,
+
     /// Print the time since the previous line.
     #[arg(short = 'r')]
     relative: bool,
+
     /// Print the time each call took.
     #[arg(short = 'T')]
     durations: bool,
+
     /// Print the stack of each call; -kk adds source lines. -k=dwarf has
     /// the BPF engine copy the stack and unwind it by call-frame
     /// information, rather than walk its frame pointers.
@@ -156,78 +179,101 @@ pub struct SyscallsArgs {
         action = clap::ArgAction::Append
     )]
     stacks: Vec<String>,
+
     /// The most frames of a stack -k prints.
     #[arg(long, value_name = "LIMIT", default_value_t = 256)]
     stack_trace_frame_limit: usize,
+
     /// Write the trace to FILE; `-` is standard output. A FILE ending in
     /// `.usprof` gets a capture, which `uscope report` and the web UI read.
     #[arg(short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
+
     /// Append to -o's file.
     #[arg(short = 'A', requires = "output")]
     append: bool,
+
     /// When to color the trace.
     #[arg(long, value_enum)]
     color: Option<ColorChoice>,
+
     /// Suppress messages about attaching; twice, about exits too.
     #[arg(short = 'q', action = clap::ArgAction::Count)]
     quiet: u8,
+
     /// Show only calls that succeeded.
     #[arg(short = 'z', conflicts_with = "failed_only")]
     successful_only: bool,
+
     /// Show only calls that failed.
     #[arg(short = 'Z')]
     failed_only: bool,
+
     /// Show only calls that name PATH, by argument or descriptor.
     #[arg(short = 'P', value_name = "PATH")]
     paths: Vec<String>,
+
     /// Show only calls on these descriptors, separated by commas.
     #[arg(long, value_name = "FDS")]
     trace_fds: Option<String>,
+
     /// Show only calls that took at least this long: 10ms, 2us, 1s.
     #[arg(long, value_name = "DURATION")]
     slower_than: Option<String>,
+
     /// Show one call in N, as 1/N; the table still counts every call.
     #[arg(long, value_name = "1/N")]
     sample: Option<String>,
+
     /// How the trace is written.
     #[arg(long, value_enum, default_value = "text")]
     format: OutputFormat,
+
     /// Report calls blocked longer than this, while they are: 1s, 500ms,
     /// or off.
     #[arg(long, value_name = "DURATION", default_value = "1s")]
     in_flight: String,
+
     /// Which engine sees the calls. There is never a fallback.
     #[arg(long, value_enum, default_value = "bpf")]
     engine: EngineArg,
+
     /// Allow the ptrace engine to attach, which stops the process at every
     /// system call it makes.
     #[arg(long)]
     stop_every_call: bool,
+
     /// Where the BPF engine attaches.
     #[arg(long, value_enum, default_value = "auto")]
     attach: AttachArg,
+
     /// The BPF engine's ring buffer: bytes, with K or M.
     #[arg(long, value_name = "SIZE")]
     ring: Option<String>,
+
     /// Hold the trace's cost to PERCENT of one CPU: over it, drop stacks,
     /// cut strings, sample calls, then only count them, a step a second.
     #[arg(long, value_name = "PERCENT")]
     budget: Option<f64>,
+
     /// Trace every process of a cgroup.
     #[arg(long, value_name = "PATH", conflicts_with = "container")]
     cgroup: Option<PathBuf>,
+
     /// Trace every process of a container, by its id.
     #[arg(long, value_name = "ID")]
     container: Option<String>,
+
     /// Stop tracing after this long: 30s, 5m.
     #[arg(long, value_name = "DURATION")]
     duration: Option<String>,
+
     /// Trace without end into DIR: a file every --segment holding that
     /// span's statistics, and the last --window of calls in DIR/windows on
     /// SIGUSR2 or a trigger. `uscope report DIR` reads the segments as one.
     #[arg(long, value_name = "DIR", conflicts_with = "output")]
     continuous: Option<PathBuf>,
+
     /// How long each segment of --continuous spans: 60s, 5m.
     #[arg(
         long,
@@ -236,6 +282,7 @@ pub struct SyscallsArgs {
         requires = "continuous"
     )]
     segment: String,
+
     /// How long --continuous keeps its files: 30m, 24h, 7d.
     #[arg(
         long,
@@ -244,6 +291,7 @@ pub struct SyscallsArgs {
         requires = "continuous"
     )]
     keep: String,
+
     /// How much of the latest calls --continuous holds for a trigger.
     #[arg(
         long,
@@ -252,12 +300,15 @@ pub struct SyscallsArgs {
         requires = "continuous"
     )]
     window: String,
+
     /// Save the window when a call takes at least this long: 100ms.
     #[arg(long, value_name = "DURATION", requires = "continuous")]
     trigger_slower_than: Option<String>,
+
     /// Save the window when a call fails with one of these: EIO,ENOSPC.
     #[arg(long, value_name = "ERRNOS", requires = "continuous")]
     trigger_errno: Option<String>,
+
     /// The program to trace and its arguments.
     #[arg(last = true, value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -289,6 +340,7 @@ fn nanoseconds(text: &str) -> Result<u64> {
         "h" => 3600e9,
         _ => bail!("{text} is not a duration, such as 10ms, 2us, or 1s"),
     };
+
     let number: f64 = number
         .parse()
         .with_context(|| format!("{text} is not a duration, such as 10ms, 2us, or 1s"))?;
@@ -314,11 +366,13 @@ fn pids(texts: &[String]) -> Result<Vec<u32>> {
             if pid == 0 {
                 bail!("0 is not a process id");
             }
+
             if !pids.contains(&pid) {
                 pids.push(pid);
             }
         }
     }
+
     Ok(pids)
 }
 
@@ -360,6 +414,7 @@ struct Stacks {
     /// Unwind a copy of the stack by call-frame information, rather than
     /// walk the frame pointers; the ptrace engine always does.
     dwarf: bool,
+
     /// Name each frame's source line, as -kk does.
     lines: bool,
 }
@@ -370,12 +425,14 @@ fn stacks(args: &SyscallsArgs) -> Result<Option<Stacks>> {
     if given.is_empty() {
         return Ok(None);
     }
+
     if !given
         .iter()
         .all(|&unwind| unwind == "fp" || unwind == "dwarf")
     {
         bail!("-k takes nothing, or =dwarf");
     }
+
     let dwarf = given.contains(&"dwarf");
     if dwarf && args.engine == EngineArg::Ptrace {
         bail!(
@@ -383,6 +440,7 @@ fn stacks(args: &SyscallsArgs) -> Result<Option<Stacks>> {
              information"
         );
     }
+
     Ok(Some(Stacks {
         dwarf,
         lines: given.len() > 1,
@@ -405,6 +463,7 @@ fn check_targets(args: &SyscallsArgs, attached: &[u32]) -> Result<()> {
             }
         }
     }
+
     let launching = !args.command.is_empty();
     let cgroup = args.cgroup.is_some() || args.container.is_some();
     if [launching, !attached.is_empty(), cgroup]
@@ -415,23 +474,28 @@ fn check_targets(args: &SyscallsArgs, attached: &[u32]) -> Result<()> {
     {
         bail!("give one target: a program after --, -p PID, --cgroup, or --container");
     }
+
     if args.summary_only && (args.trigger_slower_than.is_some() || args.trigger_errno.is_some()) {
         bail!("a trigger needs the calls themselves, which -c does not keep");
     }
+
     if cgroup && args.no_follow {
         bail!("--no-follow cannot narrow a cgroup, whose every process is traced");
     }
+
     if !launching && attached.is_empty() && args.cgroup.is_none() && args.container.is_none() {
         bail!(
             "nothing to trace: give a program after --, or -p PID; uscope never traces the whole host"
         );
     }
+
     if args.detach_on.is_some() && launching && args.engine == EngineArg::Ptrace {
         bail!(
             "-b execve cannot detach a launched program from the ptrace engine: its seccomp filter \
              would then fail the traced calls with ENOSYS"
         );
     }
+
     if args.engine == EngineArg::Ptrace && !attached.is_empty() && !args.stop_every_call {
         bail!(
             "attaching the ptrace engine stops the process at every system call it makes, \
@@ -439,6 +503,7 @@ fn check_targets(args: &SyscallsArgs, attached: &[u32]) -> Result<()> {
              Pass --stop-every-call to accept that, or use --engine bpf"
         );
     }
+
     Ok(())
 }
 
@@ -447,12 +512,15 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
     if args.successful_only {
         expressions.push("status=successful".to_owned());
     }
+
     if args.failed_only {
         expressions.push("status=failed".to_owned());
     }
+
     if let Some(fds) = &args.trace_fds {
         expressions.push(format!("trace-fds={fds}"));
     }
+
     let mut filter = Filter::parse(&expressions, &present::signal_named)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     filter.paths.clone_from(&args.paths);
@@ -465,20 +533,24 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
             .filter(|&n| n > 0)
             .with_context(|| format!("--sample takes 1/N, not {text}"))?,
     };
+
     let in_flight = match args.in_flight.as_str() {
         "off" | "0" => None,
         text => Some(nanoseconds(text).context("--in-flight")?),
     };
+
     let columns = match &args.columns {
         Some(text) => summary::columns(text).map_err(anyhow::Error::msg)?,
         None => Column::DEFAULT.to_vec(),
     };
+
     let sort = summary::sort_key(&args.sort).map_err(anyhow::Error::msg)?;
     if let Some(call) = &args.detach_on
         && call != "execve"
     {
         bail!("-b takes only execve, not {call}");
     }
+
     let attached = pids(&args.pids)?;
     check_targets(args, &attached)?;
     let launching = !args.command.is_empty();
@@ -488,6 +560,7 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
     {
         bail!("--budget takes a percent of one CPU above 0, not {percent}");
     }
+
     let stacks = stacks(args)?;
     if cgroup && stacks.is_some() {
         bail!("-k cannot unwind a cgroup's stacks yet; trace a program or -p PID");
@@ -502,6 +575,7 @@ fn plan(args: &SyscallsArgs) -> Result<Plan> {
     } else {
         None
     };
+
     Ok(Plan {
         filter,
         target,
@@ -546,12 +620,14 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         (None, Some(id)) => Some(Cgroup::container(id)?),
         (None, None) => None,
     };
+
     let stop = Arc::new(AtomicBool::new(false));
     let trigger = Arc::new(AtomicBool::new(false));
     super::profile::handle_signals(Some(stop.clone()), trigger.clone())?;
     if let Some(text) = &args.duration {
         stop_after(text, stop.clone())?;
     }
+
     // The descriptor table must see every call that changes it, shown or
     // not, for what -y, -P, and ndjson's paths say to be true.
     let mut calls = plan.filter.calls.clone();
@@ -560,6 +636,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             calls.insert(id);
         }
     }
+
     // -n numbers a process's exit line with the call that ended it.
     if args.numbers {
         for abi in Abi::ALL {
@@ -570,6 +647,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             }
         }
     }
+
     let options = TraceOptions {
         calls,
         limits: Limits {
@@ -585,12 +663,14 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         follow: plan.follow,
         stacks: plan.stacks.map(|_| SharedStacks::default()),
     };
+
     let mut printer = Printer::new(args, &plan)?;
     printer.stacks.clone_from(&options.stacks);
     printer.trigger = trigger;
     if let Some(directory) = &args.continuous {
         printer.continuous = Some(continuous(args, directory, options.stacks.clone())?);
     }
+
     if let Some((_, capture)) = &mut printer.capture {
         *capture = SyscallCapture::new(options.stacks.clone());
         let program: Vec<_> = args
@@ -603,11 +683,14 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             EngineArg::Bpf => "bpf",
             EngineArg::Ptrace => "ptrace",
         };
+
         capture.setting("syscalls", engine);
     }
+
     for &pid in &plan.attached {
         printer.processes.insert(Pid::new(pid));
     }
+
     let engine = bpf_options(args, &plan, ring);
     let finished = match (target, cgroup) {
         (Some(target), _) if args.engine == EngineArg::Ptrace => {
@@ -619,6 +702,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
         (None, Some(cgroup)) => trace_cgroup(cgroup, &options, engine, &stop, &mut printer),
         (None, None) => bail!("nothing to trace"),
     };
+
     for &pid in &plan.attached {
         let process = Pid::new(pid);
         if printer.quiet == 0
@@ -628,12 +712,15 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             printer.message(&format!("Process {pid} detached"));
         }
     }
+
     printer.finish()?;
     let Finished { end } = finished?;
+
     // An attached process's end is its own business, as under strace.
     if !plan.attached.is_empty() {
         return Ok(0);
     }
+
     Ok(match end {
         Some(ProcessEnd::Exited(code)) => code & 0xff,
         Some(ProcessEnd::Killed { signal, .. }) => 128 + signal,
@@ -655,9 +742,11 @@ fn trace_cgroup(
             if printer.quiet == 0 {
                 printer.message(&format!("Showing pids as the host sees them: {reason}"));
             }
+
             None
         }
     };
+
     printer.setting("cgroup", &cgroup.path.to_string_lossy());
     printer.cgroup = Some(cgroup.path.clone());
     Ok(bpf::trace_cgroup(
@@ -690,6 +779,7 @@ fn continuous(
     if segment == 0 {
         bail!("--segment must be longer than nothing");
     }
+
     let errnos = match &args.trigger_errno {
         Some(names) => names
             .split(',')
@@ -701,6 +791,7 @@ fn continuous(
             .collect::<Result<Vec<_>>>()?,
         None => Vec::new(),
     };
+
     let mut settings = vec![(
         "syscalls".to_owned(),
         match args.engine {
@@ -734,6 +825,7 @@ fn continuous(
         errnos,
         settings,
     };
+
     eprintln!(
         "uscope: writing a segment every {} to {}, keeping {}; `kill -USR2 {}` saves the last {}",
         args.segment,
@@ -754,11 +846,14 @@ struct Printer {
     filter: Filter,
     format: OutputFormat,
     style: Style,
+
     /// The renderer that colors text; none for files.
     renderer: Option<Renderer>,
     output: Output,
+
     /// With -ff: FILE, each process writing FILE.PID.
     per_process: Option<(PathBuf, BTreeMap<u32, Output>)>,
+
     /// Prefixes `PID ` rather than `[pid PID] `, as strace does in files.
     bare_pid: bool,
     show_calls: bool,
@@ -776,15 +871,19 @@ struct Printer {
     sample: u64,
     sampled: u64,
     in_flight: Option<u64>,
+
     /// The cgroup traced, said once its programs are attached.
     cgroup: Option<PathBuf>,
+
     /// The budget's notes so far, each a setting of the capture's.
     budget_notes: u32,
     continuous: Option<Continuous>,
+
     /// Set by SIGUSR2, which saves a continuous trace's window.
     trigger: Arc<AtomicBool>,
     columns: Vec<Column>,
     sort: Option<Column>,
+
     /// `CLOCK_REALTIME` minus `CLOCK_MONOTONIC`, and the local zone's
     /// offset, in nanoseconds.
     realtime: i128,
@@ -794,22 +893,29 @@ struct Printer {
     processes: BTreeSet<Pid>,
     ended: BTreeSet<Pid>,
     names: BTreeMap<Pid, String>,
+
     /// The number of the call that ended each process, and each thread,
     /// when one did.
     endings: BTreeMap<Pid, u32>,
     thread_endings: BTreeMap<Tid, u32>,
+
     /// In-flight calls already reported, by thread and entry time.
     reported: BTreeSet<(Tid, u64)>,
+
     /// Each thread's last ABI, where it is not x86-64's.
     personalities: BTreeMap<Tid, Abi>,
     error: Option<io::Error>,
+
     /// The ndjson line of a call being written.
     line: Vec<u8>,
+
     /// Names the frames of each call's stack, with -k.
     stacks: Option<SharedStacks>,
+
     /// With -kk, each frame's source line too.
     stack_lines: bool,
     frame_limit: usize,
+
     /// With `-o FILE.usprof`, the file and the capture of what is shown.
     capture: Option<(PathBuf, SyscallCapture)>,
 }
@@ -820,8 +926,10 @@ struct Printer {
 struct Background {
     buffer: Vec<u8>,
     to_writer: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+
     /// Buffers written, emptied for reuse, or the error writing one met.
     from_writer: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+
     /// Buffers sent and not yet returned.
     sent: usize,
     writer: Option<std::thread::JoinHandle<()>>,
@@ -844,6 +952,7 @@ impl Background {
                     } else {
                         file.write_all(&buffer)
                     };
+
                     buffer.clear();
                     if to_main.send(written.map(|()| buffer)).is_err() {
                         break;
@@ -865,6 +974,7 @@ impl Background {
         if self.writer.is_none() {
             return Err(io::Error::other("the output thread could not start"));
         }
+
         self.to_writer
             .as_ref()
             .ok_or_else(gone)?
@@ -881,6 +991,7 @@ impl Background {
             self.sent -= 1;
             next = Some(returned?);
         }
+
         let next = next.unwrap_or_else(|| Vec::with_capacity(BACKGROUND_BYTES));
         let full = std::mem::replace(&mut self.buffer, next);
         self.send(full)
@@ -893,6 +1004,7 @@ impl Write for Background {
         if self.buffer.len() >= BACKGROUND_BYTES {
             self.send_collected()?;
         }
+
         Ok(bytes.len())
     }
 
@@ -900,6 +1012,7 @@ impl Write for Background {
         if !self.buffer.is_empty() {
             self.send_collected()?;
         }
+
         self.send(Vec::new())?;
         let mut result = Ok(());
         while self.sent > 0 {
@@ -914,6 +1027,7 @@ impl Write for Background {
                 result = Err(error);
             }
         }
+
         result
     }
 }
@@ -942,6 +1056,7 @@ struct CallRecord {
     pid: u32,
     process_exited: bool,
     ret: Option<i64>,
+
     /// The stack, already JSON: an array of frames.
     stack: Option<String>,
     text: String,
@@ -957,15 +1072,18 @@ impl CallRecord {
         if let Some(abi) = self.abi {
             json_field(out, b"\"abi\":", abi);
         }
+
         out.extend_from_slice(b"\"args\":{");
         for (index, (name, value)) in self.args.iter().enumerate() {
             if index > 0 {
                 out.push(b',');
             }
+
             json_string(out, name);
             out.push(b':');
             json_string(out, value);
         }
+
         out.extend_from_slice(b"},");
         if let Some(duration) = self.duration_ns {
             json_number(
@@ -974,26 +1092,32 @@ impl CallRecord {
                 duration.try_into().unwrap_or(i64::MAX),
             );
         }
+
         if let Some(errno) = &self.errno {
             json_field(out, b"\"errno\":", errno);
         }
+
         json_field(out, b"\"name\":", &self.name);
         json_number(out, b"\"number\":", self.number.into());
         if let Some(path) = &self.path {
             json_field(out, b"\"path\":", path);
         }
+
         json_number(out, b"\"pid\":", self.pid.into());
         if self.process_exited {
             out.extend_from_slice(b"\"process_exited\":true,");
         }
+
         if let Some(ret) = self.ret {
             json_number(out, b"\"return\":", ret);
         }
+
         if let Some(stack) = &self.stack {
             out.extend_from_slice(b"\"stack\":");
             out.extend_from_slice(stack.as_bytes());
             out.push(b',');
         }
+
         json_field(out, b"\"text\":", &self.text);
         json_number(out, b"\"tid\":", self.tid.into());
         json_number(out, b"\"time_ns\":", self.time_ns);
@@ -1001,9 +1125,11 @@ impl CallRecord {
         if self.unavailable {
             out.extend_from_slice(b",\"unavailable\":true");
         }
+
         if self.unfinished {
             out.extend_from_slice(b",\"unfinished\":true");
         }
+
         out.push(b'}');
     }
 }
@@ -1022,6 +1148,7 @@ fn json_number(out: &mut Vec<u8>, key: &[u8], value: i64) {
     if value < 0 {
         out.push(b'-');
     }
+
     let mut digits = [0; 20];
     let mut rest = value.unsigned_abs();
     let mut at = digits.len();
@@ -1031,6 +1158,7 @@ fn json_number(out: &mut Vec<u8>, key: &[u8], value: i64) {
         at -= 2;
         digits[at..at + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
     }
+
     let pair = usize::try_from(rest).unwrap_or(0) * 2;
     if rest >= 10 {
         at -= 2;
@@ -1039,6 +1167,7 @@ fn json_number(out: &mut Vec<u8>, key: &[u8], value: i64) {
         at -= 1;
         digits[at] = PAIRS[pair + 1];
     }
+
     out.extend_from_slice(&digits[at..]);
     out.push(b',');
 }
@@ -1062,6 +1191,7 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
         out.push(b'"');
         return;
     }
+
     let mut start = 0;
     for (index, &byte) in bytes.iter().enumerate() {
         let escape: &[u8] = match byte {
@@ -1075,6 +1205,7 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
             0..0x20 => b"",
             _ => continue,
         };
+
         out.extend_from_slice(&bytes[start..index]);
         start = index + 1;
         if escape.is_empty() {
@@ -1086,6 +1217,7 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
             out.extend_from_slice(escape);
         }
     }
+
     out.extend_from_slice(&bytes[start..]);
     out.push(b'"');
 }
@@ -1098,6 +1230,7 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
 fn zone_offset(seconds: i64) -> i64 {
     // SAFETY: zeroes are a valid `tm`, which is plain data.
     let mut local: nix::libc::tm = unsafe { std::mem::zeroed() };
+
     // SAFETY: both pointers name live locals of the right types, and
     // localtime_r writes only through the second.
     let converted = unsafe { nix::libc::localtime_r(&raw const seconds, &raw mut local) };
@@ -1157,11 +1290,13 @@ impl Printer {
                 .open(path)
                 .with_context(|| format!("opening {}", path.display()))
         };
+
         let to_file = args.output.as_ref().filter(|path| path.as_os_str() != "-");
         let capture = to_file.filter(|path| path.extension().is_some_and(|ext| ext == "usprof"));
         if capture.is_some() && (args.follow >= 2 || args.append) {
             bail!("-ff and -A write text: a capture is one file, written once");
         }
+
         let color = args.color.unwrap_or_default();
         let (output, renderer, per_process): (Output, Option<Renderer>, _) =
             match (&args.output, to_file) {
@@ -1254,6 +1389,7 @@ impl Printer {
         if let Some((_, capture)) = &mut self.capture {
             capture.setting(key, value);
         }
+
         if let Some(continuous) = &mut self.continuous {
             continuous.setting(key, value);
         }
@@ -1264,6 +1400,7 @@ impl Printer {
         if self.format == OutputFormat::Ndjson {
             return;
         }
+
         let line = format!("uscope: {text}\n");
         if let Err(error) = io::stderr().write_all(line.as_bytes()) {
             self.error.get_or_insert(error);
@@ -1282,6 +1419,7 @@ impl Printer {
         } else {
             process.get()
         };
+
         self.write_bytes(file, line.as_bytes());
     }
 
@@ -1304,6 +1442,7 @@ impl Printer {
             },
             None => Some(&mut self.output),
         };
+
         if let Some(output) = output
             && let Err(error) = output
                 .write_all(line)
@@ -1317,6 +1456,7 @@ impl Printer {
         let Some(renderer) = self.renderer else {
             return tokens.text();
         };
+
         tokens
             .0
             .iter()
@@ -1332,6 +1472,7 @@ impl Printer {
                     Kind::Missing => Some(Role::Warning),
                     Kind::Punctuation | Kind::Text => None,
                 };
+
                 role.map_or_else(
                     || token.text.clone(),
                     |role| renderer.paint(role, &token.text).to_string(),
@@ -1343,6 +1484,7 @@ impl Printer {
     /// strace's leader: the pid, the time, and the call's number.
     fn leader(&mut self, thread: Tid, process: Pid, time: u64, number: Option<u32>) -> Tokens {
         let mut out = Tokens::default();
+
         // A loss is no thread's, and names none.
         if self.per_process.is_none() && self.threads.len() > 1 && thread != NO_THREAD {
             let name = self
@@ -1359,6 +1501,7 @@ impl Printer {
                 out.push(Kind::Punctuation, "] ");
             }
         }
+
         if self.relative {
             let since = self
                 .previous
@@ -1372,6 +1515,7 @@ impl Printer {
                 ),
             );
         }
+
         self.previous = Some(time);
         if self.timestamps > 0 {
             let wall = self.realtime + i128::from(time);
@@ -1400,14 +1544,17 @@ impl Printer {
                     clock
                 }
             };
+
             out.push(Kind::Time, text);
             out.push(Kind::Punctuation, " ");
         }
+
         if self.numbers
             && let Some(number) = number
         {
             out.push(Kind::Punctuation, format!("[{number:>4}] "));
         }
+
         out
     }
 
@@ -1415,10 +1562,12 @@ impl Printer {
         if !self.follow && !self.processes.is_empty() && !self.processes.contains(&event.process) {
             return;
         }
+
         if event.call.name().is_some_and(|name| ENDING.contains(&name)) {
             self.endings.insert(event.process, event.call.number);
             self.thread_endings.insert(event.thread, event.call.number);
         }
+
         let paths = filter::paths(event);
         let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         let fds = &self.fds;
@@ -1429,9 +1578,11 @@ impl Printer {
         if shows && let Some((_, capture)) = &mut self.capture {
             capture.call(event);
         }
+
         if shows && self.continuous.is_some() {
             self.continue_with(&TraceEvent::Call(event.clone()));
         }
+
         if shows && self.summarize {
             self.stats.entry(event.call).or_default().add(
                 event.outcome,
@@ -1439,9 +1590,11 @@ impl Printer {
                 bytes_moved(event),
             );
         }
+
         let mut style = self.style.clone();
         style.raw = self.filter.raw.contains(event.call);
         style.verbose = style.verbose || !self.filter.verbose.contains(event.call);
+
         // strace prints what descriptors named before the call, and what
         // the result names after it.
         let entry = (shows && self.show_calls).then(|| {
@@ -1468,10 +1621,12 @@ impl Printer {
         let Some((entry, arguments)) = entry else {
             return;
         };
+
         self.sampled += 1;
         if !(self.sampled - 1).is_multiple_of(self.sample) {
             return;
         }
+
         let returned = present::returned(
             event,
             &style,
@@ -1503,6 +1658,7 @@ impl Printer {
         let Some(stacks) = &self.stacks else {
             return Value::Null;
         };
+
         let frames = stacks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1511,6 +1667,7 @@ impl Printer {
             .iter()
             .map(|frame| {
                 let mut object = Map::new();
+
                 // A frame in no module has only its virtual address.
                 let address = frame
                     .module
@@ -1520,20 +1677,24 @@ impl Printer {
                 if let Some((module, _)) = &frame.module {
                     object.insert("module".into(), module.as_ref().into());
                 }
+
                 if let Some((symbol, offset)) = &frame.symbol {
                     object.insert("symbol".into(), symbol.as_ref().into());
                     object.insert("offset".into(), (*offset).into());
                 }
+
                 if let Some((file, line)) = &frame.source {
                     object.insert("file".into(), file.as_str().into());
                     object.insert("line".into(), (*line).into());
                 }
+
                 Value::Object(object)
             })
             .collect();
         if let Some(reason) = stack.truncation() {
             array.push(json!({ "ends": reason.describe() }));
         }
+
         Value::Array(array)
     }
 
@@ -1543,6 +1704,7 @@ impl Printer {
         let Some(stacks) = &self.stacks else {
             return Vec::new();
         };
+
         let addresses = &stack.addresses[..stack.addresses.len().min(self.frame_limit)];
         let frames = stacks
             .lock()
@@ -1557,6 +1719,7 @@ impl Printer {
                 {
                     let _ = write!(line, " {file}:{number}");
                 }
+
                 line
             })
             .collect();
@@ -1568,6 +1731,7 @@ impl Printer {
         } else if let Some(reason) = stack.truncation() {
             lines.push(format!(" > [stack ends: {}]", reason.describe()));
         }
+
         lines
     }
 
@@ -1577,13 +1741,16 @@ impl Printer {
         let Some((fd, direction)) = present::dumps::moves(event) else {
             return;
         };
+
         let dumps = match direction {
             present::dumps::Direction::Read => &self.filter.read_dumps,
             present::dumps::Direction::Write => &self.filter.write_dumps,
         };
+
         if !dumps.contains(&fd) {
             return;
         }
+
         for line in present::dumps::dump(event) {
             self.write_thread(event.process, event.thread, &line);
         }
@@ -1595,16 +1762,19 @@ impl Printer {
         let mut line = self.leader(thread, process, event.time(), Some(event.call.number));
         line.0.extend(entry.0);
         let width = line.text().len();
+
         // strace pads so that ` = ` begins at the column.
         if width + 1 < self.column {
             line.push(Kind::Punctuation, " ".repeat(self.column - 1 - width));
         }
+
         line.0.extend(returned.0);
         if self.durations
             && let Some(duration) = event.duration()
         {
             line.push(Kind::Time, format!(" <{}>", present::seconds(duration)));
         }
+
         let text = self.paint(&line);
         self.write_thread(process, thread, &text);
         self.dump(event);
@@ -1625,17 +1795,20 @@ impl Printer {
         if personality == event.call.abi {
             return;
         }
+
         if event.call.abi == Abi::X86_64 {
             self.personalities.remove(&event.thread);
         } else {
             self.personalities.insert(event.thread, event.call.abi);
         }
+
         if self.format == OutputFormat::Text && self.quiet == 0 {
             let mode = match event.call.abi {
                 Abi::X86_64 => "64 bit",
                 Abi::X86_32 => "32 bit",
                 Abi::X32 => "x32",
             };
+
             let note = format!("[ Process PID={} runs in {mode} mode. ]", event.thread);
             self.write(event.process, &note);
         }
@@ -1655,6 +1828,7 @@ impl Printer {
             Outcome::Failed(errno) => (Some(-i64::from(errno.0)), Some(present::errno(errno).0)),
             _ => (None, None),
         };
+
         let path = paths.into_iter().next().or_else(|| {
             filter::descriptors(event)
                 .find_map(|fd| self.fds.describe(event.process, fd))
@@ -1697,6 +1871,7 @@ impl Printer {
         if let Some(thread) = thread {
             object.insert("tid".into(), thread.get().into());
         }
+
         object
     }
 
@@ -1739,36 +1914,44 @@ impl Printer {
                 if !self.filter.signals.contains(&signal) {
                     return;
                 }
+
                 (thread, process)
             }
             TraceEvent::Exit { process, .. } => {
                 if self.quiet >= 2 {
                     return;
                 }
+
                 (process.leader(), process)
             }
+
             TraceEvent::ThreadExit {
                 thread, process, ..
             } => {
                 if self.quiet >= 2 {
                     return;
                 }
+
                 (thread, process)
             }
             TraceEvent::Lost { .. } => (NO_THREAD, NO_PROCESS),
             _ => return,
         };
+
         if !self.follow && !self.processes.contains(&process) && process != NO_PROCESS {
             return;
         }
+
         if !self.show_calls && !matches!(event, TraceEvent::Lost { .. }) {
             return;
         }
+
         match self.format {
             OutputFormat::Text => {
                 let Some(tokens) = present::other(event) else {
                     return;
                 };
+
                 let number = match event {
                     TraceEvent::Exit { process, .. } => self.endings.get(process).copied(),
                     TraceEvent::ThreadExit { thread, .. } => {
@@ -1776,6 +1959,7 @@ impl Printer {
                     }
                     _ => None,
                 };
+
                 let mut line = self.leader(thread, process, event.time(), number);
                 line.0.extend(tokens.0);
                 let text = self.paint(&line);
@@ -1814,11 +1998,14 @@ impl Printer {
                 if let Some(code) = code {
                     object.insert("code".into(), code.into());
                 }
+
                 if let Some(sender) = sender {
                     object.insert("sender".into(), sender.get().into());
                 }
+
                 object
             }
+
             TraceEvent::ThreadExit {
                 thread,
                 process,
@@ -1854,6 +2041,7 @@ impl Printer {
                 self.message(&format!("recorded the last segment to {}", path.display()));
             }
         }
+
         if self.summarize {
             let errno = |number: u16| present::errno(uscope::syscalls::Errno(number)).0;
             match self.format {
@@ -1894,6 +2082,7 @@ impl Printer {
                 }
             }
         }
+
         self.output.flush()?;
         if let Some((path, capture)) = self.capture.take() {
             capture
@@ -1901,11 +2090,13 @@ impl Printer {
                 .write(&path)
                 .with_context(|| format!("writing {}", path.display()))?;
         }
+
         if let Some((_, outputs)) = &mut self.per_process {
             for output in outputs.values_mut() {
                 output.flush()?;
             }
         }
+
         match self.error.take() {
             Some(error) if error.kind() != io::ErrorKind::BrokenPipe => {
                 Err(error).context("writing the trace")
@@ -1942,18 +2133,22 @@ impl Sink for Printer {
         {
             capture.event(&event);
         }
+
         if !matches!(event, TraceEvent::Call(_)) {
             self.continue_with(&event);
         }
+
         match &event {
             TraceEvent::Call(call) => {
                 if self.processes.is_empty() {
                     self.processes.insert(call.process);
                 }
+
                 self.note_thread(call.thread, call.process);
                 self.call(call);
                 return;
             }
+
             TraceEvent::Spawn {
                 child,
                 parent,
@@ -1966,6 +2161,7 @@ impl Sink for Printer {
                 if !*thread && let Some(name) = self.names.get(parent).cloned() {
                     self.names.insert(Pid::led_by(*child), name);
                 }
+
                 // strace calls every thread a process.
                 if self.follow && self.quiet == 0 {
                     self.message(&format!("Process {child} attached"));
@@ -1975,6 +2171,7 @@ impl Sink for Printer {
                 if self.processes.is_empty() {
                     self.processes.insert(*process);
                 }
+
                 let name: String = path
                     .rsplit('/')
                     .next()
@@ -1990,6 +2187,7 @@ impl Sink for Printer {
                         if let Some((_, capture)) = &mut self.capture {
                             capture.event(&seed);
                         }
+
                         self.fds.apply(&seed);
                     }
                 }
@@ -1997,6 +2195,7 @@ impl Sink for Printer {
             TraceEvent::Exit { process, .. } => {
                 self.ended.insert(*process);
             }
+
             TraceEvent::Signal {
                 thread, process, ..
             } => self.note_thread(*thread, *process),
@@ -2004,6 +2203,7 @@ impl Sink for Printer {
             | TraceEvent::Lost { .. }
             | TraceEvent::Descriptor { .. } => {}
         }
+
         self.other(&event);
         self.fds.apply(&event);
     }
@@ -2012,11 +2212,13 @@ impl Sink for Printer {
         let Some(after) = self.in_flight else {
             return;
         };
+
         let now = monotonic();
         for call in calls {
             if !self.reported.insert((call.thread, call.entered)) {
                 continue;
             }
+
             let event = SyscallEvent {
                 thread: call.thread,
                 process: call.process,
@@ -2029,9 +2231,11 @@ impl Sink for Printer {
                 stack: None,
                 flags: uscope::syscalls::EventFlags::default(),
             };
+
             if !self.filter.calls.contains(call.call) || !self.show_calls {
                 continue;
             }
+
             let blocked = now.saturating_sub(call.entered).max(after);
             match self.format {
                 OutputFormat::Text => {
@@ -2075,6 +2279,7 @@ impl Sink for Printer {
                 }
             }
         }
+
         // Forget calls that have returned.
         let live: BTreeSet<(Tid, u64)> = calls
             .iter()
@@ -2114,6 +2319,7 @@ impl Sink for Printer {
     fn budget(&mut self, _time: u64, note: &str) {
         self.budget_notes += 1;
         self.setting(&format!("budget {}", self.budget_notes), note);
+
         // What the trace leaves out from here, said even beside a file's
         // trace; -qq silences it.
         if self.quiet < 2 {
@@ -2124,6 +2330,7 @@ impl Sink for Printer {
     fn attached_by(&mut self, attachment: &Attachment) {
         self.setting("attach", attachment.name());
         self.setting("attach reason", &attachment.reason);
+
         // What tracing costs everyone else, which only tracepoints charge,
         // said even beside a file's trace; -qq silences it.
         if attachment.functions.is_empty() && self.quiet < 2 {
@@ -2134,6 +2341,7 @@ impl Sink for Printer {
                 attachment.reason
             ));
         }
+
         if let Some(cgroup) = &self.cgroup
             && self.quiet == 0
         {
@@ -2145,6 +2353,7 @@ impl Sink for Printer {
         if self.quiet == 0 {
             self.message(&format!("Process {process} attached"));
         }
+
         ptrace::seed_descriptors(process, self);
     }
 
@@ -2156,9 +2365,11 @@ impl Sink for Printer {
         for (&(_, call), stats) in &stats.by_call {
             self.stats.entry(call).or_default().merge(stats);
         }
+
         if let Some(continuous) = &mut self.continuous {
             continuous.counted(&stats);
         }
+
         if let Some((_, capture)) = &mut self.capture {
             capture.counted(&stats);
         }
@@ -2173,6 +2384,7 @@ fn ring_bytes(text: &str) -> Result<u32> {
         Some('M' | 'm') => 1 << 20,
         _ => 1,
     };
+
     let number = text.trim_end_matches(['K', 'k', 'M', 'm']);
     let bytes = number
         .parse::<u32>()
@@ -2182,6 +2394,7 @@ fn ring_bytes(text: &str) -> Result<u32> {
     if !bytes.is_power_of_two() || bytes < 4096 {
         bail!("--ring must be a power of two of at least 4K, not {text}");
     }
+
     Ok(bytes)
 }
 
@@ -2220,6 +2433,7 @@ mod tests {
             unavailable: true,
             unfinished: true,
         };
+
         let mut written = Vec::new();
         record.write(&mut written);
         let expected = json!({
@@ -2260,6 +2474,7 @@ mod tests {
             unavailable: false,
             unfinished: false,
         };
+
         let mut written = Vec::new();
         bare.write(&mut written);
         let expected = json!({

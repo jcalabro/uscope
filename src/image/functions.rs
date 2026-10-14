@@ -48,6 +48,7 @@ impl LocationRecord {
         if self.file.get() == NONE {
             return None;
         }
+
         Some(SourceLocation {
             file: SourceFileId::new(self.file.get()),
             line: LineNumber::new(self.line.get())?,
@@ -71,21 +72,28 @@ impl LocationRecord {
 )]
 pub struct FunctionRecord {
     pub name: U32,
+
     /// The linkage name, or [`NONE`].
     pub linkage_name: U32,
     pub declaration: LocationRecord,
+
     /// The function whose loop this one is the body of, or [`NONE`].
     pub enclosing: U32,
+
     /// The type of the coroutine the function runs, or [`NONE`].
     pub coroutine: U32,
+
     /// The function's first type argument in [`TableKind::Generics`].
     pub generics: Span<GenericRecord>,
+
     /// The function's first instance in [`TableKind::FunctionInstances`].
     pub instances: Span<Member>,
+
     /// A language that has no code of its own, by its DWARF code.
     pub other_language: U16,
     pub language: u8,
     pub role: u8,
+
     /// 1 for the program's main subprogram, else 0.
     pub main_subprogram: u8,
 }
@@ -115,15 +123,20 @@ impl Record for GenericRecord {
 )]
 pub struct InstanceRecord {
     pub function: U32,
+
     /// The nearest instance containing an inline expansion, or [`NONE`].
     pub parent: U32,
+
     /// An inline expansion's call, when described.
     pub call_site: LocationRecord,
+
     /// The instance's first range in [`TableKind::InstanceRanges`].
     pub ranges: Span<RangeRecord>,
+
     /// The instance's first recommended entry in
     /// [`TableKind::RecommendedEntries`].
     pub entries: Span<EntryRecord>,
+
     /// The preferred function breakpoint location, when `provenance` is
     /// not [`NONE_PROVENANCE`].
     pub entry: U64,
@@ -285,9 +298,11 @@ pub struct TooMany;
 /// What [`add_code_to`] encodes.
 pub struct Code<'a> {
     pub instances: &'a [CodeInstanceInfo],
+
     /// Where the line tables end prologues, in line-table order, which
     /// orders each instance's recommended entries.
     pub prologue_ends: &'a [ImageAddress],
+
     /// Where instructions are known to begin, by address, once each.
     pub instruction_starts: &'a [(ImageAddress, BoundaryEvidence)],
 }
@@ -315,6 +330,7 @@ pub fn add_code_to(builder: &mut Builder<'_>, code: &Code<'_>) -> Result<(), Too
             evidence: code_of(&EVIDENCE, evidence).ok_or(TooMany)?,
         });
     }
+
     builder.owned_table(starts);
     Ok(())
 }
@@ -358,6 +374,7 @@ fn add_functions(
             let main = strings.push(MAIN).ok_or(TooMany)?;
             names.push((MAIN, main, function.id.get()));
         }
+
         let first_generic = number(generics.len())?;
         for (parameter, argument) in function.generics.iter() {
             generics.push(GenericRecord {
@@ -365,6 +382,7 @@ fn add_functions(
                 argument: argument.get().into(),
             });
         }
+
         let instance_count =
             by_function[first_instance..].partition_point(|(owner, _)| *owner == function.id.get());
         let (language, other_language) = language_code(function.language).ok_or(TooMany)?;
@@ -386,6 +404,7 @@ fn add_functions(
         });
         first_instance += instance_count;
     }
+
     number(generics.len())?;
     builder
         .owned_table(records)
@@ -415,6 +434,7 @@ fn add_instances(
             CodeInstanceKind::OutOfLine => (None, 0),
             CodeInstanceKind::Inline { call_site } => (call_site.as_ref(), 1),
         };
+
         instance_records.push(InstanceRecord {
             function: instance.function.get().into(),
             parent: optional(instance.parent.map(CodeInstanceId::get)),
@@ -442,6 +462,7 @@ fn add_instances(
             });
         }
     }
+
     number(ranges.len())?;
     number(entry_records.len())?;
     builder
@@ -476,6 +497,7 @@ fn recommended_entries(
             }
         }
     }
+
     instances
         .iter()
         .zip(prologues)
@@ -543,6 +565,7 @@ impl<'a> FunctionView<'a> {
             index::named(self.strings, self.names, name)
                 .filter_map(move |id| self.indexed_function(id))
         };
+
         // `main` names a program's main subprogram rather than the C
         // `main` its runtime calls it from.
         let program = name == MAIN && found(name).any(Function::main_subprogram);
@@ -912,6 +935,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
         {
             return Err("a function is malformed".into());
         }
+
         next_generic += function.generics.count();
         next_member += function.instances.count() as usize;
         let own = function.instances.rows(members);
@@ -924,6 +948,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
             return Err("the instance index disagrees with the instances".into());
         }
     }
+
     if next_generic as usize != generics.len()
         || next_member != members.len()
         || members.len() != instances.len()
@@ -933,6 +958,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
     {
         return Err("the function indexes do not cover their tables".into());
     }
+
     let names = image.shared::<NameEntry>(TableKind::FunctionNames);
     let main = |function: &FunctionRecord| {
         aliased(
@@ -940,6 +966,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
             strings.bytes(StrId(function.name.get())),
         )
     };
+
     let aliases = functions.iter().filter(|function| main(function)).count();
     if names.len() != functions.len() + aliases
         || !index::valid_names(&strings, names, functions.len())
@@ -951,6 +978,7 @@ fn validate_functions(image: &Image) -> Result<(), String> {
     {
         return Err("the function name index disagrees with the functions".into());
     }
+
     Ok(())
 }
 
@@ -971,6 +999,7 @@ fn distinct_ranges(ranges: &[RangeRecord]) -> usize {
             })
             .count();
     }
+
     let mut keys = ranges.iter().map(key).collect::<Vec<_>>();
     keys.sort_unstable();
     keys.dedup();
@@ -991,6 +1020,7 @@ fn validate_instances(image: &Image) -> Result<(), String> {
             1 => true,
             _ => return Err("an instance is malformed".into()),
         };
+
         if instance.function.get() as usize >= functions.len()
             || (instance.parent.get() != NONE && instance.parent.get() as usize >= index)
             || !instance.call_site.valid(files)
@@ -1005,9 +1035,11 @@ fn validate_instances(image: &Image) -> Result<(), String> {
         {
             return Err("an instance is malformed".into());
         }
+
         next_range += instance.ranges.count();
         next_entry += instance.entries.count();
     }
+
     if next_range as usize != ranges.len()
         || next_entry as usize != entries.len()
         || !ranges
@@ -1019,9 +1051,11 @@ fn validate_instances(image: &Image) -> Result<(), String> {
     {
         return Err("an instance's ranges or entries are malformed".into());
     }
+
     // Each entry is one of its instance's ranges, and each range has one.
     let code_ranges = image.shared::<Interval>(TableKind::CodeRanges);
     let own = |instance: &InstanceRecord| instance.ranges.rows(ranges);
+
     // The index is strictly ordered, so it names each (range, instance)
     // once, and each of its intervals is one of its instance's ranges.
     // Then it holds every instance's every range exactly when it has as
@@ -1042,6 +1076,7 @@ fn validate_instances(image: &Image) -> Result<(), String> {
     {
         return Err("the code range index disagrees with the instances".into());
     }
+
     let starts = image.table::<StartRecord>();
     if !starts
         .iter()
@@ -1050,5 +1085,6 @@ fn validate_instances(image: &Image) -> Result<(), String> {
     {
         return Err("the instruction starts are malformed".into());
     }
+
     Ok(())
 }

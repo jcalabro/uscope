@@ -53,6 +53,7 @@ use crate::{
 pub struct VariableContext {
     pub stop_id: StopId,
     pub context: crate::ExecutionContext,
+
     /// The backtrace frame whose registers and call-frame address evaluate
     /// the values, which every capability they produce keeps.
     pub frame: StackFrameId,
@@ -73,18 +74,23 @@ pub enum StorageClass {
     /// The value is not held in addressable memory (a constant, a register,
     /// a computed value, or no location at all).
     NotMemory,
+
     /// Static storage at a module-relative address.
     Static,
+
     /// One thread's instance of thread-local storage.
     ThreadLocal,
+
     /// Storage addressed relative to a function activation.
     Frame {
         /// One location expression applies throughout the object's scope, so
         /// its address cannot move while the activation lives.
         stable: bool,
+
         /// The language runtime may move the stack holding the object.
         moving_stack: bool,
     },
+
     /// The address is computed from memory read during evaluation.
     Indirect,
 }
@@ -113,10 +119,13 @@ pub struct ReturnedValue {
     /// The result's name in the function, such as Go's `~r0` for one the
     /// source leaves unnamed.
     pub name: Arc<str>,
+
     /// Its type, unless its debug information is malformed.
     pub ty: Option<TypeId>,
+
     /// Its value as the call returned it, or why that cannot be known.
     pub value: Accessed,
+
     /// Why a generic result has its shape's type rather than its own.
     pub unresolved_shape: Option<crate::ShapeUnresolvedReason>,
 }
@@ -129,11 +138,14 @@ pub type Accessed = std::result::Result<Located, VariableState>;
 pub enum Step<'a> {
     /// Through a pointer or reference.
     Deref,
+
     /// To a member, through any pointers to the record holding it.
     Member(&'a str),
+
     /// To an element of an array or slice, holding `available` index values,
     /// of which an array takes one per dimension and a slice one.
     Index { available: usize },
+
     /// To the one base class subobject of a record whose type is a target.
     Base(BaseTarget<'a>),
 }
@@ -161,8 +173,10 @@ impl std::fmt::Debug for BaseTarget<'_> {
 #[derive(Clone)]
 pub struct PlannedStep {
     steps: Vec<dwarf::PathStep>,
+
     /// How many index values the step takes.
     consumed: usize,
+
     /// The type the step reaches, unless planning found it unavailable.
     result: Option<TypeId>,
 }
@@ -191,6 +205,7 @@ impl PlannedStep {
 pub struct TextLocation {
     /// The first byte's address.
     pub address: VirtualAddress,
+
     /// How many bytes there are, when the string records it rather than
     /// ending at a NUL.
     pub length: Option<u64>,
@@ -221,8 +236,10 @@ impl From<VariableUnavailableReason> for VariableRuntimeError {
 pub enum EntryParameter {
     /// The value a register held on entry.
     Register(DwarfRegister),
+
     /// The value stored, on entry, at the address a register held.
     Referent(DwarfRegister),
+
     /// The value passed for the parameter whose debug information entry
     /// is at this offset in the frame's module.
     Parameter(u64),
@@ -244,9 +261,11 @@ pub struct CallSiteId(pub(crate) usize);
 pub struct TailCallChain {
     /// The tail calls, in the order they ran.
     pub links: Arc<[CallSiteId]>,
+
     /// The linker name of each function entered: the call's target, then
     /// each link's. Another module may define one under the same name.
     pub functions: Arc<[Option<Arc<str>>]>,
+
     /// Where each link jumped from, when its call site says.
     pub jumps: Arc<[Option<TailJump>]>,
 }
@@ -257,6 +276,7 @@ pub struct TailJump {
     /// The jump's address, or the one after it where only that is
     /// described.
     pub instruction: ImageAddress,
+
     /// An address within the jump, whose code and source are the jumping
     /// function's.
     pub lookup: ImageAddress,
@@ -267,10 +287,13 @@ pub struct TailJump {
 pub enum CallTarget {
     /// Code in the same module.
     Code(ImageAddress),
+
     /// The function a linker symbol of this name defines, in any module.
     Symbol(Arc<str>),
+
     /// An address the call computed.
     Computed(VirtualAddress),
+
     /// The debug information does not say.
     Unknown,
 }
@@ -281,19 +304,23 @@ pub trait VariableRuntime {
         register: DwarfRegister,
     ) -> std::result::Result<VariableRegister, VariableRuntimeError>;
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError>;
+
     fn tls_address(
         &mut self,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
+
     /// Where `address` is in this module's image, or `None` when the
     /// module does not map it, such as code another module holds.
     fn image_address(&self, address: VirtualAddress) -> Option<ImageAddress>;
+
     fn read_memory(
         &mut self,
         address: VirtualAddress,
         size: usize,
     ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError>;
+
     /// The register-sized value `parameter` names on entry to the frame's
     /// function, which its caller's call site describes.
     fn entry_value(
@@ -301,6 +328,7 @@ pub trait VariableRuntime {
         parameter: EntryParameter,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<u64, VariableRuntimeError>;
+
     /// The name of the function whose first instruction `address` is, in
     /// whichever loaded module holds it.
     fn function_at(&self, address: VirtualAddress) -> Option<Arc<str>> {
@@ -542,11 +570,13 @@ pub fn load_program(path: &Path, data: &[u8], search: &DebugFileSearch) -> Resul
             .into(),
         ));
     }
+
     Ok(info)
 }
 
 #[cfg(target_arch = "x86_64")]
 const HOST_ARCHITECTURE: crate::Architecture = crate::Architecture::X86_64;
+
 #[cfg(target_arch = "aarch64")]
 const HOST_ARCHITECTURE: crate::Architecture = crate::Architecture::Aarch64;
 
@@ -623,6 +653,7 @@ mod tests {
                 .join("build/test-programs")
                 .join(name)
         };
+
         let modules = [
             (fixture("containers-rust-o2"), ModuleImageId::new(4)),
             (fixture("no-such-program"), ModuleImageId::new(5)),
@@ -635,6 +666,7 @@ mod tests {
                 assert!(load.is_err());
                 continue;
             }
+
             let image = &load.as_ref().expect("run `just build-test-programs`").image;
             assert_eq!((image.path(), image.id()), (path.as_path(), *id));
         }

@@ -53,6 +53,7 @@ pub fn add_to<'s>(
     names: &[Option<(&str, String)>],
 ) -> Result<(), TooMany> {
     let mut push = |text: &str| strings.push(text).ok_or(TooMany);
+
     // A path named twice keeps its last name.
     let mut paths = packages.into_iter().collect::<Vec<_>>();
     paths.reverse();
@@ -86,6 +87,7 @@ pub fn add_to<'s>(
             },
         });
     }
+
     builder
         .owned_table(packages)
         .owned_table(records)
@@ -154,6 +156,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("a package is malformed or out of order".into());
     }
+
     let functions = image.table::<super::functions::FunctionRecord>().len();
     let records = image.table::<PackagedRecord>();
     if !(records.is_empty() || records.len() == functions)
@@ -168,6 +171,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a packaged name is malformed".into());
     }
+
     // The index names each packaged function once, by its local name.
     let locals = image.shared::<NameEntry>(TableKind::LocalNames);
     let named = records
@@ -184,5 +188,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("the local name index disagrees".into());
     }
+
     Ok(())
 }

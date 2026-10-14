@@ -38,6 +38,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
         "uscope: cannot run {}: {error}",
         args.command[0].to_string_lossy()
     );
+
     // The shell's status for a command that could not be executed.
     ExitCode::from(127)
 }
@@ -49,6 +50,7 @@ fn launch(args: &LauncherArgs) -> io::Error {
         Ok(adapter) => adapter,
         Err(error) => return error,
     };
+
     let mut traced = [0];
     match adapter.read(&mut traced) {
         Ok(1) => {
@@ -56,6 +58,7 @@ fn launch(args: &LauncherArgs) -> io::Error {
             if let Ok(persona) = personality::get() {
                 let _ = personality::set(persona | Persona::ADDR_NO_RANDOMIZE);
             }
+
             Command::new(&args.command[0])
                 .args(&args.command[1..])
                 .exec()

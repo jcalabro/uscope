@@ -25,11 +25,13 @@ pub fn export(profile: &Profile) -> String {
             }));
         }
     }
+
     for zone in profile.zones() {
         let (name, category) = match &zone.value {
             Some(value) => (format!("{}={value}", zone.name), "label"),
             None => (zone.name.clone(), "zone"),
         };
+
         let mut event = json!({
             "ph": "X", "name": name, "cat": category, "pid": zone.pid, "tid": zone.tid,
             "ts": micros(zone.start), "dur": micros(zone.end) - micros(zone.start),
@@ -46,14 +48,17 @@ pub fn export(profile: &Profile) -> String {
         if !unseen.is_empty() {
             event["args"] = json!({"unseen": unseen});
         }
+
         events.push(event);
     }
+
     for marker in profile.program_markers() {
         let category = match marker.kind {
             MarkerKind::Frame => "frame",
             MarkerKind::Trigger => "trigger",
             _ => "message",
         };
+
         let mut event = json!({
             "ph": "i", "s": "t", "name": marker.name, "cat": category,
             "pid": marker.pid, "tid": marker.tid,
@@ -62,8 +67,10 @@ pub fn export(profile: &Profile) -> String {
         if let Some(text) = marker.text {
             event["args"] = json!({"text": text});
         }
+
         events.push(event);
     }
+
     json!({
         "traceEvents": events,
         "displayTimeUnit": "ns",

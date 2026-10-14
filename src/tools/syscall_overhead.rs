@@ -32,13 +32,17 @@ pub struct Run {
 pub struct Options {
     /// Where the built fixtures are.
     pub programs: PathBuf,
+
     /// The uscope executable traced runs use.
     pub uscope: PathBuf,
+
     /// Starts uscope with `CAP_BPF` and `CAP_PERFMON`: the `uscope-bpf`
     /// wrapper, given the executable and its arguments.
     pub launcher: PathBuf,
+
     /// Runs of each setup.
     pub runs: usize,
+
     /// Calls each run of the loop makes; a hundredth of them under ptrace,
     /// which takes microseconds a call.
     pub calls: u64,
@@ -55,6 +59,7 @@ pub fn measure(options: &Options, mut progress: impl FnMut(&Run)) -> Result<Vec<
             options.launcher.display()
         );
     }
+
     let placement = Placement::new()?;
     placement.uscope()?;
     let taskset = which("taskset")?;
@@ -67,10 +72,12 @@ pub fn measure(options: &Options, mut progress: impl FnMut(&Run)) -> Result<Vec<
                 setup: setup.to_owned(),
                 ns_per_call,
             };
+
             progress(&run);
             runs.push(run);
         }
     }
+
     Ok(runs)
 }
 
@@ -83,6 +90,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
     }
     .max(1)
     .to_string();
+
     // The loop runs on the program's CPUs, wherever uscope does.
     let mut looping = Command::new(taskset);
     looping
@@ -104,6 +112,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
             .arg(&calls);
         command
     };
+
     match setup {
         "bare" => timed(looping),
         // A tracer and its tracee hand the CPU back and forth at every
@@ -149,6 +158,7 @@ fn timed(mut command: Command) -> Result<f64> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
     stdout
         .lines()
         .find_map(|line| line.split_once(' ')?.1.trim().parse::<f64>().ok())
@@ -174,6 +184,7 @@ impl Tracing {
             .stderr(Stdio::piped())
             .spawn()
             .context("starting the BPF engine on another program")?;
+
         // The program runs only once the engine's programs are attached.
         let stdout = child.stdout.take().context("the traced program's output")?;
         let mut line = String::new();
@@ -183,6 +194,7 @@ impl Tracing {
             let _ = child.wait();
             bail!("the program the BPF engine traced never started");
         }
+
         Ok(Self { child })
     }
 
@@ -195,8 +207,10 @@ impl Tracing {
             if let Some(mut stderr) = self.child.stderr.take() {
                 stderr.read_to_string(&mut error)?;
             }
+
             bail!("the BPF engine ended with {status}: {error}");
         }
+
         Ok(())
     }
 }
@@ -223,8 +237,10 @@ fn which(name: &str) -> Result<PathBuf> {
 pub struct Summary {
     pub setup: String,
     pub ns_per_call: f64,
+
     /// Nanoseconds a call more than bare.
     pub added_ns: f64,
+
     /// Bare's spread, the range of its runs, in nanoseconds: the noise a
     /// cost is read against.
     pub noise_ns: f64,
@@ -238,10 +254,12 @@ pub fn summarize(runs: &[Run]) -> Vec<Summary> {
             .filter(move |run| run.setup == setup)
             .map(|run| run.ns_per_call)
     }
+
     let unhindered: Vec<f64> = of(runs, "bare").collect();
     let Some(base) = median(unhindered.iter().copied()) else {
         return Vec::new();
     };
+
     let noise = unhindered.iter().copied().fold(f64::NAN, f64::max)
         - unhindered.iter().copied().fold(f64::NAN, f64::min);
     SETUPS

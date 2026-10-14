@@ -19,13 +19,17 @@ use crate::support::{ExternalProcess, Scenario};
 
 /// The clients, each with a connection of its own.
 const CLIENTS: u64 = 4;
+
 /// The lines the clients send between one pause and the next.
 const LINES_PER_ROUND: u64 = 64;
+
 /// How long a client waits for an answer, however long the server is
 /// stopped.
 const ANSWER_TIMEOUT: Duration = Duration::from_mins(2);
+
 /// How long the server may take to serve a round's lines.
 const ROUND_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// The rounds before the debugger's memory is first sampled, and how much
 /// it may grow after.
 const WARM_UP_ROUNDS: u64 = 20;
@@ -66,8 +70,10 @@ impl Load {
                         if !answer.starts_with(&format!("{line} ")) {
                             return Err(format!("{line} was answered {answer:?}"));
                         }
+
                         answered.fetch_add(1, Ordering::Relaxed);
                     }
+
                     Ok(())
                 })
             })
@@ -92,6 +98,7 @@ impl Load {
                 .expect("a client panicked")
                 .unwrap_or_else(|error| panic!("a client failed: {error}"));
         }
+
         self.answered.load(Ordering::Relaxed)
     }
 }
@@ -144,6 +151,7 @@ async fn soak() {
             scenario = attach(&server).await;
             breakpoint = None;
         }
+
         check(&scenario, round).await;
 
         // Every third round, a breakpoint in the handler stops the server
@@ -175,14 +183,17 @@ async fn soak() {
             if running.is_finished() {
                 break (&mut running).await.expect("the resume").expect("a stop");
             }
+
             if load.answered() >= before + LINES_PER_ROUND {
                 // The breakpoint may stop the server first.
                 match scenario.handle().pause().await {
                     Ok(_) | Err(uscope::Error::AlreadyStopped) => {}
                     Err(error) => panic!("round {round}: pause: {error}"),
                 }
+
                 break running.await.expect("the resume").expect("a stop");
             }
+
             assert!(
                 Instant::now() < round_deadline,
                 "round {round}: the server answered {} lines",
@@ -190,6 +201,7 @@ async fn soak() {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
+
         check(&scenario, round).await;
         match reason {
             StopReason::Pause => {}
@@ -214,9 +226,11 @@ async fn soak() {
             None => {}
         }
     }
+
     if let Some(id) = breakpoint {
         scenario.remove_breakpoint(id).await;
     }
+
     scenario.shutdown().await;
     let answered = load.finish();
     assert!(answered > 0, "the server answered nothing");

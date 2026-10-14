@@ -34,6 +34,7 @@ pub(super) fn offset(
         )
         .into());
     }
+
     Ok(found.offset)
 }
 
@@ -64,9 +65,11 @@ pub struct Statuses {
     pub dead: u64,
     pub copystack: u64,
     pub preempted: u64,
+
     /// The bit a garbage collector sets while it scans a stack; the rest of
     /// the word is the status the goroutine returns to.
     pub scan: u64,
+
     /// Statuses newer than every release the contract was checked on, such
     /// as `_Gleaked`, when the runtime has them.
     pub leaked: Option<u64>,
@@ -97,6 +100,7 @@ impl Statuses {
 pub struct Goroutines {
     /// `runtime.allgs`, a slice of `*g`.
     pub allgs: ImageAddress,
+
     /// `runtime.allglen`, the published length of `allgs`.
     pub allglen: ImageAddress,
     pub status: u64,
@@ -110,8 +114,10 @@ pub struct Goroutines {
     pub startpc: u64,
     pub parent_goid: Option<u64>,
     pub statuses: Statuses,
+
     /// The `procid` of an `m`: the thread it runs on.
     pub m_procid: u64,
+
     /// The goroutine an `m` runs.
     pub m_curg: u64,
 }
@@ -146,12 +152,14 @@ pub struct Threads {
     /// thread pointer.
     pub tls_g: ThreadLocal,
     pub g_m: u64,
+
     /// The bounds of a g's stack, `[lo, hi)`.
     pub g_stack_lo: u64,
     pub g_stack_hi: u64,
     pub m_g0: u64,
     pub m_gsignal: u64,
     pub m_curg: u64,
+
     /// Where a vDSO call that has saved its stack pointer says its caller
     /// went on, and zero otherwise.
     pub m_vdso_sp: u64,
@@ -172,6 +180,7 @@ impl Threads {
                 );
             }
         };
+
         let m = |path: &[&str]| offset(image, "runtime.m", path, 8);
         Ok(Self {
             tls_g,
@@ -191,6 +200,7 @@ impl Threads {
 pub struct Labels {
     /// `g.labels`, a pointer to a `label.Set`.
     pub g_labels: u64,
+
     /// How a set is laid out. A program that never sets labels may not
     /// describe it, and then no goroutine has any.
     pub set: Result<LabelSet, Missing>,
@@ -201,6 +211,7 @@ pub struct Labels {
 pub struct LabelSet {
     /// `label.Set.List`, a slice of `label.Label`.
     pub list: u64,
+
     /// The size of a `label.Label`, and where its key and value strings
     /// are.
     pub stride: u64,
@@ -220,6 +231,7 @@ impl Labels {
                 value: offset(image, LABEL, &["Value"], 16)?,
             })
         };
+
         Ok(Self {
             g_labels: offset(image, "runtime.g", &["labels"], 8)?,
             set: set(),

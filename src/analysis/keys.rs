@@ -13,10 +13,13 @@ pub enum Granularity {
     /// By function, each inlined function a frame of its own.
     #[default]
     Function,
+
     /// By function, without the functions inlined into it.
     PhysicalFunction,
+
     /// By source line of each function.
     Line,
+
     /// By instruction.
     Address,
 }
@@ -26,19 +29,25 @@ pub enum Granularity {
 pub enum KeyKind {
     /// A function, by its row in the capture's functions.
     Function { function: u32 },
+
     /// A line of a function: its file, or [`NONE`], and number.
     Line { function: u32, file: u32, line: u32 },
+
     /// A frame no symbols describe, or any frame at address granularity.
     Address { frame: u32 },
+
     /// Where a stack ended early, and the module at fault, or [`NONE`].
     Truncation { reason: u8, module: u32 },
+
     /// The root of an async task's logical stack, by the outermost code of
     /// its own: a function, or a frame no symbols describe, the other
     /// [`NONE`].
     Task { function: u32, frame: u32 },
+
     /// A task of a language runtime, by its row, under which a query by
     /// task roots each path: [`NONE`] for what no task snapshot named.
     Group { task: u32 },
+
     /// A label, by its row in [`Keys::labels`], under which a query by
     /// label roots each path: [`NONE`] for a key no label has.
     Label { label: u32 },
@@ -55,17 +64,22 @@ pub struct Keys<'a> {
     flat: Vec<u32>,
     kinds: Vec<KeyKind>,
     roles: Vec<CodeRole>,
+
     /// Each key's task root, or [`NONE`] for a key that roots none.
     tasks: Vec<u32>,
+
     /// The group key of each task, by its row, and last, of none.
     groups: Vec<u32>,
     labels: Vec<Label<'a>>,
     label_rows: HashMap<Label<'a>, u32>,
+
     /// The key of each label, by its row, and last, of a key no label has.
     label_roots: Vec<u32>,
+
     /// Each thread's label spans, by its row: start, end, and label, by
     /// start.
     spans: Vec<Vec<(i64, i64, u32)>>,
+
     /// Each task's labels, by its row.
     task_labels: Vec<Vec<u32>>,
 }
@@ -82,6 +96,7 @@ fn code_role(capture: &Capture, kind: KeyKind) -> CodeRole {
         | KeyKind::Group { .. }
         | KeyKind::Label { .. } => 0,
     };
+
     role_of(number).unwrap_or_default()
 }
 
@@ -95,6 +110,7 @@ impl<'a> Keys<'a> {
                 index(kinds.len() - 1)
             })
         };
+
         let mut starts = Vec::with_capacity(capture.frames.len() + 1);
         let mut flat = Vec::with_capacity(capture.frames.len());
         for (frame, record) in capture.frames.iter().enumerate() {
@@ -109,6 +125,7 @@ impl<'a> Keys<'a> {
                 }));
                 continue;
             }
+
             let lines = capture.frame_lines(frame);
             let lines = match granularity {
                 Granularity::Address => &[][..],
@@ -116,9 +133,11 @@ impl<'a> Keys<'a> {
                 Granularity::PhysicalFunction => lines.last().map_or(&[][..], std::slice::from_ref),
                 Granularity::Function | Granularity::Line => lines,
             };
+
             if lines.is_empty() {
                 flat.push(key(KeyKind::Address { frame }));
             }
+
             for line in lines {
                 let function = line.function.get();
                 flat.push(key(if granularity == Granularity::Line {
@@ -132,8 +151,10 @@ impl<'a> Keys<'a> {
                 }));
             }
         }
+
         starts.push(index(flat.len()));
         let mut roles: Vec<CodeRole> = kinds.iter().map(|kind| code_role(capture, *kind)).collect();
+
         // A task is rooted by function, whatever the granularity.
         let mut tasks = vec![NONE; kinds.len()];
         for (code, kind) in kinds.clone().into_iter().enumerate() {
@@ -153,17 +174,20 @@ impl<'a> Keys<'a> {
                     continue;
                 }
             };
+
             tasks[code] = *known.entry(task).or_insert_with(|| {
                 kinds.push(task);
                 roles.push(CodeRole::Ordinary);
                 index(kinds.len() - 1)
             });
         }
+
         let mut add = |kind: KeyKind| {
             kinds.push(kind);
             roles.push(CodeRole::Ordinary);
             index(kinds.len() - 1)
         };
+
         let groups = (0..index(capture.tasks.len()))
             .chain([NONE])
             .map(|task| add(KeyKind::Group { task }))
@@ -342,6 +366,7 @@ impl<'a> Keys<'a> {
                         .string(capture.functions[function as usize].name.get())
                         .to_owned(),
                 };
+
                 format!("[task] {root}")
             }
             KeyKind::Group { task: NONE } => "[no task known]".to_owned(),
@@ -391,6 +416,7 @@ impl<'a> Keys<'a> {
                 let function = &capture.functions[function as usize];
                 (function.file.get(), function.line.get())
             }
+
             KeyKind::Address { .. }
             | KeyKind::Truncation { .. }
             | KeyKind::Task { .. }
@@ -399,6 +425,7 @@ impl<'a> Keys<'a> {
                 return None;
             }
         };
+
         (file != NONE).then(|| (capture.string(file), line))
     }
 
@@ -419,6 +446,7 @@ impl<'a> Keys<'a> {
             KeyKind::Truncation { module, .. } => module,
             KeyKind::Group { .. } | KeyKind::Label { .. } => NONE,
         };
+
         self.module_name(module)
     }
 
@@ -456,6 +484,7 @@ fn row<'a>(found: &mut Found<'a>, key: &'a str, value: &'a str) -> u32 {
             index(found.labels.len() - 1)
         })
     };
+
     row((key, None));
     row((key, Some(value)))
 }
@@ -468,6 +497,7 @@ fn labels(capture: &Capture) -> Found<'_> {
         spans: vec![Vec::new(); capture.threads.len()],
         tasks: vec![Vec::new(); capture.tasks.len()],
     };
+
     for range in &capture.zone_ranges {
         let start = range.start.get() as usize;
         for zone in &capture.zones[start..start + range.count.get() as usize] {
@@ -475,6 +505,7 @@ fn labels(capture: &Capture) -> Found<'_> {
             if site.kind != uscope_probes::abi::SITE_LABEL {
                 continue;
             }
+
             let (key, value) = (
                 capture.string(site.name.get()),
                 capture.string(zone.value.get()),
@@ -487,15 +518,18 @@ fn labels(capture: &Capture) -> Found<'_> {
             ));
         }
     }
+
     // Of spans that begin together, the inner, shorter one comes after,
     // and of two alike, the deeper, as each thread's depths came in order.
     for spans in &mut found.spans {
         spans.sort_by_key(|&(start, end, _)| (start, std::cmp::Reverse(end)));
     }
+
     for (task, record) in capture.tasks.iter().enumerate() {
         if record.labels.get() == NONE {
             continue;
         }
+
         for line in capture.string(record.labels.get()).lines() {
             if let Some((key, value)) = line.split_once('=') {
                 let label = row(&mut found, key, value);
@@ -503,5 +537,6 @@ fn labels(capture: &Capture) -> Found<'_> {
             }
         }
     }
+
     found
 }

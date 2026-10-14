@@ -37,6 +37,7 @@ fn with(frame: &Value, extra: &Value) -> Value {
     for (key, value) in extra.as_object().expect("an object") {
         params[key] = value.clone();
     }
+
     params
 }
 
@@ -127,6 +128,7 @@ async fn watches_read_values_and_only_changes_write_them() {
     let evaluate = |expression: &str| with(&frame, &json!({"expression": expression}));
     let first = tab.ok("evaluate", evaluate("req->key[0]")).await;
     assert_eq!(first["text"], "117 'u'", "{first}");
+
     // Watches and hovers never change the program.
     let (kind, message) = tab
         .request("evaluate", evaluate("s->stats.gets = 41"))
@@ -172,6 +174,7 @@ async fn the_console_completes_and_runs_commands_in_the_tabs_frame() {
     for member in ["op", "key", "value", "len"] {
         assert!(labels.contains(&member), "{members}");
     }
+
     assert_eq!(members["start"], 5);
     let commands = tab.ok("complete", json!({"text": "inf"})).await;
     assert_eq!(commands["items"][0]["label"], "info", "{commands}");
@@ -250,6 +253,7 @@ async fn functions_are_found_by_any_part_of_their_name() {
             .is_some_and(|path| path.ends_with("kvstore.c")),
         "{found}"
     );
+
     // Letters in order find a name, after names that hold them together.
     let scattered = tab.ok("functions", json!({"query": "tfind"})).await;
     assert!(

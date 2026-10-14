@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::debug_info::{
     EntryParameter, VariableContext, VariableRegister, VariableRuntime, VariableRuntimeError,
 };
+
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
@@ -28,6 +29,7 @@ use super::registers::{
     Fxsave, x86_64_caller_variable_register, x86_64_general_variable_register,
     x86_64_register_snapshot, x86_64_x87_variable_register, x86_64_xmm_variable_register,
 };
+
 use super::tls::TlsModule;
 use super::{
     BreakpointSite, Controller, Inferior, MAX_VALUE_CHILD_PAGE_LIMIT, RuntimeModule,
@@ -58,12 +60,14 @@ impl<P: InspectionOps> Controller<P> {
             .thread()
             .map(|pid| self.ptrace.registers(pid))
             .transpose()?;
+
         // A parked task's innermost registers are those its runtime saved.
         let resolved = if frame == StackFrameId::INNERMOST && native.is_some() {
             None
         } else {
             Some(self.resolve_frame(inferior, root, frame)?)
         };
+
         if resolved
             .as_ref()
             .and_then(|resolved| resolved.frame.as_ref())
@@ -71,12 +75,14 @@ impl<P: InspectionOps> Controller<P> {
         {
             return Err(Error::FrameSuspended);
         }
+
         let discarded = crate::unwind::RegisterFile::new([]);
         let caller = match resolved.as_ref().map(|frame| &frame.registers) {
             Some(FrameRegisters::Caller(registers)) => Some(registers),
             Some(FrameRegisters::Discarded) => Some(&discarded),
             Some(FrameRegisters::Thread(_)) | None => None,
         };
+
         Ok(x86_64_register_snapshot(
             self.revision,
             root.context,
@@ -102,6 +108,7 @@ impl<P: InspectionOps> Controller<P> {
             FrameScope::Function => None,
             FrameScope::Inline(instance) => Some(instance),
         };
+
         Some((self.modules.get(&module)?, address, selected))
     }
 
@@ -145,6 +152,7 @@ impl<P: InspectionOps> Controller<P> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
         let inferior = self.stopped_root(stop_id, root)?;
+
         // An inline frame sees its instance's variables; a physical frame,
         // its function's own.
         let resolved = self.resolve_frame(inferior, root, frame)?;
@@ -154,6 +162,7 @@ impl<P: InspectionOps> Controller<P> {
             if suspended {
                 return self.async_variables(stop_id, root, &resolved, query, budget);
             }
+
             let (module, address, selected) = scope.ok_or(Error::VariableContextUnsupported)?;
             let mut runtime = self.frame_runtime(inferior, root, &resolved, module);
             module.variables.inspect(
@@ -165,12 +174,14 @@ impl<P: InspectionOps> Controller<P> {
                 budget,
             )
         };
+
         let mut variables = match query {
             VariableQuery::Global(global) => {
                 vec![self.inspect_loaded_global(inferior, root, &resolved, *global, &mut budget)?]
             }
             VariableQuery::All => {
                 let mut variables = inspect_locals(&mut budget)?;
+
                 // A step out's stop shows what the finished function
                 // returned beside the frame it returned to.
                 if let Some(returned) = inferior
@@ -186,6 +197,7 @@ impl<P: InspectionOps> Controller<P> {
                         &mut budget,
                     )?);
                 }
+
                 variables
             }
             VariableQuery::Name(name) => {
@@ -194,6 +206,7 @@ impl<P: InspectionOps> Controller<P> {
                 } else {
                     Err(Error::VariableNotFound(name.clone()))
                 };
+
                 match local {
                     Ok(variables) => variables,
                     Err(Error::VariableNotFound(_)) => {
@@ -210,6 +223,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         };
+
         // Views present what the provider read, with the same budget.
         {
             let scope = self.frame_for(inferior, stop_id, root, &resolved);
@@ -218,6 +232,7 @@ impl<P: InspectionOps> Controller<P> {
                 machine.present_state(variable.type_info.clone(), &mut variable.state)?;
             }
         }
+
         Ok(VariableSnapshot {
             revision: self.revision,
             stop_id,
@@ -250,6 +265,7 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != image {
             return Err(Error::StaleModuleImage);
         }
+
         Ok((inferior, root, module))
     }
 
@@ -267,6 +283,7 @@ impl<P: InspectionOps> Controller<P> {
                 Err(error) => return Err(error),
             }
         }
+
         match matches.as_slice() {
             [global] => Ok(*global),
             [] => Err(Error::VariableNotFound(name.to_owned())),
@@ -292,6 +309,7 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != global.image {
             return Err(Error::StaleModuleImage);
         }
+
         let context_address = global_context_address(frame, module);
         let mut runtime = self.frame_runtime(inferior, root, frame, module);
         let mut variable = module.variables.inspect_global(
@@ -330,6 +348,7 @@ impl<P: InspectionOps> Controller<P> {
             completion: budget.completion(),
             usage: budget.usage(),
         };
+
         let invalid = |why: String| Err(Error::InvalidValueRange(why.into()));
         let (lower_bound, count, reference) = match &inspected.state {
             VariableState::Available {
@@ -340,8 +359,10 @@ impl<P: InspectionOps> Controller<P> {
                 let [dimension] = dimensions.as_ref() else {
                     return invalid("ranges currently require a one-dimensional array".into());
                 };
+
                 (dimension.lower_bound, dimension.count, reference)
             }
+
             VariableState::Available {
                 value: crate::VariableValue::Slice { length, .. },
                 children: crate::ValueChildren::Available(reference),
@@ -373,6 +394,7 @@ impl<P: InspectionOps> Controller<P> {
                 ));
             }
         };
+
         // Once `start` is in bounds, `end`, which is not below it, can only
         // be past the last element.
         let relative = |index: i128| {
@@ -381,16 +403,19 @@ impl<P: InspectionOps> Controller<P> {
                 .and_then(|index| u64::try_from(index).ok())
                 .filter(|index| *index <= count)
         };
+
         let out_of_bounds = |index| Error::ValueIndexOutOfBounds {
             index,
             lower_bound,
             count,
         };
+
         let offset = relative(start).ok_or_else(|| out_of_bounds(start))?;
         relative(end).ok_or_else(|| out_of_bounds(end.checked_sub(1).unwrap_or(end)))?;
         if length == 0 {
             return Ok(empty(offset, count));
         }
+
         self.value_children_with_budget(
             reference,
             &crate::ValueChildQuery {
@@ -415,6 +440,7 @@ impl<P: InspectionOps> Controller<P> {
             reference.module,
             reference.image,
         )?;
+
         // The capability evaluates in the frame that produced it, whichever
         // frame is selected now.
         let frame = self.resolve_frame(inferior, &root, reference.frame)?;
@@ -456,9 +482,11 @@ impl<P: InspectionOps> Controller<P> {
         if !(1..=MAX_VALUE_CHILD_PAGE_LIMIT).contains(&query.limit) {
             return Err(Error::InvalidValueChildPageLimit(query.limit));
         }
+
         if let Some(view) = &reference.view {
             return self.view_children(reference, view, query.offset, query.limit, budget);
         }
+
         let frame = self.resolve_frame(inferior, &root, reference.frame)?;
         let mut runtime = self.frame_runtime(inferior, &root, &frame, module);
         let mut page = module.variables.value_children(
@@ -477,6 +505,7 @@ impl<P: InspectionOps> Controller<P> {
             machine.dynamic = !matches!(child.relationship, crate::ValueChildRelationship::Base(_));
             machine.present_state(Some(child.type_info.clone()), &mut child.state)?;
         }
+
         page.children = children.into();
         page.completion = budget.completion();
         page.usage = budget.usage();
@@ -487,6 +516,7 @@ impl<P: InspectionOps> Controller<P> {
         if !(1..=256).contains(&query.limit) {
             return Err(Error::InvalidGlobalPageLimit(query.limit));
         }
+
         let running = self.inferior.is_some();
         let mut matches = self
             .modules
@@ -577,12 +607,15 @@ pub(super) fn global_context_address(
 
 pub(super) struct LinuxVariableRuntime<'a, P: InspectionOps> {
     pub(super) ptrace: &'a P,
+
     /// A stopped thread through which the process's memory is read.
     pub(super) pid: Pid,
+
     /// The thread whose thread-local storage the frame sees; none for a
     /// parked task.
     pub(super) thread: Option<Pid>,
     pub(super) loaded_module: LoadedModule,
+
     /// The image addresses the module's segments span.
     pub(super) image_range: AddressRange<ImageAddress>,
     pub(super) breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
@@ -591,8 +624,10 @@ pub(super) struct LinuxVariableRuntime<'a, P: InspectionOps> {
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     pub(super) tls: Option<TlsModule>,
     pub(super) frame: FrameAt,
+
     /// The stack's activations, which entry values find callers among.
     pub(super) callers: Option<Rc<Callers<'a, P>>>,
+
     /// Where the frame's task stack is below its stack pointer, which the
     /// frame's values may not read.
     pub(super) below_stack_pointer: Option<std::ops::Range<u64>>,
@@ -619,9 +654,11 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                 .into());
             }
         };
+
         if let Some(value) = x86_64_general_variable_register(native, register) {
             return Ok(value);
         }
+
         if (17..=40).contains(&register.number()) {
             let floating = self.floating.get_or_insert_with(|| {
                 self.ptrace
@@ -645,6 +682,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                     }
                 });
         }
+
         Err(VariableRuntimeError::Unavailable(
             crate::UnsupportedVariableFeature::RegisterClass.into(),
         ))
@@ -704,6 +742,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                 VariableUnavailableReason::BelowStackPointer { address },
             ));
         }
+
         let read = read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
             .map_err(|error| match error {
                 // A location computed from a meaningless frame base, as
@@ -728,6 +767,7 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
             ),
         }
     }
+
     fn entry_value(
         &mut self,
         parameter: EntryParameter,
@@ -754,6 +794,7 @@ fn validate_range_length(start: i128, end: i128) -> Result<i128> {
             format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
         ));
     }
+
     Ok(length)
 }
 
@@ -798,5 +839,6 @@ pub(super) fn validate_inspection_limits(limits: crate::InspectionLimits) -> Res
             });
         }
     }
+
     Ok(())
 }

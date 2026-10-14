@@ -44,6 +44,7 @@ const MISC_COMM_EXEC: u16 = 1 << 13;
 const MISC_SWITCH_OUT: u16 = 1 << 13;
 const MISC_SWITCH_OUT_PREEMPT: u16 = 1 << 14;
 const MISC_MMAP_BUILD_ID: u16 = 1 << 14;
+
 /// Callchain entries at or above this mark a context, not an address.
 const CONTEXT_MAX: u64 = (-4095_i64).cast_unsigned();
 
@@ -69,13 +70,17 @@ pub struct Sample<'a> {
     pub time: u64,
     pub cpu: u32,
     pub period: u64,
+
     /// The kernel's frame-pointer walk, context marks included.
     pub chain: Words<'a>,
+
     /// [`REGISTERS`] in the kernel's order, or none when the sample
     /// carries no user registers.
     pub registers: Words<'a>,
+
     /// The bytes of stack the kernel copied from the stack pointer up.
     pub stack: &'a [u8],
+
     /// The bytes of stack the sample asked for, which the copy may fall
     /// short of.
     pub stack_asked: u64,
@@ -95,6 +100,7 @@ pub struct Mmap<'a> {
     pub start: u64,
     pub length: u64,
     pub file_offset: u64,
+
     /// The file's inode, unless the kernel gave its build id instead.
     pub inode: Option<u64>,
     pub executable: bool,
@@ -106,6 +112,7 @@ pub struct Mmap<'a> {
 pub enum Record<'a> {
     Sample(Sample<'a>),
     Mmap(Mmap<'a>),
+
     /// A thread's name, set or, when `exec`, changed by an exec.
     Comm {
         pid: Pid,
@@ -125,6 +132,7 @@ pub enum Record<'a> {
         tid: Tid,
         time: u64,
     },
+
     /// Records or samples the kernel dropped.
     Lost {
         count: u64,
@@ -133,6 +141,7 @@ pub enum Record<'a> {
     Throttle {
         time: u64,
     },
+
     /// A thread left its CPU, or came back to one. One that left while it
     /// could still run was `preempted`; one that did not blocked.
     Switch {
@@ -142,6 +151,7 @@ pub enum Record<'a> {
         preempted: bool,
         time: u64,
     },
+
     /// A record the recorder does not use.
     Other {
         time: Option<u64>,
@@ -179,6 +189,7 @@ impl<'a> Fields<'a> {
         if length > self.bytes.len() {
             return Err(Malformed);
         }
+
         let (taken, rest) = self.bytes.split_at(length);
         self.bytes = rest;
         Ok(taken)
@@ -223,18 +234,22 @@ pub fn next(bytes: &[u8]) -> Option<Result<(Record<'_>, usize), Malformed>> {
     if bytes.is_empty() {
         return None;
     }
+
     if bytes.len() < 8 {
         return Some(Err(Malformed));
     }
+
     let Some(&[k0, k1, k2, k3, m0, m1, s0, s1]) = bytes.first_chunk::<8>() else {
         return Some(Err(Malformed));
     };
+
     let kind = u32::from_le_bytes([k0, k1, k2, k3]);
     let misc = u16::from_le_bytes([m0, m1]);
     let size = usize::from(u16::from_le_bytes([s0, s1]));
     if size < 8 || size > bytes.len() {
         return Some(Err(Malformed));
     }
+
     let body = &bytes[8..size];
     Some(decode(kind, misc, body).map(|record| (record, size)))
 }
@@ -243,10 +258,12 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
     if kind == RECORD_SAMPLE {
         return decode_sample(body).map(Record::Sample);
     }
+
     // Every other record ends with its sample_id.
     let Some(split) = body.len().checked_sub(SAMPLE_ID) else {
         return Ok(Record::Other { time: None });
     };
+
     let (body, id) = body.split_at(split);
     let time = u64::from_le_bytes(field(id, 8)?);
     let mut fields = Fields { bytes: body };
@@ -262,6 +279,7 @@ fn decode(kind: u32, misc: u16, body: &[u8]) -> Result<Record<'_>, Malformed> {
             } else {
                 None
             };
+
             let (protection, _flags) = fields.pair()?;
             let path = fields.bytes;
             let path = &path[..path
@@ -348,6 +366,7 @@ fn decode_sample(body: &[u8]) -> Result<Sample<'_>, Malformed> {
     } else {
         fields.words(u64::from(REGISTERS.count_ones()))?
     };
+
     let size = fields.u64()?;
     let stack = if size == 0 {
         &[][..]
@@ -356,6 +375,7 @@ fn decode_sample(body: &[u8]) -> Result<Sample<'_>, Malformed> {
         let used = usize::try_from(fields.u64()?).map_err(|_| Malformed)?;
         data.get(..used).ok_or(Malformed)?
     };
+
     Ok(Sample {
         pid: Pid::new(pid),
         tid: Tid::new(tid),
@@ -377,6 +397,7 @@ pub fn fuzz(data: &[u8]) {
         if let Record::Sample(sample) = record {
             let _ = sample.user_chain().count() + sample.registers.iter().count();
         }
+
         let _ = record.time();
         offset += length;
     }

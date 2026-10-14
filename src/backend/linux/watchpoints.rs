@@ -16,6 +16,7 @@ use crate::protocol::{
     StopReason, WatchAccess, WatchScope, Watchpoint, WatchpointHit, WatchpointId,
     WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
+
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
     AddressRange, Error, ImageAddress, InspectedValue, MemoryReadCompletion, Result, StackFrameId,
@@ -45,19 +46,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             WatchAccess::ReadWrite => SlotAccess::ReadWrite,
             WatchAccess::Read => return Err(Error::UnsupportedWatchAccess(access)),
         };
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         if !self.sites_live() {
             return Err(Error::NotStopped);
         }
+
         validate_image_current(inferior)?;
         let (expression, address, byte_size, type_info, scope, frame) = match spec {
             WatchpointSpec::Target(target) => {
                 let target = *target;
+
                 // A target is armed only at the stop that resolved it, not
                 // at a later stop or while the inferior runs.
                 if inferior.public_stop.as_ref().map(|stop| stop.id) != Some(target.stop_id) {
                     return Err(Error::StaleStop);
                 }
+
                 (
                     Some(target.expression),
                     target.address,
@@ -71,6 +76,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 (None, address, byte_size, None, WatchScope::Location, None)
             }
         };
+
         let task = self.task_watch(inferior, &scope, address)?;
         let chunks = debug_registers::split_range(address.get(), byte_size).map_err(|error| {
             watch_range_error(address, byte_size, error, inferior.watch.plan.free_slots())
@@ -83,6 +89,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let plan = (options.enabled && !inferior.stack_moves.sets_aside(task))
             .then(|| planned_with(&inferior.watch.plan, id, &chunks, slot_access))
             .transpose()?;
+
         // Read before arming, so a failed read leaves nothing armed.
         let observed = self.read_watched_bytes(address, byte_size)?;
         if let Some(plan) = plan {
@@ -110,6 +117,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             hit_count: 0,
             enabled: options.enabled,
         };
+
         self.inferior
             .as_mut()
             .ok_or(Error::NotRunning)?
@@ -130,6 +138,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = self.remove_watchpoint(id);
             return Err(error);
         }
+
         Ok(watchpoint)
     }
 
@@ -185,6 +194,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let reason = StopReason::Watchpoint {
             hits: Arc::from([]),
         };
+
         let mut stopping = BTreeMap::new();
         for id in self.reportable_watch_hits(owners)? {
             let Some(watchpoint) = self
@@ -195,6 +205,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 continue;
             };
+
             debug_assert!(
                 watchpoint.enabled,
                 "a hit is reported for watchpoint {id}, which is disabled"
@@ -212,12 +223,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .judge_condition(pid, &condition, &reason, ConditionOwner::Watchpoint(id))
                     .unwrap_or(true),
             };
+
             if stops {
                 stopping.insert(id, hit_count);
             } else {
                 self.observe_declined_hit(id)?;
             }
         }
+
         Ok(stopping)
     }
 
@@ -227,9 +240,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         let Some(record) = inferior.watch.watchpoints.get(&id) else {
             return Ok(());
         };
+
         if inferior
             .threads
             .values()
@@ -237,6 +252,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return Ok(());
         }
+
         let observed =
             self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)?;
         if let Some(record) = self
@@ -246,6 +262,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             record.observed = observed;
         }
+
         Ok(())
     }
 
@@ -271,9 +288,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         if record.watchpoint.enabled == enabled {
             return Ok(record.watchpoint.clone());
         }
+
         if !self.sites_live() {
             return Err(Error::NotStopped);
         }
+
         let watchpoint = &record.watchpoint;
         let (plan, observed) = if enabled {
             let slot_access = slot_access(watchpoint.access);
@@ -297,14 +316,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     slot_access,
                 )?)
             };
+
             let observed = self.read_watched_bytes(watchpoint.address, watchpoint.byte_size)?;
             (plan, Some(observed))
         } else {
             (Some(inferior.watch.plan.without_watchpoint(id)), None)
         };
+
         if let Some(plan) = plan {
             self.arm_all_threads(plan)?;
         }
+
         let record = self
             .inferior
             .as_mut()
@@ -314,6 +336,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(observed) = observed {
             record.observed = observed;
         }
+
         let watchpoint = record.watchpoint.clone();
         self.publish_watchpoints_changed();
         Ok(watchpoint)
@@ -345,6 +368,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return Ok(Arc::from([]));
         }
+
         self.arm_all_threads(DebugRegisterPlan::default())?;
         let removed = std::mem::take(
             &mut self
@@ -398,6 +422,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(ArmFailure::ThreadGone) => {}
                 Err(failure) => {
                     let cause = arm_error(pid, &failure);
+
                     // The failing thread may have been partly rewritten, so it
                     // is restored along with every thread already armed.
                     for &armed in std::iter::once(&pid).chain(programmed.iter().rev()) {
@@ -412,16 +437,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                             }
                         }
                     }
+
                     return Err(cause);
                 }
             }
         }
+
         inferior.watch.generation += 1;
         inferior.watch.plan = plan;
         let generation = inferior.watch.generation;
         for pid in programmed {
             inferior.thread_mut(pid)?.armed = Some(generation);
         }
+
         Ok(())
     }
 
@@ -449,6 +477,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(failure) => return Err(arm_error(pid, &failure)),
             }
         }
+
         Ok(())
     }
 
@@ -457,6 +486,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn arm_new_thread(&mut self, pid: Pid) -> Option<Error> {
         let inferior = self.inferior.as_mut()?;
         let generation = inferior.watch.generation;
+
         // Debug registers are never inherited, so an unarmed thread already
         // matches an empty plan.
         let result = if inferior.watch.plan.is_empty() {
@@ -464,6 +494,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             program_debug_registers(&self.ptrace, pid, &inferior.watch.plan)
         };
+
         match result {
             Ok(()) => {
                 inferior.threads.get_mut(&pid)?.armed = Some(generation);
@@ -483,6 +514,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             "an attached process starts with {} debug-register slots planned",
             inferior.watch.plan.slots().iter().flatten().count()
         );
+
         // Each thread is marked as carrying the current plan.
         let generation = inferior.watch.generation;
         let empty = DebugRegisterPlan::default();
@@ -493,6 +525,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(failure) => return Err(arm_error(pid, &failure)),
             }
         }
+
         Ok(())
     }
 
@@ -508,6 +541,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if thread.armed.is_none() && inferior.watch.plan.is_empty() {
                 continue;
             }
+
             match program_debug_registers(&self.ptrace, pid, &empty) {
                 Ok(()) | Err(ArmFailure::ThreadGone) => {}
                 Err(failure) => {
@@ -515,6 +549,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         first_error.map_or(Ok(()), Err)
     }
 
@@ -525,6 +560,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         let observed = inferior
             .watch
             .watchpoints
@@ -543,6 +579,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or_else(|| Error::internal("watchpoint exists"))?
                 .observed = bytes;
         }
+
         Ok(())
     }
 
@@ -554,6 +591,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         if inferior.watch.watchpoints.is_empty()
             && inferior
                 .threads
@@ -569,6 +607,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 invalid.insert(id, reason);
             }
         }
+
         let hit = inferior
             .threads
             .values()
@@ -603,6 +642,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if owners.is_empty() {
                 continue;
             }
+
             let hits = owners
                 .iter()
                 .filter_map(|(id, &hit_count)| {
@@ -628,19 +668,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             } else {
                 StopReason::Watchpoint { hits: hits.into() }
             };
+
             if let Some(barrier) = inferior.barrier.as_mut()
                 && barrier.triggering_thread == pid
                 && matches!(barrier.reason, Some(StopReason::Watchpoint { .. }))
             {
                 barrier.reason = Some(reason.clone());
             }
+
             thread.reason = Some(reason);
         }
+
         for (id, bytes) in current {
             if let Some(record) = inferior.watch.watchpoints.get_mut(&id) {
                 record.observed = bytes;
             }
         }
+
         self.remove_invalidated_watchpoints(invalidated)
     }
 
@@ -652,6 +696,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if invalidated.is_empty() {
             return Ok(());
         }
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let plan = invalidated
             .iter()
@@ -663,6 +708,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for entry in &invalidated {
             inferior.watch.watchpoints.remove(&entry.watchpoint.id);
         }
+
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::WatchpointsInvalidated {
             revision: self.revision,
@@ -678,6 +724,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
+
         let had_watchpoints = !inferior.watch.watchpoints.is_empty();
         inferior.watch.watchpoints.clear();
         inferior.watch.plan = DebugRegisterPlan::default();
@@ -715,6 +762,7 @@ impl<P: InspectionOps> Controller<P> {
                 Err(error) => return Err(error),
             }
         }
+
         Ok(None)
     }
 
@@ -728,11 +776,13 @@ impl<P: InspectionOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(BTreeSet::new());
         };
+
         let mut unchanged = BTreeSet::new();
         for id in owners {
             let Some(record) = inferior.watch.watchpoints.get(&id) else {
                 continue;
             };
+
             if record.watchpoint.access == WatchAccess::Change
                 && self
                     .read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)?
@@ -741,6 +791,7 @@ impl<P: InspectionOps> Controller<P> {
                 unchanged.insert(id);
             }
         }
+
         Ok(unchanged)
     }
 
@@ -809,6 +860,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(false);
         };
+
         let native = self.ptrace.registers(pid)?;
         let mut provider = DwarfCallerProvider {
             modules: self.unwind_modules(inferior),
@@ -819,11 +871,13 @@ impl<P: InspectionOps> Controller<P> {
             },
             first: true,
         };
+
         let mut context = FrameContext {
             instruction: VirtualAddress::new(native.rip),
             cfa: None,
             signal_frame: false,
         };
+
         let view = self.stack_view(pid);
         let activation = view.activation(activation);
         let unproven = !activation.has_returned(view.position(native.rsp));
@@ -833,6 +887,7 @@ impl<P: InspectionOps> Controller<P> {
                 CallerResult::Finished(UnwindTermination::Complete) => return Ok(false),
                 CallerResult::Finished(_) => return Ok(unproven),
             };
+
             let frame = caller.cfa.map(|cfa| view.activation(cfa));
             if frame == Some(activation) {
                 let level =
@@ -843,6 +898,7 @@ impl<P: InspectionOps> Controller<P> {
                 else {
                     return Ok(false);
                 };
+
                 let location = module.image.locate(image_address);
                 return Ok(location.physical_instance == Some(evidence.function)
                     && evidence
@@ -850,11 +906,14 @@ impl<P: InspectionOps> Controller<P> {
                         .iter()
                         .any(|range| range.contains(image_address)));
             }
+
             if frame.is_some_and(|frame| activation.is_callee_of(frame)) {
                 return Ok(false);
             }
+
             context = caller;
         }
+
         Ok(unproven)
     }
 
@@ -890,6 +949,7 @@ impl<P: InspectionOps> Controller<P> {
                         "a frame-relative global has no owning activation".into(),
                     ));
                 };
+
                 let image = &self
                     .modules
                     .get(&module)
@@ -904,6 +964,7 @@ impl<P: InspectionOps> Controller<P> {
                             VariableRuntimeError::Malformed(reason)
                             | VariableRuntimeError::Fatal(reason) => reason,
                         };
+
                         Error::WatchTargetUnsupported(
                             format!("the declaring activation is unavailable: {reason}").into(),
                         )
@@ -919,13 +980,16 @@ impl<P: InspectionOps> Controller<P> {
                     function,
                     ranges: storage.ranges,
                 };
+
                 if !moving_stack {
                     let scope = WatchScope::Frame {
                         thread: debug_thread_id(pid),
                         activation,
                     };
+
                     return Ok((scope, Some(evidence)));
                 }
+
                 // A stack its runtime may move is watched as its task's,
                 // wherever the task's stack is.
                 let (task, below_top) = self
@@ -964,6 +1028,7 @@ pub(super) fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddres
             )));
         }
     };
+
     let address = match source {
         VariableValueSource::Memory(address) => *address,
         VariableValueSource::Register(register) => {
@@ -992,6 +1057,7 @@ pub(super) fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddres
             ));
         }
     };
+
     let byte_size = value
         .type_info
         .as_ref()
@@ -1034,6 +1100,7 @@ fn watch_range_error(
             };
         }
     };
+
     Error::InvalidWatchRange {
         address,
         byte_size,
@@ -1046,8 +1113,10 @@ fn watch_range_error(
 enum ArmFailure {
     /// The thread is exiting.
     ThreadGone,
+
     /// Other hardware-breakpoint users hold the thread's slots.
     Busy,
+
     /// The kernel refused a value or the readback disagreed, as in sandboxes
     /// that ignore debug-register writes.
     Unsupported(String),
@@ -1090,6 +1159,7 @@ fn program_debug_registers(
             .write_debug_register(pid, register, value)
             .map_err(arm_failure)?;
     }
+
     let expected = std::iter::once((debug_registers::CONTROL_REGISTER, plan.control())).chain(
         plan.slots()
             .iter()
@@ -1106,6 +1176,7 @@ fn program_debug_registers(
             )));
         }
     }
+
     Ok(())
 }
 

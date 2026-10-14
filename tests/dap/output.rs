@@ -27,6 +27,7 @@ fn program_output_arrives_whole_in_order_and_on_its_own_stream() {
         )
     );
     assert_eq!(stderr, "err 1\nerr 2\nerr 3\n");
+
     // Each event carries a bounded chunk.
     for event in dap.events(started.mark, "output") {
         let length = event["output"].as_str().expect("output").len();
@@ -37,5 +38,6 @@ fn program_output_arrives_whole_in_order_and_on_its_own_stream() {
             &event["output"].as_str().expect("output")[..40]
         );
     }
+
     dap.finish();
 }

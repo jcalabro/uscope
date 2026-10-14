@@ -12,6 +12,7 @@ use crate::protocol::{
     DebuggerEvent, ExceptionDisposition, ExecutionId, ExitStatus, HeldChild, HeldProcess,
     LaunchOptions, ProcessId, Reply, ResumeScope, StopId, StopReason,
 };
+
 use crate::{Error, LoadedModule, Result, VirtualAddress};
 
 use super::breakpoints::{install_logical_breakpoint, lift_all_traps, reinstall_all_traps};
@@ -36,10 +37,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.deferred_start = Some(start);
             return;
         }
+
         if self.inferior.is_some() || self.orphans.is_some() {
             start.fail(Error::AlreadyRunning);
             return;
         }
+
         match start {
             Start::Launch(options, reply) => self.launch(options, reply),
             Start::Attach {
@@ -106,15 +109,18 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.ptrace.thread_group_id(pid)? != pid {
             return Err(Error::InvalidProcessId(requested.get()));
         }
+
         if !self.ptrace.seize(pid, true)? {
             return Err(Error::NotRunning);
         }
+
         // A thread the process started before it was seized would exec
         // untraced.
         if self.ptrace.process_threads(pid)? != [pid] {
             self.rollback_seized(&BTreeSet::from([pid]));
             return Err(Error::ProcessHasThreads(requested.get()));
         }
+
         self.ptrace
             .spawn_waiter(self.message_sender.clone())
             .inspect_err(|_| self.rollback_seized(&BTreeSet::from([pid])))
@@ -136,6 +142,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             ExpectedStop::InitialExec
         };
+
         let process_id = process_id(pid);
         let execution_id = ExecutionId::new(1);
         self.reset_breakpoint_hit_counts();
@@ -175,6 +182,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return;
             }
         };
+
         let threads = seized
             .iter()
             .map(|&pid| (pid, TraceThread::starting(ExpectedStop::InitialAttach)))
@@ -199,11 +207,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return;
             }
         }
+
         // The attach stop is presented from the leader when it survives.
         let Some(inferior) = self.inferior.as_mut() else {
             self.fail_inferior(Error::NotRunning);
             return;
         };
+
         let Some(triggering_thread) = inferior
             .threads
             .contains_key(&tgid)
@@ -213,6 +223,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.fail_inferior(Error::NotRunning);
             return;
         };
+
         inferior.barrier = Some(StopBarrier::visible(triggering_thread, StopReason::Attach));
     }
 
@@ -232,9 +243,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.rollback_seized(&seized);
             return Err(Error::TargetChangedDuringAttach);
         }
+
         if seized.is_empty() {
             return Err(Error::NotRunning);
         }
+
         let waiter = self
             .ptrace
             .spawn_waiter(self.message_sender.clone())
@@ -250,6 +263,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.threads.remove(&tid);
             inferior.retired_threads.insert(tid);
         }
+
         Ok(())
     }
 
@@ -275,6 +289,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     if seized.contains(&tid) || unseized.contains(&tid) {
                         continue;
                     }
+
                     tried = true;
                     if self.ptrace.seize(tid, false)? {
                         seized.insert(tid);
@@ -282,6 +297,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         unseized.insert(tid);
                     }
                 }
+
                 if !seized.is_empty() || !tried {
                     return Ok(());
                 }
@@ -291,6 +307,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.rollback_seized(&seized);
             return Err(error);
         }
+
         Ok((seized, unseized))
     }
 
@@ -298,6 +315,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for &pid in seized {
             let _ = self.ptrace.interrupt(pid);
         }
+
         for &pid in seized {
             loop {
                 match self.ptrace.wait_status(pid) {
@@ -329,6 +347,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let generation = inferior.watch.generation;
         let thread = inferior.thread_mut(pid)?;
         thread.expected = ExpectedStop::None;
+
         // A freshly executed image starts with empty debug registers.
         thread.armed = Some(generation);
         if pause_requested {
@@ -338,6 +357,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if let Some(reply) = self.launch_reply.take() {
                 let _ = reply.send(Ok(execution_id));
             }
+
             return self.finish_barrier_if_ready();
         }
 
@@ -346,11 +366,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             self.ptrace.continue_to_syscall(pid, None)?;
         }
+
         thread.state = NativeThreadState::Running;
         self.bump_revision();
         if let Some(reply) = self.launch_reply.take() {
             let _ = reply.send(Ok(execution_id));
         }
+
         let _ = self.events.send(DebuggerEvent::InferiorContinued {
             revision: self.revision,
             process_id,
@@ -397,6 +419,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
+
         Ok(())
     }
 
@@ -436,17 +459,20 @@ impl<P: LinuxTraceOps> Controller<P> {
             if untraced.is_empty() {
                 return Ok(false);
             }
+
             // Untraced threads can keep creating untraced threads.
             self.attach_rescans += 1;
             if self.attach_rescans > MAX_ATTACH_RESCANS {
                 return Err(backend_error(LinuxError::AttachThreadsUnstable));
             }
+
             let mut waiting = false;
             for tid in untraced {
                 if !self.ptrace.seize(tid, false)? {
                     inferior.unseized_threads.insert(tid);
                     continue;
                 }
+
                 if self.ptrace.interrupt(tid)? {
                     inferior
                         .threads
@@ -457,6 +483,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     inferior.retired_threads.insert(tid);
                 }
             }
+
             if waiting {
                 return Ok(true);
             }
@@ -470,6 +497,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .inferior
             .as_ref()
             .is_some_and(|inferior| inferior.origin.owned());
+
         // A sibling's `exit_group` may already have killed the new thread
         // out of its first stop. Its exit status follows and retires it.
         let vanished = match self.ptrace.set_options(pid, exit_kill) {
@@ -477,15 +505,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             Err(error) if is_vanished_tracee(&error) => true,
             Err(error) => return Err(error),
         };
+
         let arm_failure = if vanished {
             None
         } else {
             self.arm_new_thread(pid)
         };
+
         if let Some(inferior) = self.inferior.as_mut() {
             let name = self.ptrace.thread_name(inferior.tgid, pid);
             inferior.thread_mut(pid)?.name = name;
         }
+
         let (process_id, barrier_active, should_resume) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.thread_mut(pid)?;
@@ -494,7 +525,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             } else {
                 NativeThreadState::Stopped
             };
+
             thread.expected = ExpectedStop::None;
+
             // A thread created while a breakpoint site is lifted for a repair
             // waits for the repair; resuming execution then resumes it.
             let should_resume = inferior.repairs.is_empty()
@@ -508,6 +541,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 should_resume,
             )
         };
+
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::ThreadStarted {
             revision: self.revision,
@@ -525,6 +559,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         }
+
         if barrier_active {
             self.finish_barrier_if_ready()
         } else if should_resume {
@@ -552,6 +587,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.held != Some(HeldStop::Stopped) {
             return Ok(());
         }
+
         self.ptrace.kill(inferior.tgid, Signal::SIGCONT)?;
         inferior.held = Some(HeldStop::Continued);
         Ok(())
@@ -565,18 +601,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return false;
         };
+
         let Some(held @ (HeldStop::Continued | HeldStop::Draining { .. })) = inferior.held else {
             return false;
         };
+
         if signal != Signal::SIGCONT || sender != Some(tracer) {
             return false;
         }
+
         record!("suppressed the SIGCONT that ended the held stop");
         inferior.held = None;
         if let HeldStop::Draining { thread, mask } = held {
             // A thread gone since has no mask left to restore.
             let _ = self.ptrace.set_signal_mask(thread, mask);
         }
+
         true
     }
 
@@ -586,6 +626,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if event != libc::PTRACE_EVENT_EXIT && is_superseded(&self.ptrace.signal_metadata(pid)) {
             return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
         }
+
         let thread = self
             .inferior
             .as_mut()
@@ -628,6 +669,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     let awaited = inferior.thread(pid)?.awaiting_breakpoint.is_some();
                     return self.thread_exited(pid, status, awaited);
                 }
+
                 // A leader exiting alone gives a stop in progress nothing
                 // more to wait for.
                 self.finish_barrier_if_ready()
@@ -649,6 +691,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// its exit event carries.
     fn leader_exiting_alone(&self, pid: Pid) -> Result<Option<ExitStatus>> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+
         // With every other thread exiting too, the process is ending.
         let others_live = inferior.threads.iter().any(|(&other, thread)| {
             other != pid && !matches!(thread.state, NativeThreadState::Exiting)
@@ -656,6 +699,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if pid != inferior.tgid || !others_live {
             return Ok(None);
         }
+
         let (registers, message) = match self
             .ptrace
             .registers(pid)
@@ -664,14 +708,17 @@ impl<P: LinuxTraceOps> Controller<P> {
             Err(error) if is_vanished_tracee(&error) => return Ok(None),
             result => result?,
         };
+
         // The exit stop is inside the system call that began the exit. A
         // status in wait's form with a signal in its low bits is SIGKILL's.
         let Ok(word) = i32::try_from(message) else {
             return Ok(None);
         };
+
         if registers.orig_rax.cast_signed() != libc::SYS_exit || word & 0x7f != 0 {
             return Ok(None);
         }
+
         Ok(Some(ExitStatus::Code(i64::from((word >> 8) & 0xff))))
     }
 
@@ -695,9 +742,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             Err(error) if is_vanished_tracee(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
+
         if is_superseded(&self.ptrace.signal_metadata(pid)) {
             return Ok(None);
         }
+
         let message = i32::try_from(message).map_err(|_| Error::AddressOverflow)?;
         Ok(Some(Pid::from_raw(message)))
     }
@@ -706,7 +755,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(child) = self.event_message_of(parent)? else {
             return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
         };
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+
         // A sibling's exit_group can end the new thread before this event
         // announces it.
         let ended = inferior.vanished_threads.remove(&child);
@@ -723,10 +774,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(error) => return Err(error),
             }
         };
+
         let Some(child_tgid) = child_tgid else {
             inferior.unowned_stops.remove(&child);
             return self.restart_after_internal(parent);
         };
+
         if child_tgid != inferior.tgid {
             // The killed child's exit status is still delivered.
             inferior.unowned_stops.remove(&child);
@@ -741,6 +794,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         }
+
         // The thread a TID named exited, and its exit was handled, before
         // the kernel could give the TID to another.
         let previous = inferior
@@ -750,6 +804,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             previous.is_none(),
             "a clone event of {parent} names thread {child}, which is already live"
         );
+
         // A new thread runs with its siblings, unless the execution resumed
         // one thread alone.
         if let Some(active) = inferior.active.as_mut()
@@ -757,12 +812,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             active.resume_threads.insert(child);
         }
+
         let pending = inferior.unowned_stops.remove(&child);
+
         // The new thread, still starting, keeps a barrier from completing.
         self.restart_after_internal(parent)?;
         if let Some(status) = pending {
             self.process_wait(status)?;
         }
+
         Ok(())
     }
 
@@ -772,6 +830,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(child) = self.event_message_of(parent)? else {
             return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
         };
+
         // The child's memory is the parent's as it forked; later edits, such
         // as lifting a site to step over it, never reach the child.
         let sites = self
@@ -789,6 +848,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
+
         if inferior.unowned_stops.remove(&child).is_some() {
             self.settle_fork_child(child, &sites);
         } else {
@@ -805,6 +865,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(parent) = self.inferior.as_ref().map(|inferior| inferior.tgid) else {
             return;
         };
+
         if !self.scrub_and_settle(parent, child, sites)
             && let Some(inferior) = self.inferior.as_mut()
         {
@@ -854,10 +915,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             record!("released {child}, whose start time is unreadable, rather than holding it");
             return self.ptrace.detach(child, None);
         };
+
         self.ptrace.request_stop(child, child)?;
         if !self.ptrace.detach(child, None)? {
             return Ok(false);
         }
+
         record!("held {child} for another session");
         let held = HeldChild::new(
             process_id(parent),
@@ -867,10 +930,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             },
             self.ptrace.held_release(),
         );
+
         // A receiver gone since drops the child, which releases it.
         if let Some(children) = &self.held_children {
             let _ = children.send(held);
         }
+
         Ok(true)
     }
 
@@ -888,19 +953,23 @@ impl<P: LinuxTraceOps> Controller<P> {
                     cleaned = Err(error);
                     break;
                 }
+
                 // Only a core dump reads part of a word.
                 Err(MemoryAccessError::Partial { .. }) => {
                     cleaned = Err(backend_error(LinuxError::System(Errno::EIO)));
                     break;
                 }
             };
+
             let mut bytes = word.to_ne_bytes();
+
             // Only a trap is ours to remove. A site removed before the fork,
             // or whose memory was remapped since, such as an unloaded
             // library's, holds code the child must keep.
             if bytes[0] != BREAKPOINT_OPCODE {
                 continue;
             }
+
             bytes[0] = original_byte;
             cleaned = self
                 .ptrace
@@ -909,6 +978,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 break;
             }
         }
+
         cleaned
     }
 
@@ -919,11 +989,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return;
         };
+
         let sites = inferior.inherited_sites();
         for child in self.ptrace.traced_children(inferior.tgid, thread) {
             let Some(inferior) = self.inferior.as_ref() else {
                 return;
             };
+
             if !inferior.fork_children.contains_key(&child)
                 && !inferior.killed_children.contains(&child)
                 && !inferior.threads.contains_key(&child)
@@ -940,6 +1012,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             // The caller routes here only with orphans, so none is left to wait for.
             return self.inferior.is_some() || self.orphans.is_some();
         };
+
         match status {
             WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
                 let parent = orphans.parent;
@@ -960,6 +1033,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             _ => {}
         }
+
         if self
             .orphans
             .as_ref()
@@ -967,9 +1041,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return true;
         }
+
         let Some(orphans) = self.orphans.take() else {
             return self.inferior.is_some() || self.orphans.is_some();
         };
+
         // The program is gone, so a failure has no one to report to.
         if orphans
             .waiter
@@ -977,13 +1053,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             record!("the waiter of the orphaned children panicked");
         }
+
         if self.shutting_down {
             self.finish_shutdown(Ok(()));
             return false;
         }
+
         if let Some(start) = self.deferred_start.take() {
             self.start(start);
         }
+
         true
     }
 
@@ -991,6 +1070,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(old_tid) = self.event_message_of(pid)? else {
             return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
         };
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let mut survivor = inferior
             .threads
@@ -1005,8 +1085,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                     self.executable.to_path_buf(),
                 )));
             }
+
             return self.handle_initial_stop(pid);
         }
+
         inferior
             .retired_threads
             .extend(inferior.threads.keys().copied());
@@ -1019,6 +1101,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         survivor.trapped_at = None;
         survivor.awaiting_breakpoint = None;
         survivor.debugger_stop_pending = false;
+
         // The execing thread takes over the leader's TID, whose exit the
         // kernel never reports.
         inferior.retired_threads.remove(&pid);
@@ -1031,6 +1114,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.runtime_hooks.clear();
         inferior.stack_moves.clear();
         inferior.indirect = super::indirect::IndirectFunctions::default();
+
         // exec(2) flushes every debug register; the new image's addresses
         // have no relation to the old watchpoints.
         self.discard_watchpoints();
@@ -1040,8 +1124,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             thread.armed = Some(generation);
             thread.watch_hits.clear();
         }
+
         self.reset_runtime_modules();
         self.refresh_thread_names();
+
         // Only the executable's own image can be followed: it is the one
         // whose debug information is loaded.
         let load_bias = self.executable_load_bias(pid);
@@ -1054,6 +1140,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or(Error::NotRunning)?
                 .exec_unsupported = true;
         }
+
         self.begin_visible_stop(pid, StopReason::Exec { followed })
     }
 }
@@ -1074,6 +1161,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             // only after synchronous signals such as SIGTRAP.
             return Ok(false);
         }
+
         let candidates = inferior
             .threads
             .iter()
@@ -1091,9 +1179,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             {
                 continue;
             }
+
             self.resume_to_drain(pid)?;
             resumed = true;
         }
+
         Ok(resumed)
     }
 
@@ -1114,6 +1204,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.public_stop.take().is_some() {
             self.bump_revision();
         }
+
         Ok(())
     }
 
@@ -1142,9 +1233,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .then_some(thread),
             Some(HeldStop::Stopped) | None => None,
         };
+
         let Some(thread) = thread else {
             return Ok(false);
         };
+
         if inferior.held == Some(HeldStop::Continued) {
             let mask = self.ptrace.signal_mask(thread)?;
             let continued = 1 << (Signal::SIGCONT.number() - 1);
@@ -1153,6 +1246,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 inferior.held = Some(HeldStop::Draining { thread, mask });
             }
         }
+
         if !self
             .ptrace
             .queued_signal(thread, Signal::SIGCONT, SignalQueue::Process)?
@@ -1161,9 +1255,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             if let Some(HeldStop::Draining { thread, mask }) = inferior.held {
                 self.ptrace.set_signal_mask(thread, mask)?;
             }
+
             inferior.held = None;
             return Ok(false);
         }
+
         self.resume_to_drain(thread)?;
         Ok(true)
     }
@@ -1183,6 +1279,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let others = std::mem::take(&mut inferior.threads);
             inferior.retired_threads.extend(others.into_keys());
         }
+
         let process_id = process_id(inferior.tgid);
         let execution = inferior.active.as_ref().map(|active| active.id);
         let leader_exited = pid == inferior.tgid;
@@ -1197,6 +1294,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return self.thread_exited(pid, status, exited.awaiting_breakpoint.is_some());
         }
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         if inferior.threads.is_empty() {
@@ -1222,6 +1320,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     waiter,
                 });
             }
+
             self.reset_runtime_modules();
             self.bump_revision();
             let _ = self.events.send(DebuggerEvent::InferiorExited {
@@ -1230,21 +1329,26 @@ impl<P: LinuxTraceOps> Controller<P> {
                 execution_id: execution,
                 status: status.clone(),
             });
+
             // A process that exits before its first stop never completes a
             // pending launch or attach.
             let startup_failed = || backend_error(LinuxError::ExitedBeforeStop(status.clone()));
             if let Some(reply) = self.launch_reply.take() {
                 let _ = reply.send(Err(startup_failed()));
             }
+
             if let Some(reply) = self.attach_reply.take() {
                 let _ = reply.send(Err(startup_failed()));
             }
+
             if let Some(reply) = self.shutdown_reply.take() {
                 let _ = reply.send(Ok(()));
             }
+
             if let Some(reply) = self.kill_reply.take() {
                 let _ = reply.send(Ok(()));
             }
+
             self.settle_pending_edits(edits);
             return Ok(());
         }
@@ -1278,6 +1382,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             matches!(active.scope, ResumeScope::Thread(thread) if thread == thread_id)
                 || matches!(active.kind, ActiveKind::Step { owner, .. } if owner.thread == pid)
         });
+
         // A thread resumed alone to reach its awaited breakpoint holds its
         // siblings back; they must run once it is gone.
         let ran_alone = awaited_breakpoint && inferior.active.is_some();
@@ -1290,10 +1395,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             thread_id,
             status: status.clone(),
         });
+
         // A shutdown only stops and releases threads; it never runs them.
         if self.shutting_down {
             return Ok(());
         }
+
         if barrier_active {
             if owned_execution
                 && let Some(barrier) = self
@@ -1308,11 +1415,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 barrier.ended = Some(reason.clone());
                 barrier.reason.get_or_insert(reason);
             }
+
             return self.finish_barrier_if_ready();
         }
+
         if owned_execution {
             let reason = StopReason::ThreadExited { thread_id, status };
             let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+
             // Every other thread stayed stopped during a single-thread
             // execution, and one of them presents the stop. During an
             // all-thread step they may all be running.
@@ -1321,6 +1431,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }) {
                 return self.begin_visible_stop(stopped, reason);
             }
+
             let running = inferior
                 .threads
                 .iter()
@@ -1329,9 +1440,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or(Error::NotRunning)?;
             return self.raise_barrier(running, reason);
         }
+
         if repair_interrupted || ran_alone {
             return self.advance_execution();
         }
+
         Ok(())
     }
 }
@@ -1351,6 +1464,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(start) = self.deferred_start.take() {
             start.fail(Error::RequestCancelled);
         }
+
         self.launch_reply
             .take()
             .map(|reply| reply.send(Err(Error::RequestCancelled)));
@@ -1363,14 +1477,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             if self.orphans.is_none() {
                 self.finish_shutdown(Ok(()));
             }
+
             return;
         };
+
         if inferior.origin != InferiorOrigin::Attached {
             if let Err(error) = self.kill_inferior() {
                 self.finish_shutdown(Err(error));
             }
+
             return;
         }
+
         // An attached process is detached once every thread is stopped.
         let running = inferior
             .threads
@@ -1385,6 +1503,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return;
             }
         }
+
         if let Err(error) = self.detach_when_stopped() {
             self.finish_shutdown(Err(error));
         }
@@ -1406,9 +1525,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return false;
         };
+
         if inferior.threads.contains_key(&pid) {
             return false;
         }
+
         match status {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
                 // A thread no event announced yet exited; one may still come.
@@ -1419,6 +1540,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if !(retired || killed || forked) {
                     inferior.vanished_threads.insert(pid);
                 }
+
                 inferior.unowned_stops.remove(&pid);
             }
             WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT) => {
@@ -1436,6 +1558,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             _ => return false,
         }
+
         true
     }
 
@@ -1447,12 +1570,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return BTreeMap::new();
         };
+
         let stopped = std::mem::take(&mut inferior.unowned_stops);
         let pending = std::mem::take(&mut inferior.fork_children);
         let sites = inferior.inherited_sites();
         for &pid in stopped.keys() {
             self.settle_fork_child(pid, &sites);
         }
+
         pending
     }
 
@@ -1466,11 +1591,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.finish_shutdown(Err(error));
                 return false;
             }
+
             return self.inferior.is_some() || self.orphans.is_some();
         }
+
         if attached {
             return self.handle_detach_wait(status);
         }
+
         let result = match status {
             WaitEvent::Exited(pid, code) => {
                 self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
@@ -1482,6 +1610,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.adopt_unannounced_fork_children(pid);
                 self.ptrace.continue_during_shutdown(pid)
             }
+
             // SIGKILL may have moved the thread on to its exit stop since
             // this status, so continuing it may let it exit: the children it
             // forked are found while `/proc` still lists them.
@@ -1496,10 +1625,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 format!("{other:?}"),
             ))),
         };
+
         if let Err(error) = result {
             self.finish_shutdown(Err(error));
             return false;
         }
+
         self.inferior.is_some() || self.orphans.is_some()
     }
 
@@ -1513,6 +1644,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
                 self.adopt_unannounced_fork_children(pid);
+
                 // An exiting leader settles the detach: Linux reports its
                 // exit only after every other thread's.
                 if let Some(thread) = self
@@ -1522,6 +1654,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 {
                     thread.state = NativeThreadState::Exiting;
                 }
+
                 self.release_exiting_thread(pid)
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
@@ -1535,6 +1668,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             WaitEvent::Stopped(pid, signal) => {
                 let classified = self.classify_stop(pid, signal);
+
                 // The program never sees the signal that ended its held stop.
                 let pending = match classified {
                     ClassifiedStop::SignalDelivery(pending)
@@ -1544,6 +1678,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     }
                     _ => None,
                 };
+
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
                 inferior.and_then(|inferior| {
                     let thread = inferior.thread_mut(pid)?;
@@ -1551,9 +1686,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     if pending.is_some() {
                         thread.pending_signal = pending;
                     }
+
                     Ok(())
                 })
             }
+
             // A thread detached at a system call goes on with it.
             WaitEvent::PtraceEvent(pid, _, _) | WaitEvent::PtraceSyscall(pid) => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
@@ -1566,10 +1703,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 format!("{other:?}"),
             ))),
         };
+
         if let Err(error) = result.and_then(|()| self.detach_when_stopped()) {
             self.finish_shutdown(Err(error));
             return false;
         }
+
         self.inferior.is_some() || self.orphans.is_some()
     }
 
@@ -1580,14 +1719,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         if inferior.threads.is_empty() {
             // Every thread exited while the session ended; once their exits
             // are collected nothing remains to release.
             if inferior.retired_threads.is_empty() && inferior.fork_children.is_empty() {
                 self.forget_vanished_inferior();
             }
+
             return Ok(());
         }
+
         let ready = inferior.fork_children.is_empty()
             && inferior
                 .threads
@@ -1596,6 +1738,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if ready && !self.drain_queued_traps()? && !self.drain_held_continue()? {
             self.detach_inferior();
         }
+
         Ok(())
     }
 
@@ -1606,6 +1749,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(mut inferior) = self.inferior.take() else {
             return;
         };
+
         let killed = std::mem::take(&mut inferior.killed_children);
         let waiter = inferior.waiter.take();
         let outcome = if pending.is_empty() && killed.is_empty() {
@@ -1619,6 +1763,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             });
             Ok(())
         };
+
         self.reset_runtime_modules();
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::InferiorDetached {
@@ -1635,11 +1780,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn handle_fork_during_detach(&mut self, parent: Pid) -> Result<()> {
         let event = self.event_message_of(parent)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+
         // The killed parent goes on to its exit, which the detach awaits.
         let Some(child) = event else {
             inferior.thread_mut(parent)?.state = NativeThreadState::Running;
             return Ok(());
         };
+
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
         let sites = inferior.inherited_sites();
         self.track_fork_child(child, sites);
@@ -1654,6 +1801,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(child) = self.event_message_of(parent)? else {
             return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
         };
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.vfork_windows.insert(
             parent,
@@ -1670,13 +1818,16 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// exited, and reinstalls the traps once no window remains open.
     pub(super) fn handle_vfork_done(&mut self, parent: Pid) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+
         // A parent that vforked before this session attached has no window.
         if inferior.vfork_windows.remove(&parent).is_some() {
             self.close_vfork_windows_if_empty()?;
         }
+
         if !self.barrier_active() {
             self.begin_internal_stop()?;
         }
+
         self.restart_after_internal(parent)
     }
 
@@ -1686,9 +1837,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(());
         };
+
         if inferior.vfork_windows.remove(&thread).is_some() {
             self.close_vfork_windows_if_empty()?;
         }
+
         Ok(())
     }
 
@@ -1699,6 +1852,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.traps_lifted = false;
             reinstall_all_traps(&self.ptrace, inferior)?;
         }
+
         Ok(())
     }
 
@@ -1712,12 +1866,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(false);
         };
+
         if inferior.vfork_windows.is_empty() {
             return Ok(false);
         }
+
         if inferior.vfork_windows.values().all(|window| window.resumed) {
             return Ok(true);
         }
+
         if !inferior.traps_lifted {
             // A repair's lifted site is restored first, so that the lift sees
             // every trap in place and the repair is not left to reinstall one.
@@ -1726,6 +1883,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             lift_all_traps(&self.ptrace, inferior)?;
             inferior.traps_lifted = true;
         }
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let unresumed: Vec<(Pid, VforkWindow)> = inferior
             .vfork_windows
@@ -1751,6 +1909,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.track_fork_child(window.child, Vec::new());
             self.continue_thread(parent)?;
         }
+
         Ok(true)
     }
 
@@ -1764,6 +1923,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.thread_mut(parent)?.state = NativeThreadState::Running;
             return Ok(());
         };
+
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
         lift_all_traps(&self.ptrace, inferior)?;
         self.track_fork_child(child, Vec::new());
@@ -1773,12 +1933,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn handle_clone_during_detach(&mut self, parent: Pid) -> Result<()> {
         let event = self.event_message_of(parent)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+
         // The killed parent goes on to its exit, which the detach awaits.
         let Some(child) = event else {
             inferior.thread_mut(parent)?.state = NativeThreadState::Running;
             return Ok(());
         };
+
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
+
         // The child's first stop may already have arrived.
         let stopped = inferior.unowned_stops.remove(&child).is_some();
         let thread = inferior
@@ -1788,6 +1951,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if stopped {
             thread.state = NativeThreadState::Stopped;
         }
+
         Ok(())
     }
 
@@ -1807,6 +1971,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }),
             "detaching an inferior with a thread that is not stopped"
         );
+
         // Every thread was stopped, and only SIGKILL takes one out of its
         // stop: a thread that refuses to be written belongs to a process
         // that is ending, where what is left can never run.
@@ -1819,6 +1984,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_shutdown(first_error.map_or(Err(Error::NotRunning), Err));
             return;
         };
+
         let mut record = |result: Result<()>| {
             if let Err(error) = result
                 && !is_vanished_tracee(&error)
@@ -1826,6 +1992,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 first_error.get_or_insert(error);
             }
         };
+
         let installed = inferior
             .breakpoints
             .iter()
@@ -1838,9 +2005,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .remove_breakpoint(pid, &mut inferior.breakpoints, address),
             );
         }
+
         if let Some(waiter) = inferior.waiter.take() {
             record(self.join_waiter(waiter));
         }
+
         for (&pid, thread) in &inferior.threads {
             let signal = thread
                 .pending_signal
@@ -1849,9 +2018,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .filter(|signal| self.signals.get(*signal).pass);
             record(self.ptrace.detach(pid, signal).map(drop));
         }
+
         if !inferior.watch.watchpoints.is_empty() {
             self.publish_watchpoints_changed();
         }
+
         self.reset_runtime_modules();
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::InferiorDetached {
@@ -1877,10 +2048,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = reply.send(Err(Error::NotRunning));
             return;
         }
+
         if self.kill_reply.is_some() {
             let _ = reply.send(Err(Error::RequestCancelled));
             return;
         }
+
         match self.kill_inferior() {
             Ok(()) => self.kill_reply = Some(reply),
             Err(error) => {
@@ -1906,6 +2079,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(stop) = stop else {
             return Ok(());
         };
+
         let process = process_id(tgid);
         let scope = ResumeScope::Process(process);
         let execution = self.begin_execution(
@@ -1928,6 +2102,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         self.ptrace.kill(inferior.tgid, Signal::SIGKILL)
     }
 
@@ -1940,6 +2115,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.begin_shutdown(None);
             return;
         }
+
         if self
             .inferior
             .as_ref()

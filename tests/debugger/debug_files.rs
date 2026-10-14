@@ -67,11 +67,13 @@ async fn stops_with_debug_information(mut scenario: Scenario, debug_file: &Path)
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits[0].breakpoint, breakpoint.id);
     let location = scenario
         .operation("location", scenario.handle().current_location())
         .await;
     assert!(location_line(&location).is_some(), "{location:?}");
+
     // The stripped file's own symbol table is gone; the debug file's names
     // the function.
     assert!(
@@ -101,6 +103,7 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let program = scratch.path().join("basic-debuglink");
     fs::copy(split("basic-debuglink"), &program).expect("copy the program");
     fs::create_dir(scratch.path().join(".debug")).expect("the .debug directory");
+
     // Another build's debug information under the linked name.
     fs::copy(
         build_id_debug_file().0,
@@ -114,6 +117,7 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
         panic!("{:?}", image.separate_debug_file());
     };
+
     assert_eq!(
         path.as_path(),
         scratch.path().join(".debug/basic-debuglink.debug")
@@ -132,6 +136,7 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
 #[tokio::test]
 async fn a_debug_directory_holds_the_debug_file_a_build_id_names() {
     let fixture = split("basic-build-id");
+
     // Without the directory, nothing describes the program.
     let scenario = Scenario::new("build-id-missing", &fixture);
     assert_eq!(scenario.handle().module_image().functions().len(), 0);
@@ -141,6 +146,7 @@ async fn a_debug_directory_holds_the_debug_file_a_build_id_names() {
         directories: vec![debug_root()],
         ..DebugFileOptions::default()
     };
+
     let scenario = Scenario::with_debug_files("build-id", &fixture, &options);
     stops_with_debug_information(scenario, &build_id_debug_file().0).await;
 }
@@ -155,6 +161,7 @@ async fn a_library_loads_its_debug_information_from_its_debug_link() {
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits[0].breakpoint, breakpoint.id);
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
@@ -207,16 +214,19 @@ impl Server {
                 let Ok(mut stream) = stream else {
                     continue;
                 };
+
                 let mut request = String::new();
                 let mut reader = BufReader::new(&stream);
                 if reader.read_line(&mut request).is_err() {
                     continue;
                 }
+
                 // The headers end at an empty line.
                 let mut line = String::new();
                 while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
                     line.clear();
                 }
+
                 let body = files.iter().find_map(|(id, body)| {
                     request
                         .starts_with(&format!("GET /buildid/{id}/debuginfo "))
@@ -333,6 +343,7 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
             )
         })
     };
+
     let mut described = BTreeSet::new();
     for function in image.functions() {
         described.insert(format!(
@@ -343,11 +354,13 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
             place(function.declaration())
         ));
     }
+
     for global in image.globals() {
         let ty = match &global.type_info {
             uscope::GlobalVariableType::Resolved(info) => info.name.to_string(),
             other => format!("{other:?}"),
         };
+
         // An unnamed global, as a string literal, is named by where its
         // DIE lies, which dwz moves.
         let name = if global.qualified_name.starts_with("<anonymous global at ") {
@@ -355,12 +368,14 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
         } else {
             &global.qualified_name
         };
+
         described.insert(format!(
             "global {name} {:?} {ty} at {}",
             global.linkage_name,
             place(global.declaration.clone())
         ));
     }
+
     for node in image.types() {
         described.insert(match node {
             uscope::TypeNode::Resolved(info) => {
@@ -371,6 +386,7 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
             malformed => format!("{malformed:?}"),
         });
     }
+
     for row in image.statement_rows() {
         described.insert(format!(
             "row {:#x} {} {} {:?}",
@@ -380,6 +396,7 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
             row.flags
         ));
     }
+
     described
 }
 
@@ -406,6 +423,7 @@ async fn sharing_through_a_supplementary_file_changes_nothing_the_debug_informat
                 scenario.shutdown().await;
                 described
             };
+
             let expected = load("plain").await;
             let found = load(layout).await;
             assert!(
@@ -434,6 +452,7 @@ async fn frame_places(scenario: &Scenario) -> Vec<(String, String)> {
         else {
             continue;
         };
+
         let image = scenario
             .operation(
                 "module image",
@@ -450,6 +469,7 @@ async fn frame_places(scenario: &Scenario) -> Vec<(String, String)> {
                 .into_owned(),
         ));
     }
+
     places
 }
 
@@ -478,6 +498,7 @@ async fn debug_files_read_what_they_share_from_their_supplementary_file() {
         directories: vec![dwz_debug_root()],
         ..DebugFileOptions::default()
     };
+
     let mut scenario = Scenario::with_debug_files("dwz", &program, &options);
     let image = Arc::clone(scenario.handle().module_image());
     assert_eq!(
@@ -489,6 +510,7 @@ async fn debug_files_read_what_they_share_from_their_supplementary_file() {
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits[0].breakpoint, breakpoint.id);
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
@@ -505,6 +527,7 @@ async fn debug_files_read_what_they_share_from_their_supplementary_file() {
         library_image.debug_file().map(|path| path.as_path()),
         Some(filed(&dwz_debug_root(), &build_id(&library)).as_path())
     );
+
     // The library's types are the supplementary file's.
     assert!(matches!(
         evaluated(&scenario, "shape.opposite_.y").await,
@@ -588,6 +611,7 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
     let program_id = build_id(&program);
     let debug_file = filed(&dwz_debug_root(), &program_id);
     let scratch = ScratchDir::new("dwz-supplementary");
+
     // The program's debug file, filed by itself, its supplementary file
     // where it names it replaced by another build's.
     let root = scratch.path().join("root");
@@ -603,6 +627,7 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
         let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
             panic!("{:?}", image.separate_debug_file());
         };
+
         assert_eq!(path.as_path(), copied.as_path());
         assert!(
             reason.starts_with("its dwz supplementary file ../../.dwz/shapes (build-id ")
@@ -610,10 +635,12 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
             "{reason}"
         );
     };
+
     let options = |directories: Vec<PathBuf>| DebugFileOptions {
         directories,
         ..DebugFileOptions::default()
     };
+
     let scenario =
         Scenario::with_debug_files("dwz-misnamed", &program, &options(vec![root.clone()]));
     refused(&scenario);
@@ -656,6 +683,7 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
         debuginfod_cache: Some(cache.path().to_path_buf()),
         ..DebugFileOptions::default()
     };
+
     let scenario = Scenario::with_debug_files("dwz-debuginfod", &program, &downloading);
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
     let image = scenario.handle().module_image();
@@ -684,6 +712,7 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
         directories: vec![split("altlink-root")],
         ..DebugFileOptions::default()
     };
+
     let mut scenario = Scenario::with_debug_files("altlink", split("basic-build-id"), &options);
     let image = Arc::clone(scenario.handle().module_image());
     assert_eq!(image.functions().len(), 0);
@@ -691,6 +720,7 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
         panic!("{:?}", image.separate_debug_file());
     };
+
     assert!(path.starts_with(split("altlink-root")), "{path:?}");
     assert_eq!(
         &**reason,
@@ -711,6 +741,7 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     let uscope::DebugInformation::Unusable { reason } = image.debug_information() else {
         panic!("{:?}", image.debug_information());
     };
+
     assert!(
         reason.starts_with("its dwz supplementary file .dwz/shapes (build-id ")
             && reason.ends_with(") was not found"),
@@ -784,6 +815,7 @@ async fn a_debug_sup_names_its_supplementary_file_by_checksum() {
         directories: vec![root],
         ..DebugFileOptions::default()
     };
+
     let scenario = Scenario::with_debug_files("debug-sup", &program, &options);
     let image = scenario.handle().module_image();
     assert!(image.functions().any(|function| function.name() == "area"));

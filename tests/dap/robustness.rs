@@ -34,6 +34,7 @@ impl ListeningAdapter {
             child,
             address: SocketAddr::from(([127, 0, 0, 1], 0)),
         };
+
         let mut line = String::new();
         BufReader::new(adapter.child.stderr.as_mut().expect("stderr"))
             .read_line(&mut line)
@@ -71,6 +72,7 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
     let directory = ScratchDir::new("dap-listen");
     let log = directory.path().join("traffic.log");
     let adapter = ListeningAdapter::start(&log);
+
     // A web page's request carries Origin; the adapter drops it unanswered.
     let mut browser = TcpStream::connect(adapter.address).expect("connect");
     browser
@@ -95,6 +97,7 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
         &Configuration::default(),
     );
     first.event(started.mark, "process", |_| true);
+
     // A second client connects and asks during the first session, and is
     // served once it ends.
     let mut second = Dap::connect("tcp second", adapter.address);
@@ -195,6 +198,7 @@ fn killing_the_adapter_kills_its_program_and_releases_attached_ones() {
     let pid = launched.process_id().expect("process");
     launched.signal(nix::sys::signal::Signal::SIGKILL);
     launched.abandon();
+
     // Nothing reports the death of a process this test did not start.
     support::wait_until("the launched program is gone with its adapter", || {
         std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -214,6 +218,7 @@ fn killing_the_adapter_kills_its_program_and_releases_attached_ones() {
     attached.stopped(started.mark);
     attached.signal(nix::sys::signal::Signal::SIGKILL);
     attached.abandon();
+
     // The kernel detaches a dead tracer's tracees and resumes the ones it
     // held stopped: this one is untraced and back waiting for its input.
     let status = std::fs::read_to_string(format!("/proc/{}/status", process.process_id()))
@@ -266,7 +271,9 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+
     // A thread can reach the breakpoint before its removal takes effect,
     // which stops the program there once more.
     let (kind, body) = dap.next_event(mark, &["stopped", "exited"]);
@@ -284,6 +291,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
     } else {
         body
     };
+
     assert_eq!(exited, json!({"exitCode": 0}));
     dap.event(mark, "terminated", |_| true);
     dap.finish();
@@ -314,6 +322,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
 }

@@ -20,16 +20,21 @@ use super::*;
 /// What a marker says its expression shows.
 enum Expected {
     Summary(String),
+
     /// A summary whose items may come in any order.
     Unordered(String),
+
     /// Only how many elements or entries, which come in an order that
     /// changes between runs.
     Count(u64),
+
     /// The view refuses the value, saying this.
     Problem(String),
+
     /// The presented value's children, each `name = summary` (a field or
     /// a member), `[i] = summary`, or `key: summary`, and `[raw]`.
     Children(String),
+
     /// No view presents the value, and it holds no text.
     Stored,
 }
@@ -56,10 +61,12 @@ fn expand(text: &str) -> String {
             rest = &rest[start + 1..];
             continue;
         };
+
         out.push_str(&rest[..start]);
         out.extend(std::iter::repeat_n(character, count));
         rest = &rest[start + 1 + rest[start + 1..].find('}').expect("closed") + 1..];
     }
+
     out.push_str(rest);
     out
 }
@@ -69,15 +76,19 @@ fn expectation(text: &str) -> Expected {
     if text == "stored" {
         return Expected::Stored;
     }
+
     if let Some(problem) = text.strip_prefix("problem: ") {
         return Expected::Problem(problem.to_owned());
     }
+
     if let Some(children) = text.strip_prefix("children: ") {
         return Expected::Children(children.to_owned());
     }
+
     if let Some(count) = text.strip_prefix("count: ") {
         return Expected::Count(count.parse().expect("a count"));
     }
+
     text.strip_suffix(" (any order)").map_or_else(
         || Expected::Summary(expand(text)),
         |summary| Expected::Unordered(expand(summary)),
@@ -139,6 +150,7 @@ fn go_duration(text: &str) -> Option<f64> {
         total = number.mul_add(scale, total);
         rest = &rest[unit.len()..];
     }
+
     (!text.is_empty()).then_some(total)
 }
 
@@ -148,9 +160,11 @@ fn summary_matches(expected: &str, actual: &str) -> bool {
     let Some((head, tail)) = expected.split_once("{duration ") else {
         return expected == actual;
     };
+
     let Some(rest) = actual.strip_prefix(head) else {
         return false;
     };
+
     let (range, tail) = tail.split_once('}').expect("a closed duration");
     let (low, high) = range.split_once("..").expect("a duration range");
     let end = rest
@@ -168,6 +182,7 @@ fn sorted_items(summary: &str) -> String {
     let Some(open) = summary.find(['[', '{']) else {
         return summary.to_owned();
     };
+
     let (head, body) = summary.split_at(open);
     let (inner, close) = body[1..].split_at(body.len() - 2);
     let mut items = Vec::new();
@@ -187,9 +202,11 @@ fn sorted_items(summary: &str) -> String {
             _ => {}
         }
     }
+
     if !inner.trim().is_empty() {
         items.push(inner[start..].trim());
     }
+
     items.sort_unstable();
     format!("{head}{}{}{close}", &body[..1], items.join(", "))
 }
@@ -255,6 +272,7 @@ async fn first_children(
             ));
             return None;
         }
+
         if page.children.len() as u64 != wanted - children.len() as u64
             && page.completion.exhaustion().is_none()
         {
@@ -264,8 +282,10 @@ async fn first_children(
                 children.len()
             ));
         }
+
         children.extend(page.children.iter().cloned());
     }
+
     Some(children)
 }
 
@@ -282,11 +302,13 @@ async fn check_children(
         failures.push(format!("line {}: no children", marker.line));
         return;
     };
+
     let count = presentation.count.map_or(0, PresentedCount::known);
     let wanted = reference.total().min(256);
     let Some(whole) = first_children(scenario, marker, reference, wanted, failures).await else {
         return;
     };
+
     let elements = whole
         .iter()
         .filter(|child| is_item(&child.relationship))
@@ -297,6 +319,7 @@ async fn check_children(
             marker.line
         ));
     }
+
     let raw = whole.last();
     if !matches!(
         raw,
@@ -312,6 +335,7 @@ async fn check_children(
     {
         failures.push(format!("line {}: no [raw] child: {raw:?}", marker.line));
     }
+
     // Small pages read the same elements as one large page.
     let mut paged = Vec::new();
     let mut offset = 0;
@@ -327,6 +351,7 @@ async fn check_children(
         paged.extend(small.children.iter().map(|child| child.state.clone()));
         offset += 7;
     }
+
     let expected = whole
         .iter()
         .take(paged.len())
@@ -338,6 +363,7 @@ async fn check_children(
             marker.line
         ));
     }
+
     for index in [0, count.saturating_sub(1)] {
         if index < count.min(256) {
             let child = &whole[usize::try_from(index).expect("small")];
@@ -368,6 +394,7 @@ async fn check_name(
         (ValueChildRelationship::Element { .. }, _) => {
             format!("({})[{index}]", marker.expression)
         }
+
         (
             ValueChildRelationship::Entry { .. },
             VariableState::Available {
@@ -382,6 +409,7 @@ async fn check_name(
             return;
         }
     };
+
     let again = evaluate(scenario, &name).await;
     let rendered = |state: &VariableState| match state {
         VariableState::Available {
@@ -391,6 +419,7 @@ async fn check_name(
         VariableState::Available { value, text, .. } => format!("{value:?} {text:?}"),
         state => format!("{state:?}"),
     };
+
     if rendered(&again.state) != rendered(&child.state) {
         failures.push(format!(
             "line {}: `{name}` is {} but child {index} is {}",
@@ -415,11 +444,13 @@ async fn check_listed_children(
         failures.push(format!("line {}: no children", marker.line));
         return;
     };
+
     let Some(children) =
         first_children(scenario, marker, reference, reference.total(), failures).await
     else {
         return;
     };
+
     seen.extend(children.iter().filter_map(|child| match &child.state {
         VariableState::Available {
             presentation: Some(presentation),
@@ -478,8 +509,10 @@ async fn check_marker(
                 marker.line, marker.expression, value.state
             ));
         }
+
         return;
     }
+
     // Text a language's own types hold, such as Rust's `Box<str>`, needs
     // no view.
     if let (
@@ -494,8 +527,10 @@ async fn check_marker(
         if &uscope::quoted_text(text) != expected {
             failures.push(format!("line {}: the text is {text:?}", marker.line));
         }
+
         return;
     }
+
     let Some(presentation) = presentation(value) else {
         failures.push(format!(
             "line {}: `{}` has no presentation: {:?}",
@@ -503,6 +538,7 @@ async fn check_marker(
         ));
         return;
     };
+
     seen.insert(presentation.view.to_string());
     match (&marker.expected, presentation.shape) {
         (Expected::Problem(words), PresentedShape::Raw) => {
@@ -532,6 +568,7 @@ async fn check_marker(
                     marker.line, marker.expression, presentation.count
                 ));
             }
+
             check_children(scenario, marker, presentation, failures).await;
         }
         (Expected::Summary(expected) | Expected::Unordered(expected), _) => {
@@ -539,12 +576,14 @@ async fn check_marker(
             if matches!(marker.expected, Expected::Unordered(_)) {
                 actual = sorted_items(&actual);
             }
+
             if !summary_matches(expected, &actual) {
                 failures.push(format!(
                     "line {}: `{}`\n    expected {expected}\n    actual   {actual}",
                     marker.line, marker.expression
                 ));
             }
+
             if matches!(
                 presentation.shape,
                 PresentedShape::Sequence | PresentedShape::Map
@@ -631,6 +670,7 @@ async fn check_markers(
         } else {
             evaluate(scenario, &marker.expression).await
         };
+
         // Nor need it keep everything a view reads, such as the parts of a
         // value it holds in pieces.
         let view_unavailable = matches!(
@@ -641,6 +681,7 @@ async fn check_markers(
         if optimized && (matches!(value.state, VariableState::Unavailable(_)) || view_unavailable) {
             continue;
         }
+
         // Or keep it where it has no address, which a view may need.
         if optimized
             && let VariableState::Available {
@@ -651,6 +692,7 @@ async fn check_markers(
         {
             continue;
         }
+
         check_marker(scenario, marker, &value, seen, failures).await;
     }
 }
@@ -660,6 +702,7 @@ async fn check_markers(
 enum MarkedFrame {
     /// In the frame of `barrier`, which the fixture passes its values.
     Barrier,
+
     /// In the frame that calls `barrier`, whose locals they are.
     Caller,
 }
@@ -697,6 +740,7 @@ async fn check_printed_markers(
     let mut stops = 0;
     while matches!(reason, StopReason::Breakpoint { .. }) {
         stops += 1;
+
         // The fixture writes its markers before it calls barrier.
         let printed = fs::read_to_string(&output_path).expect("read the fixture's output");
         let markers = markers_in(&printed[read..]);
@@ -708,13 +752,16 @@ async fn check_printed_markers(
         if matches!(frame, MarkedFrame::Caller) {
             select_caller(&scenario).await;
         }
+
         let before = failures.len();
         check_markers(&scenario, &markers, optimized, &mut seen, &mut failures).await;
         for failure in &mut failures[before..] {
             *failure = format!("stop {stops}, printed {failure}");
         }
+
         reason = scenario.resume_to_stop().await;
     }
+
     assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
     assert!(stops >= 2, "{fixture} stopped at each barrier");
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
@@ -770,6 +817,7 @@ async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
                 .await,
         );
     }
+
     assert_every_view_binds("libstdc++.views", &seen);
     assert_every_view_binds("libc++.views", &seen);
 }
@@ -784,6 +832,7 @@ async fn c_library_values_present_as_their_views_say() {
     ] {
         seen.extend(check_containers(fixture, "c/glibc.c", "barrier", optimized).await);
     }
+
     assert_every_view_binds("glibc.views", &seen);
 }
 
@@ -793,6 +842,7 @@ async fn rust_containers_present_as_their_views_say() {
     for (fixture, optimized) in [("containers-rust-o0", false), ("containers-rust-o2", true)] {
         seen.extend(check_containers(fixture, "rust/containers.rs", "barrier", optimized).await);
     }
+
     assert_every_view_binds("rust-std.views", &seen);
 }
 
@@ -821,6 +871,7 @@ async fn zig_containers_present_as_their_views_say() {
                 .await,
         );
     }
+
     assert_every_view_binds("zig-std.views", &seen);
 }
 
@@ -838,6 +889,7 @@ async fn odin_containers_present_as_their_views_say() {
             .await,
         );
     }
+
     assert_every_view_binds("odin-core.views", &seen);
 }
 
@@ -847,6 +899,7 @@ async fn d_containers_present_as_their_views_say() {
     for (fixture, optimized) in [("containers-d-o0", false), ("containers-d-o2", true)] {
         seen.extend(check_containers(fixture, "d/containers.d", "barrier", optimized).await);
     }
+
     assert_every_view_binds("d-std.views", &seen);
 }
 
@@ -858,6 +911,7 @@ async fn go_containers_present_as_their_views_say() {
             check_containers(fixture, "go/containers/main.go", "main.barrier", optimized).await,
         );
     }
+
     assert_every_view_binds("go-runtime.views", &seen);
 }
 
@@ -872,6 +926,7 @@ async fn go_library_values_present_as_go_shows_them() {
             check_printed_markers(fixture, "main.barrier", MarkedFrame::Barrier, optimized).await,
         );
     }
+
     for library in [
         "go-time.views",
         "go-sync.views",
@@ -986,11 +1041,13 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
         else {
             panic!("round {round}: not stopped: {:?}", snapshot.inferior);
         };
+
         let context = uscope::StopContext {
             stop: stop_id,
             execution: thread_id.into(),
             frame: caller,
         };
+
         let handle = scenario.handle().clone();
         let words = Expression::parse("words").expect("an expression");
         let many = Expression::parse("many[299] + len(many)").expect("an expression");
@@ -1023,12 +1080,14 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
                         } => number.to_string(),
                         state => format!("{state:?}"),
                     };
+
                     assert_eq!(shown, expected, "round {round}");
                 }
                 Err(Error::StaleStop | Error::NotStopped | Error::NotRunning) => {}
                 other => panic!("round {round}: {other:?}"),
             }
         }
+
         scenario.shutdown().await;
     }
 }
@@ -1046,6 +1105,7 @@ async fn an_assignment_sent_before_run_control_answers_with_its_value() {
         .operation("backtrace", scenario.handle().backtrace())
         .await;
     let caller = trace.frames[1].id;
+
     // Each check costs more than the work between looks for run control,
     // and finding an element's place runs them all.
     let sum = vec!["n"; 16].join(" + ");
@@ -1078,6 +1138,7 @@ view rust alloc::vec::Vec<T, _> {{
     else {
         panic!("not stopped: {:?}", snapshot.inferior);
     };
+
     let handle = scenario.handle().clone();
     let frame = handle.at(uscope::StopContext {
         stop: stop_id,
@@ -1085,6 +1146,7 @@ view rust alloc::vec::Vec<T, _> {{
         frame: caller,
     });
     let assignment = Expression::parse("ints[0] = 7").expect("an expression");
+
     // Polled in order, so the assignment is queued first.
     let (assigned, resumed) = tokio::join!(
         frame.evaluate_with(
@@ -1112,6 +1174,7 @@ view rust alloc::vec::Vec<T, _> {{
         ),
         other => panic!("{other:?}"),
     }
+
     scenario.shutdown().await;
 }
 
@@ -1164,6 +1227,7 @@ view rust nowhere {
     );
     let ints = evaluate(&scenario, "ints").await;
     assert_eq!(summary(&ints), "a vector");
+
     // The path presents as its bytes, a Vec<u8> the session's view now
     // presents, whose children it borrows.
     let path = evaluate(&scenario, "path").await;
@@ -1175,6 +1239,7 @@ view rust nowhere {
     let ValueChildren::Available(reference) = &presentation.children else {
         panic!("{presentation:?}");
     };
+
     let page = scenario
         .operation(
             "children",
@@ -1196,6 +1261,7 @@ view rust nowhere {
             other => format!("{other:?}"),
         })
         .collect::<Vec<_>>();
+
     // The vector's own presentation, `empty`, has no elements, and its
     // `[raw]` is its own: the path's children are its field and `[raw]`.
     assert_eq!(names, ["length", "[raw]"]);
@@ -1210,6 +1276,7 @@ view rust nowhere {
         ),
         "{length:?}"
     );
+
     // Restoring the built-in views presents the vector again.
     scenario
         .operation("unload views", scenario.handle().load_views(&[], &[], &[]))
@@ -1250,6 +1317,7 @@ async fn embedded_views_present_only_their_own_modules_types() {
         (presented.summary.as_ref(), presented.view.source.as_ref()),
         ("{x: 0x3, y: 4}", "libembedded-views.so.views[0]")
     );
+
     // The program's own point has the library's point's name, and no view.
     let here = evaluate(&scenario, "here").await;
     assert!(presentation(&here).is_none(), "{:?}", here.state);
@@ -1286,6 +1354,7 @@ async fn the_rust_sdk_embeds_a_programs_views_and_kernels() {
             "{expression}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -1314,6 +1383,7 @@ fn the_tutorial_quotes_its_fixtures_as_they_are() {
         else {
             continue;
         };
+
         let block = lines
             .by_ref()
             .take_while(|line| *line != "```")
@@ -1327,5 +1397,6 @@ fn the_tutorial_quotes_its_fixtures_as_they_are() {
         );
         quoted += 1;
     }
+
     assert!(quoted >= 5, "the tutorial quotes its fixtures");
 }

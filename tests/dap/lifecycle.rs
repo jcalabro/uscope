@@ -41,6 +41,7 @@ fn every_client_profile_runs_a_program_to_its_breakpoints_and_exit() {
                     .clone();
             }
         }
+
         assert_eq!(breakpoints[0]["verified"], true);
         assert_eq!(breakpoints[0]["line"], line);
         assert_eq!(breakpoints[1]["verified"], true);
@@ -65,6 +66,7 @@ fn every_client_profile_runs_a_program_to_its_breakpoints_and_exit() {
             assert_eq!(frames[0]["line"], line);
             assert_eq!(frames[1]["name"], "main");
         }
+
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
         assert_eq!(
@@ -94,6 +96,7 @@ fn launches_pass_arguments_environment_and_directory_and_report_output() {
         dap.event(started.mark, "exited", |_| true),
         json!({"exitCode": 3})
     );
+
     // The program's output is complete when it exits.
     assert_eq!(
         dap.output_text(started.mark, "stdout"),
@@ -102,6 +105,7 @@ fn launches_pass_arguments_environment_and_directory_and_report_output() {
             directory.path().display()
         )
     );
+
     // Its stdin is empty rather than the adapter's protocol stream.
     assert_eq!(dap.output_text(started.mark, "stderr"), "input: (eof)\n");
     let process = dap.event(started.mark, "process", |_| true);
@@ -126,6 +130,7 @@ fn stop_on_entry_stops_before_the_program_runs_any_code() {
     let stop = dap.stopped(started.mark);
     assert_eq!(stop.reason, "entry");
     let frames = dap.inspect_as(Profile::VsCode, &stop);
+
     // The first instruction belongs to the dynamic loader.
     assert!(
         frames[0]["name"]
@@ -196,6 +201,7 @@ fn invalid_configurations_are_shown_to_the_user_and_the_session_survives() {
         assert_eq!(response["body"]["error"]["showUser"], true);
         let message = response["message"].as_str().expect("message");
         assert!(message.starts_with(&expected), "{message}");
+
         // Requests still work after the failure.
         dap.request("threads", Value::Null);
         dap.finish();
@@ -222,11 +228,13 @@ fn requests_out_of_order_are_refused_without_ending_the_session() {
         dap.request_error("frobnicate", json!({})),
         "the 'frobnicate' request is not supported"
     );
+
     // Every source has a path, so a client never needs its contents sent.
     assert_eq!(
         dap.request_error("source", json!({"sourceReference": 1})),
         "source contents are not available from the debugger; open the file locally"
     );
+
     // A thread to pause exists even before anything is launched.
     assert_eq!(
         dap.request("threads", Value::Null),
@@ -262,8 +270,10 @@ fn disconnecting_kills_a_launched_program_whether_running_or_stopped() {
         } else {
             dap.event(started.mark, "process", |_| true);
         }
+
         let sent = dap.send("disconnect", json!({}));
         dap.success(sent);
+
         // The program's end is reported before the disconnect response.
         let messages = dap.messages_since(sent.mark);
         let position = |predicate: &dyn Fn(&Value) -> bool| messages.iter().position(predicate);
@@ -272,6 +282,7 @@ fn disconnecting_kills_a_launched_program_whether_running_or_stopped() {
         let response = position(&|message| message["type"] == "response").expect("response");
         assert!(exited < terminated && terminated < response, "{messages:?}");
         assert_eq!(messages[exited]["body"], json!({"exitCode": 128 + 9}));
+
         // Finishing checks that the program is gone.
         dap.close_stdin();
         dap.finish();
@@ -297,6 +308,7 @@ fn ending_input_or_signaling_the_adapter_ends_the_session_and_the_program() {
             None => dap.close_stdin(),
             Some(signal) => dap.signal(signal),
         }
+
         dap.wait_for_exit();
         dap.close_stdin();
         dap.finish();
@@ -323,6 +335,7 @@ fn attaching_continues_the_process_and_detaching_leaves_it_running() {
         let event = dap.event(started.mark, "process", |_| true);
         assert_eq!(event["startMethod"], "attach");
         assert_eq!(event["systemProcessId"], pid);
+
         // Reading the process's debug information shows progress.
         let progress = dap.event(started.mark, "progressStart", |_| true);
         assert_eq!(progress["title"], format!("Attaching to process {pid}"));
@@ -334,12 +347,14 @@ fn attaching_continues_the_process_and_detaching_leaves_it_running() {
             let resumed = dap.send("continue", json!({"threadId": stop.thread}));
             dap.success(resumed);
         }
+
         let mark = dap.mark();
         process.release();
         let stop = dap.stopped(mark);
         assert_eq!(stop.reason, "function breakpoint");
         let frames = dap.inspect_as(Profile::VsCode, &stop);
         assert_eq!(frames[0]["name"], "attach_breakpoint");
+
         // Detaching leaves the process running; it then finishes alone.
         dap.finish();
         assert_eq!(process.wait().code(), Some(23));
@@ -382,6 +397,7 @@ fn core_dumps_open_stopped_at_their_signal_and_refuse_to_run() {
     let stop = dap.stopped(started.mark);
     assert_eq!(stop.reason, "exception");
     assert_eq!(stop.body["text"], "SIGSEGV");
+
     // A core dump has no program to restart, so a client opens it again.
     assert_eq!(
         dap.event(started.mark, "capabilities", |_| true),
@@ -417,6 +433,7 @@ fn restarting_relaunches_the_program_with_new_arguments_in_the_same_session() {
         json!({"arguments": {"program": fixture("process-environment"), "args": ["a", "b", "c"]}}),
     );
     dap.success(restart);
+
     // The old process ends, but the session goes on.
     assert_eq!(
         dap.event(restart.mark, "exited", |_| true),
@@ -564,6 +581,7 @@ fn core_dumps_explain_their_signal_their_missing_modules_and_mismatched_files() 
                 "{message}"
             );
         }
+
         dap.finish();
     }
 }

@@ -21,11 +21,13 @@ fn a_recording_collects_every_threads_spans_and_counts() {
                         let _inner = crate::span!("decode");
                         crate::count!("dies", 10_u32);
                     }
+
                     crate::count!("dies", 1_u32);
                 });
             }
         });
     }
+
     crate::count!("loose", 3_u64);
     mark("ready");
     let report = recording.finish().unwrap();
@@ -37,6 +39,7 @@ fn a_recording_collects_every_threads_spans_and_counts() {
             .find(|phase| phase.name == name)
             .unwrap_or_else(|| panic!("no phase {name} in {:?}", report.phases))
     };
+
     assert_eq!(phase("load").spans, 1);
     assert_eq!(phase("load").counters.get("units"), Some(&2));
     assert_eq!(phase("unit").spans, 2);
@@ -146,6 +149,7 @@ fn a_report_says_whether_it_counted_instructions() {
         let _work = crate::span!("work");
         std::hint::black_box((0..10_000_u64).sum::<u64>());
     }
+
     let report = recording.finish().unwrap();
     let work = &report.phases[0];
     match report.summary.instructions.as_str() {

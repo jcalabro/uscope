@@ -17,6 +17,7 @@ pub struct Gate {
     pub pid: u32,
     go: Option<OwnedFd>,
     spawner: Option<JoinHandle<std::io::Result<Option<ExitStatus>>>>,
+
     /// Dropping it lets a spawner that does not reap its child return.
     hold: Option<mpsc::Sender<()>>,
 }
@@ -26,6 +27,7 @@ pub struct Gate {
 pub struct GateOptions {
     /// A seccomp filter the child installs before it executes.
     pub filter: Option<Vec<Instruction>>,
+
     /// Whether the spawning thread waits for the child and reaps it, as
     /// when nothing traces it. A ptrace engine reaps it itself.
     pub reap: bool,
@@ -90,6 +92,7 @@ pub fn launch(mut command: Command, options: GateOptions) -> std::io::Result<Gat
             if reap {
                 return child.wait().map(Some);
             }
+
             // The tracer reaps the child; this thread only outlives it.
             let _ = released.recv();
             drop(child);
@@ -103,8 +106,10 @@ pub fn launch(mut command: Command, options: GateOptions) -> std::io::Result<Gat
             Ok(Err(error)) => error,
             _ => std::io::Error::other("the program did not start"),
         };
+
         return Err(error);
     }
+
     let pid = u32::from_le_bytes(pid);
     record!("syscalls launch: {pid} waits at its gate");
     Ok(Gate {
@@ -161,6 +166,7 @@ mod tests {
             filter: None,
             reap: true,
         };
+
         let mut gate = launch(Command::new("true"), options).expect("a gated child");
         let pid = gate.pid;
         drop(gate.go.take());
@@ -175,6 +181,7 @@ mod tests {
                 nix::sys::signal::Signal::SIGKILL,
             );
         }
+
         assert_eq!(
             ended.expect("the child ends"),
             Err(Some(libc::ECANCELED)),
@@ -192,11 +199,13 @@ mod tests {
             filter: None,
             reap: false,
         };
+
         let mut command = Command::new("sleep");
         command.arg("100");
         let mut gate = launch(command, options).expect("a gated child");
         let pid = nix::unistd::Pid::from_raw(gate.pid.cast_signed());
         gate.open().expect("the gate opens");
+
         // The spawning thread returns once the program executes.
         gate.finish().expect("the program executes");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -213,6 +222,7 @@ mod tests {
                 other => break other,
             }
         };
+
         assert_eq!(
             status,
             Ok(WaitStatus::Signaled(

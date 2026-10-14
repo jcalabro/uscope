@@ -16,8 +16,10 @@ pub struct Token {
 pub enum TokenKind {
     /// A plain identifier, including keywords.
     Ident(String),
+
     /// A backticked name, which is never a keyword.
     Quoted(String),
+
     /// `$name`, without the `$`.
     Register(String),
     Integer {
@@ -76,6 +78,7 @@ pub enum Punct {
     CloseParen,
     OpenBracket,
     CloseBracket,
+
     /// Only `offsetof(TYPE, member)` in a view's expressions takes one.
     Comma,
 }
@@ -186,6 +189,7 @@ pub fn lex(text: &str) -> Result<Vec<Token>, ExpressionError> {
             format!("an expression may be at most {MAX_TEXT_BYTES} bytes long"),
         ));
     }
+
     let mut lexer = Lexer { text, cursor: 0 };
     let mut tokens = Vec::new();
     loop {
@@ -198,6 +202,7 @@ pub fn lex(text: &str) -> Result<Vec<Token>, ExpressionError> {
             });
             return Ok(tokens);
         }
+
         let after_dot = matches!(
             tokens.last(),
             Some(Token {
@@ -206,6 +211,7 @@ pub fn lex(text: &str) -> Result<Vec<Token>, ExpressionError> {
             })
         );
         let kind = lexer.token(after_dot)?;
+
         // Every token consumes text, so a mistake here cannot loop while
         // the token list grows.
         assert!(lexer.cursor > start, "the lexer made no progress");
@@ -265,11 +271,13 @@ impl Lexer<'_> {
         let Some(byte) = self.peek() else {
             return Err(self.error(start, "the text ends where a token should begin"));
         };
+
         if is_name_start(byte) {
             return Ok(TokenKind::Ident(
                 self.take_while(is_name_continue).to_owned(),
             ));
         }
+
         if byte.is_ascii_digit() {
             return if after_dot {
                 self.field_index(start)
@@ -277,6 +285,7 @@ impl Lexer<'_> {
                 self.number(start)
             };
         }
+
         match byte {
             b'`' => self.quoted(start),
             b'$' => {
@@ -285,6 +294,7 @@ impl Lexer<'_> {
                 if name.is_empty() {
                     return Err(self.error(start, "expected a register name after `$`"));
                 }
+
                 Ok(TokenKind::Register(name.to_owned()))
             }
             b'\'' => self.char_literal(start),
@@ -304,6 +314,7 @@ impl Lexer<'_> {
                         error
                     });
                 };
+
                 self.cursor += punct.text().len();
                 Ok(TokenKind::Punct(punct))
             }
@@ -316,11 +327,13 @@ impl Lexer<'_> {
             self.cursor = self.text.len();
             return Err(self.error(start, "a backticked name needs a closing backtick"));
         };
+
         let name = self.rest()[..length].to_owned();
         self.cursor += length + 1;
         if name.is_empty() {
             return Err(self.error(start, "a backticked name cannot be empty"));
         }
+
         Ok(TokenKind::Quoted(name))
     }
 
@@ -331,6 +344,7 @@ impl Lexer<'_> {
         if (digits.len() > 1 && digits.starts_with('0')) || value.is_err() {
             return Err(self.error(start, "a tuple field is a decimal index"));
         }
+
         Ok(TokenKind::Integer {
             value: u128::from(value.unwrap_or_default()),
             suffix: None,
@@ -344,6 +358,7 @@ impl Lexer<'_> {
             (Some(b'0'), Some(b'b' | b'B')) => 2,
             _ => 10,
         };
+
         if radix != 10 {
             self.cursor += 2;
             let body = self.take_while(is_name_continue).to_owned();
@@ -355,6 +370,7 @@ impl Lexer<'_> {
             if matches!(suffix, Some(Suffix::F32 | Suffix::F64)) {
                 return Err(self.error(start, "a float literal must be decimal"));
             }
+
             return self.integer(start, digits, radix, suffix);
         }
 
@@ -366,6 +382,7 @@ impl Lexer<'_> {
             self.cursor += 1;
             self.take_while(|byte| byte.is_ascii_digit() || byte == b'_');
         }
+
         let exponent = matches!(self.peek(), Some(b'e' | b'E'))
             && match self.peek_at(1) {
                 Some(b'+' | b'-') => self.peek_at(2).is_some_and(|byte| byte.is_ascii_digit()),
@@ -375,6 +392,7 @@ impl Lexer<'_> {
             self.cursor += 2;
             self.take_while(|byte| byte.is_ascii_digit() || byte == b'_');
         }
+
         let number_end = self.cursor;
         let suffix_text = self.take_while(is_name_continue).to_owned();
         let suffix = self.suffix(start, &suffix_text)?;
@@ -383,16 +401,19 @@ impl Lexer<'_> {
                 .error(start, "an integer cannot begin with 0")
                 .with_hint("write 0o17 for octal or 17 for decimal"));
         }
+
         if fraction || exponent || matches!(suffix, Some(Suffix::F32 | Suffix::F64)) {
             if matches!(suffix, Some(Suffix::Int { .. } | Suffix::Size { .. })) {
                 return Err(self.error(start, "a float literal cannot have an integer suffix"));
             }
+
             let text: String = self.text[start..number_end]
                 .chars()
                 .filter(|&character| character != '_')
                 .collect();
             return self.float(start, &text, suffix);
         }
+
         self.integer(start, &digits, 10, suffix)
     }
 
@@ -410,6 +431,7 @@ impl Lexer<'_> {
         if digits.is_empty() {
             return Err(self.error(start, "expected digits"));
         }
+
         let value = u128::from_str_radix(&digits, radix)
             .map_err(|_| self.error(start, "an integer literal may have at most 128 bits"))?;
         Ok(TokenKind::Integer { value, suffix })
@@ -432,6 +454,7 @@ impl Lexer<'_> {
                 .filter(|value| value.is_finite())
                 .map(Float::from_f64)
         };
+
         parsed
             .map(TokenKind::Float)
             .ok_or_else(|| self.error(start, "the float literal is too large"))
@@ -449,6 +472,7 @@ impl Lexer<'_> {
                 if let Some(parsed) = int_suffix(suffix) {
                     return Ok(Some(parsed));
                 }
+
                 let error = self.error(start, format!("unknown literal suffix `{suffix}`"));
                 return Err(
                     if suffix.chars().all(|character| "uUlLzZ".contains(character)) {
@@ -459,6 +483,7 @@ impl Lexer<'_> {
                 );
             }
         };
+
         Ok(Some(parsed))
     }
 
@@ -485,12 +510,14 @@ impl Lexer<'_> {
                 u32::from(character)
             }
         };
+
         if self.peek() != Some(b'\'') {
             return Err(self.error(
                 start,
                 "a character literal holds one character and a closing `'`",
             ));
         }
+
         self.cursor += 1;
         Ok(TokenKind::Char(value))
     }
@@ -520,6 +547,7 @@ impl Lexer<'_> {
                     bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
                 }
             }
+
             assert!(self.cursor > before, "the string lexer made no progress");
         }
     }
@@ -530,6 +558,7 @@ impl Lexer<'_> {
         let Some(byte) = self.peek() else {
             return Err(self.error(start, "an escape needs a character after `\\`"));
         };
+
         self.cursor += 1;
         Ok(match byte {
             b'n' => Escaped::Char('\n'),
@@ -547,6 +576,7 @@ impl Lexer<'_> {
                 let Some(digits) = digits else {
                     return Err(self.error(start, "`\\x` needs two hexadecimal digits"));
                 };
+
                 let value = u8::from_str_radix(digits, 16).unwrap_or_default();
                 self.cursor += 2;
                 Escaped::Byte(value)
@@ -566,6 +596,7 @@ impl Lexer<'_> {
                         "`\\u` needs a code point in braces, such as `\\u{e9}`",
                     ));
                 };
+
                 self.cursor += body.len() + 2;
                 Escaped::Char(value)
             }
@@ -588,9 +619,11 @@ fn int_suffix(text: &str) -> Option<Suffix> {
         b'u' => (false, &text[1..]),
         _ => return None,
     };
+
     if digits.starts_with('0') {
         return None;
     }
+
     let width = digits
         .parse::<u8>()
         .ok()

@@ -58,6 +58,7 @@ impl Driven {
             Mode::Current => vec!["current".into()],
             Mode::Handle => vec!["handle".into()],
         };
+
         let reason = scenario
             .run_with_to_stop(LaunchOptions {
                 arguments,
@@ -85,6 +86,7 @@ impl Driven {
                 _ => {}
             }
         }
+
         Self {
             scenario,
             driver: driver.expect("the fixture names the driving thread"),
@@ -107,6 +109,7 @@ fn awaits(mode: Mode) -> Vec<(String, u64)> {
             line(SOURCE, "// AWAIT: main"),
         ));
     }
+
     awaits
 }
 
@@ -166,11 +169,13 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
         else {
             panic!("{context}: not stopped");
         };
+
         let view = |frame| StopContext {
             stop: stop_id,
             execution: ExecutionContext::Thread(stopped.driver),
             frame,
         };
+
         let handle = stopped.scenario.handle();
         let trace = stopped
             .scenario
@@ -186,6 +191,7 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
             let [unfollowed] = &trace.unfollowed[..] else {
                 panic!("{context}: {}", listing(&trace));
             };
+
             let driver = &trace.frames[unfollowed.driver.get() as usize];
             assert_eq!(
                 driver.role,
@@ -196,6 +202,7 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
             stopped.scenario.shutdown().await;
             continue;
         };
+
         assert!(
             trace.unfollowed.is_empty(),
             "{context}: {}",
@@ -237,6 +244,7 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
                 .is_some_and(|name| name.contains("8block_on")),
             "{context}: {driver:#?}"
         );
+
         // Only one future is driven, once.
         assert_eq!(
             trace
@@ -258,6 +266,7 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
             )
             .await;
         }
+
         stopped.scenario.shutdown().await;
     }
 }

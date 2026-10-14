@@ -42,14 +42,18 @@ pub struct Config {
     pub breakpoints: Breakpoints,
     pub debug_info: DebugInfo,
     pub history: History,
+
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub signals: BTreeMap<String, SignalActions>,
+
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub source_map: Vec<SourceMapRule>,
+
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
     pub startup: Startup,
     pub projects: Projects,
+
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub launch: Vec<Launch>,
 }
@@ -72,6 +76,7 @@ pub struct Ui {
     pub unicode: Toggle,
     pub hyperlinks: Toggle,
     pub paths: PathStyle,
+
     /// `auto`, `never`, or a command.
     pub pager: String,
     pub editor: String,
@@ -102,6 +107,7 @@ pub struct Source {
     #[serde(deserialize_with = "context")]
     pub context: [u32; 2],
     pub highlight: bool,
+
     #[serde(deserialize_with = "bounded::<_, u8, 1, 16>")]
     pub tab_width: u8,
 }
@@ -134,8 +140,10 @@ pub enum Section {
 pub struct Stop {
     #[serde(deserialize_with = "sections")]
     pub show: Vec<Section>,
+
     #[serde(deserialize_with = "bounded::<_, u32, 1, 1000>")]
     pub backtrace_frames: u32,
+
     #[serde(deserialize_with = "bounded::<_, u32, 1, 64>")]
     pub disassembly_instructions: u32,
     pub highlight_changes: bool,
@@ -185,10 +193,13 @@ pub struct Print {
     pub style: PrintStyle,
     pub radix: Radix,
     pub width: Width,
+
     #[serde(deserialize_with = "bounded::<_, u8, 0, 16>")]
     pub indent: u8,
+
     #[serde(deserialize_with = "bounded::<_, u64, 1, 64>")]
     pub max_depth: u64,
+
     #[serde(deserialize_with = "bounded::<_, u64, 1, 512>")]
     pub max_elements: u64,
 }
@@ -258,8 +269,10 @@ pub struct DebugInfo {
     /// Debug directories searched before the system's, relative to the
     /// project root.
     pub directories: Vec<PathBuf>,
+
     /// Download debug files no directory holds from debuginfod servers.
     pub debuginfod: bool,
+
     /// How many threads load debug information, unless `USCOPE_JOBS` says;
     /// by default, one per CPU up to 16.
     pub jobs: Option<std::num::NonZeroUsize>,
@@ -296,14 +309,17 @@ impl<'de> Deserialize<'de> for SignalActions {
             print: true,
             pass: true,
         };
+
         for action in text.split_whitespace() {
             super::commands::apply_signal_action(&mut policy, action).map_err(de::Error::custom)?;
         }
+
         if text.split_whitespace().next().is_none() {
             return Err(de::Error::custom(
                 "expected actions such as \"nostop noprint pass\"",
             ));
         }
+
         Ok(Self(text))
     }
 }
@@ -354,11 +370,14 @@ pub enum AttachTarget {
 impl<'de> Deserialize<'de> for AttachTarget {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
+
         impl de::Visitor<'_> for Visitor {
             type Value = AttachTarget;
+
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a process id or a process name")
             }
+
             fn visit_i64<E: de::Error>(self, value: i64) -> Result<AttachTarget, E> {
                 u64::try_from(value)
                     .ok()
@@ -366,18 +385,22 @@ impl<'de> Deserialize<'de> for AttachTarget {
                     .map(AttachTarget::Pid)
                     .ok_or_else(|| E::custom(format!("{value} is not a process id")))
             }
+
             fn visit_u64<E: de::Error>(self, value: u64) -> Result<AttachTarget, E> {
                 self.visit_i64(i64::try_from(value).unwrap_or(-1))
             }
+
             fn visit_str<E: de::Error>(self, value: &str) -> Result<AttachTarget, E> {
                 if value.is_empty() {
                     return Err(E::custom("a process name cannot be empty"));
                 }
+
                 Ok(value
                     .parse()
                     .map_or_else(|_| AttachTarget::Name(value.to_owned()), AttachTarget::Pid))
             }
         }
+
         deserializer.deserialize_any(Visitor)
     }
 }
@@ -396,26 +419,37 @@ impl Serialize for AttachTarget {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Launch {
     pub name: String,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub startup: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach: Option<AttachTarget>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sysroot: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_path: Vec<PathBuf>,
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_module_mismatch: bool,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<PathBuf>,
 }
@@ -446,6 +480,7 @@ impl Launch {
             }
             _ => {}
         }
+
         let launches = self.attach.is_none() && self.core.is_none();
         if !launches
             && let Some(key) = [
@@ -460,6 +495,7 @@ impl Launch {
                 "launch configuration '{name}' sets {key}, which only a launched program takes"
             ));
         }
+
         if self.core.is_none()
             && let Some(key) = [
                 (self.sysroot.is_some(), "sysroot"),
@@ -473,6 +509,7 @@ impl Launch {
                 "launch configuration '{name}' sets {key}, which only a core dump takes"
             ));
         }
+
         if let Some(variable) = self
             .env
             .keys()
@@ -482,6 +519,7 @@ impl Launch {
                 "launch configuration '{name}' sets the environment variable '{variable}', which is not a name"
             ));
         }
+
         Ok(())
     }
 
@@ -529,6 +567,7 @@ fn context<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u32; 2], D::Er
             "context lines are out of range; expected 0 to {MAX} before and after"
         )));
     }
+
     Ok(lines)
 }
 
@@ -542,6 +581,7 @@ fn sections<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Section>, 
             )));
         }
     }
+
     Ok(sections)
 }
 
@@ -556,11 +596,14 @@ fn serde_name(value: &impl Serialize) -> String {
 impl<'de> Deserialize<'de> for Width {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
+
         impl de::Visitor<'_> for Visitor {
             type Value = Width;
+
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("\"terminal\" or a column count")
             }
+
             fn visit_i64<E: de::Error>(self, value: i64) -> Result<Width, E> {
                 u16::try_from(value)
                     .ok()
@@ -572,9 +615,11 @@ impl<'de> Deserialize<'de> for Width {
                         ))
                     })
             }
+
             fn visit_u64<E: de::Error>(self, value: u64) -> Result<Width, E> {
                 self.visit_i64(i64::try_from(value).unwrap_or(i64::MAX))
             }
+
             fn visit_str<E: de::Error>(self, value: &str) -> Result<Width, E> {
                 if value == "terminal" {
                     Ok(Width::Terminal)
@@ -585,6 +630,7 @@ impl<'de> Deserialize<'de> for Width {
                 }
             }
         }
+
         deserializer.deserialize_any(Visitor)
     }
 }
@@ -640,6 +686,7 @@ impl fmt::Display for Origin {
 #[derive(Debug)]
 pub struct ConfigError {
     pub file: Option<PathBuf>,
+
     /// The one-based line and column.
     pub position: Option<(usize, usize)>,
     pub message: String,
@@ -672,6 +719,7 @@ impl fmt::Display for ConfigError {
             (Some(file), None) => write!(formatter, "{}: ", file.display())?,
             _ => {}
         }
+
         formatter.write_str(&self.message)
     }
 }
@@ -703,11 +751,13 @@ fn explain(message: &str, path: &str) -> String {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
+
     if let Some(rest) = message.strip_prefix("unknown field ") {
         let names = quoted(rest);
         let Some((key, expected)) = names.split_first() else {
             return message.to_owned();
         };
+
         // The path ends at the table holding the unknown key, or at the
         // key itself.
         let table = if path == key {
@@ -715,17 +765,20 @@ fn explain(message: &str, path: &str) -> String {
         } else {
             path.strip_suffix(&format!(".{key}")).unwrap_or(path)
         };
+
         let place = if table.is_empty() {
             format!("unknown table or key '{key}'")
         } else {
             format!("unknown key '{key}' in [{table}]")
         };
+
         return match suggest::did_you_mean(key, expected.iter().map(String::as_str)) {
             Some(suggestion) => format!("{place}; {suggestion}"),
             None if expected.is_empty() => format!("{place}; it takes no keys"),
             None => format!("{place}; expected one of {}", expected.join(", ")),
         };
     }
+
     if let Some(rest) = message.strip_prefix("unknown variant ") {
         let names = quoted(rest);
         if let Some((value, expected)) = names.split_first() {
@@ -738,6 +791,7 @@ fn explain(message: &str, path: &str) -> String {
             );
         }
     }
+
     if message.starts_with("missing field ") {
         let names = quoted(message);
         if let Some(key) = names.first() {
@@ -745,6 +799,7 @@ fn explain(message: &str, path: &str) -> String {
             return format!("{table} needs the key '{key}'");
         }
     }
+
     if path.is_empty() {
         message.to_owned()
     } else {
@@ -780,13 +835,16 @@ fn locate(text: &str, path: &[Step<'_>]) -> Option<Range<usize>> {
                 return span;
             }
         }
+
         let Step::Key(name) = step else {
             return span;
         };
+
         let (key, found) = table.iter().find(|(key, _)| key.get_ref() == name)?;
         span = Some(key.span());
         value = Some(found);
     }
+
     span
 }
 
@@ -803,12 +861,15 @@ pub struct File {
 #[derive(Clone, Debug)]
 pub struct Files {
     pub root: PathBuf,
+
     /// The user's file, if any is to be read.
     pub user: Option<PathBuf>,
     pub project: PathBuf,
     pub local: PathBuf,
+
     /// Whether any file is read at all.
     pub enabled: bool,
+
     /// The files that exist, from the lowest precedence to the highest.
     pub read: Vec<File>,
 }
@@ -818,8 +879,10 @@ pub struct Files {
 pub enum UserFile {
     /// None, and no project file either.
     Disabled,
+
     /// The standard one, if it exists.
     Standard,
+
     /// A file named by `--config` or `USCOPE_CONFIG`, which must exist.
     Named(PathBuf),
 }
@@ -831,9 +894,11 @@ impl UserFile {
         if no_config {
             return Self::Disabled;
         }
+
         if let Some(path) = config {
             return Self::Named(path.to_path_buf());
         }
+
         match ENVIRONMENT.get().cloned().flatten() {
             Some(path) if path.is_empty() => Self::Disabled,
             Some(path) => Self::Named(PathBuf::from(path)),
@@ -857,6 +922,7 @@ static ENVIRONMENT: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync:
 pub unsafe fn take_environment() {
     const VARIABLE: &str = "USCOPE_CONFIG";
     let _ = ENVIRONMENT.set(std::env::var_os(VARIABLE));
+
     // SAFETY: the caller guarantees no other thread uses the environment.
     unsafe { std::env::remove_var(VARIABLE) };
 }
@@ -903,6 +969,7 @@ pub fn read_text(path: &Path) -> Result<Option<String>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
+
     let mut text = String::new();
     file.take(MAX_FILE_BYTES + 1)
         .read_to_string(&mut text)
@@ -913,6 +980,7 @@ pub fn read_text(path: &Path) -> Result<Option<String>, String> {
             path.display()
         ));
     }
+
     Ok(Some(text))
 }
 
@@ -934,9 +1002,11 @@ impl Files {
             enabled: !matches!(user, UserFile::Disabled),
             read: Vec::new(),
         };
+
         if !files.enabled {
             return Ok(files);
         }
+
         let required = matches!(user, UserFile::Named(_));
         let candidates = [
             (FileKind::User, files.user.clone(), required),
@@ -953,6 +1023,7 @@ impl Files {
                 None => {}
             }
         }
+
         Ok(files)
     }
 
@@ -964,6 +1035,7 @@ impl Files {
             if file.kind == FileKind::User {
                 continue;
             }
+
             let subset = file
                 .table
                 .iter()
@@ -974,6 +1046,7 @@ impl Files {
                 acting.insert(file.kind.name().to_owned(), toml::Value::Table(subset));
             }
         }
+
         (!acting.is_empty()).then(|| {
             toml::to_string(&acting)
                 .unwrap_or_else(|error| format!("the acting settings cannot be shown: {error}"))
@@ -1004,6 +1077,7 @@ impl Files {
             if file.kind != FileKind::User && !trusted {
                 table.retain(|key, _| !ACTING.contains(&key));
             }
+
             if let Some(commands) = table
                 .get_mut("startup")
                 .and_then(toml::Value::as_table_mut)
@@ -1021,11 +1095,14 @@ impl Files {
                     });
                 }
             }
+
             if let Some(toml::Value::Array(launches)) = table.remove("launch") {
                 merge_launches(&mut merged, launches, &origin, &mut origins)?;
             }
+
             merge_table(&mut merged, &table, "", &origin, &mut origins);
         }
+
         let config: Config = toml::Value::Table(merged)
             .try_into()
             .map_err(|error: toml::de::Error| ConfigError::new(None, error.message()))?;
@@ -1040,6 +1117,7 @@ impl Files {
                 ConfigError::new(file, message)
             })?;
         }
+
         Ok(Settings {
             config,
             root: self.root.clone(),
@@ -1068,12 +1146,14 @@ fn merge_table(
         } else {
             format!("{prefix}.{key}")
         };
+
         if let (Some(toml::Value::Table(existing)), toml::Value::Table(incoming)) =
             (target.get_mut(key), value)
         {
             merge_table(existing, incoming, &path, origin, origins);
             continue;
         }
+
         target.insert(key.clone(), value.clone());
         origins
             .retain(|recorded, _| recorded != &path && !recorded.starts_with(&format!("{path}.")));
@@ -1117,10 +1197,12 @@ fn merge_launches(
             "launch must be an array of tables, as in [[launch]]",
         ));
     };
+
     for launch in launches {
         let toml::Value::Table(launch) = launch else {
             continue;
         };
+
         let name = launch
             .get("name")
             .and_then(toml::Value::as_str)
@@ -1146,8 +1228,10 @@ fn merge_launches(
             );
             existing.push(toml::Value::Table(launch));
         }
+
         origins.extend(scratch);
     }
+
     Ok(())
 }
 
@@ -1164,6 +1248,7 @@ impl File {
             } else {
                 path_text
             };
+
             let inner = error.into_inner();
             return Err(ConfigError::at(
                 &path,
@@ -1172,6 +1257,7 @@ impl File {
                 explain(inner.message(), &path_text),
             ));
         }
+
         let table = text
             .parse::<toml::Table>()
             .map_err(|error| ConfigError::at(&path, &text, error.span(), error.message()))?;
@@ -1181,6 +1267,7 @@ impl File {
             text,
             table,
         };
+
         file.check()?;
         Ok(file)
     }
@@ -1204,6 +1291,7 @@ impl File {
                 "[projects] may be set only in the user's file, so a project cannot trust itself",
             ));
         }
+
         for name in config.signals.keys() {
             if uscope::signal_named(name).is_none() {
                 let names = uscope::signal_codes()
@@ -1218,11 +1306,13 @@ impl File {
                 ));
             }
         }
+
         for (alias, expansion) in &config.aliases {
             if let Err(message) = check_alias(alias, expansion) {
                 return Err(self.error_at(&[Step::Key("aliases"), Step::Key(alias)], message));
             }
         }
+
         for (index, launch) in config.launch.iter().enumerate() {
             if launch.name.trim().is_empty() || launch.name.contains('.') {
                 return Err(self.error_at(
@@ -1230,6 +1320,7 @@ impl File {
                     "a launch configuration needs a name, without dots",
                 ));
             }
+
             if config.launch[..index]
                 .iter()
                 .any(|earlier| earlier.name == launch.name)
@@ -1240,6 +1331,7 @@ impl File {
                 ));
             }
         }
+
         Ok(())
     }
 }
@@ -1250,12 +1342,14 @@ fn check_alias(alias: &str, expansion: &str) -> Result<(), String> {
     if alias.is_empty() || alias.contains(char::is_whitespace) || alias.contains('/') {
         return Err(format!("the alias '{alias}' must be one word"));
     }
+
     if let Some(spec) = command_named(alias) {
         return Err(format!(
             "the alias '{alias}' would hide the command {}",
             spec.name
         ));
     }
+
     let first = expansion.split_whitespace().next().unwrap_or_default();
     let command = first.split_once('/').map_or(first, |(name, _)| name);
     if command_named(command).is_none() {
@@ -1269,6 +1363,7 @@ fn check_alias(alias: &str, expansion: &str) -> Result<(), String> {
             "the alias '{alias}' stands for '{expansion}', which does not start with a command{suggestion}"
         ));
     }
+
     Ok(())
 }
 
@@ -1286,8 +1381,10 @@ pub struct StartupCommand {
 pub struct Settings {
     pub config: Config,
     pub root: PathBuf,
+
     /// The startup commands of every file, in order.
     pub startup: Vec<StartupCommand>,
+
     /// Where each setting a file set came from, by dotted key; every other
     /// setting is a default.
     pub origins: BTreeMap<String, Origin>,
@@ -1311,6 +1408,7 @@ impl Settings {
             if let Some(origin) = self.origins.get(key) {
                 return origin.clone();
             }
+
             match key.rsplit_once('.') {
                 Some((parent, _)) => key = parent,
                 None => return Origin::Default,
@@ -1353,6 +1451,7 @@ impl Settings {
                         names.collect::<Vec<_>>().join(", ")
                     );
                 }
+
                 message
             })
     }
@@ -1365,6 +1464,7 @@ impl Settings {
             Ok(_) => return "the settings are not a table".to_owned(),
             Err(error) => return format!("the settings cannot be shown: {error}"),
         };
+
         // Startup commands are listed one by one, each from its own file.
         table.remove("startup");
         let mut lines = Vec::new();
@@ -1376,6 +1476,7 @@ impl Settings {
                 Some(command.origin.clone()),
             ));
         }
+
         let width = lines
             .iter()
             .map(|(key, value, _)| key.len() + value.len() + 3)
@@ -1404,6 +1505,7 @@ fn flatten(value: &toml::Value, path: &str, lines: &mut Vec<(String, String, Opt
             format!("{path}.{key}")
         }
     };
+
     match value {
         toml::Value::Table(table) if !table.is_empty() => {
             for (key, value) in table {
@@ -1455,12 +1557,14 @@ impl TrustStore {
         let Some(path) = path else {
             return Ok(Self::default());
         };
+
         let record = match read_text(&path).map_err(|error| ConfigError::new(None, error))? {
             Some(text) => toml::from_str(&text).map_err(|error| {
                 ConfigError::at(&path, &text, error.span(), error.message().trim_end())
             })?,
             None => TrustRecord::default(),
         };
+
         Ok(Self {
             path: Some(path),
             record,
@@ -1493,6 +1597,7 @@ impl TrustStore {
         if removed {
             self.save()?;
         }
+
         Ok(removed)
     }
 
@@ -1525,6 +1630,7 @@ pub fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(describe)?;
     }
+
     let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&temporary, text).map_err(describe)?;
     std::fs::rename(&temporary, path).map_err(|error| {
@@ -1538,6 +1644,7 @@ pub fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
 pub enum Answer {
     /// Trust it until its acting settings change.
     Yes,
+
     /// Trust it for this session.
     Once,
     No,
@@ -1559,6 +1666,7 @@ pub fn ask_trust(
     for line in acting.lines() {
         writeln!(output, "    {line}")?;
     }
+
     writeln!(output)?;
     loop {
         write!(
@@ -1571,6 +1679,7 @@ pub fn ask_trust(
             writeln!(output)?;
             return Ok(Answer::No);
         }
+
         match line.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => return Ok(Answer::Yes),
             "o" | "once" => return Ok(Answer::Once),
@@ -1614,6 +1723,7 @@ mod tests {
         let parsed = parse(FileKind::User, DEFAULTS).expect("the defaults parse");
         let config: Config = parsed.table.try_into().expect("the defaults deserialize");
         assert_eq!(config, Config::default());
+
         // Commented out, it sets nothing.
         let commented = parse(FileKind::User, &commented_defaults()).expect("comments parse");
         assert!(commented.table.is_empty(), "{:?}", commented.table);
@@ -1759,6 +1869,7 @@ mod tests {
                 .expect_err("an incoherent launch")
                 .to_string()
         };
+
         assert_eq!(
             refused("[[launch]]\nname = \"a\"\nattach = 4\ncore = \"core\"\n"),
             "/project.toml: launch configuration 'a' sets both attach and core; choose one"
@@ -1793,6 +1904,7 @@ mod tests {
             .expect("in-memory streams");
             (answer, String::from_utf8(output).expect("UTF-8"))
         };
+
         let (answer, shown) = ask("maybe\nYes\n");
         assert_eq!(answer, Answer::Yes);
         assert!(shown.contains("    commands = [\"run\"]"), "{shown}");

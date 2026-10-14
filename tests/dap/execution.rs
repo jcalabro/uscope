@@ -62,6 +62,7 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
     );
     let (name, ..) = top(&mut dap, interrupted.thread);
     assert_eq!(name, "worker_reached");
+
     // Threads are named as they named themselves by the stop, and say
     // what stopped them.
     let threads = dap.request("threads", Value::Null);
@@ -79,6 +80,7 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
             interrupted.thread
         )
     );
+
     // The abandoned step leaves nothing behind: the program now runs out.
     let resumed = dap.send("continue", json!({"threadId": interrupted.thread}));
     dap.success(resumed);
@@ -112,6 +114,7 @@ fn every_co_hit_thread_is_named_by_its_breakpoint() {
             .as_array()
             .expect("threads")
             .clone();
+
         // The adapter sends every event of a stop before it answers the
         // next request.
         let events = dap
@@ -131,15 +134,18 @@ fn every_co_hit_thread_is_named_by_its_breakpoint() {
             .collect::<Vec<_>>();
         assert!(at_breakpoint.contains(&stop.thread), "{threads:?}");
         co_hits += at_breakpoint.len() - 1;
+
         // The program stays at the last stop, which nothing would wait
         // for after it.
         if round == 9 {
             break;
         }
+
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     // The workers call `contended` together, so many of their hits come
     // at the same stop.
     assert!(co_hits > 0);
@@ -157,6 +163,7 @@ fn step_in_out_and_by_instruction() {
         "if (parameter_target(4)",
     );
     let thread = stop.thread;
+
     // The line's breakpoint covers several of its addresses, which steps
     // would otherwise reach and report as breakpoint stops.
     dap.request(
@@ -166,6 +173,7 @@ fn step_in_out_and_by_instruction() {
     let advance = |dap: &mut Dap, command: &str, arguments: Value| {
         let sent = dap.send(command, arguments);
         dap.success(sent);
+
         // Clients assume only the stepping thread runs unless told.
         assert_eq!(
             dap.event(sent.mark, "continued", |_| true),
@@ -175,6 +183,7 @@ fn step_in_out_and_by_instruction() {
         assert_eq!(stopped.reason, "step", "{command}");
         top(dap, thread)
     };
+
     let (name, line, _) = advance(&mut dap, "stepIn", json!({"threadId": thread}));
     assert_eq!(
         (name.as_str(), line),
@@ -185,6 +194,7 @@ fn step_in_out_and_by_instruction() {
     );
     let (name, ..) = advance(&mut dap, "stepOut", json!({"threadId": thread}));
     assert_eq!(name, "main");
+
     // An instruction step moves by one instruction without leaving main.
     let (_, _, before) = top(&mut dap, thread);
     let (name, _, after) = advance(
@@ -215,12 +225,14 @@ fn pausing_stops_a_running_program_and_is_harmless_when_stopped() {
             ..Configuration::default()
         },
     );
+
     // Run from main, which then loops forever, so the pause cannot land in
     // the loader or the C library's startup.
     let entered = dap.stopped(started.mark);
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
     let running = dap.send("continue", json!({"threadId": entered.thread}));
     dap.success(running);
+
     // Requests that need a stop say so while the program runs.
     assert_eq!(
         dap.request_error("stackTrace", json!({"threadId": 1})),
@@ -238,6 +250,7 @@ fn pausing_stops_a_running_program_and_is_harmless_when_stopped() {
     assert_eq!(stop.reason, "pause");
     let (name, ..) = top(&mut dap, stop.thread);
     assert_eq!(name, "main");
+
     // Pausing again changes nothing and reports no second stop.
     dap.request("pause", json!({"threadId": stop.thread}));
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
@@ -268,6 +281,7 @@ fn signal_stops(exceptions: Value) -> (Vec<String>, Value, String) {
         if kind == "exited" {
             break body["exitCode"].clone();
         }
+
         assert_eq!(body["reason"], "exception");
         let thread = body["threadId"].clone();
         let info = dap.request("exceptionInfo", json!({"threadId": thread}));
@@ -278,6 +292,7 @@ fn signal_stops(exceptions: Value) -> (Vec<String>, Value, String) {
         dap.success(resumed);
         mark = resumed.mark;
     };
+
     let console = dap.output_text(started.mark, "console");
     dap.finish();
     (stops, exit, console)
@@ -301,6 +316,7 @@ fn signals_stop_as_exceptions_that_the_filters_choose() {
     let (stops, exit, console) = signal_stops(json!({"filters": []}));
     assert!(stops.is_empty());
     assert_eq!(exit, 63);
+
     // Signals that stop by default are still reported when they do not.
     assert!(console.contains("received SIGUSR1"), "{console}");
     assert!(
@@ -345,6 +361,7 @@ fn fatal_signals_explain_themselves_and_exits_report_the_signal() {
         ("exception", &json!("SIGSEGV"))
     );
     let info = dap.request("exceptionInfo", json!({"threadId": stop.thread}));
+
     // The description names the fault's cause and address.
     assert_eq!(info["description"], "SIGSEGV (SEGV_MAPERR) at 0x1");
     assert_eq!(top(&mut dap, stop.thread).0, "fault");
@@ -354,6 +371,7 @@ fn fatal_signals_explain_themselves_and_exits_report_the_signal() {
     );
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
     dap.success(resumed);
+
     // Death by a signal is an exit code no client mistakes for a status.
     assert_eq!(
         dap.event(resumed.mark, "exited", |_| true),
@@ -383,6 +401,7 @@ fn single_thread_requests_run_only_the_thread_they_name() {
         true
     );
     let first = dap.stopped(started.mark);
+
     // Only the named thread runs, so only it can stop again, though every
     // thread calls the function.
     for _ in 0..5 {
@@ -393,6 +412,7 @@ fn single_thread_requests_run_only_the_thread_they_name() {
         assert_eq!(dap.success(resumed), json!({"allThreadsContinued": false}));
         assert_eq!(dap.stopped(resumed.mark).thread, first.thread);
     }
+
     let stepped = dap.send(
         "next",
         json!({"threadId": first.thread, "singleThread": true}),
@@ -438,11 +458,13 @@ fn step_in_goes_into_the_target_the_client_chose() {
         .map(|target| target["label"].as_str().expect("a label"))
         .collect::<Vec<_>>();
     assert_eq!(labels, ["inc", "twice", "add"], "{targets:?}");
+
     // A caller's line has nothing to step into.
     if let Some(caller) = frames.get(1) {
         let none = dap.request("stepInTargets", json!({"frameId": caller["id"]}));
         assert_eq!(none["targets"], json!([]));
     }
+
     let add = targets[2]["id"].clone();
     let sent = dap.send("stepIn", json!({"threadId": thread, "targetId": add}));
     dap.success(sent);
@@ -453,6 +475,7 @@ fn step_in_goes_into_the_target_the_client_chose() {
         line,
         json!(line_of(&source("c/step-targets.c"), "targets: add"))
     );
+
     // A target belongs to the stop that listed it.
     let stale = dap.request_error("stepIn", json!({"threadId": thread, "targetId": add}));
     assert_eq!(stale, "the step-in target belongs to an earlier stop");

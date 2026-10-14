@@ -16,6 +16,7 @@ use super::table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallSet {
     calls: BTreeSet<SyscallId>,
+
     /// The same calls as a bitmap per ABI, by number, which a tracer asks
     /// about every call it sees.
     bits: [Vec<u64>; 3],
@@ -40,6 +41,7 @@ impl CallSet {
             calls,
             bits: Default::default(),
         };
+
         set.index();
         set
     }
@@ -52,8 +54,10 @@ impl CallSet {
             if words.len() <= word {
                 words.resize(word + 1, 0);
             }
+
             words[word] |= 1 << (id.number % 64);
         }
+
         self.bits = bits;
     }
 
@@ -150,22 +154,30 @@ fn error<T>(message: impl Into<String>) -> Result<T, FilterError> {
 pub struct Filter {
     /// Calls to trace.
     pub calls: CallSet,
+
     /// Outcomes to show.
     pub status: StatusSet,
+
     /// Show only calls that name one of these paths, by argument or
     /// descriptor (`-P`).
     pub paths: Vec<String>,
+
     /// Show only calls on these descriptors (`--trace-fds`).
     pub fds: Option<BTreeSet<i64>>,
+
     /// Signals to show (`-e signal=`), by number.
     pub signals: BTreeSet<i32>,
+
     /// Descriptors whose reads and writes are dumped in hex.
     pub read_dumps: BTreeSet<i64>,
     pub write_dumps: BTreeSet<i64>,
+
     /// Show only calls that took at least this long.
     pub slower_than: Option<u64>,
+
     /// Calls whose arguments are left raw (`-e raw=`).
     pub raw: CallSet,
+
     /// Calls whose structures are printed in full (`-e verbose=`), or
     /// abbreviated when not (`-e abbrev=`).
     pub verbose: CallSet,
@@ -202,6 +214,7 @@ fn element(text: &str) -> Result<BTreeSet<SyscallId>, FilterError> {
         },
         _ => (text, Abi::ALL.to_vec()),
     };
+
     let calls = |predicate: &dyn Fn(SyscallId, &str) -> bool| -> BTreeSet<SyscallId> {
         abis.iter()
             .flat_map(|&abi| {
@@ -213,6 +226,7 @@ fn element(text: &str) -> Result<BTreeSet<SyscallId>, FilterError> {
             .map(|(id, _)| id)
             .collect()
     };
+
     let found = match body {
         "all" => calls(&|_, _| true),
         "none" => BTreeSet::new(),
@@ -238,6 +252,7 @@ fn element(text: &str) -> Result<BTreeSet<SyscallId>, FilterError> {
                         None => return error(format!("unknown class %{name}")),
                     },
                 };
+
                 // strace's `%%statfs` takes ustat too, which no class does.
                 let ustat = name == "%statfs";
                 calls(&|id, call| {
@@ -253,9 +268,11 @@ fn element(text: &str) -> Result<BTreeSet<SyscallId>, FilterError> {
             }
         }
     };
+
     if found.is_empty() && body != "none" && !optional {
         return error(format!("invalid system call {text:?}"));
     }
+
     Ok(found)
 }
 
@@ -269,6 +286,7 @@ fn set(text: &str) -> Result<(bool, BTreeSet<SyscallId>), FilterError> {
     for part in text.split(',').filter(|part| !part.is_empty()) {
         calls.extend(element(part)?);
     }
+
     Ok((negated, calls))
 }
 
@@ -279,6 +297,7 @@ fn numbers(text: &str, what: &str) -> Result<BTreeSet<i64>, FilterError> {
     if negated {
         return error(format!("{what} cannot be negated"));
     }
+
     text.split(',')
         .filter(|part| !part.is_empty())
         .map(|part| {
@@ -316,6 +335,7 @@ fn signal_set(
             }
         }
     }
+
     Ok(if negated {
         (1..=64)
             .filter(|signal| !signals.contains(signal))
@@ -346,8 +366,10 @@ impl Filter {
                         if !traced_by_name {
                             filter.calls = CallSet::none();
                         }
+
                         filter.calls.extend(&calls);
                     }
+
                     traced_by_name = true;
                 }
                 "status" => filter.status = Self::status(value)?,
@@ -389,6 +411,7 @@ impl Filter {
                 other => return error(format!("unknown qualifier {other:?}")),
             }
         }
+
         Ok(filter)
     }
 
@@ -402,6 +425,7 @@ impl Filter {
             unfinished: false,
             unavailable: false,
         };
+
         for part in text.split(',').filter(|part| !part.is_empty()) {
             match part {
                 "all" => set = StatusSet::ALL,
@@ -413,6 +437,7 @@ impl Filter {
                 other => return error(format!("invalid status {other:?}")),
             }
         }
+
         Ok(if negated {
             StatusSet {
                 successful: !set.successful,
@@ -438,17 +463,20 @@ impl Filter {
         if !self.calls.contains(event.call) || !self.status.admits(event.outcome) {
             return false;
         }
+
         if let Some(slower) = self.slower_than
             && event.duration().is_none_or(|duration| duration < slower)
         {
             return false;
         }
+
         let fds = || descriptors(event);
         if let Some(wanted) = &self.fds
             && !fds().any(|fd| wanted.contains(&fd))
         {
             return false;
         }
+
         if !self.paths.is_empty() {
             let named = paths
                 .iter()
@@ -459,6 +487,7 @@ impl Filter {
                 return false;
             }
         }
+
         true
     }
 }
@@ -495,6 +524,7 @@ pub fn paths(event: &SyscallEvent) -> Vec<String> {
     let Some(spec) = specs::spec(event.call) else {
         return Vec::new();
     };
+
     spec.args
         .iter()
         .enumerate()
@@ -586,6 +616,7 @@ mod tests {
             stack: None,
             flags: super::super::model::EventFlags::default(),
         };
+
         assert!(filter.shows(&event, &[], &|_| None));
         event.args[0] = 4;
         assert!(!filter.shows(&event, &[], &|_| None));
@@ -597,6 +628,7 @@ mod tests {
             paths: vec!["/etc/hosts".to_owned()],
             ..Filter::default()
         };
+
         assert!(by_path.shows(&event, &[], &|fd| {
             (fd == 3).then(|| "/etc/hosts".to_owned())
         }));

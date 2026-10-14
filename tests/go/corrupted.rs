@@ -42,6 +42,7 @@ async fn a_corrupted_goroutine_is_refused_and_the_rest_read_as_before() {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         panic!("not stopped");
     };
+
     let page = scenario
         .operation("tasks", scenario.handle().tasks(None, 64))
         .await;
@@ -56,17 +57,20 @@ async fn a_corrupted_goroutine_is_refused_and_the_rest_read_as_before() {
             execution: ExecutionContext::Task(task.id),
             frame: StackFrameId::INNERMOST,
         };
+
         let trace = scenario.handle().at(at).backtrace().await;
         if task.id.number == victim {
             let Err(Error::TaskUnavailable { reason, .. }) = &trace else {
                 panic!("goroutine {victim}: {trace:#?}");
             };
+
             assert!(reason.contains("outside its stack"), "{reason}");
         } else {
             let trace = trace.unwrap_or_else(|error| panic!("{task:?}: {error}"));
             assert_eq!(trace.termination, UnwindTermination::Complete, "{task:?}");
         }
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))

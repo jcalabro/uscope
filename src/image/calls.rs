@@ -24,6 +24,7 @@ pub struct CallingFunction {
     /// The linker name other modules may call it by.
     pub name: Option<Arc<str>>,
     pub frame_base: Metadata<LocationListId>,
+
     /// Whether the function describes every tail call it makes.
     pub tail_calls_described: bool,
     pub tail_calls: Vec<u32>,
@@ -34,6 +35,7 @@ pub struct CallingFunction {
 pub enum SiteTarget {
     Code(ImageAddress),
     Symbol(Arc<str>),
+
     /// The location of the address it calls, or why it is malformed.
     Computed(Result<LocationListId, Arc<str>>),
     Unknown,
@@ -44,9 +46,11 @@ pub enum SiteTarget {
 pub struct SiteParameter {
     /// The register the parameter is passed in.
     pub register: Option<u16>,
+
     /// The `.debug_info` offset of the callee's parameter entry.
     pub parameter: Option<u64>,
     pub value: Option<ExpressionId>,
+
     /// The value the passed address pointed at.
     pub data_value: Option<ExpressionId>,
 }
@@ -55,11 +59,14 @@ pub struct SiteParameter {
 #[derive(Debug, Clone)]
 pub struct CallSite {
     pub function: u32,
+
     /// The instruction after the call, which a frame it entered returns to.
     pub return_address: Option<ImageAddress>,
     pub target: SiteTarget,
+
     /// For a tail call, the function it enters in this module, if known.
     pub enters: Option<u32>,
+
     /// For a tail call, where it jumped from, if known.
     pub jump: Option<TailJump>,
     pub parameters: Vec<SiteParameter>,
@@ -92,6 +99,7 @@ impl Record for CallingFunctionRecord {
 
 pub mod calling_flags {
     pub const TAIL_CALLS_DESCRIBED: u8 = 1 << 0;
+
     pub const ALL: u8 = TAIL_CALLS_DESCRIBED;
 }
 
@@ -102,13 +110,16 @@ pub mod calling_flags {
 pub struct CallSiteRecord {
     pub function: U32,
     pub return_address: U64,
+
     /// What [`CallSiteRecord::target_kind`] says it is.
     pub target: U64,
+
     /// The function a tail call enters, or [`NONE`].
     pub enters: U32,
     pub jump_instruction: U64,
     pub jump_lookup: U64,
     pub parameters: Span<SiteParameterRecord>,
+
     /// Why the site is malformed, or [`NONE`].
     pub malformed: U32,
     pub target_kind: u8,
@@ -121,15 +132,21 @@ impl Record for CallSiteRecord {
 
 pub mod site_flags {
     pub const RETURN_ADDRESS: u8 = 1 << 0;
+
     pub const JUMP: u8 = 1 << 1;
+
     pub const ALL: u8 = RETURN_ADDRESS | JUMP;
 }
 
 pub mod targets {
     pub const UNKNOWN: u8 = 0;
+
     pub const CODE: u8 = 1;
+
     pub const SYMBOL: u8 = 2;
+
     pub const COMPUTED: u8 = 3;
+
     pub const COMPUTED_MALFORMED: u8 = 4;
 }
 
@@ -140,6 +157,7 @@ pub mod targets {
 pub struct SiteParameterRecord {
     pub register: U16,
     pub parameter: U64,
+
     /// The value's expression, or [`NONE`].
     pub value: U32,
     pub data_value: U32,
@@ -152,7 +170,9 @@ impl Record for SiteParameterRecord {
 
 pub mod parameter_flags {
     pub const REGISTER: u8 = 1 << 0;
+
     pub const PARAMETER: u8 = 1 << 1;
+
     pub const ALL: u8 = REGISTER | PARAMETER;
 }
 
@@ -216,6 +236,7 @@ pub fn add_to(
             value: (*site).into(),
         }));
     }
+
     let mut sites = Vec::with_capacity(calls.sites.len());
     let mut parameters = Vec::new();
     let mut returns = Vec::new();
@@ -225,9 +246,11 @@ pub fn add_to(
             flags |= site_flags::RETURN_ADDRESS;
             returns.push((address.get(), number(index)?));
         }
+
         if site.jump.is_some() {
             flags |= site_flags::JUMP;
         }
+
         let (target_kind, target) = match &site.target {
             SiteTarget::Unknown => (targets::UNKNOWN, 0),
             SiteTarget::Code(address) => (targets::CODE, address.get()),
@@ -238,6 +261,7 @@ pub fn add_to(
                 u64::from(text(strings, why)?.get()),
             ),
         };
+
         sites.push(CallSiteRecord {
             function: site.function.into(),
             return_address: site.return_address.map_or(0, ImageAddress::get).into(),
@@ -258,9 +282,11 @@ pub fn add_to(
             if parameter.register.is_some() {
                 flags |= parameter_flags::REGISTER;
             }
+
             if parameter.parameter.is_some() {
                 flags |= parameter_flags::PARAMETER;
             }
+
             SiteParameterRecord {
                 register: parameter.register.unwrap_or(0).into(),
                 parameter: parameter.parameter.unwrap_or(0).into(),
@@ -271,6 +297,7 @@ pub fn add_to(
         }));
         number(parameters.len())?;
     }
+
     returns.sort_unstable();
     let returns = returns
         .into_iter()
@@ -408,6 +435,7 @@ impl<'a> Site<'a> {
 
     pub fn target(self) -> SiteTarget {
         let value = self.record.target.get();
+
         // Validation keeps a string's or a list's number within u32.
         let row = u32::try_from(value).ok();
         match self.record.target_kind {
@@ -486,6 +514,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("a calling function is malformed".into());
     }
+
     if !view
         .tail_calls
         .iter()
@@ -493,6 +522,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a tail call names no site".into());
     }
+
     let expression = |id: U32| id.get() == NONE || (id.get() as usize) < expressions;
     if !view.parameters.iter().all(|parameter| {
         parameter.flags & !parameter_flags::ALL == 0
@@ -503,6 +533,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("a call site's parameter is malformed".into());
     }
+
     if !view.sites.iter().all(|site| {
         (site.function.get() as usize) < functions
             && (site.enters.get() == NONE || (site.enters.get() as usize) < functions)
@@ -524,6 +555,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("a call site is malformed".into());
     }
+
     if !view.returns.is_sorted_by(|earlier, later| {
         (earlier.key.get(), earlier.value.get()) < (later.key.get(), later.value.get())
     }) || !view.returns.iter().all(|entry| {
@@ -542,5 +574,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("the index of where calls return is malformed".into());
     }
+
     Ok(())
 }

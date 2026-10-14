@@ -27,9 +27,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         if inferior.loader_site.is_some() || inferior.exec_unsupported {
             return Ok(());
         }
+
         let Some(address) = self
             .modules
             .values()
@@ -41,6 +43,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(());
         };
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let pid = inferior.memory_thread();
         self.ptrace.install_breakpoint(
@@ -88,16 +91,19 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn reresolve_breakpoints(&mut self, mut changed: bool) -> Result<()> {
         for index in 0..self.breakpoints.len() {
             let breakpoint = &self.breakpoints[index];
+
             // A disabled breakpoint is resolved again when it is enabled.
             if !breakpoint.enabled || matches!(breakpoint.spec, BreakpointSpec::Address(_)) {
                 continue;
             }
+
             let resolved = self
                 .resolve_in_modules(&breakpoint.spec)
                 .unwrap_or_else(|_| Arc::from([]));
             if resolved == breakpoint.locations {
                 continue;
             }
+
             let owner = BreakpointOwner::User(breakpoint.id);
             let previous = std::mem::replace(
                 &mut self.breakpoints[index].locations,
@@ -107,11 +113,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(inferior) = self.inferior.as_mut() else {
                 continue;
             };
+
             for location in previous
                 .iter()
                 .filter(|location| !resolved.contains(location))
             {
                 let address = runtime_breakpoint_address(inferior, location.location)?;
+
                 // An unmapped library's trap went with its memory.
                 if location
                     .library
@@ -122,6 +130,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)?;
                 }
             }
+
             for location in resolved
                 .iter()
                 .filter(|location| !previous.contains(location))
@@ -132,9 +141,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .install_breakpoint(pid, &mut inferior.breakpoints, address, owner)?;
             }
         }
+
         if changed {
             self.publish_breakpoints_changed();
         }
+
         Ok(())
     }
 }
@@ -159,6 +170,7 @@ impl<P: super::native::InspectionOps> Controller<P> {
                 changed = true;
             }
         }
+
         changed
     }
 }
@@ -169,6 +181,7 @@ fn forget_owner(inferior: &mut Inferior, address: VirtualAddress, owner: Breakpo
     let Some(site) = inferior.breakpoints.get_mut(&address) else {
         return;
     };
+
     site.owners.remove(&owner);
     if site.owners.is_empty() {
         let original_byte = site.original_byte;

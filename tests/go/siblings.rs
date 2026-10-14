@@ -62,6 +62,7 @@ async fn a_step_stays_with_its_goroutine() {
             let context = format!("{fixture} with {processors} processors");
             let mut scenario = in_the_loop(fixture, processors).await;
             let task = integer(&scenario, "$task").await.expect("a task");
+
             // The program's own name for the goroutine, where it is known.
             let id = integer(&scenario, "id").await;
             if fixture.ends_with("o0") {
@@ -83,6 +84,7 @@ async fn a_step_stays_with_its_goroutine() {
                 if let (Some(id), Some(now)) = (id, integer(&scenario, "id").await) {
                     assert_eq!(now, id, "{context}: the program's own id changed");
                 }
+
                 let (function, line) = place(&scenario).await;
                 assert_eq!(function, "main.work", "{context}: line {line}");
                 walked.push(line);
@@ -90,6 +92,7 @@ async fn a_step_stays_with_its_goroutine() {
                     threads.insert(thread);
                 }
             }
+
             // Unoptimized, the walk visits every line of each round in
             // order; optimized code may visit them in another.
             if fixture.ends_with("o0") {
@@ -101,6 +104,7 @@ async fn a_step_stays_with_its_goroutine() {
                     "{context}: {walked:?}"
                 );
             }
+
             eprintln!("{context}: the goroutine ran on threads {threads:?}");
 
             // Every sibling returns to the same place, and only this
@@ -126,6 +130,7 @@ async fn finish_returns_to_its_caller_after_the_stack_moves() {
     let recurse = support::source_line(SOURCE, "// recurse");
     for fixture in BUILDS {
         let mut scenario = crate::invariants::checked(fixture);
+
         // Each goroutine first reaches this depth in its first deep call,
         // whose deeper calls then grow its stack again.
         let breakpoint = scenario
@@ -181,12 +186,14 @@ async fn finish_returns_to_its_caller_after_the_stack_moves() {
         if let Some(depth) = integer(&scenario, "depth").await {
             assert_eq!(depth, 17, "{fixture}");
         }
+
         // The caller's frame is where the runtime copied it.
         if fixture.ends_with("o0") {
             let after = address(&scenario, "&pad").await;
             assert!(before.is_some() && after.is_some(), "{fixture}");
             assert_ne!(after, before, "{fixture}: the stack never moved");
         }
+
         scenario.shutdown().await;
     }
 }
@@ -225,12 +232,15 @@ async fn stepping_through_the_scheduler_returns_to_the_same_goroutine() {
             );
             assert_eq!(integer(&scenario, "$task").await, Some(task), "{fixture}");
             let (function, _) = place(&scenario).await;
+
             // Optimized, the first statement may be in the next call.
             if function.starts_with("main.") {
                 break;
             }
+
             visited.push(function);
         }
+
         assert!(
             visited
                 .iter()

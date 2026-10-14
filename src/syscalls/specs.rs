@@ -35,10 +35,13 @@ use super::model::{Abi, SyscallId};
 pub enum Arg {
     /// An `int`: the low 32 bits, signed.
     Int,
+
     /// A `long` or `loff_t`.
     Long,
+
     /// An `unsigned int`: the low 32 bits.
     Uint,
+
     /// A `size_t` or `unsigned long`.
     Size,
     Hex,
@@ -56,6 +59,7 @@ pub enum Arg {
     Path,
     Str,
     StrArray,
+
     /// Memory behind a pointer.
     Mem {
         direction: Direction,
@@ -69,8 +73,10 @@ pub enum Arg {
 pub enum Direction {
     /// The call reads it: worth reading at entry.
     In,
+
     /// The call writes it: only meaningful at exit, and only on success.
     Out,
+
     /// Both.
     InOut,
 }
@@ -92,6 +98,7 @@ impl Direction {
 pub enum MemKind {
     /// Raw bytes: the count is a byte length.
     Bytes,
+
     /// Structures of a known layout: the count is how many, one when
     /// unstated.
     Struct(Struct),
@@ -103,6 +110,7 @@ pub enum Count {
     One,
     Arg(u8),
     Return,
+
     /// The integer argument N points at.
     PointedBy(u8),
 }
@@ -114,9 +122,11 @@ pub enum Struct {
     Statx,
     Statfs,
     Timespec,
+
     /// Two timespecs, as `utimensat` takes.
     Timespec2,
     Timeval,
+
     /// Two timevals, as `utimes` takes.
     Timeval2,
     Itimerval,
@@ -136,6 +146,7 @@ pub enum Struct {
     Sockaddr,
     Int,
     U64,
+
     /// The two descriptors `pipe` writes.
     Fds2,
     Siginfo,
@@ -147,8 +158,10 @@ pub enum Struct {
     FdSet,
     Dirents,
     Tms,
+
     /// `struct rseq`, as long as the call's length says.
     Rseq,
+
     /// The status `wait4` writes.
     WaitStatus,
 }
@@ -245,6 +258,7 @@ pub enum Ret {
     Octal,
     Fd,
     Pid,
+
     /// The call does not return when it succeeds.
     None,
 }
@@ -849,6 +863,7 @@ fn count(text: &str) -> Result<Count, ParseError> {
             .filter(|&index| index < 6)
             .ok_or_else(|| ParseError(format!("bad argument number in {text:?}")))
     };
+
     if text == "ret" {
         Ok(Count::Return)
     } else if let Some(digits) = text.strip_prefix("*a") {
@@ -883,9 +898,11 @@ fn arg(token: &'static str) -> Result<Arg, ParseError> {
             if let Some(set) = token.strip_prefix("F:") {
                 return Ok(Arg::Flags(set));
             }
+
             if let Some(set) = token.strip_prefix("E:") {
                 return Ok(Arg::Enum(set));
             }
+
             let (direction, rest) = if let Some(rest) = token.strip_prefix("<>") {
                 (Direction::InOut, rest)
             } else if let Some(rest) = token.strip_prefix('<') {
@@ -895,6 +912,7 @@ fn arg(token: &'static str) -> Result<Arg, ParseError> {
             } else {
                 return Err(ParseError(format!("unknown argument {token:?}")));
             };
+
             let (name, count_text) = rest
                 .split_once(':')
                 .map_or((rest, None), |(n, c)| (n, Some(c)));
@@ -906,6 +924,7 @@ fn arg(token: &'static str) -> Result<Arg, ParseError> {
                         .ok_or_else(|| ParseError(format!("unknown structure {name:?}")))?,
                 )
             };
+
             let count = match (kind, count_text) {
                 (MemKind::Bytes, None) => {
                     return Err(ParseError(format!("{token:?} needs a length")));
@@ -913,6 +932,7 @@ fn arg(token: &'static str) -> Result<Arg, ParseError> {
                 (_, None) => Count::One,
                 (_, Some(text)) => count(text)?,
             };
+
             Arg::Mem {
                 direction,
                 kind,
@@ -936,6 +956,7 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
             "{signature:?} has more than six arguments"
         )));
     }
+
     let ret = match ret.trim() {
         "i" => Ret::Int,
         "u" => Ret::Uint,
@@ -946,7 +967,9 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
         "none" => Ret::None,
         other => return Err(ParseError(format!("unknown result {other:?}"))),
     };
+
     let mut set = Classes::default();
+
     // `-desc` keeps a call that takes a descriptor out of %desc, as
     // strace's tables do for a few.
     let mut not_desc = false;
@@ -955,13 +978,16 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
             not_desc = true;
             continue;
         }
+
         set.insert(
             Class::named(name).ok_or_else(|| ParseError(format!("unknown class {name:?}")))?,
         );
     }
+
     if args.iter().any(|arg| matches!(arg, Arg::Path)) {
         set.insert(Class::File);
     }
+
     // strace's %desc: calls that take or make descriptors, a directory's
     // included, except the network's, which are %net alone.
     let makes = |arg: &Arg| {
@@ -973,6 +999,7 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
             }
         )
     };
+
     let takes = |arg: &Arg| matches!(arg, Arg::Fd | Arg::DirFd);
     if !not_desc
         && !set.contains(Class::Net)
@@ -980,6 +1007,7 @@ pub fn parse(signature: &'static str, classes: &str) -> Result<Spec, ParseError>
     {
         set.insert(Class::Desc);
     }
+
     Ok(Spec {
         args,
         ret,
@@ -1079,6 +1107,7 @@ mod tests {
                 "{name} is not a 64-bit call"
             );
         }
+
         // Every 64-bit call has a spec, so none prints as raw words, and
         // names for as many arguments as its spec has.
         for &(_, name) in table::calls(Abi::X86_64) {

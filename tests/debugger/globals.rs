@@ -75,6 +75,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
         for qualified in expected {
             catalog_global(image, qualified);
         }
+
         for global in image.globals() {
             if let uscope::GlobalVariableType::Resolved(type_info) = &global.type_info {
                 assert_eq!(
@@ -85,6 +86,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
                 );
             }
         }
+
         // Listing is filtered, paged, and ordered by name.
         if fixture == "globals-go-o0" {
             let page = |offset, limit| {
@@ -94,6 +96,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
                     limit,
                 })
             };
+
             let first = page(0, 1).await.expect("first global page");
             let second = page(1, 1).await.expect("second global page");
             assert_eq!(
@@ -111,6 +114,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
                 Err(Error::InvalidGlobalPageLimit(0))
             ));
         }
+
         debugger
             .shutdown()
             .await
@@ -185,6 +189,7 @@ async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization(
             } => reference,
             state => panic!("{fixture} global pointer was unavailable: {state:?}"),
         };
+
         let dereferenced = scenario
             .operation(
                 "dereference global pointer",
@@ -252,6 +257,7 @@ async fn cpp_globals_resolve_namespaces_static_members_specifications_and_consta
                 .await;
             assert_variable_value(&variable, ScalarValue::Signed(expected));
         }
+
         assert!(matches!(
             scenario.handle().variable("duplicate").await,
             Err(Error::AmbiguousGlobalVariable { .. })
@@ -284,6 +290,7 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
             .await;
         assert_variable_value(&variable, ScalarValue::Signed(expected));
     }
+
     assert!(matches!(
         scenario.handle().variable("DUPLICATE").await,
         Err(Error::AmbiguousGlobalVariable { .. })
@@ -352,6 +359,7 @@ async fn go_package_globals_are_printable_without_source_stepping() {
             .await;
         assert_variable_value(&variable, expected);
     }
+
     assert_signed(
         &dereference_named(&scenario, "main.packagePointer", 1)
             .await
@@ -426,6 +434,7 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
                 .await;
             assert_variable_value(&variable, ScalarValue::Signed(expected));
         }
+
         assert!(matches!(
             scenario.handle().variable("duplicate").await,
             Err(Error::AmbiguousGlobalVariable { .. })
@@ -510,6 +519,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     else {
         panic!("same-name globals across modules must be ambiguous");
     };
+
     assert_eq!(selector, "module_collision");
     assert_eq!(candidates.len(), 2);
     let loaded = scenario
@@ -532,6 +542,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         image: external.image,
         variable: external.variable.id,
     };
+
     let value = scenario
         .operation(
             "inspect DSO external global",
@@ -554,6 +565,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         } => reference,
         state => panic!("cross-module pointer was unavailable: {state:?}"),
     };
+
     let cross_module_referent = scenario
         .operation(
             "dereference main-image pointer into DSO",
@@ -586,6 +598,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         } => reference,
         state => panic!("DSO pointer global was unavailable: {state:?}"),
     };
+
     let dso_referent = scenario
         .operation(
             "dereference DSO pointer global",
@@ -612,6 +625,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         )
         .await;
     assert_variable_value(&tls_value, ScalarValue::Signed(213));
+
     // glibc's descriptors find a loaded library's TLS block in the DTV or
     // in static TLS space the loader set aside.
     assert_eq!(tls_location_by_name(&scenario, "dso_tls").await.1, 213);
@@ -623,6 +637,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
                 if module.path.ends_with("libglobals.so")
         );
     }
+
     assert!(saw_load);
 
     assert!(matches!(
@@ -641,6 +656,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
                 if module.module.id == first_module.id
         );
     }
+
     assert!(saw_unload);
 
     assert!(matches!(
@@ -673,6 +689,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         )
         .await;
     assert_variable_value(&reloaded_value, ScalarValue::Signed(211));
+
     // Reloading reuses the module's TLS slot under a newer generation.
     assert_eq!(tls_location_by_name(&scenario, "dso_tls").await.1, 213);
 
@@ -751,7 +768,9 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             else {
                 panic!("{fixture}: unavailable TLS variable {variable:?}");
             };
+
             values.push(*value);
+
             // The variable found by name is the storage whose address the
             // thread stored in its own pointer.
             let (address, by_name) = tls_location_by_name(&scenario, "tls_value").await;
@@ -765,6 +784,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             let uscope::VariableValue::Address(stored) = available_value(&pointer.state) else {
                 panic!("{fixture}: TLS pointer is not an address: {pointer:?}");
             };
+
             assert_eq!(stored.address.get(), address, "{fixture}");
             let reference = match pointer.state {
                 VariableState::Available {
@@ -773,6 +793,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                 } => reference,
                 state => panic!("{fixture}: unavailable TLS pointer {state:?}"),
             };
+
             thread_references.push((thread.id, *value, reference.clone()));
             let tls_referent = scenario
                 .operation(
@@ -782,6 +803,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                 .await;
             assert_signed(&tls_referent.state, *value, fixture);
         }
+
         let selected = snapshot.threads.last().expect("TLS thread").id;
         scenario
             .operation(
@@ -799,6 +821,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                 .await;
             assert_signed(&tls_referent.state, value, fixture);
         }
+
         values.sort_unstable();
         assert_eq!(values, [300, 301, 302], "{fixture}");
         assert!(matches!(
@@ -853,6 +876,7 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
             })
             .await;
         assert_eq!(entry, StopReason::Entry, "{fixture}");
+
         // Before the C library sets the thread pointer up, no thread has TLS.
         // Only dynamically linked glibc needs its loader to identify the
         // executable's TLS, and its loader has not run yet.
@@ -871,6 +895,7 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
                 "{fixture}"
             );
         }
+
         scenario.add_breakpoint("tls_stop").await;
         assert!(
             matches!(
@@ -916,6 +941,7 @@ async fn a_library_with_no_code_is_a_module_with_its_globals_and_tls() {
             .await;
         assert_variable_value(&variable, ScalarValue::Signed(expected));
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -951,6 +977,7 @@ async fn tls_on_glibc_before_2_34_without_libpthread_is_unavailable_with_its_rea
             "{name}"
         );
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))

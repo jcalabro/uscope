@@ -63,35 +63,47 @@ pub struct Script {
     pub requests: u64,
     pub launches: u64,
     pub early_breakpoints: u64,
+
     /// Whether to favor watching memory.
     pub watching: bool,
+
     /// Functions the program defines in some variant.
     pub functions: Vec<String>,
+
     /// Functions this variant defines, which must resolve.
     pub defined: Vec<String>,
     pub source: PathBuf,
     pub source_lines: u64,
+
     /// The source's markers, by line.
     pub markers: BTreeMap<u64, Marker>,
+
     /// In unoptimized code, the image addresses where a row of a marker's
     /// line starts, with the line: where its condition holds at every hit.
     pub marker_rows: BTreeMap<u64, u64>,
+
     /// The image, whose code memory reads must show unchanged.
     pub image: Arc<Image>,
+
     /// Small objects the program defines, which it may watch: name, image
     /// address, and size.
     pub globals: Vec<(String, u64, u64)>,
+
     /// The views the program's types are presented with, which the client
     /// loads into the session.
     pub views: Option<Arc<str>>,
+
     /// How the kernel answers debug-register requests.
     pub debug: DebugBehavior,
+
     /// The program the world started untraced, which the client attaches
     /// to rather than launching it first.
     pub attach: Option<ProcessId>,
+
     /// Whether the session holds the children the program forks, for
     /// sessions of their own.
     pub follow: bool,
+
     /// Whether the client stops at system calls.
     pub catching: bool,
 }
@@ -101,33 +113,43 @@ pub struct Script {
 pub struct Shared {
     /// What the client did, for the trace.
     pub notes: Rc<RefCell<Vec<String>>>,
+
     /// Processes something outside the session killed, which the world
     /// records when its fault fires.
     pub killed: Rc<RefCell<BTreeSet<Tgid>>>,
+
     /// Processes that began to end as a whole, killed or exiting their
     /// group, which the world records as it happens.
     pub ending: Rc<RefCell<BTreeSet<Tgid>>>,
+
     /// The user's breakpoints the debugger said it made enabled, and the
     /// client has not asked to remove or disable, with the image addresses
     /// of their locations. Temporary ones, which a stop may delete, are not
     /// among them.
     pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
+
     /// The breakpoints the debugger said are disabled, which the client has
     /// not asked to enable or remove since.
     pub disabled: Rc<RefCell<BTreeSet<u64>>>,
+
     /// What the client saw that the world's oracles judge, in order.
     pub observations: Rc<RefCell<Vec<Observation>>>,
+
     /// The events about breakpoint hits the debugger published, which the
     /// world's auditor counts.
     pub published: Rc<RefCell<Published>>,
+
     /// The watchpoints the debugger said it armed, and the client has not
     /// asked to remove, by identifier.
     pub watches: Rc<RefCell<BTreeMap<u64, Intent>>>,
+
     /// Whether the session holds the children the program forks.
     pub following: Rc<Cell<bool>>,
+
     /// The children the session held, which the world hands to sessions of
     /// their own.
     pub held: Rc<RefCell<Option<HeldChildren>>>,
+
     /// The catchpoints the debugger said it made, and the client has not
     /// asked to remove, by identifier, with what each stops.
     pub catches: Rc<RefCell<BTreeMap<u64, super::kernel::catching::UserCatch>>>,
@@ -138,28 +160,35 @@ pub struct Shared {
 pub enum Observation {
     /// A backtrace taken at a stop.
     Backtrace { stop: StopId, backtrace: Backtrace },
+
     /// A step of the selected thread, about to be requested, from where the
     /// debugger presented it.
     StepBegins {
         thread: ThreadId,
         kind: StepKind,
         presentation: Option<FramePresentation>,
+
         /// For an advance, the image addresses it runs to.
         targets: BTreeSet<u64>,
+
         /// For a step into one call of a line, that call's instruction.
         call: Option<u64>,
     },
+
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
+
     /// The variables of the selected frame at a stop, with the backtrace of
     /// their thread.
     Variables {
         stop: StopId,
         variables: VariableSnapshot,
         backtrace: Backtrace,
+
         /// Expressions evaluated in the same frame at the same stop.
         evaluations: Vec<Evaluated>,
     },
+
     /// A container a view presents, as a global's value, with its elements
     /// in one page and in pages of a smaller size.
     Presented {
@@ -184,21 +213,27 @@ pub struct Evaluated {
 pub enum Purpose {
     /// The condition of the marker on the frame's line, or its negation.
     Marker { negated: bool },
+
     /// What the marker on the frame's line expects.
     Expected,
+
     /// A variable shown once among the frame's variables: its name, or
     /// the name's address dereferenced.
     Name(String),
+
     /// The address of a variable shown once, in memory.
     Address(String),
+
     /// An integer variable cast to an integer type `bits` wide.
     Cast {
         name: String,
         bits: u32,
         signed: bool,
     },
+
     /// An expression no program's types allow.
     IllTyped,
+
     /// Two integer variables combined: `left operator right`.
     Arithmetic {
         left: String,
@@ -233,14 +268,18 @@ pub struct Client {
     pub marks: Rc<RefCell<Marks>>,
     pub shared: Shared,
     pub script: Script,
+
     /// The last execution that resumed one thread alone.
     pub alone: Cell<Option<ExecutionId>>,
+
     /// What the client saw at the last stop, which the hits since are
     /// judged against.
     pub baseline: RefCell<Option<Baseline>>,
+
     /// The watchpoints the debugger said it disabled, with the hits each
     /// had counted then, which it counts no more.
     pub disabled_watches: RefCell<BTreeMap<u64, (Intent, u64)>>,
+
     /// Whether the client disabled a watchpoint while the program ran
     /// since the last stop, freeing slots a thread that could not be
     /// armed may since have taken.
@@ -342,10 +381,12 @@ impl Client {
         if self.script.follow {
             self.hold_forks().await?;
         }
+
         let mut breakpoints = Vec::new();
         for _ in 0..self.script.early_breakpoints {
             self.add_breakpoint(&mut breakpoints).await?;
         }
+
         let mut launches = 0;
         let mut watched_launch = 0;
         let mut last_stop: Option<StopId> = None;
@@ -354,20 +395,24 @@ impl Client {
             let Some(snapshot) = self.state().await? else {
                 return Ok(());
             };
+
             match snapshot.inferior.clone() {
                 InferiorState::NotRunning => {
                     if launches == self.script.launches {
                         break;
                     }
+
                     launches += 1;
                     if launches > 1 {
                         self.mark(Mark::Relaunched);
                     }
+
                     match self.script.attach.filter(|_| launches == 1) {
                         Some(process) => self.attach(process).await?,
                         None => self.launch().await?,
                     }
                 }
+
                 InferiorState::Running {
                     process_id,
                     execution_id,
@@ -377,6 +422,7 @@ impl Client {
                         .await;
                     self.excuse(process_id, result)?;
                 }
+
                 InferiorState::Stopped {
                     process_id,
                     stop_id,
@@ -400,7 +446,9 @@ impl Client {
                         if at_breakpoints > 1 {
                             self.mark(Mark::CoHit);
                         }
+
                         self.judge_hits(process_id, &snapshot, &mut breakpoints)?;
+
                         // The semantic oracles judge every stop.
                         let result = self.inspect(stop_id).await;
                         self.excuse(process_id, result)?;
@@ -409,6 +457,7 @@ impl Client {
                             let result = self.resume_unarmed().await;
                             self.excuse(process_id, result)?;
                         }
+
                         // A watch from the first stop sees the whole run.
                         if self.script.watching && watched_launch != launches {
                             watched_launch = launches;
@@ -416,6 +465,7 @@ impl Client {
                             self.excuse(process_id, result)?;
                         }
                     }
+
                     if let Some(previous) = last_stop
                         && previous != stop_id
                     {
@@ -424,8 +474,10 @@ impl Client {
                                 "stop {stop_id} follows stop {previous}"
                             )));
                         }
+
                         stale = Some(previous);
                     }
+
                     last_stop = Some(stop_id);
                     let result = self
                         .while_stopped(&snapshot, stop_id, stale, &mut events, &mut breakpoints)
@@ -434,6 +486,7 @@ impl Client {
                 }
             }
         }
+
         self.shutdown().await
     }
 
@@ -457,6 +510,7 @@ impl Client {
         let Some(views) = &self.script.views else {
             return Ok(());
         };
+
         let errors = self
             .handle
             .load_views(&[("program.views", views)], &[], &[])
@@ -497,6 +551,7 @@ impl Client {
                 if !matches!(self.script.debug, DebugBehavior::Contended(_)) {
                     return Err(protocol(format!("stop {stop_id} reports {reason:?}")));
                 }
+
                 self.mark(Mark::WatchArmFailed);
             }
             StopReason::ThreadExited { thread_id, .. } if thread_id.get() == process_id.get() => {
@@ -504,6 +559,7 @@ impl Client {
             }
             _ => {}
         }
+
         Ok(())
     }
 
@@ -520,6 +576,7 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("attaching failed: {error}"))),
         }
+
         Ok(())
     }
 
@@ -531,6 +588,7 @@ impl Client {
             stop_at_entry: self.script.stop_at_entry,
             ..LaunchOptions::default()
         };
+
         let killed = self.shared.killed.borrow().len();
         match self.handle.launch_with(options).await {
             Ok(execution) => self.note(format!("launched as execution {execution}")),
@@ -541,6 +599,7 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("launch failed: {error}"))),
         }
+
         Ok(())
     }
 
@@ -556,17 +615,21 @@ impl Client {
             } else {
                 self.add_catch().await?;
             }
+
             self.mark(Mark::CatchEditWhileRunning);
             return Ok(());
         }
+
         if self.control(8) == 0 {
             if self.script.watching && self.control(2) == 0 {
                 self.toggle_watch(true).await?;
             } else if self.toggle_breakpoint(breakpoints).await? {
                 self.mark(Mark::EditWhileRunning);
             }
+
             return Ok(());
         }
+
         match self.draw(if self.script.watching { 8 } else { 7 }) {
             0 => {
                 self.note("pause");
@@ -606,6 +669,7 @@ impl Client {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -620,6 +684,7 @@ impl Client {
         let InferiorState::Stopped { process_id, .. } = snapshot.inferior else {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
+
         let scope = ResumeScope::Process(process_id);
         if self.control(6) == 0 {
             match self.control(if self.script.watching { 5 } else { 4 }) {
@@ -631,8 +696,10 @@ impl Client {
                 3 => self.step_into_call().await?,
                 _ => self.toggle_watch(false).await?,
             }
+
             return Ok(());
         }
+
         let choices = if self.script.watching { 21 } else { 16 };
         let choice = self.draw(choices + if self.script.catching { 3 } else { 0 });
         if choice >= choices {
@@ -641,8 +708,10 @@ impl Client {
             } else {
                 self.add_catch().await?;
             }
+
             return Ok(());
         }
+
         match choice {
             0 => {
                 self.note("resume");
@@ -695,6 +764,7 @@ impl Client {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -714,6 +784,7 @@ impl Client {
         if snapshot.selected != Some(ExecutionContext::Thread(thread)) {
             self.mark(Mark::ThreadSelected);
         }
+
         Ok(())
     }
 
@@ -729,6 +800,7 @@ impl Client {
                 .find(|thread| thread.id.get() == process_id.get()),
             _ => None,
         };
+
         let thread = match main {
             Some(main) if self.draw(2) == 0 => main.id,
             _ => {
@@ -738,6 +810,7 @@ impl Client {
                     .id
             }
         };
+
         let execution = match self
             .handle
             .continue_execution(
@@ -755,6 +828,7 @@ impl Client {
                 )));
             }
         };
+
         self.note(format!(
             "continued thread {thread} alone as execution {execution}"
         ));
@@ -794,6 +868,7 @@ impl Client {
         } else {
             None
         };
+
         let (page_address, page) = match aim {
             Some(trap) => *pages
                 .iter()
@@ -801,6 +876,7 @@ impl Client {
                 .ok_or_else(|| protocol(format!("trap {trap:#x} is outside the code")))?,
             None => pages[usize::try_from(self.draw(pages.len() as u64)).expect("small")],
         };
+
         let offset = aim
             .map_or_else(
                 || self.draw(page.len() as u64 - length + 1),
@@ -825,10 +901,12 @@ impl Client {
                 ),
             ));
         }
+
         self.note(format!("read {length} bytes at {address:#x}"));
         if aim.is_some_and(|trap| (address..address + length).contains(&trap)) {
             self.mark(Mark::ReadOverTrap);
         }
+
         Ok(())
     }
 
@@ -841,6 +919,7 @@ impl Client {
             Err(Error::NotRunning) if running => self.note("the program ended first"),
             Err(error) => return Err(protocol(format!("kill failed: {error}"))),
         }
+
         let snapshot = self.snapshot().await?;
         if snapshot.inferior != InferiorState::NotRunning {
             return Err(protocol(format!(
@@ -848,6 +927,7 @@ impl Client {
                 snapshot.inferior
             )));
         }
+
         Ok(())
     }
 
@@ -867,12 +947,14 @@ impl Client {
                 )));
             }
         }
+
         let after = self.snapshot().await?;
         if after != before {
             return Err(protocol(format!(
                 "a refused request changed the state from {before:?} to {after:?}"
             )));
         }
+
         self.note(format!("stale stop {stale} refused"));
         self.mark(Mark::StaleStopRefused);
         Ok(())
@@ -929,6 +1011,7 @@ impl Client {
             self.note("the debugger detached and exited");
             return Ok(());
         }
+
         sent.map_err(|_| protocol("the request queue closed before shutdown"))?;
         answer
             .await

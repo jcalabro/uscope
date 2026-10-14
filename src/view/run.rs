@@ -18,6 +18,7 @@ use super::bind::{
     BoundDynamic, BoundField, BoundFormat, BoundInputValue, BoundScan, BoundShape, BoundView,
     BoundVisualizer, TextSource, ViewObject, ViewProgram,
 };
+
 use super::pattern::{Captured, Captures};
 use super::scan::{Checkpoints, Scanner, Var};
 use super::summary;
@@ -32,6 +33,7 @@ const PAGE_SIZE: u64 = 4096;
 pub enum Failure {
     /// The value shows as it is stored, with this problem beside it.
     Problem(ViewProblem),
+
     /// The debugger failed, which fails the whole inspection.
     Debugger(crate::Error),
 }
@@ -85,15 +87,19 @@ fn unsupported(message: &str) -> Stop {
 #[derive(Debug)]
 pub struct Presented {
     pub shape: PresentedShape,
+
     /// How many elements or entries a sequence or map holds, also when it
     /// presents as text.
     pub count: Option<crate::PresentedCount>,
     pub text: Option<TextSummary>,
     pub summary: String,
+
     /// For `value`, the value that stands for this one.
     pub inner: Option<InspectedValue>,
+
     /// Why the summary stopped short of every element.
     pub partial: Option<ViewProblem>,
+
     /// How many named children it has: a record's members and the
     /// view's fields, less those it hides, which come after its elements.
     pub named: u64,
@@ -126,9 +132,11 @@ impl Presented {
 #[derive(Debug)]
 pub enum Child {
     Element(u64, InspectedValue),
+
     /// A map's entry: its index, key, and value.
     Entry(u64, Box<InspectedValue>, InspectedValue),
     Field(Arc<str>, InspectedValue),
+
     /// The value as it is stored, which the caller materializes.
     Raw,
 }
@@ -140,6 +148,7 @@ pub struct ViewMachine<'m, M: Machine> {
     this: M::Place,
     lets: &'m [ViewProgram<M::Step>],
     values: Vec<Option<Value<M::Place>>>,
+
     /// The generators' variables and clauses' `let`s, by position.
     variables: Vec<Value<M::Place>>,
 }
@@ -165,6 +174,7 @@ impl<'m, M: Machine> ViewMachine<'m, M> {
         if let Some(Some(value)) = self.values.get(index) {
             return Ok(value.clone());
         }
+
         let lets = self.lets;
         let program = lets
             .get(index)
@@ -362,6 +372,7 @@ pub(super) fn count<M: Machine>(
     let Value::Int(integer) = interp::value(program, machine)? else {
         return Err(internal("a count is not an integer"));
     };
+
     let value = integer.value();
     value
         .to_u128()
@@ -389,12 +400,14 @@ fn checks<M: Machine>(
         if truth(&check.program, machine)? {
             continue;
         }
+
         let detail = check.sides.as_ref().and_then(|sides| {
             let mut parts = Vec::new();
             for (text, program) in sides {
                 let value = interp::value(program, machine).ok()?;
                 parts.push(format!("`{text}` is {}", side_text(&value)));
             }
+
             Some(Arc::from(parts.join(", ")))
         });
         return Err(Failure::Problem(ViewProblem::CheckFailed {
@@ -402,6 +415,7 @@ fn checks<M: Machine>(
             detail,
         }));
     }
+
     Ok(())
 }
 
@@ -424,6 +438,7 @@ fn resolve<'b, M: Machine>(
             otherwise
         };
     }
+
     // A `match` that names no value it has is that value's problem.
     if let BoundShape::Unmatched { text, program } = shape {
         let value = interp::value(program, machine)?;
@@ -432,6 +447,7 @@ fn resolve<'b, M: Machine>(
             side_text(&value)
         )));
     }
+
     Ok(shape)
 }
 
@@ -450,10 +466,12 @@ fn named<'b, St>(bound: &'b BoundView<St>, shape: &'b BoundShape<St>) -> Vec<Nam
             .chain(bound.extensions.iter().map(AsRef::as_ref))
             .any(|view| view.hidden.iter().any(|(hidden, _)| hidden == name))
     };
+
     let members = match shape {
         BoundShape::Record(members) => members.as_slice(),
         _ => &[],
     };
+
     members
         .iter()
         .chain(&bound.fields)
@@ -503,6 +521,7 @@ fn named_value<M: Machine>(
         let mut extension = ViewMachine::new(&mut *machine.base, named.owner, this);
         element(&named.field.program, &mut extension)?
     };
+
     formatted(bound, &named.field.name, value, machine)
 }
 
@@ -517,9 +536,11 @@ fn formatted<M: Machine>(
     let Some(format) = format_of(bound, name) else {
         return Ok(value);
     };
+
     let Some(summary) = super::format::write(format, &value, machine)? else {
         return Ok(value);
     };
+
     if let VariableState::Available {
         presentation,
         children,
@@ -538,6 +559,7 @@ fn formatted<M: Machine>(
             visualizers: Arc::from([]),
         }));
     }
+
     Ok(value)
 }
 
@@ -557,9 +579,11 @@ fn declared_length<M: Machine>(
     if !scan.random_access() {
         return Ok(declared);
     }
+
     let super::bind::BoundGenerator::Range(length) = &scan.clauses[0].generator else {
         return Err(internal("random access is one range"));
     };
+
     machine.set_variables(&[]);
     let generated = count(length, machine, "range's length")?;
     match declared {
@@ -594,6 +618,7 @@ fn dynamic_place<M: Machine>(
     let Value::Pointer(address) = interp::value(pointer, machine)? else {
         return Err(internal("a dynamic value's pointer is not a pointer"));
     };
+
     let ty = match ty {
         BoundDynamic::Fixed(ty) => *ty,
         BoundDynamic::Function {
@@ -618,11 +643,13 @@ fn dynamic_place<M: Machine>(
                 .ok_or_else(|| refused(format!("the type has no type argument {index}")))?
         }
     };
+
     if address == 0 {
         return Err(Failure::Problem(ViewProblem::Unavailable(
             VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
         )));
     }
+
     Ok(machine.place_at(address, ty)?)
 }
 
@@ -674,6 +701,7 @@ fn function_type<M: Machine>(
         captures.retain(|(captured, _)| **captured != *parameter);
         captures.push((parameter.to_string(), Captured::Type(ty)));
     }
+
     let mut found = Vec::<TypeReference>::new();
     for candidate in candidates {
         let Some(identity) = machine
@@ -682,6 +710,7 @@ fn function_type<M: Machine>(
         else {
             continue;
         };
+
         if super::pattern::matches_with(pattern, identity, machine, captures.clone()).is_some()
             && !found
                 .iter()
@@ -690,6 +719,7 @@ fn function_type<M: Machine>(
             found.push(*candidate);
         }
     }
+
     match found.as_slice() {
         [ty] => Ok(*ty),
         [] => Err(refused(format!(
@@ -752,6 +782,7 @@ impl<'b, St, P: Clone> Walk<'b, St, P> {
                 next: index,
             }));
         }
+
         let mut scanner = Scanner::at(scan, declared, checkpoints, index);
         Ok(scanner
             .skip_to(index, machine, checkpoints)?
@@ -769,10 +800,12 @@ impl<'b, St, P: Clone> Walk<'b, St, P> {
                 if *next >= *length {
                     return Ok(None);
                 }
+
                 let index = *next;
                 *next += 1;
                 let mut values = vec![Var::Integer(i128::from(index)).value()];
                 machine.set_variables(&values);
+
                 // A random-access clause has only `let`s after its range.
                 for item in &scan.clauses[0].items {
                     if let super::bind::BoundItem::Let(program) = item {
@@ -780,6 +813,7 @@ impl<'b, St, P: Clone> Walk<'b, St, P> {
                         machine.set_variables(&values);
                     }
                 }
+
                 Ok(Some(index))
             }
             Self::Scan(scanner) => scanner.next(machine, checkpoints),
@@ -853,6 +887,7 @@ pub fn present<M: Machine>(
                     summary::value(value.type_info.as_ref(), &value.state),
                 ));
             }
+
             Presented::new(
                 PresentedShape::Record,
                 summary::record(&parts, parts.len() == shown.len()),
@@ -866,7 +901,9 @@ pub fn present<M: Machine>(
             return Err(internal("`if` and `match` are resolved"));
         }
     };
+
     presented.named = named(bound, shape).len() as u64;
+
     // Text the view writes `self` as presents the value, which keeps the
     // children its shape gives it.
     if !matches!(shape, BoundShape::Value(_) | BoundShape::Text { .. })
@@ -876,9 +913,11 @@ pub fn present<M: Machine>(
         presented.summary = summary::quoted(&text);
         presented.text = Some(text);
     }
+
     if let Some(pieces) = &bound.summary {
         presented.summary = rendered(pieces, &mut machine)?;
     }
+
     Ok(presented)
 }
 
@@ -897,6 +936,7 @@ fn rendered<M: Machine>(
                     Some(format) => super::format::write(*format, &value, machine)?,
                     None => None,
                 };
+
                 text.push_str(
                     &written
                         .unwrap_or_else(|| summary::value(value.type_info.as_ref(), &value.state)),
@@ -904,6 +944,7 @@ fn rendered<M: Machine>(
             }
         }
     }
+
     Ok(text)
 }
 
@@ -929,6 +970,7 @@ fn self_text<M: Machine>(
     else {
         return Ok(None);
     };
+
     let text = if std::ptr::eq(owner, bound) {
         machine.set_variables(&[]);
         read_text(source, None, machine)
@@ -937,6 +979,7 @@ fn self_text<M: Machine>(
         let mut extension = ViewMachine::new(&mut *machine.base, owner, this);
         read_text(source, None, &mut extension)
     };
+
     match text {
         Ok(text) => Ok(super::format::utf8_text(&text)),
         Err(Failure::Problem(_)) => Ok(None),
@@ -965,22 +1008,26 @@ fn preview<M: Machine>(
         let previewing = partial.is_none()
             && items.len() < summary::MAX_ELEMENTS
             && characters < summary::MAX_CHARACTERS;
+
         // With a declared count, nothing past the preview is needed.
         if !previewing && declared.is_some() {
             break;
         }
+
         let index = match current.next(machine, checkpoints) {
             Ok(Some(index)) => index,
             Ok(None) => {
                 ended = true;
                 break;
             }
+
             // Running out of budget, or memory, while only counting leaves
             // the count a lower bound.
             Err(Failure::Problem(ViewProblem::Unavailable(reason))) if !previewing => {
                 partial = Some(ViewProblem::Unavailable(reason));
                 break;
             }
+
             // Running out of budget while looking for the next element
             // ends the preview there.
             Err(Failure::Problem(ViewProblem::Unavailable(
@@ -995,10 +1042,12 @@ fn preview<M: Machine>(
             }
             Err(failure) => return Err(failure),
         };
+
         counted = index + 1;
         if !previewing {
             continue;
         }
+
         let child = item(shape, machine, index)?;
         let (rendered, states) = match &child {
             Child::Element(_, value) => (
@@ -1015,8 +1064,10 @@ fn preview<M: Machine>(
             ),
             _ => return Err(internal("items are elements or entries")),
         };
+
         characters += rendered.chars().count() + 2;
         items.push(rendered);
+
         // An element the budget or memory could not provide ends the
         // preview, rather than spending more on the rest.
         for state in states {
@@ -1029,16 +1080,19 @@ fn preview<M: Machine>(
                 }
                 _ => {}
             }
+
             if partial.is_some() {
                 break;
             }
         }
     }
+
     let count = match declared {
         Some(declared) => crate::PresentedCount::Exact(declared),
         None if ended || walk.is_none() => crate::PresentedCount::Exact(counted),
         None => crate::PresentedCount::AtLeast(counted),
     };
+
     let complete =
         items.len() as u64 == count.known() && matches!(count, crate::PresentedCount::Exact(_));
     let presented = if is_map {
@@ -1049,6 +1103,7 @@ fn preview<M: Machine>(
             summary::sequence(count, &items, complete),
         )
     };
+
     Ok(Presented {
         count: Some(count),
         partial,
@@ -1070,6 +1125,7 @@ pub fn children<M: Machine>(
 ) -> Result<Vec<Child>, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
     let shape = resolve(bound, &mut machine)?;
+
     // A record's members come before the view's fields.
     let named = named(bound, shape);
     let end = offset.saturating_add(limit).min(
@@ -1097,6 +1153,7 @@ pub fn children<M: Machine>(
                         generated: children.len() as u64 + offset,
                     }));
                 }
+
                 // A budget that ends while the scan looks for the next
                 // element ends the page with the elements it found.
                 Err(failure) if out_of_work(&failure) && !children.is_empty() => {
@@ -1104,17 +1161,22 @@ pub fn children<M: Machine>(
                 }
                 Err(failure) => return Err(failure),
             };
+
             let child = item(shape, &mut machine, index)?;
+
             // A page ends at the first child its budget cannot afford,
             // which the page's completion then reports.
             if out_of_budget(&child) {
                 return Ok(children);
             }
+
             children.push(child);
         }
     }
+
     for index in offset.max(elements)..end {
         let position = usize::try_from(index - elements).unwrap_or(usize::MAX);
+
         // A member or field the program cannot provide is that child's
         // problem.
         let child = match named.get(position) {
@@ -1124,11 +1186,14 @@ pub fn children<M: Machine>(
             ),
             None => Child::Raw,
         };
+
         if out_of_budget(&child) {
             break;
         }
+
         children.push(child);
     }
+
     Ok(children)
 }
 
@@ -1149,12 +1214,14 @@ pub fn visualizers<St>(bound: &BoundView<St>) -> Vec<(&BoundView<St>, &BoundVisu
 #[derive(Debug)]
 pub enum Input {
     Value(Box<InspectedValue>),
+
     /// `bytes(PTR, LEN)`: where the bytes are and how many, which the
     /// caller reads at once.
     Bytes {
         address: u64,
         length: u64,
     },
+
     /// A string the `visualize` writes.
     Text(Arc<str>),
 }
@@ -1177,6 +1244,7 @@ pub fn inputs<M: Machine>(
     let Some(&(owner, visualizer)) = listed.get(index) else {
         return Err(internal("no such visualizer"));
     };
+
     let drawing = visualizer
         .bound
         .as_ref()
@@ -1190,6 +1258,7 @@ pub fn inputs<M: Machine>(
         extension = ViewMachine::new(&mut *machine.base, owner, this);
         &mut extension
     };
+
     let mut inputs = Vec::new();
     for input in &drawing.inputs {
         machine.set_variables(&[]);
@@ -1201,8 +1270,10 @@ pub fn inputs<M: Machine>(
             },
             BoundInputValue::Text(text) => Input::Text(Arc::clone(text)),
         };
+
         inputs.push((Arc::clone(&input.name), value, input.path.clone()));
     }
+
     Ok(inputs)
 }
 
@@ -1223,24 +1294,30 @@ where
     let BoundShape::Sequence { scan, element } = shape else {
         return Ok(None);
     };
+
     if !scan.random_access() || !scan.clauses[0].items.is_empty() {
         return Ok(None);
     }
+
     let Some((pointer, scale, element_type)) =
         element.indexed_pointer(|object| matches!(object, ViewObject::Variable(0)))
     else {
         return Ok(None);
     };
+
     if pointer.mentions(&|object| matches!(object, ViewObject::Variable(_))) {
         return Ok(None);
     }
+
     let Some(count) = declared_length(scan, &mut machine)? else {
         return Ok(None);
     };
+
     machine.set_variables(&[]);
     let Value::Pointer(address) = interp::value(&pointer, &mut machine)? else {
         return Ok(None);
     };
+
     Ok(Some((address, count, element_type, scale)))
 }
 
@@ -1262,6 +1339,7 @@ fn out_of_budget(child: &Child) -> bool {
             VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_))
         )
     };
+
     match child {
         Child::Element(_, value) | Child::Field(_, value) => limited(value),
         Child::Entry(_, key, value) => limited(key) || limited(value),
@@ -1285,6 +1363,7 @@ pub fn length<M: Machine>(
             if let Some(length) = declared_length(scan, &mut machine)? {
                 return Ok(length);
             }
+
             let mut scanner = Scanner::<_, M::Place>::at(scan, None, checkpoints, u64::MAX);
             while scanner.next(&mut machine, checkpoints)?.is_some() {}
             Ok(scanner.position())
@@ -1303,6 +1382,7 @@ pub fn length<M: Machine>(
                 _ => Err(refused("the text's length could not be read")),
             }
         }
+
         // A value that holds nothing, such as Go's nil map, has nothing.
         BoundShape::Empty(_) => Ok(0),
         // A value presented as another has that one's length.
@@ -1310,6 +1390,7 @@ pub fn length<M: Machine>(
             let Value::Place(place) = interp::value(program, &mut machine)? else {
                 return Err(refused(NO_LENGTH));
             };
+
             machine
                 .presented_length(&place)?
                 .ok_or_else(|| refused(NO_LENGTH))
@@ -1357,15 +1438,18 @@ pub fn element_place<M: Machine>(
 ) -> Result<M::Place, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
     let shape = resolve(bound, &mut machine)?;
+
     // A value presented as another has that one's elements.
     if let BoundShape::Value(program) = shape {
         let Value::Place(place) = interp::value(program, &mut machine)? else {
             return Err(refused("the view computes the value it presents"));
         };
+
         return machine
             .presented_element(&place, index)?
             .ok_or_else(|| refused("the value the view presents has no elements"));
     }
+
     let BoundShape::Sequence { scan, element } = shape else {
         return Err(refused(if matches!(shape, BoundShape::Map { .. }) {
             "a map's entries are not indexed by position"
@@ -1373,6 +1457,7 @@ pub fn element_place<M: Machine>(
             "the view presents no elements"
         }));
     };
+
     let declared = declared_length(scan, &mut machine)?;
     let out_of_bounds = |count: u64| {
         Failure::Problem(ViewProblem::Unavailable(
@@ -1383,18 +1468,23 @@ pub fn element_place<M: Machine>(
             },
         ))
     };
+
     let Ok(wanted) = u64::try_from(index) else {
         return Err(out_of_bounds(declared.unwrap_or(0)));
     };
+
     if declared.is_some_and(|declared| wanted >= declared) {
         return Err(out_of_bounds(declared.unwrap_or(0)));
     }
+
     let Some(mut walk) = Walk::at(scan, declared, wanted, &mut machine, checkpoints)? else {
         return Err(out_of_bounds(wanted));
     };
+
     if walk.next(&mut machine, checkpoints)?.is_none() {
         return Err(out_of_bounds(wanted));
     }
+
     match interp::value(element, &mut machine)? {
         Value::Place(place) => Ok(place),
         _ => Err(refused(
@@ -1415,10 +1505,12 @@ fn read_text<M: Machine>(
             VariableUnavailableReason::ValueAccess(ValueAccessUnavailableReason::NullPointer),
         )));
     }
+
     let width = source.width();
     if width == 1 {
         return read_bytes(machine, address, length);
     }
+
     read_units(machine, address, length, width)
 }
 
@@ -1441,9 +1533,11 @@ fn read_units<M: Machine>(
         if read == wanted {
             break None;
         }
+
         let Some(next) = address.checked_add(read) else {
             break None;
         };
+
         let size = (PAGE_SIZE - next % PAGE_SIZE).min(wanted - read);
         let chunk = match machine.read(next, usize::try_from(size).unwrap_or(usize::MAX)) {
             Ok(chunk) => chunk,
@@ -1462,6 +1556,7 @@ fn read_units<M: Machine>(
             }
             Err(stop) => return Err(stop.into()),
         };
+
         // A unit may straddle the chunks, so the search begins at the unit
         // the chunk's first byte belongs to.
         let first = bytes.len() - bytes.len() % width;
@@ -1475,6 +1570,7 @@ fn read_units<M: Machine>(
             break Some(TextCompletion::Complete);
         }
     };
+
     let completion = match (stopped, length) {
         (Some(completion), _) => completion,
         (None, Some(length)) if bytes.len() as u64 == length * wide => TextCompletion::Complete,
@@ -1482,6 +1578,7 @@ fn read_units<M: Machine>(
             length: in_bytes(length),
         },
     };
+
     Ok(TextSummary::from_units(
         &bytes,
         width,
@@ -1509,21 +1606,25 @@ fn text_location<M: Machine>(
             let Value::Place(place) = interp::value(program, machine)? else {
                 return Err(internal("a text's elements are not a place"));
             };
+
             let available = match category(machine, program.result()) {
                 Category::Array { dimensions, .. } => {
                     dimensions.first().map_or(0, |dimension| dimension.count)
                 }
                 _ => machine.length(&place)?,
             };
+
             let length = declared.unwrap_or(available);
             if length > available {
                 return Err(refused(format!(
                     "the text's length {length} exceeds its {available} elements"
                 )));
             }
+
             if length == 0 {
                 return Ok((0, Some(0)));
             }
+
             let first = machine.step(&place, first, &[0])?;
             (machine.address(&first)?, Some(length))
         }
@@ -1550,13 +1651,16 @@ pub fn text_span<M: Machine>(
                     ),
                 )));
             }
+
             Ok(Some((address, length)))
         }
+
         // A value presented as another is that one's text.
         BoundShape::Value(program) => {
             let Value::Place(place) = interp::value(program, &mut machine)? else {
                 return Ok(None);
             };
+
             Ok(machine
                 .text_span(&place)?
                 .map(|span| (span.address, Some(span.length))))
@@ -1579,6 +1683,7 @@ pub fn capacity<M: Machine>(
         machine.set_variables(&[]);
         return capacity_of(&field.program, &mut machine).map(Some);
     }
+
     for extension in &bound.extensions {
         if let Some(field) = extension
             .fields
@@ -1589,6 +1694,7 @@ pub fn capacity<M: Machine>(
             return capacity_of(&field.program, &mut extended).map(Some);
         }
     }
+
     let place = match shape {
         BoundShape::Value(program) => match interp::value(program, &mut machine)? {
             Value::Place(place) => place,
@@ -1597,6 +1703,7 @@ pub fn capacity<M: Machine>(
         BoundShape::Dynamic { pointer, ty } => dynamic_place(pointer, ty, &mut machine)?,
         _ => return Ok(None),
     };
+
     Ok(machine.presented_capacity(&place)?)
 }
 
@@ -1608,6 +1715,7 @@ fn capacity_of<M: Machine>(
     let Value::Int(integer) = interp::value(program, machine)? else {
         return Err(refused("its `capacity` field is not an integer"));
     };
+
     let value = integer.value();
     value
         .to_u128()
@@ -1640,10 +1748,12 @@ pub fn entry_place<M: Machine>(
             "the view presents no map"
         }));
     };
+
     let declared = declared_length(scan, &mut machine)?;
     let Some(mut walk) = Walk::at(scan, declared, 0, &mut machine, checkpoints)? else {
         return Ok(None);
     };
+
     let mut unreadable = None;
     while walk.next(&mut machine, checkpoints)?.is_some() {
         let candidate = element(key_program, &mut machine)?;
@@ -1661,6 +1771,7 @@ pub fn entry_place<M: Machine>(
             Err(stop) => return Err(stop.into()),
         }
     }
+
     unreadable.map_or_else(|| Ok(None), |stop| Err(stop.into()))
 }
 
@@ -1679,9 +1790,11 @@ fn read_bytes<M: Machine>(
         if read == wanted {
             break None;
         }
+
         let Some(next) = address.checked_add(read) else {
             break None;
         };
+
         let size = (PAGE_SIZE - next % PAGE_SIZE).min(wanted - read);
         let chunk = match machine.read(next, usize::try_from(size).unwrap_or(usize::MAX)) {
             Ok(chunk) => chunk,
@@ -1697,6 +1810,7 @@ fn read_bytes<M: Machine>(
             }
             Err(stop) => return Err(stop.into()),
         };
+
         if length.is_none()
             && let Some(position) = chunk.iter().position(|byte| *byte == 0)
         {
@@ -1706,13 +1820,16 @@ fn read_bytes<M: Machine>(
                 completion: TextCompletion::Complete,
             });
         }
+
         bytes.extend_from_slice(&chunk);
     };
+
     let completion = match (stopped, length) {
         (Some(completion), _) => completion,
         (None, Some(length)) if bytes.len() as u64 == length => TextCompletion::Complete,
         (None, length) => TextCompletion::Truncated { length },
     };
+
     Ok(TextSummary {
         bytes: bytes.into(),
         completion,

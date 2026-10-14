@@ -31,6 +31,7 @@ pub enum Evaluation {
         value: crate::InspectedValue,
         cause: Option<syntax::Span>,
     },
+
     /// `base[start..end]`: the elements of an array or slice in a
     /// half-open range of source indices.
     Range(crate::ValueChildPage),

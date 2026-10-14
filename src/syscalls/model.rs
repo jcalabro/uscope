@@ -16,8 +16,10 @@ pub use crate::model::{Pid, Tid};
 pub enum Abi {
     /// The x86-64 `syscall` instruction.
     X86_64,
+
     /// The i386 ABI: `int 0x80` or `sysenter`, from 32-bit or 64-bit code.
     X86_32,
+
     /// The x32 ABI: `syscall` with bit 30 set in the number.
     X32,
 }
@@ -108,14 +110,18 @@ pub const MAX_ERRNO: i64 = 4095;
 pub enum Outcome {
     /// It returned this value.
     Returned(i64),
+
     /// It failed with this error.
     Failed(Errno),
+
     /// It had not returned when the trace ended or the thread was last
     /// seen: still blocked, or the trace stopped first.
     Unfinished,
+
     /// Its process exited, or replaced itself by `execve`, before the call
     /// returned, as `exit_group` and a successful `execve` never return.
     ProcessExited,
+
     /// The engine could not tell, as when the exit was lost.
     Unavailable,
 }
@@ -161,6 +167,7 @@ impl Outcome {
 pub enum ReadAt {
     /// Before the kernel ran the call: what it was asked to do.
     Entry,
+
     /// After the call returned. Another thread may have changed the memory
     /// in between, and an input buffer then shows what it holds now.
     Exit,
@@ -171,11 +178,14 @@ pub enum ReadAt {
 pub enum CaptureState {
     /// All of it.
     Complete,
+
     /// The first bytes, up to the string limit; `wanted` bytes were there,
     /// or more when it is `u32::MAX`.
     Truncated { wanted: u32 },
+
     /// The memory could not be read: unmapped, or not yet paged in.
     Unreadable,
+
     /// The selection asked for no copy.
     NotRequested,
 }
@@ -198,9 +208,11 @@ impl EventFlags {
     /// The thread was stopped in the debugger while it was in the call, so
     /// the duration includes the stop.
     pub const SPANNED_STOP: Self = Self(1);
+
     /// The entry was not seen: tracing began during the call, or the call
     /// was refused before it entered. It has no duration.
     pub const ENTRY_UNSEEN: Self = Self(2);
+
     /// The engine could not tell which ABI made the call, and named it by
     /// the 64-bit table.
     pub const ABI_UNCERTAIN: Self = Self(4);
@@ -226,6 +238,7 @@ pub struct CallStack {
     /// The instruction after the call's, then each return address,
     /// innermost first.
     pub addresses: Arc<[u64]>,
+
     /// Why it ends short of its outermost frame, as a
     /// [`Truncation`](crate::capture::records::Truncation)'s number.
     pub truncated: Option<u8>,
@@ -244,18 +257,24 @@ impl CallStack {
 pub struct SyscallEvent {
     /// The thread, by its id in the traced process's pid namespace.
     pub thread: Tid,
+
     /// Its process.
     pub process: Pid,
     pub call: SyscallId,
+
     /// The six argument registers, always, however many the call takes.
     pub args: [u64; 6],
+
     /// Bytes behind pointer arguments, in argument order.
     pub captured: Vec<Capture>,
     pub outcome: Outcome,
+
     /// `CLOCK_MONOTONIC` nanoseconds at entry, when it was seen.
     pub entered: Option<u64>,
+
     /// `CLOCK_MONOTONIC` nanoseconds at exit, when it was seen.
     pub exited: Option<u64>,
+
     /// The thread's user stack, when stacks were asked for.
     pub stack: Option<CallStack>,
     pub flags: EventFlags,
@@ -292,32 +311,41 @@ pub enum ProcessEnd {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TraceEvent {
     Call(SyscallEvent),
+
     /// A signal was delivered to a thread.
     Signal {
         thread: Tid,
         process: Pid,
         time: u64,
         signal: i32,
+
         /// `si_code`, when the engine saw it.
         code: Option<i32>,
+
         /// The sending process, for signals one sent.
         sender: Option<Pid>,
+
         /// The whole `siginfo_t`, when the engine read it.
         info: Option<Arc<[u8]>>,
+
         /// The thread's stack where the signal found it, when stacks were
         /// asked for.
         stack: Option<CallStack>,
     },
+
     /// A thread created a process or a thread.
     Spawn {
         parent_thread: Tid,
         parent: Pid,
+
         /// The child's first thread, which leads it when it is a process.
         child: Tid,
+
         /// Whether the child is a thread of the parent's process.
         thread: bool,
         time: u64,
     },
+
     /// A process replaced its image.
     Exec {
         thread: Tid,
@@ -325,12 +353,14 @@ pub enum TraceEvent {
         time: u64,
         path: Arc<str>,
     },
+
     /// A process ended.
     Exit {
         process: Pid,
         time: u64,
         end: ProcessEnd,
     },
+
     /// A thread other than its process's leader ended, which only the
     /// ptrace engine reports.
     ThreadExit {
@@ -339,6 +369,7 @@ pub enum TraceEvent {
         time: u64,
         end: ProcessEnd,
     },
+
     /// Events the engine lost, on one CPU or thread, since the last such
     /// report. Every count the trace shows is a lower bound once one has
     /// occurred.
@@ -346,21 +377,26 @@ pub enum TraceEvent {
         time: u64,
         count: u64,
     },
+
     /// What a descriptor refers to, as the engine read it from the system
     /// (`/proc/PID/fd/N`): when tracing began, or right after a call made
     /// the descriptor.
     Descriptor {
         process: Pid,
+
         /// The descriptor, or `AT_FDCWD` (-100) for the working directory.
         fd: i64,
         time: u64,
+
         /// What `/proc/PID/fd/N` links to, or empty for a file whose path
         /// the engine could not read, which then keeps the path its call
         /// named.
         text: Arc<str>,
         cloexec: bool,
+
         /// The device it is, when it is a character or block device.
         device: Option<Device>,
+
         /// Whether the call reported next made it, rather than the
         /// descriptor being there when tracing began.
         made: bool,
@@ -399,6 +435,7 @@ pub struct InFlight {
     pub process: Pid,
     pub call: SyscallId,
     pub args: [u64; 6],
+
     /// `CLOCK_MONOTONIC` nanoseconds at entry.
     pub entered: u64,
 }

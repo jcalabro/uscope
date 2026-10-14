@@ -25,10 +25,13 @@ type Resolver = (ModuleId, ImageAddress);
 pub(super) struct IndirectFunctions {
     /// The implementation each resolver chose, in the resolver's module.
     chosen: BTreeMap<Resolver, ImageAddress>,
+
     /// The resolvers whose entries are planted, by entry.
     entries: BTreeMap<VirtualAddress, Resolver>,
+
     /// Calls of resolvers under way, each awaiting its return.
     calls: Vec<Call>,
+
     /// The return sites planted for `calls`.
     returns: BTreeSet<VirtualAddress>,
 }
@@ -52,6 +55,7 @@ struct Call {
     thread: Pid,
     resolver: Resolver,
     returns_to: VirtualAddress,
+
     /// The stack pointer once the call returns, which tells its return
     /// from a deeper call's return to the same place.
     stack: u64,
@@ -75,6 +79,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return BTreeSet::new();
         };
+
         let names = self
             .breakpoints
             .iter()
@@ -97,6 +102,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ) {
                     continue;
                 }
+
                 wanted.extend(
                     runtime
                         .image
@@ -110,6 +116,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 );
             }
         }
+
         wanted
     }
 
@@ -121,21 +128,25 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
+
         if wanted.is_empty() {
             return;
         }
+
         let pid = inferior.memory_thread();
         let mut learned = Vec::new();
         for &(module, resolver) in &wanted {
             let Some(defining) = self.modules.get(&module) else {
                 continue;
             };
+
             let names = defining
                 .image
                 .symbols()
                 .filter(|symbol| symbol.address() == resolver && symbol.exported())
                 .map(crate::image::symbols::Symbol::unversioned_name)
                 .collect::<BTreeSet<_>>();
+
             // A slot of the module's own that the resolver fills, or one
             // of any module's that imports the function by name.
             let mut slots = Vec::new();
@@ -145,15 +156,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                         GotTarget::Indirect(address) => holder == module && *address == resolver,
                         GotTarget::Import(name) => names.contains(&**name),
                     };
+
                     if fills && let Ok(address) = runtime.loaded.virtual_address(slot.address) {
                         slots.push(address);
                     }
                 }
             }
+
             for slot in slots {
                 let Ok(value) = self.ptrace.read_word(pid, slot.get()) else {
                     continue;
                 };
+
                 // A slot the loader has yet to relocate, or one bound to
                 // another module's definition, holds no code of the
                 // resolver's module.
@@ -165,6 +179,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         inferior.indirect.chosen.extend(learned);
     }
 
@@ -183,9 +198,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 entries.insert(entry, (module, resolver));
             }
         }
+
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(());
         };
+
         let live = |pid: &Pid| inferior.threads.contains_key(pid);
         let calls = (inferior.indirect.calls.iter())
             .filter(|call| wanted.contains(&call.resolver) && live(&call.thread))
@@ -201,6 +218,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .chain(&returns)
             .copied()
             .collect::<BTreeSet<_>>();
+
         // The record changes with each site, so that a failed edit leaves
         // it naming exactly the sites planted.
         for &address in planted.difference(&needed) {
@@ -213,6 +231,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.indirect.entries.remove(&address);
             inferior.indirect.returns.remove(&address);
         }
+
         let pid = inferior.memory_thread();
         for &address in needed.difference(&planted) {
             self.ptrace.install_breakpoint(
@@ -230,6 +249,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         inferior.indirect.entries = entries;
         inferior.indirect.calls = calls;
         inferior.indirect.returns = returns;
@@ -245,6 +265,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !indirect.entries.contains_key(&address) && !indirect.returns.contains(&address) {
             return Ok(());
         }
+
         let registers = self.ptrace.registers(pid)?;
         if let Some(&resolver) = indirect.entries.get(&address) {
             let returns_to = VirtualAddress::new(self.ptrace.read_word(pid, registers.rsp)?);
@@ -258,11 +279,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             });
             return self.queue_module_refresh();
         }
+
         let Some(index) = indirect.calls.iter().position(|call| {
             call.thread == pid && call.returns_to == address && call.stack == registers.rsp
         }) else {
             return Ok(());
         };
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let call = inferior.indirect.calls.remove(index);
         let (module, resolver) = call.resolver;
@@ -280,6 +303,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .chosen
                 .insert(call.resolver, implementation);
         }
+
         self.queue_module_refresh()
     }
 }

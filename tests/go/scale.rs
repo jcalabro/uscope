@@ -51,6 +51,7 @@ async fn a_hundred_thousand_goroutines_page_once_each_with_bounded_work() {
             .await;
         assert!(page.gaps.is_empty(), "{:?}", page.gaps);
         assert!(page.tasks.len() <= PAGE);
+
         // Reading a page never reads the whole goroutine list.
         assert!(
             page.usage.memory_reads <= 32 * PAGE as u64,
@@ -67,17 +68,20 @@ async fn a_hundred_thousand_goroutines_page_once_each_with_bounded_work() {
             assert!(numbers.insert(task.id.number), "{task:?} again");
             last = Some(task.id);
         }
+
         match page.next {
             Some(next) => from = Some(next),
             None => break,
         }
     }
+
     assert_eq!(numbers.len(), counted);
 
     let snapshot = scenario.snapshot().await;
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         panic!("not stopped");
     };
+
     let task = last.expect("a goroutine");
     let trace = scenario
         .operation(

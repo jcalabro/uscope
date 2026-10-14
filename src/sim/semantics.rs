@@ -30,9 +30,11 @@ use crate::{
 pub enum Unwound {
     /// Every frame, to the thread's first.
     Whole,
+
     /// The innermost frames, ending explicitly where unwinding could not
     /// go on, as at a frame without call-frame information.
     Truncated,
+
     /// The innermost frames, ending at a caller read from a return address
     /// the program overwrote.
     Corrupt,
@@ -65,6 +67,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
     else {
         return Ok(None);
     };
+
     let process = kernel
         .process_of(thread.tid)
         .expect("a stopped thread's process exists");
@@ -83,6 +86,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
                 thread.tid
             ));
         };
+
         if level == 0 {
             if address != thread.registers.rip {
                 return Err(format!(
@@ -90,8 +94,10 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
                     thread.tid, thread.registers.rip
                 ));
             }
+
             continue;
         }
+
         let Some(call) = calls.len().checked_sub(level).map(|index| calls[index]) else {
             return Err(format!(
                 "thread {}'s frame {level} is at {address:#x}, but the thread is only {depth} \
@@ -99,6 +105,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
                 thread.tid
             ));
         };
+
         let held = process
             .space
             .peek_bytes(call.slot, 8)
@@ -112,6 +119,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
                     thread.tid, call.return_address, call.slot
                 ));
             }
+
             if level + 1 != physical.len() || complete {
                 return Err(format!(
                     "thread {}'s backtrace goes on past frame {level}, whose return address \
@@ -119,8 +127,10 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
                     thread.tid, backtrace.termination
                 ));
             }
+
             return Ok(Some(Unwound::Corrupt));
         }
+
         if address != call.return_address {
             return Err(format!(
                 "thread {}'s frame {level} is at {address:#x}, but its call returns to {:#x}",
@@ -128,6 +138,7 @@ pub fn backtrace(kernel: &Kernel, backtrace: &Backtrace) -> Result<Option<Unwoun
             ));
         }
     }
+
     match (physical.len() < depth, complete) {
         (true, true) => Err(format!(
             "thread {}'s backtrace says it is complete after {} frames, but the thread is \
@@ -164,12 +175,14 @@ pub fn tail_frames(
     else {
         return Ok(0);
     };
+
     let function = |address: u64| {
         address
             .checked_sub(bias)
             .and_then(|address| facts.function(address))
             .map(|function| function.start + bias)
     };
+
     let calls = &thread.shadow.calls;
     let mut shown = 0;
     let mut level = 0;
@@ -185,22 +198,27 @@ pub fn tail_frames(
                 thread.tid, frame.level
             ));
         };
+
         let mut tails = Vec::new();
         while let Some(tail) = frames.next_if(|frame| frame.kind == FrameKind::TailCall) {
             tails.push(tail);
         }
+
         if tails.is_empty() {
             level += 1;
             continue;
         }
+
         let tid = thread.tid;
         let Some(index) = calls.len().checked_sub(level + 1) else {
             return Err(format!(
                 "thread {tid}'s frame at {instruction} has functions that left by tail calls below it,                  but no call began its activation"
             ));
         };
+
         let call = calls[index];
         let jumps = thread.shadow.jumps(index);
+
         // A caller's code is just before its return address.
         let code = instruction.get() - u64::from(level != 0);
         let mut inner = function(code);
@@ -212,28 +230,34 @@ pub fn tail_frames(
                     tail.level
                 ));
             };
+
             let Some(jump) = jumps.iter().find(|jump| at == jump.from || at == jump.next) else {
                 return Err(format!(
                     "thread {tid}'s frame {} says its function left by a tail call at                      {at:#x}, but its activation took no such jump: {jumps:x?}",
                     tail.level
                 ));
             };
+
             if Some(jump.to) != inner {
                 return Err(format!(
                     "thread {tid}'s frame {} left by the jump at {:#x} to {:#x}, but the                      frame inside it runs the function at {inner:x?}",
                     tail.level, jump.from, jump.to
                 ));
             }
+
             inner = function(jump.from);
         }
+
         if inner != Some(call.target) {
             return Err(format!(
                 "thread {tid}'s tail calls below the frame at {instruction} began in the function at                  {inner:x?}, but the call entered {:#x}",
                 call.target
             ));
         }
+
         level += 1;
     }
+
     Ok(shown)
 }
 
@@ -244,17 +268,22 @@ pub struct Begun {
     pub kind: StepKind,
     pub rip: u64,
     pub shadow: Shadow,
+
     /// How many instructions the thread had completed.
     pub retired: u64,
+
     /// Whether the thread stood inside a system call, which returns before
     /// it executes anything else.
     pub inside_call: bool,
+
     /// The frame the debugger presented, and how many inline frames it
     /// hid below it.
     pub frame: Option<PresentedFrame>,
     pub hidden_inline_frames: u32,
+
     /// For an advance, the addresses it runs to.
     pub targets: BTreeSet<u64>,
+
     /// For a step into one call of a line, where that call returns.
     pub into_return: Option<u64>,
 }
@@ -289,9 +318,11 @@ impl Begun {
 pub enum Judged {
     /// By rules that need no knowledge of lines.
     Instructions,
+
     /// A source step in optimized code, which inlines, splits functions,
     /// and turns calls into jumps: by where it stopped and how deep.
     Loosely,
+
     /// A source step in unoptimized code: also by every position it passed,
     /// none of which may be a place it had to stop.
     Exactly,
@@ -330,9 +361,11 @@ pub fn step(
             begun.tid
         ));
     };
+
     if thread.shadow.lost || begun.shadow.lost {
         return Ok(None);
     }
+
     let end = thread.registers.rip;
     let retired = thread.retired - begun.retired;
     let start = begun.rip;
@@ -348,6 +381,7 @@ pub fn step(
             ))
         }
     };
+
     match begun.kind {
         StepKind::Instruction => one_instruction(),
         StepKind::OverInstruction => {
@@ -355,6 +389,7 @@ pub fn step(
             if instruction.mnemonic() != Mnemonic::Call {
                 return one_instruction();
             }
+
             if end != instruction.next_ip() || after != before {
                 return Err(format!(
                     "stepping over the call at {start:#x} ended at {end:#x}, {} calls deep; \
@@ -364,11 +399,13 @@ pub fn step(
                     before.len()
                 ));
             }
+
             Ok(Some(Judged::Instructions))
         }
         StepKind::Out => {
             let lines = Lines::of(variant);
             let described = |address| lines.line(address).is_some();
+
             // A source step stops only where a line describes the code, so
             // a return to undescribed code goes on to the first instruction
             // of the caller that a line describes.
@@ -392,6 +429,7 @@ pub fn step(
             if returned || inline && after == before {
                 return Ok(Some(Judged::Instructions));
             }
+
             Err(format!(
                 "stepping out of {} frame at {start:#x}, {} calls deep, ended at {end:#x}, {} \
                  calls deep; it returns to {:#x}",
@@ -429,19 +467,23 @@ pub fn advance(
         if !begun.targets.contains(&position.rip) {
             continue;
         }
+
         if position.rip == begun.rip && !stood {
             stood = true;
             continue;
         }
+
         return Err(format!(
             "thread {} advancing to {:#x?} executed the instruction at {:#x}, where it had to \
              stop",
             begun.tid, begun.targets, position.rip
         ));
     }
+
     if !stopped {
         return Ok(None);
     }
+
     match reason {
         Some(StopReason::Step {
             kind: StepKind::Advance,
@@ -456,14 +498,17 @@ pub fn advance(
                     begun.tid
                 ));
             };
+
             if !begun.targets.contains(&thread.registers.rip) {
                 return Err(format!(
                     "thread {} advancing to {:#x?} stopped at {:#x}",
                     begun.tid, begun.targets, thread.registers.rip
                 ));
             }
+
             Ok(Some(Judged::Instructions))
         }
+
         Some(StopReason::Step {
             kind: StepKind::Out,
         }) => step(
@@ -568,6 +613,7 @@ fn source_step(
     let from = lines.line(start);
     let describe = |line| lines.describe(line);
     let entered = after.len() > before.len() && after[..before.len()] == before[..];
+
     // Begun in code no line describes, stepping over has no line to step
     // over, and steps as stepping in does.
     // A process without a language runtime starts no task, so stepping
@@ -590,15 +636,18 @@ fn source_step(
             after[before.len()].return_address
         ));
     }
+
     // Stepping into an inline frame hidden at the stop moves nothing.
     if kind == StepKind::IntoSource && retired == 0 && end == start {
         if begun.hidden_inline_frames > 0 {
             return Ok(Judged::Loosely);
         }
+
         return Err(format!(
             "a step in at {start:#x} moved nothing, and no inline frame was hidden there"
         ));
     }
+
     if kind == StepKind::OverSource
         && !(after.len() <= before.len() && before[..after.len()] == after[..])
     {
@@ -610,6 +659,7 @@ fn source_step(
             before.len()
         ));
     }
+
     // A compiler's epilogue marker is where a source step crosses to the
     // caller, never a place it stops.
     if lines.epilogue(end) {
@@ -619,6 +669,7 @@ fn source_step(
             describe(from)
         ));
     }
+
     let Some(stop) = lines.row(end).filter(|range| range.line.is_some()) else {
         return Err(format!(
             "a {kind:?} step from {start:#x} ({}) stopped at {end:#x}, which no source line \
@@ -626,6 +677,7 @@ fn source_step(
             describe(from)
         ));
     };
+
     // Stepping in may stop where a function's source begins, which
     // optimized code need not mark as a statement.
     if !(stop.statement || kind == StepKind::IntoSource && entered && lines.facts.optimized) {
@@ -636,15 +688,18 @@ fn source_step(
             describe(stop.line)
         ));
     }
+
     if lines.facts.optimized {
         return Ok(Judged::Loosely);
     }
+
     if thread.shadow.activation() == begun.shadow.activation() && stop.line == from {
         return Err(format!(
             "a {kind:?} step from {start:#x} stopped at {end:#x} on the line it began on, {}",
             describe(from)
         ));
     }
+
     if let Some((position, line)) = missed_stop(begun, positions, &lines) {
         return Err(format!(
             "a {kind:?} step from {start:#x} ({}) ran past {:#x} ({}), {} calls deep, where it \
@@ -656,6 +711,7 @@ fn source_step(
             describe(stop.line)
         ));
     }
+
     Ok(Judged::Exactly)
 }
 
@@ -676,13 +732,16 @@ fn missed_stop(
         if lines.epilogue(position.rip) {
             crossed.insert(position.activation);
         }
+
         if crossed.contains(&position.activation) {
             return None;
         }
+
         let line = lines.statement_at(position.rip)?.line;
         if line.is_none() || line == from {
             return None;
         }
+
         let must_stop = position.activation == begun.shadow.activation()
             || position.depth < before.len()
                 && activation_at(&begun.shadow, position.depth) == Some(position.activation)
@@ -696,6 +755,7 @@ fn missed_stop(
 pub enum Inspected {
     /// A marker's condition held with the debugger's values.
     Held,
+
     /// A marker applied, but optimized code left a variable it needs
     /// without a value.
     Unavailable,
@@ -726,6 +786,7 @@ pub fn variables(
     let Some(marker) = marker_at(kernel, snapshot, backtrace, variant, source, markers) else {
         return Ok(None);
     };
+
     let mut values = BTreeMap::new();
     for name in marker.condition.variables() {
         let state = named(&snapshot.variables, name).map(|variable| &variable.state);
@@ -742,6 +803,7 @@ pub fn variables(
             None => {}
         }
     }
+
     match marker.condition.evaluate(&values) {
         Verdict::Holds => Ok(Some(Inspected::Held)),
         Verdict::Unknown(_) => Ok(Some(Inspected::Unavailable)),
@@ -770,6 +832,7 @@ pub fn evaluations(
     evaluations: &[Evaluated],
 ) -> Result<Vec<Mark>, String> {
     let marker = marker_at(kernel, snapshot, backtrace, variant, source, markers);
+
     // Registers hold the values of the innermost frame only; a caller's
     // were saved somewhere or lost.
     let innermost = backtrace
@@ -785,12 +848,14 @@ pub fn evaluations(
             Ok(other) => Err(format!("{other:?}")),
             Err(error) => Err(error.clone()),
         };
+
         let wrong = |expected: &str| {
             format!(
                 "`{}` evaluated to {state:?}, not {expected}",
                 evaluated.text
             )
         };
+
         match &evaluated.purpose {
             Purpose::Marker { .. } | Purpose::Expected => {
                 let Some(marker) = marker else { continue };
@@ -811,6 +876,7 @@ pub fn evaluations(
                         } else {
                             ""
                         };
+
                         return Err(format!(
                             "at line {} of {source}, {what}{}",
                             marker.line,
@@ -827,6 +893,7 @@ pub fn evaluations(
                     marks.push(Mark::NameEvaluated);
                     marks.extend(stored(kernel, snapshot, innermost, &evaluated.text, state)?);
                 }
+
                 (
                     Some(VariableState::Unavailable(view)),
                     Ok(VariableState::Unavailable(reason)),
@@ -851,6 +918,7 @@ pub fn evaluations(
             }
         }
     }
+
     Ok(marks)
 }
 
@@ -867,17 +935,20 @@ fn computed<'v>(
             evaluated.text
         )
     };
+
     match &evaluated.purpose {
         Purpose::Cast { name, bits, signed } => {
             let Some(value) = shown(name).and_then(integer) else {
                 return Err(format!("`{}` casts a variable not shown", evaluated.text));
             };
+
             let low = value.cast_unsigned() & ((1 << bits) - 1);
             let truncated = if *signed && low >> (bits - 1) == 1 {
                 low.cast_signed() - (1 << bits)
             } else {
                 low.cast_signed()
             };
+
             match state {
                 Ok(state) if integer(state) == Some(truncated) => Ok(Some(Mark::CastEvaluated)),
                 _ => Err(wrong(&format!(
@@ -903,11 +974,13 @@ fn computed<'v>(
             ) else {
                 return Err(format!("`{}` combines variables not shown", evaluated.text));
             };
+
             let exact = match operator {
                 '+' => a.checked_add(b),
                 '-' => a.checked_sub(b),
                 _ => a.checked_mul(b),
             };
+
             let Some(exact) = exact else { return Ok(None) };
             match state {
                 Ok(state) if integer(state) == Some(exact) => Ok(Some(Mark::ArithmeticEvaluated)),
@@ -945,6 +1018,7 @@ fn stored(
     else {
         return Ok(None);
     };
+
     let (place, held, mark) = match source {
         VariableValueSource::Memory(address) => (
             address.to_string(),
@@ -960,6 +1034,7 @@ fn stored(
             else {
                 return Ok(None);
             };
+
             let bytes = thread.registers.general[index].to_le_bytes();
             (
                 register.name.to_string(),
@@ -969,11 +1044,13 @@ fn stored(
         }
         _ => return Ok(None),
     };
+
     if held.as_deref() != Some(&**raw) {
         return Err(format!(
             "`{text}` showed bytes {raw:?} from {place}, which holds {held:?}"
         ));
     }
+
     Ok(Some(mark))
 }
 
@@ -998,13 +1075,16 @@ pub fn entry_values(
     let ExecutionContext::Thread(thread) = snapshot.context else {
         return Ok(Vec::new());
     };
+
     let Some(thread) = stopped(kernel, thread).filter(|_| innermost) else {
         return Ok(Vec::new());
     };
+
     let bias = variant.image.bias();
     let Some(address) = thread.registers.rip.checked_sub(bias) else {
         return Ok(Vec::new());
     };
+
     let Some(call) = thread.shadow.calls.last().filter(|call| {
         variant
             .facts
@@ -1013,6 +1093,7 @@ pub fn entry_values(
     }) else {
         return Ok(Vec::new());
     };
+
     let shown = snapshot
         .variables
         .iter()
@@ -1038,16 +1119,20 @@ fn judge_entry_values(
         let Some(raw) = raw.filter(|raw| raw.len() <= 8) else {
             continue;
         };
+
         let Some(register) = facts.entry_register(name, address) else {
             continue;
         };
+
         let Some(index) = GENERAL_REGISTERS.iter().position(|name| *name == register) else {
             continue;
         };
+
         // Variables of one name in nested scopes may be different things.
         if shown.iter().filter(|(other, _)| *other == name).count() > 1 {
             continue;
         }
+
         let value = entered[index].to_le_bytes();
         if value.get(..raw.len()) != Some(raw) {
             return Err(format!(
@@ -1055,8 +1140,10 @@ fn judge_entry_values(
                 entered[index]
             ));
         }
+
         marks.push(Mark::EntryValueTrue);
     }
+
     Ok(marks)
 }
 
@@ -1104,6 +1191,7 @@ fn integer(state: &VariableState) -> Option<i128> {
     let VariableState::Available { value, .. } = state else {
         return None;
     };
+
     match value {
         VariableValue::Scalar(ScalarValue::Signed(value)) => Some(*value),
         VariableValue::Scalar(ScalarValue::Unsigned(value)) => i128::try_from(*value).ok(),
@@ -1136,17 +1224,21 @@ mod tests {
             targets: BTreeSet::from([rip, 0x9999]),
             ..Begun::new(&kernel.threads[&tid], StepKind::Advance, None)
         };
+
         let at = |rip| Position {
             rip,
             depth: 0,
             activation: 0,
         };
+
         let advanced = StopReason::Step {
             kind: StepKind::Advance,
         };
+
         let judge = |begun: &Begun, positions: &[Position], reason: Option<&StopReason>| {
             advance(&kernel, begun, positions, reason, true, variant)
         };
+
         assert!(judge(&begun, &[at(rip), at(rip + 1)], Some(&advanced)).is_ok());
         assert!(judge(&begun, &[at(rip), at(rip + 1), at(rip)], Some(&advanced)).is_err());
         assert!(judge(&begun, &[at(rip + 1), at(0x9999)], None).is_err());
@@ -1154,6 +1246,7 @@ mod tests {
             targets: BTreeSet::from([0x9999]),
             ..begun
         };
+
         assert!(judge(&elsewhere, &[], Some(&advanced)).is_err());
     }
 
@@ -1177,6 +1270,7 @@ mod tests {
                 entry: [0; 16],
             });
         }
+
         (kernel, tid)
     }
 
@@ -1210,12 +1304,14 @@ mod tests {
         let corpus = Corpus::load().expect("load the golden corpus");
         let variant = &corpus.programs[0].variants[0];
         let (mut kernel, tid) = kernel_with_calls(variant, &[0x9000]);
+
         // The call entered `a`, which jumped to `b`, which jumped to `c`.
         let function = |name: &str, start| facts::Function {
             name: name.into(),
             start,
             end: start + 0x100,
         };
+
         let facts = Facts {
             functions: vec![
                 function("a", 0x1000),
@@ -1224,6 +1320,7 @@ mod tests {
             ],
             ..Facts::default()
         };
+
         let shadow = &mut kernel.threads.get_mut(&tid).expect("the thread").shadow;
         shadow.calls[0].target = 0x1000;
         shadow.jumps = vec![vec![
@@ -1264,16 +1361,21 @@ mod tests {
                 },
             )
         };
+
         // At each jump, or the instruction after it.
         assert_eq!(judge(&[0x1150, 0x1050]), Ok(2));
         assert_eq!(judge(&[0x1152, 0x1055]), Ok(2));
         assert_eq!(judge(&[]), Ok(0));
+
         // Where no jump left.
         assert!(judge(&[0x1150, 0x1060]).is_err());
+
         // Out of order.
         assert!(judge(&[0x1050, 0x1150]).is_err());
+
         // Missing the function the call entered.
         assert!(judge(&[0x1150]).is_err());
+
         // Missing a function between.
         assert!(judge(&[0x1050]).is_err());
     }
@@ -1291,6 +1393,7 @@ mod tests {
             unresolved_shape: None,
             state: VariableState::Unavailable(crate::UnsupportedVariableFeature::Tls.into()),
         };
+
         let local = variable(crate::VariableKind::Local);
         let returned = variable(crate::VariableKind::Returned);
         assert_eq!(
@@ -1313,9 +1416,11 @@ mod tests {
         let stopped = UnwindTermination::NoUnwindInfo {
             address: VirtualAddress::new(0x40_2222),
         };
+
         let judge = |kernel: &Kernel, frames: &[u64], termination: UnwindTermination| {
             backtrace(kernel, &backtrace_of(tid, frames, termination))
         };
+
         let complete = UnwindTermination::Complete;
         assert_eq!(
             judge(&kernel, &[rip, 0x40_2222, 0x40_1111], complete.clone()),
@@ -1405,6 +1510,7 @@ mod tests {
             .iter()
             .find(|function| function.name == "main")
             .expect("main");
+
         // Three statement rows of distinct lines in main, in address order.
         let mut lines = Vec::new();
         for range in facts
@@ -1420,26 +1526,31 @@ mod tests {
                 lines.push(*range);
             }
         }
+
         let [first, second, third, ..] = lines[..] else {
             panic!("main has three lines");
         };
+
         let (mut kernel, tid) = kernel_with_calls(variant, &[0x40_1111]);
         let begun = {
             let thread = kernel.threads.get_mut(&tid).expect("the thread");
             thread.registers.rip = first.start;
             Begun::new(thread, StepKind::OverSource, None)
         };
+
         let activation = begun.shadow.activation();
         {
             let thread = kernel.threads.get_mut(&tid).expect("the thread");
             thread.registers.rip = third.start;
             thread.retired += 3;
         }
+
         let passed = |rip| Position {
             rip,
             depth: 1,
             activation,
         };
+
         let judge = |positions: &[Position]| step(&kernel, &begun, positions, variant);
         assert_eq!(
             judge(&[passed(first.start), passed(second.start - 1)]),

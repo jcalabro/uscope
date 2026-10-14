@@ -30,6 +30,7 @@ async fn assign_pc(view: &crate::StopView<'_>, pc: u64) -> Result<(), Failure> {
     let crate::eval::Evaluation::Value { value, .. } = assigned else {
         return Err(protocol(format!("assigning $pc gave {assigned:?}")));
     };
+
     if !matches!(
         value.state,
         VariableState::Available {
@@ -41,6 +42,7 @@ async fn assign_pc(view: &crate::StopView<'_>, pc: u64) -> Result<(), Failure> {
             "$pc read {value:?} once assigned {pc:#x}"
         )));
     }
+
     Ok(())
 }
 
@@ -65,6 +67,7 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
         }
+
         Ok(())
     }
 
@@ -79,11 +82,13 @@ impl Client {
         ];
         let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
         let before = self.snapshot().await?;
+
         // A source step must know which frame it starts in, so one from a
         // stop whose inline frame is ambiguous is refused, not guessed.
         let ambiguous = kind != StepKind::Instruction
             && kind != StepKind::OverInstruction
             && presented_ambiguously(&before);
+
         // Stepping out of a frame without a caller to return to must be
         // refused, and change nothing.
         let caller = if kind == StepKind::Out && !ambiguous {
@@ -96,10 +101,12 @@ impl Client {
             if let Some(stop) = before.stop_id {
                 self.observe(Observation::Backtrace { stop, backtrace });
             }
+
             caller
         } else {
             Caller::Trusted
         };
+
         self.note(format!("step {kind:?}"));
         if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
@@ -110,6 +117,7 @@ impl Client {
                 call: None,
             });
         }
+
         let result = self.handle.step(kind).await;
         self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
         if ambiguous {
@@ -118,17 +126,20 @@ impl Client {
                     "step {kind:?} from an ambiguous inline frame returned {result:?}"
                 )));
             }
+
             let after = self.snapshot().await?;
             if after != before {
                 return Err(protocol(format!(
                     "a refused step changed the state from {before:?} to {after:?}"
                 )));
             }
+
             self.note(format!(
                 "step {kind:?} from an ambiguous inline frame refused"
             ));
             return Ok(());
         }
+
         match (result, &caller) {
             (
                 Ok(reason),
@@ -137,6 +148,7 @@ impl Client {
                 if matches!(reason, StopReason::Syscall(_)) {
                     self.mark(Mark::CatchStepStop);
                 }
+
                 self.note(format!("stepped: {reason:?}"));
             }
             (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
@@ -148,6 +160,7 @@ impl Client {
                         "a refused step out changed the state from {before:?} to {after:?}"
                     )));
                 }
+
                 self.note(format!("step out of a frame {caller} refused: {error}"));
                 self.mark(Mark::StepOutRefused);
             }
@@ -160,6 +173,7 @@ impl Client {
                 return Err(protocol(format!("step {kind:?} failed: {error}")));
             }
         }
+
         Ok(())
     }
 
@@ -172,6 +186,7 @@ impl Client {
         else {
             return Ok(());
         };
+
         let view = self.handle.at(StopContext {
             stop,
             execution: thread.into(),
@@ -186,10 +201,12 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("step targets failed: {error}"))),
         };
+
         if targets.is_empty() {
             self.note("no call on the line to step into");
             return Ok(());
         }
+
         let target = self
             .choices
             .borrow_mut()
@@ -222,6 +239,7 @@ impl Client {
                 )));
             }
         }
+
         Ok(())
     }
 
@@ -233,6 +251,7 @@ impl Client {
         let Some(targets) = self.advance_targets(&spec, breakpoints).await? else {
             return Ok(());
         };
+
         let before = self.snapshot().await?;
         let ambiguous = presented_ambiguously(&before);
         let caller = if ambiguous {
@@ -247,8 +266,10 @@ impl Client {
             if let Some(stop) = before.stop_id {
                 self.observe(Observation::Backtrace { stop, backtrace });
             }
+
             caller
         };
+
         self.note(format!("advance to {spec}: {targets:#x?}"));
         if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
@@ -259,6 +280,7 @@ impl Client {
                 call: None,
             });
         }
+
         let result = self.handle.advance(spec.clone()).await;
         self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
         if ambiguous {
@@ -267,8 +289,10 @@ impl Client {
                     "advance from an ambiguous inline frame returned {result:?}"
                 )));
             }
+
             return self.unchanged_by_refusal(&before, "advance").await;
         }
+
         match (result, &caller) {
             (
                 Ok(reason),
@@ -283,6 +307,7 @@ impl Client {
                     } => self.mark(Mark::AdvanceReturned),
                     _ => {}
                 }
+
                 self.note(format!("advanced: {reason:?}"));
             }
             (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
@@ -301,6 +326,7 @@ impl Client {
                 return Err(protocol(format!("advance to {spec} failed: {error}")));
             }
         }
+
         Ok(())
     }
 
@@ -316,9 +342,11 @@ impl Client {
         else {
             return Ok(());
         };
+
         if presented_ambiguously(&before) {
             return Ok(());
         }
+
         let view = self.handle.at(StopContext {
             stop,
             execution: thread.into(),
@@ -335,17 +363,20 @@ impl Client {
                 .find(|value| &*value.register.name == name)?;
             Some(u64::from_le_bytes(value.bytes.as_deref()?.try_into().ok()?))
         };
+
         let (Some(pc), Some(call)) = (value("rip"), value("orig_rax")) else {
             return Err(protocol(format!(
                 "the innermost frame lacks rip or orig_rax: {registers:?}"
             )));
         };
+
         if call != u64::MAX {
             self.note(format!(
                 "thread {thread} is in system call {call}; not moved"
             ));
             return Ok(());
         }
+
         let by_jump = self.control(2) == 0;
         if by_jump {
             match self
@@ -369,6 +400,7 @@ impl Client {
         } else {
             assign_pc(&view, pc).await?;
         }
+
         let after = self.snapshot().await?;
         if after.stop_id == Some(stop)
             || !matches!(
@@ -383,6 +415,7 @@ impl Client {
                 "a move in place did not publish the stop again: {after:?}"
             )));
         }
+
         self.note(format!(
             "moved thread {thread} in place at {pc:#x}, {}",
             if by_jump {
@@ -421,12 +454,14 @@ impl Client {
                 return Err(protocol(format!("resolving {spec} failed: {error}")));
             }
         };
+
         if breakpoints.iter().any(|added| added.id() == probe.id) {
             return Err(protocol(format!(
                 "a probe for {spec} returned the client's own breakpoint {}",
                 probe.id
             )));
         }
+
         self.handle
             .remove_breakpoint(probe.id)
             .await
@@ -437,11 +472,13 @@ impl Client {
                 BreakpointLocation::Image(address) => {
                     targets.insert(address.get());
                 }
+
                 // Code outside the program is not where the oracle can
                 // follow an advance to.
                 BreakpointLocation::Virtual(_) => return Ok(None),
             }
         }
+
         Ok(Some(targets))
     }
 
@@ -457,6 +494,7 @@ impl Client {
                 "a refused {request} changed the state from {before:?} to {after:?}"
             )));
         }
+
         Ok(())
     }
 
@@ -472,6 +510,7 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
         };
+
         // Code no debug information describes has no variables to show.
         let undescribed = backtrace
             .frames
@@ -486,6 +525,7 @@ impl Client {
             }
             Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
         };
+
         self.note(format!(
             "variables of frame {} in {}: {}",
             variables.stack_frame,
@@ -501,6 +541,7 @@ impl Client {
             stop,
             backtrace: backtrace.clone(),
         });
+
         // Half the inspections also evaluate expressions, so that the
         // variables oracle alone judges the rest.
         let evaluations = if self.draw(2) == 0 {
@@ -508,17 +549,20 @@ impl Client {
         } else {
             Vec::new()
         };
+
         self.observe(Observation::Variables {
             stop,
             variables,
             backtrace,
             evaluations,
         });
+
         // Half the inspections of a program with views also present its
         // containers.
         if self.script.views.is_some() && self.draw(2) == 0 {
             self.present(stop).await?;
         }
+
         // Every other stopped thread's stack, without changing which is
         // selected.
         for thread in snapshot.threads.iter() {
@@ -527,11 +571,13 @@ impl Client {
             {
                 continue;
             }
+
             let context = StopContext {
                 stop,
                 execution: ExecutionContext::Thread(thread.id),
                 frame: StackFrameId::new(0),
             };
+
             match self.handle.at(context).backtrace().await {
                 Ok(backtrace) => self.observe(Observation::Backtrace { stop, backtrace }),
                 // Only the selected thread's presentation is in the
@@ -547,6 +593,7 @@ impl Client {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -563,6 +610,7 @@ impl Client {
             {
                 continue;
             }
+
             let expression = Expression::parse(name).expect("a container's name parses");
             let value = match self.handle.evaluate(&expression).await {
                 Ok(crate::Evaluation::Value { value, .. }) => value,
@@ -571,6 +619,7 @@ impl Client {
                 }
                 Err(error) => return Err(protocol(format!("evaluating `{name}` failed: {error}"))),
             };
+
             let children = match &value.state {
                 VariableState::Available {
                     presentation: Some(presentation),
@@ -587,6 +636,7 @@ impl Client {
                 }
                 _ => None,
             };
+
             let (whole, paged) = match children {
                 Some(reference) => {
                     let elements = reference.elements().unwrap_or(0);
@@ -597,6 +647,7 @@ impl Client {
                 }
                 None => (Ok(Vec::new()), Ok(Vec::new())),
             };
+
             self.note(format!("presented `{name}`"));
             self.observe(Observation::Presented {
                 stop,
@@ -606,6 +657,7 @@ impl Client {
                 paged,
             });
         }
+
         Ok(())
     }
 
@@ -633,9 +685,11 @@ impl Client {
             if page.children.is_empty() {
                 break;
             }
+
             offset += page.children.len() as u64;
             pages.push(page);
         }
+
         Ok(pages)
     }
 
@@ -664,6 +718,7 @@ impl Client {
                 asked.push((Purpose::Expected, expected.clone()));
             }
         }
+
         // Only names shown once, which name one variable unambiguously. No
         // name reaches what a finished function returned.
         let nameable = || {
@@ -672,6 +727,7 @@ impl Client {
                 .iter()
                 .filter(|variable| variable.kind != VariableKind::Returned)
         };
+
         let unique = nameable().filter(|variable| {
             nameable()
                 .filter(|other| other.name == variable.name)
@@ -707,12 +763,14 @@ impl Client {
                 by_name.push((Purpose::Name(name.clone()), format!("*&{name}")));
             }
         }
+
         let pick = |count: usize| usize::try_from(self.draw(count as u64)).expect("small");
         let computed = if integers.is_empty() {
             Vec::new()
         } else {
             self.computed(&integers)
         };
+
         // Either kind may come first, so that either may be the first to
         // notice a value that changed between reads.
         if pick(2) == 0 {
@@ -720,6 +778,7 @@ impl Client {
         } else {
             asked.extend(computed.into_iter().chain(by_name));
         }
+
         let mut evaluations = Vec::new();
         for (purpose, text) in asked {
             let result = match Expression::parse(&text) {
@@ -730,6 +789,7 @@ impl Client {
                     .map_err(|error| error.to_string()),
                 Err(error) => Err(format!("parsing failed: {error}")),
             };
+
             self.note(format!("evaluated `{text}`"));
             evaluations.push(Evaluated {
                 purpose,
@@ -737,6 +797,7 @@ impl Client {
                 result,
             });
         }
+
         evaluations
     }
 
@@ -760,6 +821,7 @@ impl Client {
                 text,
             ));
         }
+
         let name = integers[pick(integers.len())].clone();
         let bits = [8, 16, 32][pick(3)];
         let signed = pick(2) == 0;
@@ -769,6 +831,7 @@ impl Client {
         } else {
             format!("{name} as {target}")
         };
+
         computed.push((Purpose::Cast { name, bits, signed }, text));
         let name = &integers[pick(integers.len())];
         let text = match pick(3) {
@@ -776,6 +839,7 @@ impl Client {
             1 => format!("{name}[0]"),
             _ => format!("*{name}"),
         };
+
         computed.push((Purpose::IllTyped, text));
         computed
     }
@@ -802,8 +866,10 @@ enum Caller {
     /// A caller the unwinder found in the program's code, or none needed:
     /// an inline frame returns into its physical frame.
     Trusted,
+
     /// The unwinder says the frame has no caller.
     Outermost(UnwindTermination),
+
     /// The caller the stack names lies outside every module, as a corrupt
     /// return address does.
     Corrupt(VirtualAddress),
@@ -814,9 +880,11 @@ impl Caller {
         let Some(frame) = backtrace.frames.first() else {
             return Self::Outermost(backtrace.termination.clone());
         };
+
         if frame.kind == FrameKind::Inline {
             return Self::Trusted;
         }
+
         match backtrace.frames.get(1) {
             None => Self::Outermost(backtrace.termination.clone()),
             Some(caller) if caller.module.is_none() => {

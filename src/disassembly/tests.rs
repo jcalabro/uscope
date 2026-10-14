@@ -61,6 +61,7 @@ fn listing(block: &DisassemblyBlock) -> Vec<String> {
                 InstructionContent::Invalid => "(bad)".to_owned(),
                 InstructionContent::Truncated => "(truncated)".to_owned(),
             };
+
             format!("{:#x}: {text}", instruction.address)
         })
         .collect()
@@ -149,6 +150,7 @@ fn context_before_an_address_requires_landing_on_it_from_a_known_start() {
             evidence: BoundaryEvidence::ProgramCounter,
         }
     );
+
     // Only one instruction lies between the nearest known starts, and the
     // segment before that one crossed it.
     assert_eq!(
@@ -228,6 +230,7 @@ fn unreadable_memory_truncates_instead_of_guessing() {
             reason: MemoryReadUnavailableReason::Inaccessible,
         }
     );
+
     // A truncated instruction's length is unknown, so it never claims to
     // cross the end of its range.
     let block = function(&mut source, BASE, 0x1002);
@@ -245,6 +248,7 @@ fn unreadable_memory_truncates_instead_of_guessing() {
     let unreadable = ContextShortfall::Unreadable {
         address: VirtualAddress::new(BASE),
     };
+
     assert_eq!(boundary, TargetBoundary::Unverified(unreadable));
     assert_eq!(shortfall, Some(unreadable));
     assert_eq!(listing(&block), ["0x1004: nop"]);
@@ -392,6 +396,7 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
             else {
                 panic!("{bytes:x?} did not decode");
             };
+
             let rendered = tokens
                 .iter()
                 .map(|token| token.text.as_ref())
@@ -408,6 +413,7 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
     else {
         panic!("call did not decode");
     };
+
     let kinds = tokens
         .iter()
         .filter(|token| token.kind != InstructionTokenKind::Text)
@@ -446,12 +452,14 @@ fn indirect_targets_are_read_from_the_stopped_state() {
         address: VirtualAddress::new(address),
         module: None,
     };
+
     let memory = |slot, target| {
         Some(IndirectTarget::Memory {
             slot: at(slot),
             target: at(target),
         })
     };
+
     let unreadable = |slot, address| {
         Some(IndirectTarget::Unreadable {
             slot: at(slot),
@@ -459,12 +467,14 @@ fn indirect_targets_are_read_from_the_stopped_state() {
             reason: MemoryReadUnavailableReason::Inaccessible,
         })
     };
+
     let registers = RegisterFile::new([
         (crate::unwind::RAX, 0x1_0000_2008),
         (crate::unwind::RSP, 0x2008),
         (crate::unwind::FS_BASE, 0x1ff0),
     ]);
     let needs = Some(IndirectTarget::NeedsRegisters);
+
     // Bytes, the target away from the stop, and the target at it.
     let cases: [(&[u8], _, _); 12] = [
         // Program-counter-relative and absolute slots hold everywhere.

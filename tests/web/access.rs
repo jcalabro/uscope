@@ -63,6 +63,7 @@ async fn the_socket_refuses_other_pages_names_and_cookies() {
             .await;
         assert_eq!(refused.err(), Some(403), "{cookie:?} {origin:?} {host:?}");
     }
+
     let mut client = web
         .connect("tab", Some(&cookie), Some(&origin), None)
         .await
@@ -114,6 +115,7 @@ async fn a_viewer_watches_but_cannot_control_or_share_control() {
         let (kind, _) = viewer.request(method, params).await.expect_err(method);
         assert_eq!(kind, "forbidden", "{method}");
     }
+
     viewer
         .ok("share", json!({"role": "view", "to": "/s/x"}))
         .await;
@@ -149,6 +151,7 @@ async fn malformed_requests_are_answered_not_fatal() {
         })
         .await;
     assert_eq!(answer["error"]["kind"], "invalid");
+
     // The connection still works.
     let (kind, _) = client
         .request("continue", json!({}))
@@ -168,6 +171,7 @@ async fn the_page_can_ask_whether_its_cookie_is_good() {
         ));
         response.split(' ').nth(1).map(str::to_owned)
     };
+
     let cookie = web.cookie(&web.control_token.clone());
     assert_eq!(check(&cookie).as_deref(), Some("204"));
     assert_eq!(check("uscope-1=c-0").as_deref(), Some("403"));
@@ -182,8 +186,10 @@ async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_
             "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
         ))
     };
+
     let page = get("/debug/7/s/abc/stop/1/t/2/f/0", "proxy.example");
     assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+
     // The URL itself, with and without its slash, is the page.
     for root in ["/debug/7/", "/debug/7"] {
         let page = get(root, "proxy.example");
@@ -192,12 +198,14 @@ async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_
             "{root}: {page}"
         );
     }
+
     // The proxy's own pages may frame it; no other page may.
     assert!(page.contains("frame-ancestors 'self'"), "{page}");
     for outside in ["/s/abc", "/api/check", "/debug/8/s/abc", "/debug/7x/s/abc"] {
         let refused = get(outside, "proxy.example");
         assert!(refused.starts_with("HTTP/1.1 404"), "{outside}: {refused}");
     }
+
     let unknown = get("/debug/7/s/abc", "evil.example");
     assert!(unknown.starts_with("HTTP/1.1 421"), "{unknown}");
 
@@ -218,6 +226,7 @@ async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_
 
     let mut client = web.control("tab").await;
     assert_eq!(client.next().await["type"], "hello");
+
     // Shared links name the proxy.
     let link = client
         .ok("share", json!({"role": "view", "to": "/s/abc"}))
@@ -244,6 +253,7 @@ async fn the_renderers_frame_is_sandboxed_and_allows_no_request() {
             web.address
         ))
     };
+
     let frame = get();
     assert!(frame.starts_with("HTTP/1.1 200"), "{frame}");
     let policy = frame
@@ -259,6 +269,7 @@ async fn the_renderers_frame_is_sandboxed_and_allows_no_request() {
     ] {
         assert!(policy.contains(directive), "{directive} in {policy}");
     }
+
     let nonce = policy
         .split("'nonce-")
         .nth(1)

@@ -20,16 +20,22 @@ use super::stacks::SharedStacks;
 #[derive(Debug, Clone)]
 pub struct ContinuousOptions {
     pub directory: PathBuf,
+
     /// How long segments and windows are kept.
     pub keep: Duration,
+
     /// Nanoseconds each segment spans.
     pub segment: u64,
+
     /// Nanoseconds of calls a window holds; 0 keeps none.
     pub window: u64,
+
     /// A call that took at least this many nanoseconds writes a window.
     pub slower_than: Option<u64>,
+
     /// A call that fails with one of these writes a window.
     pub errnos: Vec<u16>,
+
     /// Settings each file records, such as the engine.
     pub settings: Vec<(String, String)>,
 }
@@ -47,13 +53,17 @@ pub struct Saved {
 pub struct Continuous {
     options: ContinuousOptions,
     stacks: Option<SharedStacks>,
+
     /// When the segment began.
     began: u64,
     stats: Folded,
+
     /// What else happened over the segment: exits, losses, and the like.
     other: Vec<TraceEvent>,
+
     /// Every event of the last window's span.
     window: VecDeque<TraceEvent>,
+
     /// When a window was last written; triggers sooner than a window's
     /// span after it are let go.
     written: Option<u64>,
@@ -98,6 +108,7 @@ impl Continuous {
             TraceEvent::Call(call) => self.stats.add(call),
             other => self.other.push(other.clone()),
         }
+
         if self.options.window > 0 {
             self.window.push_back(event.clone());
             let since = time.saturating_sub(self.options.window);
@@ -105,9 +116,11 @@ impl Continuous {
                 self.window.pop_front();
             }
         }
+
         let TraceEvent::Call(call) = event else {
             return Ok(None);
         };
+
         self.triggered_by(call)
             .map_or(Ok(None), |reason| self.trigger(&reason, time))
     }
@@ -119,6 +132,7 @@ impl Continuous {
         {
             return Some(format!("{name} took {took} ns"));
         }
+
         match call.outcome {
             Outcome::Failed(Errno(errno)) if self.options.errnos.contains(&errno) => {
                 Some(format!("{name} failed with errno {errno}"))
@@ -146,6 +160,7 @@ impl Continuous {
         {
             return Ok(None);
         }
+
         self.written = Some(now);
         let mut capture = self.capture();
         capture.setting("trigger", reason);
@@ -159,6 +174,7 @@ impl Continuous {
                 other => capture.event(other),
             }
         }
+
         let directory = self.options.directory.join("windows");
         std::fs::create_dir_all(&directory)?;
         let path = capture
@@ -181,6 +197,7 @@ impl Continuous {
         for event in self.other.drain(..) {
             capture.event(&event);
         }
+
         capture.span(self.began, now);
         capture.counted(&std::mem::take(&mut self.stats));
         self.began = now;
@@ -194,6 +211,7 @@ impl Continuous {
         for (key, value) in &self.options.settings {
             capture.setting(key, value);
         }
+
         capture
     }
 
@@ -249,15 +267,18 @@ mod tests {
         for at in 0..10 {
             assert_eq!(trace.event(&fast(at * 1000)).expect("added"), None);
         }
+
         let mut kernel = Folded::default();
         if let TraceEvent::Call(counted) = fast(0) {
             for _ in 0..5 {
                 kernel.add(&counted);
             }
         }
+
         trace.counted(&kernel);
         assert!(!trace.segment_due(second - 1) && trace.segment_due(second));
         trace.end_segment(second).expect("a segment");
+
         // What the trace learns as it runs is recorded in the files after.
         trace.setting("budget 1", "cut at 16");
 
@@ -271,6 +292,7 @@ mod tests {
             (saved.calls, saved.reason.as_str()),
             (2, "fsync took 1000000000 ns")
         );
+
         // Another trigger within the window's span is let go.
         let failed = call("read", 3 * second + 5, 1, Outcome::Failed(Errno(5)));
         assert_eq!(trace.event(&failed).expect("added"), None);

@@ -44,9 +44,11 @@ fn source_breakpoints_move_to_code_keep_their_ids_and_explain_failures() {
             .is_some_and(|message| message.contains("no code")),
         "{first:?}"
     );
+
     // Sending the same breakpoints again keeps their ids.
     let again = set_lines(&mut dap, &path, &[comment, between]);
     assert_eq!(again, first);
+
     // Sending the moved line, as dape does until lines settle, is stable.
     let settled = set_lines(&mut dap, &path, &[code]);
     assert_eq!(settled[0]["line"], code);
@@ -61,6 +63,7 @@ fn source_breakpoints_move_to_code_keep_their_ids_and_explain_failures() {
         (frames[0]["name"].clone(), frames[0]["line"].clone()),
         (json!("first_function"), json!(code))
     );
+
     // Clearing the file's breakpoints lets the program finish.
     assert!(set_lines(&mut dap, &path, &[]).is_empty());
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
@@ -91,7 +94,9 @@ fn function_breakpoints_stop_at_every_function_with_the_name() {
     let [helper, missing, malformed] = &started.function_breakpoints[..] else {
         panic!("three breakpoints");
     };
+
     assert_eq!(helper["verified"], true);
+
     // A function no loaded module has waits for one that does.
     assert_eq!(
         (&missing["verified"], &missing["reason"]),
@@ -118,6 +123,7 @@ fn function_breakpoints_stop_at_every_function_with_the_name() {
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     files.sort_by_key(ToString::to_string);
     assert_eq!(files, [json!("main.c"), json!("other.c")]);
     assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
@@ -145,6 +151,7 @@ fn hit_conditions_choose_which_hits_stop_and_reject_ambiguous_counts() {
     let [counted, bare, zero] = &breakpoints(&set)[..] else {
         panic!("three breakpoints");
     };
+
     assert_eq!(counted["verified"], true);
     assert_eq!(
         bare["message"],
@@ -170,6 +177,7 @@ fn hit_conditions_choose_which_hits_stop_and_reject_ambiguous_counts() {
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
 }
@@ -192,6 +200,7 @@ fn breakpoints_sharing_an_address_are_reported_by_one_stop() {
     let source_id = started.source_breakpoints[0][0]["id"].clone();
     let function_id = started.function_breakpoints[0]["id"].clone();
     let stop = dap.stopped(started.mark);
+
     // Two kinds of breakpoint hit together make a plain breakpoint stop.
     assert_eq!(stop.reason, "breakpoint");
     let mut ids = stop.body["hitBreakpointIds"]
@@ -200,6 +209,7 @@ fn breakpoints_sharing_an_address_are_reported_by_one_stop() {
         .clone();
     ids.sort_by_key(Value::as_i64);
     assert_eq!(ids, [source_id.clone(), function_id]);
+
     // Removing one leaves the other installed.
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
@@ -232,6 +242,7 @@ fn breakpoints_set_while_running_stop_it_and_cleared_ones_never_do() {
         dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
+
         // With the breakpoint gone, the next stop is the pause.
         let paused = dap.send("pause", json!({"threadId": stop.thread}));
         dap.success(paused);
@@ -239,6 +250,7 @@ fn breakpoints_set_while_running_stop_it_and_cleared_ones_never_do() {
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
     }
+
     dap.finish();
 }
 
@@ -266,6 +278,7 @@ fn breakpoints_in_files_no_loaded_module_has_wait_pending() {
                 .is_some_and(|message| message.starts_with("no loaded module has code for "))
         );
     }
+
     dap.stopped(started.mark);
     dap.finish();
 }
@@ -308,6 +321,7 @@ fn conditions_stop_only_where_they_hold() {
     let [counted, invalid] = &breakpoints(&set)[..] else {
         panic!("two breakpoints");
     };
+
     assert_eq!(counted["verified"], true);
     assert_eq!(invalid["verified"], false);
     assert_eq!(
@@ -323,6 +337,7 @@ fn conditions_stop_only_where_they_hold() {
         dap.success(resumed);
         mark = resumed.mark;
     }
+
     assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
 }
@@ -363,9 +378,11 @@ fn logpoints_log_values_instead_of_stopping() {
             if call == 7 {
                 line.push_str("seven\n");
             }
+
             line
         })
         .collect::<String>();
+
     // The two logpoints share one address, so their order within a hit
     // follows their ids.
     assert_eq!(console, expected);
@@ -400,6 +417,7 @@ fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
 #[test]
 fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
     let mut dap = Dap::start("library breakpoints");
+
     // The program loads a library, unloads it, stops in after_unload, and
     // loads it again. Without that stop, an unload and reload could pass
     // before the client hears of either, which leaves nothing to report.
@@ -437,6 +455,7 @@ fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
         assert_eq!(trace["stackFrames"][0]["name"], "dso_touch");
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
+
         // The library unloads: the breakpoint waits again, as the client
         // hears before the next stop or the exit.
         let (next, body) = dap.next_event(resumed.mark, &["stopped", "exited"]);
@@ -465,6 +484,7 @@ fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
             assert_eq!((next.as_str(), body), ("exited", json!({"exitCode": 0})));
         }
     }
+
     dap.finish();
 }
 
@@ -477,6 +497,7 @@ fn stops_until_exit(dap: &mut Dap, mut mark: crate::dap::Mark) -> Vec<(String, i
         if kind == "exited" {
             return stops;
         }
+
         let thread = body["threadId"].as_i64().expect("threadId");
         let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 2}));
         let name = |index: usize| {
@@ -486,6 +507,7 @@ fn stops_until_exit(dap: &mut Dap, mut mark: crate::dap::Mark) -> Vec<(String, i
                 .trim_end_matches(" [inlined]")
                 .to_owned()
         };
+
         stops.push((
             name(0),
             trace["stackFrames"][0]["line"].as_i64().expect("line"),
@@ -501,6 +523,7 @@ fn stops_until_exit(dap: &mut Dap, mut mark: crate::dap::Mark) -> Vec<(String, i
 fn breakpoints_in_inlined_code_stop_in_every_inlined_copy_as_gdb_does() {
     let path = source("c/inline.c");
     let line = line_of(&path, "inline_sink = incremented;");
+
     // gdb stops at the line as often in each build: gcc's line table marks
     // a statement there in only some of the inlined copies.
     for (program, line_callers) in [
@@ -576,6 +599,7 @@ fn a_function_breakpoint_stops_in_every_overload_and_method_of_the_name() {
         },
     );
     assert_eq!(started.function_breakpoints[0]["verified"], true);
+
     // Each overload and the method, by their lines; frames name functions
     // as their debug information does, without scope or parameters.
     let path = source("cpp/overloads.cpp");
@@ -623,6 +647,7 @@ fn function_breakpoints_find_code_without_debug_information_by_its_symbols() {
     let [_, strlen] = &breakpoints(&set)[..] else {
         panic!("two breakpoints: {set}");
     };
+
     assert_eq!(strlen["verified"], true, "{strlen}");
     assert!(strlen["instructionReference"].is_string(), "{strlen}");
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));

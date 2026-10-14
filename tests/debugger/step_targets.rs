@@ -113,6 +113,7 @@ async fn a_step_goes_into_the_call_it_names() {
                 ),
                 "{fixture}"
             );
+
             // Arguments the line computed by other calls are there.
             assert_eq!(
                 signed_variable(&scenario, parameter).await,
@@ -122,6 +123,7 @@ async fn a_step_goes_into_the_call_it_names() {
             if callee == "add" {
                 assert_eq!(signed_variable(&scenario, "b").await, 2, "{fixture}");
             }
+
             scenario.shutdown().await;
         }
     }
@@ -175,6 +177,7 @@ async fn indirect_calls_are_entered_and_undescribed_ones_stepped_through() {
 async fn recursion_through_a_passed_call_does_not_end_it_early() {
     for fixture in ["step-targets-gcc-o0", "step-targets-clang-o0"] {
         let mut scenario = stopped_at(fixture, "targets: fact").await;
+
         // The outermost activation, of fact(3).
         assert_eq!(signed_variable(&scenario, "n").await, 3, "{fixture}");
         let listed = targets(&scenario).await;
@@ -193,6 +196,7 @@ async fn recursion_through_a_passed_call_does_not_end_it_early() {
             ("twice".to_owned(), source_line(SOURCE, "targets: twice")),
             "{fixture}"
         );
+
         // Not a deeper activation's call, of twice(2).
         assert_eq!(signed_variable(&scenario, "x").await, 3, "{fixture}");
         scenario.shutdown().await;
@@ -212,6 +216,7 @@ async fn a_step_into_another_address_is_refused() {
         matches!(refused, Err(Error::NotAStepTarget(address)) if address == elsewhere),
         "{refused:?}"
     );
+
     // The program did not move.
     assert_eq!(targets(&scenario).await, listed);
     scenario.step_into_to_stop(call).await;
@@ -273,6 +278,7 @@ async fn a_breakpoint_on_a_passed_call_does_not_take_the_step_into_it() {
                     scenario.shutdown().await;
                     continue;
                 }
+
                 let condition = uscope::HitCondition::new(uscope::HitComparison::Equal, 5)
                     .expect("a hit condition");
                 scenario
@@ -298,6 +304,7 @@ async fn a_breakpoint_on_a_passed_call_does_not_take_the_step_into_it() {
                     );
                 }
             }
+
             let callee = last.callee.as_deref().expect("a named callee");
             assert_eq!(
                 scenario.step_into_to_stop(last.call).await,

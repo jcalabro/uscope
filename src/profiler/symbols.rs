@@ -18,8 +18,10 @@ use crate::{ImageAddress, ModuleImageId};
 pub struct ModuleSymbols {
     /// The module's path when it was mapped.
     pub module: String,
+
     /// The file its symbols were read from, or why none was found.
     pub source: Result<PathBuf, String>,
+
     /// How many of its frames gained lines.
     pub frames: u64,
 }
@@ -62,6 +64,7 @@ impl Profile {
         if modules.is_empty() {
             return Vec::new();
         }
+
         let search = &DebugFileSearch::new(options);
         let capture = &self.capture;
         let mut builder = CaptureBuilder::new();
@@ -83,6 +86,7 @@ impl Profile {
                 frames,
             });
         }
+
         builder.setting("symbols", "recorded");
         self.capture = builder.finish();
         found
@@ -106,10 +110,12 @@ fn symbolize_module(builder: &mut CaptureBuilder, module: u32, info: &DebugInfo)
         if lines.is_empty() {
             continue;
         }
+
         let inputs: Vec<_> = lines.iter().map(OwnedLine::input).collect();
         builder.symbolize(frame, module, &inputs);
         symbolized += 1;
     }
+
     symbolized
 }
 
@@ -133,14 +139,17 @@ fn locate(
         Ok(_) => "its file has changed since it was recorded".to_owned(),
         Err(_) => "its file is gone".to_owned(),
     };
+
     let Some(build_id) = build_id.and_then(unhex) else {
         why.push_str(", and it has no build id");
         return Err(why);
     };
+
     let Some(file) = search.with_build_id(&build_id) else {
         why.push_str(", and no debug directory or server has its build id");
         return Err(why);
     };
+
     crate::debug_info::load_module_bytes(&file.path, &file.data, id, search)
         .map(|info| (file.path, info))
         .map_err(|error| error.to_string())

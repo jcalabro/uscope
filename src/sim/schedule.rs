@@ -35,13 +35,17 @@ pub type SessionId = usize;
 pub enum Action {
     /// A running thread executes a burst of instructions.
     Run(Tid),
+
     /// A session's waiter reaps a status and queues it for its controller.
     Collect(SessionId),
+
     /// A session's controller handles the message at the front of its
     /// queue.
     Deliver(SessionId),
+
     /// A session's client task runs until it waits again.
     Poll(SessionId),
+
     /// The next child the first session held is adopted by a session of
     /// its own, or released.
     Follow,
@@ -84,6 +88,7 @@ impl Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     Walk(Weights),
+
     /// PCT with `depth - 1` change points among the first `horizon`
     /// actions.
     Pct {
@@ -111,12 +116,16 @@ impl fmt::Display for Policy {
 
 pub struct Scheduler {
     policy: Policy,
+
     /// Each actor's priority under PCT; higher runs first.
     priorities: BTreeMap<Actor, i64>,
+
     /// The steps at which the actor that runs drops, earliest first.
     change_points: Vec<u64>,
+
     /// The priority the next actor to drop gets, below every other.
     floor: i64,
+
     /// The step since which each enabled actor has waited to run.
     waiting: BTreeMap<Actor, u64>,
 }
@@ -135,6 +144,7 @@ impl Scheduler {
                 .map(|_| choices.below(Stream::Schedule, horizon) + 1)
                 .collect(),
         };
+
         change_points.sort_unstable();
         Self {
             policy,
@@ -157,11 +167,13 @@ impl Scheduler {
                             .expect("a priority fits")
                     });
                 }
+
                 self.waiting
                     .retain(|actor, _| enabled.iter().any(|action| action.actor() == *actor));
                 for action in enabled {
                     self.waiting.entry(action.actor()).or_insert(step);
                 }
+
                 let starved = enabled
                     .iter()
                     .filter(|action| step - self.waiting[&action.actor()] >= PATIENCE)
@@ -177,6 +189,7 @@ impl Scheduler {
                     self.change_points.remove(0);
                     self.drop_actor(action.actor());
                 }
+
                 action
             }
         }
@@ -240,18 +253,21 @@ mod tests {
         for step in 2..=change {
             assert_eq!(scheduler.choose(&enabled, step, &mut choices), first);
         }
+
         // The change point dropped the actor that ran at it.
         let second = scheduler.choose(&enabled, change + 1, &mut choices);
         assert_ne!(second, first);
         let Action::Run(tid) = second else {
             unreachable!("only threads are enabled")
         };
+
         scheduler.yielded(tid);
         let third = scheduler.choose(&enabled, change + 2, &mut choices);
         assert!(![first, second].contains(&third));
         let Action::Run(tid) = third else {
             unreachable!("only threads are enabled")
         };
+
         // Once the third yields too, the earliest to drop is highest again.
         scheduler.yielded(tid);
         assert_eq!(scheduler.choose(&enabled, change + 3, &mut choices), first);
@@ -277,6 +293,7 @@ mod tests {
         } else {
             Action::Follow
         };
+
         let ran = (2..=2 * PATIENCE)
             .position(|step| scheduler.choose(&enabled, step, &mut choices) == other)
             .expect("the waiting actor runs");

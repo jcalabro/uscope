@@ -30,6 +30,7 @@ pub fn complete(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathEntry> {
     let Ok(entries) = std::fs::read_dir(resolve(directory, cwd, home)) else {
         return Vec::new();
     };
+
     let mut found = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -37,6 +38,7 @@ pub fn complete(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathEntry> {
             if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
                 return None;
             }
+
             // Follow symbolic links, as running the path would.
             let metadata = std::fs::metadata(entry.path()).ok()?;
             let kind = if metadata.is_dir() {
@@ -46,6 +48,7 @@ pub fn complete(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathEntry> {
             } else {
                 PathKind::File
             };
+
             let slash = if kind == PathKind::Directory { "/" } else { "" };
             Some(PathEntry {
                 text: format!("{directory}{name}{slash}"),
@@ -59,6 +62,7 @@ pub fn complete(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathEntry> {
             PathKind::Executable => 1,
             PathKind::File => 2,
         };
+
         (rank(a.kind), &a.text).cmp(&(rank(b.kind), &b.text))
     });
     found.truncate(MAX_ENTRIES);
@@ -68,6 +72,7 @@ pub fn complete(text: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathEntry> {
 /// This user's processes other than the server itself, newest first.
 pub fn processes(proc: &Path) -> Vec<Process> {
     let me = std::process::id();
+
     // The owner of this process's own directory is this user.
     let (Ok(entries), Ok(own)) = (
         std::fs::read_dir(proc),
@@ -75,6 +80,7 @@ pub fn processes(proc: &Path) -> Vec<Process> {
     ) else {
         return Vec::new();
     };
+
     let uid = own.uid();
     let mut found = entries
         .filter_map(Result::ok)
@@ -83,6 +89,7 @@ pub fn processes(proc: &Path) -> Vec<Process> {
             if pid == me || entry.metadata().ok()?.uid() != uid {
                 return None;
             }
+
             let path = entry.path();
             let command = std::fs::read(path.join("cmdline"))
                 .ok()
@@ -163,6 +170,7 @@ mod tests {
                 .map(|entry| entry.text)
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(texts("b"), ["bin/", "build/"]);
         assert_eq!(
             texts("build/kv"),
@@ -178,6 +186,7 @@ mod tests {
             kinds,
             [PathKind::Directory, PathKind::Executable, PathKind::File]
         );
+
         // A home directory, and an absolute path regardless of cwd.
         assert_eq!(
             complete("~/build/kvs", Path::new("/nonexistent"), Some(root))[0].text,

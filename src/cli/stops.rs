@@ -22,6 +22,7 @@ use super::{Cli, value};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Display {
     pub id: u64,
+
     /// The format letters written after `display/`, as `print` takes them.
     pub format: String,
     pub expression: String,
@@ -53,6 +54,7 @@ impl Displays {
             format: format.to_owned(),
             expression: expression.to_owned(),
         };
+
         self.list.push(display.clone());
         display
     }
@@ -63,12 +65,14 @@ impl Displays {
         let Some(ids) = ids else {
             return Ok(std::mem::take(&mut self.list).len());
         };
+
         if let Some(missing) = ids
             .iter()
             .find(|id| !self.list.iter().any(|display| display.id == **id))
         {
             anyhow::bail!("no display {missing}");
         }
+
         self.list.retain(|display| !ids.contains(&display.id));
         Ok(ids.len())
     }
@@ -103,6 +107,7 @@ impl Changes {
             self.before = std::mem::take(&mut self.shown);
             self.stop = Some(activation.stop);
         }
+
         let key = (
             activation.context,
             activation.function.clone(),
@@ -157,6 +162,7 @@ impl Cli {
             if let Ok(place) = self.describe_location(false).await {
                 let _ = write!(suffix, " in {place}");
             }
+
             if let Some(snapshot) = &snapshot
                 && snapshot.threads.len() > 1
                 && let Some(ExecutionContext::Thread(thread)) = snapshot.selected
@@ -168,6 +174,7 @@ impl Cli {
                     snapshot.threads.len()
                 );
             }
+
             // The task the stopped thread runs, as the thread list shows it.
             if let Some(snapshot) = &snapshot
                 && let Some(ExecutionContext::Thread(thread)) = snapshot.selected
@@ -184,6 +191,7 @@ impl Cli {
                 );
             }
         }
+
         if self.settings.config.stop.elapsed && elapsed >= Duration::from_secs(1) {
             let _ = write!(
                 suffix,
@@ -194,6 +202,7 @@ impl Cli {
                 )
             );
         }
+
         let mut output = match reason {
             StopReason::Watchpoint { hits } => format::watchpoint_hits(
                 hits,
@@ -209,6 +218,7 @@ impl Cli {
             }
             _ => format!("{}{suffix}", format::stop(reason, renderer)),
         };
+
         if let Some(snapshot) = &snapshot
             && in_code(reason)
         {
@@ -217,12 +227,14 @@ impl Cli {
                 output.push_str(&line);
             }
         }
+
         if let (StopReason::Breakpoint { hits, .. }, Some(snapshot)) = (reason, &snapshot)
             && let Some(deleted) = self.deleted_temporaries(hits, snapshot)
         {
             output.push('\n');
             output.push_str(&deleted);
         }
+
         if in_code(reason) {
             let sections = self.sections(true).await;
             if !sections.is_empty() {
@@ -230,6 +242,7 @@ impl Cli {
                 output.push_str(&sections);
             }
         }
+
         output
     }
 
@@ -242,6 +255,7 @@ impl Cli {
         else {
             return Vec::new();
         };
+
         let mut lines = Vec::new();
         for thread in snapshot
             .threads
@@ -255,6 +269,7 @@ impl Cli {
             else {
                 continue;
             };
+
             let mut line = format!("thread {}", renderer.paint(Role::Metadata, thread.id));
             if let Some(ThreadActivity::Task { task, .. }) = &thread.activity {
                 let _ = write!(
@@ -263,19 +278,23 @@ impl Cli {
                     renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
                 );
             }
+
             let _ = write!(line, " also {}", format::stop(reason, renderer));
             let context = StopContext {
                 stop,
                 execution: ExecutionContext::Thread(thread.id),
                 frame: StackFrameId::INNERMOST,
             };
+
             if let Ok(location) = self.debugger.at(context).location().await
                 && let Ok(place) = self.describe(&location, false).await
             {
                 let _ = write!(line, " in {place}");
             }
+
             lines.push(line);
         }
+
         lines
     }
 
@@ -290,6 +309,7 @@ impl Cli {
         } else {
             None
         };
+
         let activation = match &variables {
             Some(Ok(variables)) if stop.highlight_changes => {
                 self.activation(
@@ -301,12 +321,14 @@ impl Cli {
             }
             _ => None,
         };
+
         let activation = activation.as_ref();
         let mut parts = Vec::new();
         let mut sections = stop.show.clone();
         if !sections.contains(&Section::Displays) {
             sections.push(Section::Displays);
         }
+
         for section in sections {
             let part = match section {
                 Section::Source => self.source_section(at_stop).await,
@@ -329,6 +351,7 @@ impl Cli {
                     .map(|snapshot| format::threads(&snapshot, renderer))
                     .map_err(Into::into),
             };
+
             match part {
                 Ok(text) if text.is_empty() => {}
                 Ok(text) => parts.push(text),
@@ -341,6 +364,7 @@ impl Cli {
                 )),
             }
         }
+
         parts.join("\n")
     }
 
@@ -405,6 +429,7 @@ impl Cli {
         for display in &displays {
             lines.push(self.display_line(display, activation).await);
         }
+
         lines.join("\n")
     }
 
@@ -421,6 +446,7 @@ impl Cli {
             Ok(layout) => self.print(&display.expression, layout, renderer).await,
             Err(error) => Err(error),
         };
+
         let line = match shown {
             Ok(line) => line,
             Err(error) => {
@@ -430,10 +456,12 @@ impl Cli {
                 );
             }
         };
+
         let name = format!("display {}", display.id);
         if !self.changed(activation, &name, &line) {
             return format!("{id} {line}");
         }
+
         if renderer.is_colored()
             && let Ok(layout) = self.layout(Command::Print, &display.format)
             && let Ok(changed) = self
@@ -442,6 +470,7 @@ impl Cli {
         {
             return format!("{id} {changed}");
         }
+
         format!("{id} {}*", plain(&line))
     }
 
@@ -460,9 +489,11 @@ impl Cli {
                 {
                     return line.to_owned();
                 }
+
                 if !renderer.is_colored() {
                     return format!("{line}*");
                 }
+
                 changed_lines
                     .get_or_insert_with(|| {
                         format::registers(&registers, renderer.changed())
@@ -499,6 +530,7 @@ impl Cli {
         if self.debugger.snapshot().await?.stop_id.is_none() {
             anyhow::bail!("the program is not stopped");
         }
+
         Ok(self.sections(false).await)
     }
 
@@ -509,6 +541,7 @@ impl Cli {
         if expression.is_empty() {
             anyhow::bail!("display takes an expression; `display` alone lists them");
         }
+
         uscope::Expression::parse(expression)
             .map_err(|error| anyhow::anyhow!(format::expression_error(expression, &error)))?;
         let display = self
@@ -524,6 +557,7 @@ impl Cli {
         if stopped {
             return Ok(self.display_line(&display, None).await);
         }
+
         Ok(format!(
             "{} {}: {}",
             self.renderers.stdout.paint(Role::Success, "display"),
@@ -542,6 +576,7 @@ impl Cli {
         if displays.list.is_empty() {
             return "no displays".to_owned();
         }
+
         displays
             .list
             .iter()

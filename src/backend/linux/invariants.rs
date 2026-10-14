@@ -65,6 +65,7 @@ impl<P: InspectionOps> Controller<P> {
                 module.loaded.image
             );
         }
+
         debug_assert!(
             self.modules
                 .get(&ModuleId::new(0))
@@ -87,6 +88,7 @@ impl<P: InspectionOps> Controller<P> {
             let first = ids.insert(breakpoint.id);
             debug_assert!(first, "breakpoint {} is listed twice", breakpoint.id);
         }
+
         for &id in self.catchpoints.keys() {
             debug_assert!(
                 id.get() < self.next_catchpoint_id,
@@ -120,6 +122,7 @@ impl<P: InspectionOps> Controller<P> {
                 );
             }
         }
+
         debug_assert!(
             self.inferior.is_some()
                 || (self.launch_reply.is_none()
@@ -143,6 +146,7 @@ impl Inferior {
         if !shutting_down {
             self.check_stop();
         }
+
         self.check_watches();
     }
 
@@ -162,6 +166,7 @@ impl Inferior {
                 );
             }
         }
+
         for (&address, site) in &self.breakpoints {
             debug_assert!(
                 !site.owners.is_empty(),
@@ -203,6 +208,7 @@ impl Inferior {
                 }
             }
         }
+
         if let Some(address) = self.loader_site {
             debug_assert!(
                 self.breakpoints
@@ -211,6 +217,7 @@ impl Inferior {
                 "the loader's site at {address} has no loader owner"
             );
         }
+
         for &address in self.runtime_hooks.keys() {
             debug_assert!(
                 self.breakpoints
@@ -219,6 +226,7 @@ impl Inferior {
                 "the runtime hook at {address} has no runtime owner"
             );
         }
+
         debug_assert!(
             !self.traps_lifted || !self.vfork_windows.is_empty(),
             "the traps are lifted with no vfork window open to reinstall them"
@@ -263,6 +271,7 @@ impl Inferior {
                     "thread {id} is stopped at a breakpoint at {address}, which has no site"
                 );
             }
+
             debug_assert!(
                 thread
                     .armed
@@ -279,12 +288,14 @@ impl Inferior {
                 );
             }
         }
+
         for pid in self.fork_children.keys() {
             debug_assert!(
                 !self.killed_children.contains(pid),
                 "fork child {pid} is both awaiting its first stop and killed"
             );
         }
+
         if !shutting_down && let Some(active) = &self.active {
             for pid in &active.resume_threads {
                 debug_assert!(
@@ -295,6 +306,7 @@ impl Inferior {
                 );
             }
         }
+
         if let Some(barrier) = &self.barrier {
             debug_assert!(
                 !barrier.paused || barrier.reason.is_some(),
@@ -308,6 +320,7 @@ impl Inferior {
                 );
             }
         }
+
         if !shutting_down {
             debug_assert!(
                 !self.threads.is_empty(),
@@ -321,6 +334,7 @@ impl Inferior {
         let Some(stop) = &self.public_stop else {
             return;
         };
+
         debug_assert!(
             self.barrier.is_none(),
             "stop {} is published while another stop is in progress",
@@ -346,6 +360,7 @@ impl Inferior {
                 debug_thread_id(pid)
             );
         }
+
         if let Some(pid) = stop.selected_thread {
             debug_assert!(
                 self.threads.contains_key(&pid),
@@ -369,9 +384,11 @@ impl Inferior {
                 );
             }
         }
+
         if self.barrier.is_some() {
             return;
         }
+
         for (&id, record) in &self.watch.watchpoints {
             let planned = plan
                 .slots()

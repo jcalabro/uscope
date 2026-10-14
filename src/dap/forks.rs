@@ -71,6 +71,7 @@ pub(super) async fn follow(client: Client, arguments: Value, child: HeldChild) {
             ANSWER_TIMEOUT.as_secs()
         ),
     };
+
     // A child a session attached to meanwhile is left alone.
     if child.release().unwrap_or(false) {
         let _ = client

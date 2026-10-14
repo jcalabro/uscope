@@ -34,6 +34,7 @@ pub struct InstructionCost {
     /// Its address in its module's file.
     pub address: u64,
     pub text: String,
+
     /// The function a direct jump or call goes to, with the offset into it
     /// when that is not its start.
     pub target: Option<String>,
@@ -46,6 +47,7 @@ pub struct InstructionCost {
 pub struct CodeBlock {
     pub symbol: String,
     pub instructions: Vec<InstructionCost>,
+
     /// Why decoding ended before the symbol did, if it did.
     pub stopped: Option<String>,
 }
@@ -57,6 +59,7 @@ pub struct Disassembly {
     pub weight: u64,
     pub module: String,
     pub blocks: Vec<CodeBlock>,
+
     /// Sampled addresses no decoded instruction holds: own, then total.
     pub unplaced: Vec<(u64, u64, u64)>,
 }
@@ -111,6 +114,7 @@ impl Profile {
     pub fn disassemble(&self, query: &Query, name: &str) -> Result<Disassembly, String> {
         let keys = self.keys(Granularity::Address);
         let capture = &self.capture;
+
         // Each module's sampled addresses in the function, with their weights.
         let mut sampled: BTreeMap<u32, BTreeMap<u64, (u64, u64)>> = BTreeMap::new();
         let costs = keys.functions(&selection(query));
@@ -118,12 +122,14 @@ impl Profile {
             let KeyKind::Address { frame } = keys.kind(cost.key) else {
                 continue;
             };
+
             let physical = capture.frame_lines(frame).last();
             if physical.is_none_or(|line| {
                 capture.string(capture.functions[line.function.get() as usize].name.get()) != name
             }) {
                 continue;
             }
+
             let frame = &capture.frames[frame as usize];
             let weights = sampled
                 .entry(frame.module.get())
@@ -133,6 +139,7 @@ impl Profile {
             weights.0 += cost.own;
             weights.1 += cost.total;
         }
+
         let (module, addresses) = sampled
             .into_iter()
             .max_by_key(|(_, addresses)| addresses.values().map(|(_, total)| total).sum::<u64>())
@@ -140,6 +147,7 @@ impl Profile {
         if module == NONE {
             return Err(format!("{name}'s samples ran code no module covers"));
         }
+
         let record = &capture.modules[module as usize];
         let path = capture.string(record.path.get()).to_owned();
         if record.digest == [0; 16] {
@@ -147,11 +155,13 @@ impl Profile {
                 "the recording could not read {path}, so its code is unknown"
             ));
         }
+
         let bytes =
             std::fs::read(&path).map_err(|error| format!("{path} cannot be read: {error}"))?;
         if twox_hash::XxHash3_128::oneshot(&bytes).to_le_bytes() != record.digest {
             return Err(format!("{path} has changed since it was recorded"));
         }
+
         let file = object::File::parse(bytes.as_slice())
             .map_err(|error| format!("{path} cannot be parsed: {error}"))?;
         let mut code = decode(&file, path, addresses)?;
@@ -187,6 +197,7 @@ fn decode(
             format!("{name}+{offset:#x}")
         })
     };
+
     let mut decoder = decoder_for(TargetDescription::X86_64, AssemblySyntax::Intel)
         .map_err(|error| error.to_string())?;
     let mut blocks = Vec::new();
@@ -195,6 +206,7 @@ fn decode(
         if addresses.range(start..end).next().is_none() {
             continue;
         }
+
         let code = symbol
             .section_index()
             .and_then(|index| file.section_by_index(index).ok())
@@ -211,6 +223,7 @@ fn decode(
             instructions: Vec::new(),
             stopped: None,
         };
+
         let mut offset = 0;
         while offset < code.len() {
             if block.instructions.len() == MAX_FUNCTION_INSTRUCTIONS {
@@ -219,6 +232,7 @@ fn decode(
                 ));
                 break;
             }
+
             let address = start + offset as u64;
             let RawDecode::Instruction {
                 length,
@@ -230,6 +244,7 @@ fn decode(
                 block.stopped = Some(format!("the bytes at {address:#x} are no instruction"));
                 break;
             };
+
             let held: Vec<u64> = addresses
                 .range(address..address + length as u64)
                 .map(|(at, _)| *at)
@@ -250,8 +265,10 @@ fn decode(
             });
             offset += length;
         }
+
         blocks.push(block);
     }
+
     Ok(Disassembly {
         weight: 0,
         module,

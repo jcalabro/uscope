@@ -20,11 +20,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// How many lines the ring keeps before dropping the oldest.
 const CAPACITY: usize = 16 * 1024;
+
 /// The longest message a line keeps after its time and thread; longer ones,
 /// such as large event payloads, are cut without formatting the rest.
 const MAX_LINE: usize = 1024;
+
 /// How large a streamed recording may grow before it restarts from the ring.
 const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
+
 /// How many recordings of past runs [`stream_run`] keeps.
 const KEPT_RUNS: usize = 20;
 
@@ -38,6 +41,7 @@ struct Stream {
     path: PathBuf,
     file: File,
     written: u64,
+
     /// How many times the stream reached its size limit and restarted.
     restarts: u64,
 }
@@ -53,12 +57,14 @@ thread_local! {
     /// Whether this thread holds the recorder, so a panic while it does
     /// cannot wait for it.
     static HOLDING: Cell<bool> = const { Cell::new(false) };
+
     /// The lines this thread captures instead of recording to the ring.
     static CAPTURED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 fn with_recorder<T>(change: impl FnOnce(&mut Recorder) -> T) -> T {
     struct Holding;
+
     impl Drop for Holding {
         fn drop(&mut self) {
             HOLDING.set(false);
@@ -79,6 +85,7 @@ pub(crate) fn record(message: fmt::Arguments<'_>) {
     if body.write_fmt(message).is_err() {
         body.0.push_str(" …");
     }
+
     let mut body = Some(body.0);
     CAPTURED.with_borrow_mut(|captured| {
         if let Some(lines) = captured {
@@ -88,6 +95,7 @@ pub(crate) fn record(message: fmt::Arguments<'_>) {
     let Some(body) = body else {
         return;
     };
+
     let current = thread::current();
     let thread = current.name().map_or("unnamed", |name| {
         name.strip_prefix("uscope-").unwrap_or(name)
@@ -106,10 +114,12 @@ impl fmt::Write for Bounded {
             self.0.push_str(text);
             return Ok(());
         }
+
         let mut end = room;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
+
         self.0.push_str(&text[..end]);
         Err(fmt::Error)
     }
@@ -126,6 +136,7 @@ impl Recorder {
             self.lines.pop_front();
             self.dropped += 1;
         }
+
         self.lines.push_back(line);
         self.stream();
     }
@@ -136,6 +147,7 @@ impl Recorder {
         let Some(mut stream) = self.stream.take() else {
             return;
         };
+
         let line = self.lines.back().map_or("", String::as_str);
         if stream.written + line.len() as u64 <= MAX_STREAM_BYTES {
             // One write per line, so a killed process loses nothing it
@@ -156,6 +168,7 @@ impl Recorder {
                 return;
             }
         }
+
         self.stream = Some(stream);
     }
 
@@ -172,13 +185,16 @@ impl Recorder {
                 "# the recording reached its size limit {restarts} times and kept the newest lines",
             );
         }
+
         if self.dropped > 0 {
             let _ = writeln!(text, "# the ring dropped the {} oldest lines", self.dropped);
         }
+
         text.push_str("# each line: seconds since the first record, thread, what happened\n");
         for line in &self.lines {
             text.push_str(line);
         }
+
         text
     }
 }
@@ -196,6 +212,7 @@ pub fn dump(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+
     fs::write(path, text)
 }
 
@@ -205,7 +222,9 @@ pub fn stream_to(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+
     let mut file = File::create(path)?;
+
     // Holding the ring while writing it keeps any line from falling between
     // the copy and the stream.
     with_recorder(|recorder| {
@@ -253,6 +272,7 @@ fn prune(runs: &Path, keep: usize) -> io::Result<()> {
         // Another run may be pruning the same file.
         let _ = fs::remove_file(path);
     }
+
     Ok(())
 }
 
@@ -268,6 +288,7 @@ pub fn record_panics() {
             if !HOLDING.get() {
                 record(format_args!("panic: {info}"));
             }
+
             previous(info);
         }));
     });
@@ -361,6 +382,7 @@ mod tests {
         for line in 0..lines {
             record(format_args!("{line} {long}"));
         }
+
         record(format_args!("last"));
         with_recorder(|recorder| recorder.stream = None);
 

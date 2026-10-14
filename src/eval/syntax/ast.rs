@@ -44,6 +44,7 @@ impl Tree {
             if !balanced(slice) {
                 return Err(format!("`{slice}` is unbalanced, in `{text}`"));
             }
+
             for child in node.kind.children() {
                 let inner = self.span(child);
                 if inner.start < span.start || inner.end > span.end {
@@ -54,6 +55,7 @@ impl Tree {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -118,6 +120,7 @@ pub enum Separator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeName {
     pub base: TypeBase,
+
     /// How many pointers lead to the base, outermost first.
     pub pointers: u8,
     pub span: Span,
@@ -128,9 +131,11 @@ pub struct TypeName {
 pub enum TypeBase {
     /// A built-in or program type, by name.
     Named(Path),
+
     /// A C base type of several words, in canonical order, such as
     /// `["unsigned", "long", "long"]`.
     CWords(Vec<CWord>),
+
     /// A `struct`, `union`, `enum`, or `class` tag.
     Tagged(Tag, Path),
 }
@@ -215,6 +220,7 @@ pub enum Suffix {
         width: u8,
         signed: bool,
     },
+
     /// `isize` or `usize`, as wide as the target's addresses.
     Size {
         signed: bool,
@@ -227,6 +233,7 @@ pub enum Suffix {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
     Named(String),
+
     /// A tuple field, `.0`.
     Index(u32),
 }
@@ -258,6 +265,7 @@ impl Builtin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SizeOf {
     Type(TypeName),
+
     /// An operand, which is measured as a type instead when it is a bare
     /// path naming no value.
     Operand(NodeId),
@@ -267,12 +275,16 @@ pub enum SizeOf {
 pub enum UnaryOp {
     /// `-`
     Neg,
+
     /// `!`
     Not,
+
     /// `~`
     BitNot,
+
     /// `*`
     Deref,
+
     /// `&`
     AddressOf,
 }
@@ -304,6 +316,7 @@ pub enum BinaryOp {
 pub enum CastForm {
     /// `(T)x`
     Prefix,
+
     /// `x as T`
     As,
 }
@@ -311,6 +324,7 @@ pub enum CastForm {
 #[derive(Debug, Clone)]
 pub enum NodeKind {
     Name(Path),
+
     /// `$name`, without the `$`.
     Register(String),
     Integer {
@@ -318,8 +332,10 @@ pub enum NodeKind {
         suffix: Option<Suffix>,
     },
     Float(Float),
+
     /// A character literal's code point.
     Char(u32),
+
     /// A string literal's bytes.
     Text(Vec<u8>),
     Bool(bool),
@@ -338,6 +354,7 @@ pub enum NodeKind {
         then: NodeId,
         otherwise: NodeId,
     },
+
     /// `=`, or a compound assignment with its operator.
     Assign {
         op: Option<BinaryOp>,
@@ -349,6 +366,7 @@ pub enum NodeKind {
         operand: NodeId,
         form: CastForm,
     },
+
     /// `.field`, or `->field` when `arrow`.
     Member {
         base: NodeId,
@@ -360,12 +378,14 @@ pub enum NodeKind {
         base: NodeId,
         index: NodeId,
     },
+
     /// `base[start..end]`, only ever the whole expression.
     Range {
         base: NodeId,
         start: NodeId,
         end: NodeId,
     },
+
     /// `base[start:end]`, either bound of which may be left out.
     Slice {
         base: NodeId,
@@ -373,11 +393,13 @@ pub enum NodeKind {
         end: Option<NodeId>,
     },
     SizeOf(SizeOf),
+
     /// `offsetof(TYPE, member)`, a view's: where a member is in its record.
     OffsetOf {
         ty: TypeName,
         member: String,
     },
+
     /// `container_of(PTR, TYPE, member)`, a view's: a pointer to the
     /// record of `TYPE` whose `member` PTR points to.
     ContainerOf {
@@ -385,11 +407,13 @@ pub enum NodeKind {
         ty: TypeName,
         member: String,
     },
+
     /// `global(NAME)`, a view's: a global of the module whose value it
     /// presents.
     Global(String),
     Len(NodeId),
     Cap(NodeId),
+
     /// A call of a view's built-in function on one operand.
     Call {
         function: Builtin,
@@ -497,6 +521,7 @@ impl NodeKind {
             (Self::SizeOf(SizeOf::Type(left)), Self::SizeOf(SizeOf::Type(right))) => {
                 same_type(left, right)
             }
+
             (
                 Self::OffsetOf { ty, member },
                 Self::OffsetOf {
@@ -544,5 +569,6 @@ fn balanced(text: &str) -> bool {
             _ => {}
         }
     }
+
     open.is_empty()
 }

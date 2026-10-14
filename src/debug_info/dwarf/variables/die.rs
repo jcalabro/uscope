@@ -9,6 +9,7 @@ use gimli::Reader as _;
 use crate::debug_info::dwarf::{
     DieKey, DwarfError, Reader, Units, die_reference, is_type_unit, source_path, string_attribute,
 };
+
 use crate::{
     AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFileId, SourceLocation,
     VariableKind,
@@ -21,6 +22,7 @@ pub(super) fn variable_order_key(object: &DataObject) -> (u8, u8, SourceFileId, 
     if matches!(object.kind, VariableKind::Parameter | VariableKind::Result) {
         return (0, 0, SourceFileId::new(0), 0, 0, object.order);
     }
+
     object.declaration.as_ref().map_or(
         (
             1,
@@ -50,21 +52,25 @@ pub(super) fn data_object_scope_ranges(
     let Some(attribute) = entry.attr(gimli::DW_AT_start_scope) else {
         return (Arc::clone(&scope.ranges), None);
     };
+
     let Some(offset) = attribute.udata_value() else {
         return (
             Arc::clone(&scope.ranges),
             Some("unsupported DW_AT_start_scope form".into()),
         );
     };
+
     let Some(first) = scope.ranges.first() else {
         return (Arc::clone(&scope.ranges), None);
     };
+
     let Some(start) = first.start.get().checked_add(offset) else {
         return (
             Arc::clone(&scope.ranges),
             Some("DW_AT_start_scope address overflow".into()),
         );
     };
+
     let ranges = scope
         .ranges
         .iter()
@@ -124,17 +130,20 @@ pub(super) fn zig_qualified_name(
     let mut parts = vec![name];
     let mut visited = HashSet::new();
     let mut current = die_reference(entry.attr_value(DW_AT_ZIG_PARENT), unit_index, units)?;
+
     // A cycle, or a chain longer than any Zig nests, names nothing; a
     // partial name would be a wrong one.
     while let Some(key) = current {
         if !visited.insert(key) {
             return Err(DwarfError::ReferenceCycle);
         }
+
         if parts.len() > MAX_ZIG_PARENTS {
             return Err(DwarfError::MalformedVariable(
                 "a Zig type's parents nest past their limit".into(),
             ));
         }
+
         let unit = units
             .get(key.unit)
             .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
@@ -142,13 +151,16 @@ pub(super) fn zig_qualified_name(
         let Some(parent_name) = copy_name(dwarf, unit, &parent)? else {
             break;
         };
+
         let qualified = parent_name.contains(['.', '(']);
         parts.push(parent_name);
         if qualified {
             break;
         }
+
         current = die_reference(parent.attr_value(DW_AT_ZIG_PARENT), key.unit, units)?;
     }
+
     parts.reverse();
     Ok(parts.join(".").into())
 }
@@ -166,11 +178,13 @@ pub(super) fn string_with_origins(
     if let Some(value) = string_attribute(dwarf, unit, entry, attribute)? {
         return Ok(Some(value));
     }
+
     for (origin_unit, origin) in chain {
         if let Some(value) = string_attribute(dwarf, &units[*origin_unit], origin, attribute)? {
             return Ok(Some(value));
         }
     }
+
     Ok(None)
 }
 
@@ -215,6 +229,7 @@ pub(super) fn flag_with_origins(
         gimli::AttributeValue::Flag(value) => Some(value),
         _ => None,
     };
+
     entry.attr(attribute).and_then(flag).or_else(|| {
         chain
             .iter()
@@ -241,6 +256,7 @@ pub(super) fn origin_chain<'data>(
         if !seen.insert(key) {
             return Err(DwarfError::ReferenceCycle);
         }
+
         let unit = units
             .get(key.unit)
             .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
@@ -248,6 +264,7 @@ pub(super) fn origin_chain<'data>(
         current = origin_reference(&origin, key.unit, units)?;
         chain.push((key.unit, origin));
     }
+
     Ok(chain)
 }
 
@@ -288,6 +305,7 @@ impl<K: Copy + Eq + std::hash::Hash> Seen<K> {
                 }
             }
         }
+
         self.many.insert(key)
     }
 }
@@ -330,6 +348,7 @@ pub(super) fn declaration_with_origins<'data>(
 /// files interned in order.
 pub(super) struct DeclaredSource {
     path: std::path::PathBuf,
+
     /// Whether the path is a type unit's, which names it as a suffix.
     suffix: bool,
     line: LineNumber,
@@ -406,10 +425,12 @@ pub(super) fn declaration_remembering_files<'data>(
             if is_type_unit(file_unit) {
                 return Ok(files.intern_suffix(source_path(dwarf, file_unit, header, file)?));
             }
+
             let key = (std::ptr::from_ref(file_unit).addr(), index);
             if let Some(id) = declared.0.get(&key) {
                 return Ok(*id);
             }
+
             let id = files.intern(source_path(dwarf, file_unit, header, file)?);
             declared.0.insert(key, id);
             Ok(id)
@@ -444,6 +465,7 @@ fn declared_with<'a, 'data, F>(
                 .map(|(origin_unit, origin_entry)| (&units[*origin_unit], origin_entry)),
         )
     };
+
     let found = dies().find_map(|(unit, entry)| {
         entry
             .attr(gimli::DW_AT_decl_file)
@@ -460,12 +482,15 @@ fn declared_with<'a, 'data, F>(
     let (Some((file_unit, file_index)), Some(line)) = (found, line) else {
         return Ok(None);
     };
+
     let Some(program) = file_unit.line_program.as_ref() else {
         return Ok(None);
     };
+
     let Some(file_entry) = program.header().file(file_index) else {
         return Ok(None);
     };
+
     let column = dies()
         .find_map(|(_, entry)| {
             entry
@@ -486,10 +511,12 @@ pub(super) fn constant_member_offset(attribute: &gimli::Attribute<Reader<'_>>) -
     if let Some(offset) = attribute.udata_value() {
         return Some(offset);
     }
+
     let mut bytes = attribute.exprloc_value()?.0;
     if bytes.read_u8().ok()? != gimli::DW_OP_plus_uconst.0 {
         return None;
     }
+
     let offset = bytes.read_uleb128().ok()?;
     bytes.is_empty().then_some(offset)
 }
@@ -514,6 +541,7 @@ pub(super) fn array_bound(
                 attribute.udata_value().map(i128::from)
             }
         }
+
         // A reference or expression describes a bound known only at run time.
         _ => None,
     }
@@ -528,6 +556,7 @@ pub(super) fn index_type_is_signed(
     else {
         return false;
     };
+
     unit.entry(offset).is_ok_and(|index_type| {
         matches!(
             index_type.attr_value(gimli::DW_AT_encoding),
@@ -542,12 +571,16 @@ pub(super) fn index_type_is_signed(
 pub(super) enum ByteSize {
     /// The attribute is not present; a default size may apply.
     Absent,
+
     /// A constant unsigned size in bytes.
     Constant(u64),
+
     /// A valid constant above `u64::MAX`.
     Unsupported(Arc<str>),
+
     /// A location expression or DIE reference, known only at run time.
     Dynamic,
+
     /// A form DWARF does not permit for a byte size.
     Malformed,
 }
@@ -557,8 +590,10 @@ pub(super) enum ByteSize {
 pub(super) enum UnsignedConstant {
     /// A representable constant value.
     Value(u64),
+
     /// A valid `DW_FORM_data16` constant above `u64::MAX`.
     Oversized,
+
     /// A form that is not an integer constant.
     NonConstant,
 }
@@ -569,6 +604,7 @@ pub(super) fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> Uns
     if let Some(value) = attribute.udata_value() {
         return UnsignedConstant::Value(value);
     }
+
     match attribute.value() {
         gimli::AttributeValue::Data16(value) => {
             u64::try_from(value).map_or(UnsignedConstant::Oversized, UnsignedConstant::Value)
@@ -585,6 +621,7 @@ pub(super) fn base_type_encoding(
     let Some(attribute) = entry.attr(gimli::DW_AT_encoding) else {
         return Err("base type has no encoding".into());
     };
+
     match unsigned_constant(attribute) {
         UnsignedConstant::Value(value) => u8::try_from(value)
             .map_err(|_| Arc::from("DW_AT_encoding exceeds the one-byte DW_ATE domain")),
@@ -603,11 +640,13 @@ pub(super) fn byte_size_attribute(
     let Some(attribute) = entry.attr(gimli::DW_AT_byte_size) else {
         return ByteSize::Absent;
     };
+
     match unsigned_constant(attribute) {
         UnsignedConstant::Value(size) => ByteSize::Constant(size),
         UnsignedConstant::Oversized => {
             ByteSize::Unsupported("constant DW_AT_byte_size exceeds the supported u64 range".into())
         }
+
         // DWARF also permits an expression or a DIE reference, which are
         // valid but not statically sizable; any other form is malformed.
         UnsignedConstant::NonConstant => match attribute.value() {

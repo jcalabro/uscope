@@ -19,9 +19,11 @@ pub struct Declarations {
     /// Integer constants by name; a later one replaces an earlier one of
     /// the same name.
     pub constants: Vec<(Arc<str>, IntegerValue)>,
+
     /// Rust trait objects' vtables, by address, with the concrete type
     /// each is for; a later one replaces an earlier one at its address.
     pub vtables: Vec<(ImageAddress, TypeId)>,
+
     /// The producers, in the order they were first named.
     pub producers: Vec<Arc<str>>,
 }
@@ -32,8 +34,10 @@ pub struct Declarations {
 )]
 pub struct NamedConstantRecord {
     pub name: U32,
+
     /// The value's two's-complement bytes, little-endian.
     pub value: [u8; 16],
+
     /// Whether the value is signed.
     pub signed: u8,
 }
@@ -76,6 +80,7 @@ pub fn add_to(
                 IntegerValue::Signed(value) => (value.to_le_bytes(), 1),
                 IntegerValue::Unsigned(value) => (value.to_le_bytes(), 0),
             };
+
             Ok(NamedConstantRecord {
                 name: strings.push(name).ok_or(TooMany)?.0.into(),
                 value,
@@ -101,6 +106,7 @@ pub fn add_to(
             producers.push(Item { value: id.into() });
         }
     }
+
     builder
         .owned_table(constants)
         .owned_table(vtables)
@@ -198,6 +204,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a named constant is malformed".into());
     }
+
     let types = image.table::<super::types::TypeRecord>().len();
     if !view
         .vtables
@@ -209,6 +216,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a vtable is malformed".into());
     }
+
     let mut producers = view
         .producers
         .iter()
@@ -220,5 +228,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a producer is malformed".into());
     }
+
     Ok(())
 }

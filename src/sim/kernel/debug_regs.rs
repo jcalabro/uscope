@@ -18,10 +18,13 @@ use crate::sim::cpu::{Access, Accesses};
 
 /// DR6's single-step bit.
 pub const DR_STEP: u64 = 1 << 14;
+
 /// The DR6 bits that read as set with no condition recorded.
 pub const DR6_RESERVED: u64 = 0xffff_0ff0;
+
 /// The DR7 bits a write ignores.
 const DR7_RESERVED: u64 = 0xfc00;
+
 /// The first address no user hardware breakpoint may cover.
 const USER_LIMIT: u64 = 0x7fff_ffff_f000;
 const SLOTS: usize = 4;
@@ -65,6 +68,7 @@ impl Breakpoint {
             Kind::Write => access.write,
             Kind::ReadWrite => true,
         };
+
         self.enabled
             && kind
             && access.address < self.address + self.length
@@ -83,12 +87,14 @@ const fn decode(dr7: u64, slot: usize) -> Result<(bool, u64, Kind), Errno> {
         3 => Kind::ReadWrite,
         _ => return Err(Errno::EINVAL),
     };
+
     let length = match (fields >> 2) & 3 {
         0 => 1,
         1 => 2,
         2 => 8,
         _ => 4,
     };
+
     Ok((enabled, length, kind))
 }
 
@@ -96,8 +102,10 @@ const fn decode(dr7: u64, slot: usize) -> Result<(bool, u64, Kind), Errno> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DebugRegisters {
     slots: [Option<Breakpoint>; SLOTS],
+
     /// The DR7 the tracer last wrote, which reads back.
     dr7: u64,
+
     /// DR6 as Linux virtualizes it: the bits that differ from idle.
     dr6: u64,
 }
@@ -146,6 +154,7 @@ impl DebugRegisters {
                         enabled: false,
                     },
                 };
+
                 self.slots[index] = Some(slot.validate()?);
                 Ok(())
             }
@@ -191,6 +200,7 @@ impl DebugRegisters {
                 }
             }
         }
+
         self.dr7 = dr7;
         Ok(())
     }

@@ -46,6 +46,7 @@ pub fn known(reasons: &mut Reasons, truth: &Truth, current: &Known) -> BTreeMap<
         if !matches!(reason, StopReason::Syscall(_)) {
             continue;
         }
+
         let (_, then) = reasons
             .entry(tid)
             .or_insert_with(|| (reason.clone(), current.clone()));
@@ -56,6 +57,7 @@ pub fn known(reasons: &mut Reasons, truth: &Truth, current: &Known) -> BTreeMap<
             .collect();
         known.insert(tid, then);
     }
+
     known
 }
 
@@ -73,19 +75,23 @@ pub fn judge(
     let (Some(_), Some(tgid)) = (truth.public_stop, truth.inferior) else {
         return Ok(Vec::new());
     };
+
     if ending(kernel, tgid) {
         return Ok(Vec::new());
     }
+
     let mut marks = Vec::new();
     for (&tid, reason) in &truth.reasons {
         let StopReason::Syscall(stop) = reason else {
             continue;
         };
+
         let empty = Known::new();
         let catches = known.get(&tid).unwrap_or(&empty);
         let Some(thread) = kernel.threads.get(&tid) else {
             return Err(format!("thread {tid} reports a call, but it is gone"));
         };
+
         let State::Stopped {
             kind: StopKind::Syscall { exit },
             ..
@@ -97,6 +103,7 @@ pub fn judge(
                 thread.state
             ));
         };
+
         if exit != stop.returned.is_some() {
             return Err(format!(
                 "thread {tid} reports a call's {}, but it is at its {}",
@@ -108,6 +115,7 @@ pub fn judge(
                 if exit { "exit" } else { "entry" }
             ));
         }
+
         let general = &thread.registers.general;
         let call = u32::try_from(thread.orig_rax)
             .ok()
@@ -128,6 +136,7 @@ pub fn judge(
                 thread.orig_rax
             ));
         }
+
         let returned = general[RAX].cast_signed();
         if exit && stop.returned != Some(returned) {
             return Err(format!(
@@ -136,6 +145,7 @@ pub fn judge(
                 stop.returned
             ));
         }
+
         judge_memory(kernel, tgid, tid, stop)?;
         judge_listed(catches, thread, tid, stop, exit)?;
         marks.push(if exit {
@@ -144,6 +154,7 @@ pub fn judge(
             Mark::CatchEntryStop
         });
     }
+
     Ok(marks)
 }
 
@@ -159,6 +170,7 @@ fn judge_memory(
         if !matches!(capture.state, CaptureState::Complete) {
             continue;
         }
+
         let address = stop.args[usize::from(capture.arg)];
         let bytes = space.read_user(address, capture.bytes.len() as u64);
         if bytes.as_deref() != Some(&capture.bytes[..]) {
@@ -171,6 +183,7 @@ fn judge_memory(
             ));
         }
     }
+
     Ok(())
 }
 
@@ -196,6 +209,7 @@ fn judge_listed(
             ));
         }
     }
+
     for listed in stop.catchpoints.iter() {
         let stops = catches
             .get(&listed.get())
@@ -208,5 +222,6 @@ fn judge_listed(
             ));
         }
     }
+
     Ok(())
 }

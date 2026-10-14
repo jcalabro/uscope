@@ -14,6 +14,7 @@ fn distance(left: &str, right: &str, bound: usize) -> Option<usize> {
     if left.len().abs_diff(right.len()) > bound {
         return None;
     }
+
     // Rows of the optimal string alignment table: two back, one back, and
     // the one being filled.
     let mut before = vec![0; right.len() + 1];
@@ -33,14 +34,18 @@ fn distance(left: &str, right: &str, bound: usize) -> Option<usize> {
             {
                 cost = cost.min(before[column - 2] + 1);
             }
+
             current[column] = cost;
         }
+
         if current.iter().min().is_some_and(|least| *least > bound) {
             return None;
         }
+
         std::mem::swap(&mut before, &mut previous);
         std::mem::swap(&mut previous, &mut current);
     }
+
     Some(previous[right.len()]).filter(|distance| *distance <= bound)
 }
 
@@ -60,6 +65,7 @@ pub fn nearest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) ->
         .collect::<Vec<_>>();
     found.sort_unstable();
     found.dedup_by_key(|(.., candidate)| *candidate);
+
     // Only the nearest by distance are suggested, and then those the word
     // begins.
     let nearest = found.first().map_or(0, |(rank, ..)| *rank);
@@ -87,6 +93,7 @@ pub fn did_you_mean<'a>(
         [first, second] => format!("{first} or {second}"),
         [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
     };
+
     Some(format!("did you mean {list}?"))
 }
 
@@ -106,6 +113,7 @@ mod tests {
             Some("did you mean 'color'?")
         );
         assert_eq!(did_you_mean("zzz", names), None);
+
         // Short words allow one edit, so `p` suggests nothing long.
         assert_eq!(nearest("mian", names), ["main"]);
         assert_eq!(distance("kitten", "sitting", 3), Some(3));

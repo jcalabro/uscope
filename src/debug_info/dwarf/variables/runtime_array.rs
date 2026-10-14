@@ -86,6 +86,7 @@ pub(super) fn element_offset(
             .and_then(|step| offset.checked_add(step))
             .ok_or(VariableUnavailableReason::EvaluationLimit)?;
     }
+
     Ok(offset)
 }
 
@@ -109,6 +110,7 @@ impl DwarfVariableInfo {
         else {
             return None;
         };
+
         let placement = Resolved::placement(&dimensions, &strides)?;
         self.resolved_text(type_id, shape, &data, &placement, runtime, budget)
     }
@@ -133,12 +135,15 @@ impl DwarfVariableInfo {
         else {
             return None;
         };
+
         let [dimension] = placement.dimensions.as_ref() else {
             return None;
         };
+
         if i64::try_from(*element_size).ok() != placement.strides.first().copied() {
             return None;
         }
+
         // Its characters are adjacent, as a static array's.
         let contiguous = ValueShape::Array {
             element: *element,
@@ -146,9 +151,11 @@ impl DwarfVariableInfo {
             ordering: *ordering,
             byte_size: dimension.count.saturating_mul(*element_size),
         };
+
         let value = VariableValue::Array {
             dimensions: Arc::clone(&placement.dimensions),
         };
+
         self.text_summary(type_id, &contiguous, &value, data, None, runtime, budget)
     }
 
@@ -174,12 +181,14 @@ impl DwarfVariableInfo {
                 "only arrays bounded at run time resolve here".into(),
             ));
         };
+
         // Expressions find the array's parts from where it is, and from
         // the frame, whose base is its function's.
         let object = match storage {
             ValueStorage::Memory(address) => Some(*address),
             _ => None,
         };
+
         let frame_base_location = address
             .and_then(|address| self.catalog().function_at(address))
             .and_then(|function| function.objects().next())
@@ -200,6 +209,7 @@ impl DwarfVariableInfo {
             address,
             frame_base: &mut frame_base,
         };
+
         for (child, absent) in [
             (LayoutChild::Allocated, Resolved::NotAllocated),
             (LayoutChild::Associated, Resolved::NotAssociated),
@@ -208,6 +218,7 @@ impl DwarfVariableInfo {
                 return Ok(absent);
             }
         }
+
         let data = parts
             .value(LayoutChild::DataLocation, runtime, budget)?
             .map_or_else(
@@ -221,6 +232,7 @@ impl DwarfVariableInfo {
             bounds.push(bound);
             strides.push(stride);
         }
+
         let strides = adjacent_strides(&bounds, &strides, *ordering, *element_size)?;
         Ok(Resolved::Elements {
             data,
@@ -260,15 +272,18 @@ impl Parts<'_, '_, '_> {
                 "the array has too many dimensions".into(),
             ));
         };
+
         let bound = |part| LayoutChild::Bound {
             dimension: dimension_index,
             part,
         };
+
         let lower = self.bound(lower_bound, bound(BoundPart::Lower), runtime, budget)?;
         let count =
             match extent {
                 ArrayExtent::Upper(upper) => {
                     let upper = self.bound(upper, bound(BoundPart::Extent), runtime, budget)?;
+
                     // A dimension ending before it begins is empty, as
                     // Fortran's may be.
                     Some(
@@ -296,6 +311,7 @@ impl Parts<'_, '_, '_> {
             }
             None => None,
         };
+
         Ok(((lower, count), stride))
     }
 
@@ -310,6 +326,7 @@ impl Parts<'_, '_, '_> {
         let Some(expression) = self.info.type_facts().dynamic_layout(self.array, child) else {
             return Ok(None);
         };
+
         let tables = self.info.locations();
         let pieces = evaluate_with_object(
             tables.expression(expression),
@@ -325,6 +342,7 @@ impl Parts<'_, '_, '_> {
                 "an array's expression computed several pieces".into(),
             ));
         };
+
         let value = match piece.location {
             Location::Address { address } => address,
             Location::Value { value } => value.to_u64(u64::MAX).map_err(|_| {
@@ -336,6 +354,7 @@ impl Parts<'_, '_, '_> {
                 ));
             }
         };
+
         Ok(Some(value))
     }
 
@@ -364,6 +383,7 @@ impl Parts<'_, '_, '_> {
                 else {
                     return Err(missing());
                 };
+
                 let tables = self.info.locations();
                 let pieces = evaluate_with_object(
                     tables.expression(expression),
@@ -401,6 +421,7 @@ impl Parts<'_, '_, '_> {
                         "an array's bound is a variable of no type".into(),
                     ));
                 };
+
                 let base = match self.info.value_shape(ty)? {
                     ValueShape::Scalar(base) => base,
                     ValueShape::Enumeration { representation, .. } => representation,
@@ -410,6 +431,7 @@ impl Parts<'_, '_, '_> {
                         ));
                     }
                 };
+
                 let mut cache = FrameBaseCache::Empty;
                 let storage = self.info.located_data_object(
                     variable,
@@ -449,6 +471,7 @@ fn adjacent_strides(
     if ordering == ArrayOrdering::RowMajor {
         order.reverse();
     }
+
     let mut adjacent = vec![0; bounds.len()];
     for (position, &index) in order.iter().enumerate() {
         adjacent[index] = strides[index].unwrap_or(span);
@@ -461,6 +484,7 @@ fn adjacent_strides(
             None => return Err(crate::UnsupportedVariableFeature::TypeRepresentation.into()),
         };
     }
+
     Ok(adjacent)
 }
 
@@ -471,6 +495,7 @@ fn integer(bytes: &[u8], byte_size: u8, signed: bool, byte_order: crate::ByteOrd
         crate::ByteOrder::Little => &bytes[..size],
         crate::ByteOrder::Big => &bytes[bytes.len() - size..],
     };
+
     let raw = unsigned_value(bytes, byte_order).unwrap_or(0);
     let bits = size * 8;
     if signed && bits < 128 && bits > 0 {

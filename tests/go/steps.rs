@@ -50,6 +50,7 @@ async fn stopped_at(fixture: &str, marker: &str) -> (Scenario, i128) {
 async fn stepping_in_stops_only_in_code_the_program_wrote() {
     let fixture = "steps-go-o0";
     let (mut scenario, task) = at_the_walk(fixture).await;
+
     // Each step, and the function and line it ends at.
     let walk = [
         // Past the runtime's map assignment.
@@ -83,6 +84,7 @@ async fn stepping_in_stops_only_in_code_the_program_wrote() {
             "{fixture}: {marker}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -113,12 +115,14 @@ async fn optimized_steps_stop_only_in_code_the_program_wrote() {
             break;
         }
     }
+
     for function in ["main.square.area", "main.fresh"] {
         assert!(
             visited.iter().any(|(name, _)| name == function),
             "{fixture}: {visited:?}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -138,6 +142,7 @@ async fn a_function_breakpoint_stops_once_for_a_call_that_grows_the_stack() {
             }
             reason => panic!("{fixture}: {reason:?}"),
         };
+
         let reason = scenario
             .run_with_to_stop(LaunchOptions {
                 stdout: Some(Stdio::null()),
@@ -185,6 +190,7 @@ async fn stepping_into_a_new_goroutine_stops_where_it_begins() {
             );
             let (stopped, at) = place(&scenario).await;
             assert_eq!(stopped, function, "{context}");
+
             // Optimized, the prologue may end on the body's first line.
             assert!(
                 [line(declaration), line(body)].contains(&at),
@@ -192,6 +198,7 @@ async fn stepping_into_a_new_goroutine_stops_where_it_begins() {
             );
             let started = integer(&scenario, "$task").await.expect("a goroutine");
             assert_ne!(started, task, "{context}");
+
             // The step belongs to the new goroutine from then on.
             scenario.step_to_stop(StepKind::OverSource).await;
             assert_eq!(

@@ -10,6 +10,7 @@ use uscope::{BreakpointSpec, LineNumber, LoadedModuleRecord, ModuleId, ModuleIma
 use super::protocol::{
     BreakpointLocationsArguments, ErrorBody, GotoTargetsArguments, ModulesArguments,
 };
+
 use super::session::{Closed, Session, error, parse};
 
 impl Session {
@@ -21,6 +22,7 @@ impl Session {
             Err(uscope::Error::NotRunning) => Vec::new(),
             Err(other) => return Err(error(other)),
         };
+
         let start = usize::try_from(arguments.start_module.unwrap_or(0)).unwrap_or(0);
         let count = arguments
             .module_count
@@ -32,6 +34,7 @@ impl Session {
             let image = self.image(record.module.id).await;
             modules.push(module_json(record, image.as_deref()));
         }
+
         Ok(json!({"modules": modules, "totalModules": records.len()}))
     }
 
@@ -42,9 +45,11 @@ impl Session {
         let Some(handle) = self.target_handle().ok() else {
             return Ok(());
         };
+
         let Ok(snapshot) = handle.loaded_modules().await else {
             return Ok(());
         };
+
         let loaded = snapshot
             .modules
             .iter()
@@ -59,9 +64,11 @@ impl Session {
         for id in unloaded {
             self.forget_module(id).await?;
         }
+
         for record in snapshot.modules.iter() {
             self.announce_module(record).await?;
         }
+
         Ok(())
     }
 
@@ -72,6 +79,7 @@ impl Session {
         if self.modules.contains_key(&record.module.id) {
             return Ok(());
         }
+
         self.modules.insert(record.module.id, record.clone());
         let image = self.image(record.module.id).await;
         self.client
@@ -80,6 +88,7 @@ impl Session {
                 json!({"reason": "new", "module": module_json(record, image.as_deref())}),
             )
             .await?;
+
         // What could not be used of a library's debug information, and what
         // kept its own views out, once, when it loads; the program's are
         // said when the session starts.
@@ -89,10 +98,12 @@ impl Session {
             for warning in crate::present::debug_information::warnings(image, false) {
                 self.client.important(warning).await?;
             }
+
             for error in image.view_errors() {
                 self.client.important(format!("views: {error}")).await?;
             }
         }
+
         self.add_loaded_sources(record.module.id, image.as_deref())
             .await
     }
@@ -104,12 +115,14 @@ impl Session {
     pub(super) async fn loaded_sources(&mut self) -> Result<Value, ErrorBody> {
         let handle = self.target_handle()?;
         let mut sources = BTreeMap::<PathBuf, BTreeSet<ModuleId>>::new();
+
         // Before the program runs, its own image is what is loaded.
         if self.modules.is_empty() {
             for file in handle.module_image().source_files() {
                 sources.entry(self.local_path(&file.path)).or_default();
             }
         }
+
         let records = self.modules.values().cloned().collect::<Vec<_>>();
         for record in records {
             if let Some(image) = self.image(record.module.id).await {
@@ -121,6 +134,7 @@ impl Session {
                 }
             }
         }
+
         let body =
             json!({"sources": sources.keys().map(|path| source_json(path)).collect::<Vec<_>>()});
         self.loaded_sources = Some(sources);
@@ -137,6 +151,7 @@ impl Session {
         let (Some(image), true) = (image, self.loaded_sources.is_some()) else {
             return Ok(());
         };
+
         let paths = image
             .source_files()
             .iter()
@@ -146,6 +161,7 @@ impl Session {
             let Some(sources) = self.loaded_sources.as_mut() else {
                 return Ok(());
             };
+
             let modules = sources.entry(path.clone()).or_default();
             let new = modules.is_empty();
             modules.insert(module);
@@ -158,6 +174,7 @@ impl Session {
                     .await?;
             }
         }
+
         Ok(())
     }
 
@@ -167,12 +184,14 @@ impl Session {
         let Some(sources) = self.loaded_sources.as_mut() else {
             return Ok(());
         };
+
         let mut gone = Vec::new();
         sources.retain(|path, modules| {
             if modules.remove(&module) && modules.is_empty() {
                 gone.push(path.clone());
                 return false;
             }
+
             true
         });
         for path in gone {
@@ -183,6 +202,7 @@ impl Session {
                 )
                 .await?;
         }
+
         Ok(())
     }
 
@@ -202,6 +222,7 @@ impl Session {
         ) else {
             return Ok(json!({"breakpoints": []}));
         };
+
         // The program's lines, and those of the libraries loaded now.
         let mut images = vec![Arc::clone(handle.module_image())];
         images.extend(
@@ -216,6 +237,7 @@ impl Session {
                 lines.extend(image.breakpoint_lines(file.id, first..=last));
             }
         }
+
         let lines = lines
             .into_iter()
             .map(|line| json!({"line": self.line_to_client(line.get())}))
@@ -240,6 +262,7 @@ impl Session {
         else {
             return Ok(json!({"targets": []}));
         };
+
         let mut images = vec![Arc::clone(handle.module_image())];
         images.extend(
             self.code()
@@ -266,6 +289,7 @@ impl Session {
                 "line": self.line_to_client(line.get()),
             }));
         }
+
         Ok(json!({"targets": targets}))
     }
 }
@@ -288,6 +312,7 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         } else {
             "no symbols"
         };
+
         let mut status = match image.separate_debug_file() {
             Some(uscope::DebugFile::Unusable { path, reason }) => format!(
                 "{status}; cannot use the debug file {}: {reason}",
@@ -295,16 +320,20 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
             ),
             _ => status.to_owned(),
         };
+
         if let Some(problem) = crate::present::debug_information::dwarf_problem(image) {
             status = format!("{status}; {problem}");
         }
+
         module["symbolStatus"] = status.into();
+
         // A separate debug file, when the module's own was stripped.
         if let Some(debug_file) = image.debug_file() {
             module["symbolFilePath"] = debug_file.display().to_string().into();
         } else if debug_information {
             module["symbolFilePath"] = image.path().display().to_string().into();
         }
+
         let range = image.address_range();
         let bias = record.module.load_bias;
         module["addressRange"] = format!(
@@ -314,6 +343,7 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         )
         .into();
     }
+
     module
 }
 

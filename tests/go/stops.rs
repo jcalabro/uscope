@@ -14,6 +14,7 @@ pub async fn integer(scenario: &Scenario, text: &str) -> Option<i128> {
     else {
         panic!("{text}: not a value");
     };
+
     match value.state {
         VariableState::Available {
             value: VariableValue::Scalar(ScalarValue::Signed(value)),
@@ -37,6 +38,7 @@ pub async fn address(scenario: &Scenario, text: &str) -> Option<u64> {
     else {
         panic!("{text}: not a value");
     };
+
     match value.state {
         VariableState::Available {
             value: VariableValue::Address(address),

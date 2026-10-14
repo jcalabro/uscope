@@ -34,6 +34,7 @@ impl Trace {
             self.lines.pop_front();
             self.dropped += 1;
         }
+
         self.lines.push_back(line);
     }
 
@@ -57,9 +58,11 @@ pub enum FailureKind {
     /// The debugger disagreed with the truth, broke its protocol, hung, or
     /// panicked: write a red-first test outside the simulator, then fix.
     Debugger,
+
     /// The run needed something the simulation does not model: probe the
     /// real behavior, add the rule with its conformance test, then model it.
     ModelGap,
+
     /// The simulator broke its own invariants or panicked: fix the simulator.
     Simulator,
 }
@@ -78,9 +81,11 @@ impl fmt::Display for FailureKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub kind: FailureKind,
+
     /// The oracle or check that failed.
     pub check: &'static str,
     pub message: String,
+
     /// The action at which the run failed.
     pub step: u64,
 }
@@ -148,6 +153,7 @@ fn without_numbers(text: &str) -> String {
             shape.push(next);
         }
     }
+
     shape
 }
 
@@ -179,6 +185,7 @@ mod tests {
                 ),
             )
         };
+
         assert_eq!(
             hit(1004, 0x7fff_f7ff_7620, 0).signature(),
             hit(2013, 0x40_1334, 17).signature()
@@ -191,6 +198,7 @@ mod tests {
         let stop = |reason: &str| {
             Failure::debugger("protocol", format!("stop 7 reports {reason}")).signature()
         };
+
         assert_eq!(
             stop("Exception(ExceptionInfo { signal: 11 })"),
             stop("Exception(ExceptionInfo { signal: 5 })")

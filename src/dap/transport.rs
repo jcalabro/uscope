@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrit
 
 /// The largest message body accepted; a larger one ends the session.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+
 /// The largest header block accepted.
 const MAX_HEADER: usize = 8 * 1024;
 
@@ -13,16 +14,22 @@ const MAX_HEADER: usize = 8 * 1024;
 pub enum TransportError {
     #[error("the connection closed in the middle of a message")]
     Truncated,
+
     #[error("a message header has no Content-Length")]
     MissingLength,
+
     #[error("invalid Content-Length {0:?}")]
     InvalidLength(String),
+
     #[error("a {0}-byte message exceeds the {MAX_FRAME}-byte limit")]
     TooLarge(usize),
+
     #[error("a message header exceeds {MAX_HEADER} bytes")]
     HeaderTooLarge,
+
     #[error("malformed message header line {0:?}")]
     MalformedHeader(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -31,6 +38,7 @@ pub enum TransportError {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Frame {
     pub body: Vec<u8>,
+
     /// Whether the header carried `Origin`, which only a web browser sends.
     pub origin: bool,
 }
@@ -58,6 +66,7 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
                 Err(TransportError::Truncated)
             };
         }
+
         header_bytes += read;
         if line.last() != Some(&b'\n') {
             return Err(if header_bytes > MAX_HEADER {
@@ -66,6 +75,7 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
                 TransportError::Truncated
             });
         }
+
         let text = String::from_utf8_lossy(&line);
         let text = text.trim_end_matches(['\r', '\n']);
         if text.is_empty() {
@@ -74,8 +84,10 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
                 header_bytes = 0;
                 continue;
             }
+
             break;
         }
+
         let (name, value) = text
             .split_once(':')
             .ok_or_else(|| TransportError::MalformedHeader(text.to_owned()))?;
@@ -84,6 +96,7 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
             if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(TransportError::InvalidLength(value.to_owned()));
             }
+
             let parsed = value
                 .parse::<usize>()
                 .map_err(|_| TransportError::InvalidLength(value.to_owned()))?;
@@ -92,10 +105,12 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
             origin = true;
         }
     }
+
     let length = length.ok_or(TransportError::MissingLength)?;
     if length > MAX_FRAME {
         return Err(TransportError::TooLarge(length));
     }
+
     let mut body = vec![0; length];
     match reader.read_exact(&mut body).await {
         Ok(_) => Ok(Some(Frame { body, origin })),
@@ -162,6 +177,7 @@ mod tests {
                     .map_err(|error| error.to_string());
                 assert_eq!(&actual, expected, "split at {split}");
             }
+
             feeder.await.expect("feeder");
         }
     }
@@ -228,6 +244,7 @@ mod tests {
                 String::from_utf8_lossy(bytes)
             );
         }
+
         let long = format!("X-Padding: {}\r\n", "x".repeat(MAX_HEADER));
         assert_eq!(
             read_all(long.as_bytes()).await[0],

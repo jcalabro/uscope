@@ -42,6 +42,7 @@ use terminal::{
 pub struct Renderers {
     pub stdout: Renderer,
     pub stderr: Renderer,
+
     /// Whether stdout accepts cursor-control sequences.
     pub stdout_control: bool,
 }
@@ -159,6 +160,7 @@ pub enum DisassemblySyntax {
     /// Intel syntax: destination first, `qword ptr [rbp-0x8]`.
     #[default]
     Intel,
+
     /// AT&T syntax as GNU tools print it: source first, `-0x8(%rbp)`.
     Att,
 }
@@ -194,6 +196,7 @@ enum Control {
 enum OnError {
     /// Stop the script and fail the session.
     Abort,
+
     /// Report the error and read the next command.
     Report,
 }
@@ -225,24 +228,32 @@ pub struct Cli {
     syntax: AssemblySyntax,
     launch: LaunchSettings,
     views: std::sync::Mutex<ViewSources>,
+
     /// The breakpoints an interactive session keeps for the next one.
     kept: std::sync::OnceLock<std::sync::Mutex<saved::Kept>>,
+
     /// The terminal's width and height as the line editor last measured
     /// them, or 0.
     columns: std::sync::atomic::AtomicUsize,
     rows: std::sync::atomic::AtomicUsize,
+
     /// The exceptions that stop, as `catch` last chose them.
     exceptions: std::sync::Mutex<uscope::ExceptionStops>,
+
     /// The expressions every stop prints.
     displays: std::sync::Mutex<stops::Displays>,
+
     /// The values the last stops showed, which a stop marks changes from.
     changes: std::sync::Mutex<stops::Changes>,
+
     /// What completion knows of the loaded code and the selected frame.
     completion_code: std::sync::Mutex<Option<complete::Code>>,
     completion_names: std::sync::Mutex<Option<complete::Names>>,
+
     /// Source files lexed for highlighting, by path, with when each was
     /// modified.
     highlights: std::sync::Mutex<Highlights>,
+
     /// The program's profile, recording or recorded, boxed as a profile is
     /// large.
     profiling: std::sync::Mutex<Box<profile::Profiling>>,
@@ -324,6 +335,7 @@ impl Cli {
             ),
             command => Some(command.to_owned()),
         };
+
         let tall = rows != 0
             && output
                 .split('\n')
@@ -339,11 +351,13 @@ impl Cli {
         let Some(pager) = pager.filter(|_| tall) else {
             return Ok(emit(output)?);
         };
+
         let text = format!("{output}\n");
         let shown = tokio::task::spawn_blocking(move || page(&pager, &text)).await?;
         if matches!(shown, Ok(true)) {
             return Ok(());
         }
+
         self.warn("the pager could not run; set [ui] pager, or PAGER");
         Ok(emit(output)?)
     }
@@ -381,6 +395,7 @@ impl Cli {
             views.discovered = discovered;
             views.session = session;
         }
+
         warnings.extend(self.reload_views().await);
         warnings.extend(
             self.debugger
@@ -398,10 +413,12 @@ impl Cli {
     pub async fn debug_information_warnings(&self) -> Vec<String> {
         let program = self.debugger.module_image();
         let mut warnings = crate::present::debug_information::warnings(program, true);
+
         // A program yet to run has loaded nothing else.
         let Ok(loaded) = self.debugger.loaded_modules().await else {
             return warnings;
         };
+
         for record in loaded.modules.iter() {
             if let Ok(image) = self.debugger.loaded_module_image(record.module.id).await
                 && image.id() != program.id()
@@ -409,6 +426,7 @@ impl Cli {
                 warnings.extend(crate::present::debug_information::warnings(&image, false));
             }
         }
+
         warnings
     }
 
@@ -419,6 +437,7 @@ impl Cli {
         for warning in &warnings {
             self.warn(&format!("views: {warning}"));
         }
+
         warnings.is_empty()
     }
 
@@ -437,13 +456,16 @@ impl Cli {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+
         let mut kernels = Vec::<uscope::view_files::KernelFile>::new();
+
         // Files in one directory share the kernels beside them.
         for kernel in sources.iter().flat_map(|file| &file.kernels) {
             if !kernels.iter().any(|loaded| loaded.path == kernel.path) {
                 kernels.push(kernel.clone());
             }
         }
+
         let files = sources
             .iter()
             .map(|file| (file.name.as_str(), file.text.as_str()))
@@ -454,6 +476,7 @@ impl Cli {
                 renderers.push(renderer.clone());
             }
         }
+
         match self.debugger.load_views(&files, &kernels, &renderers).await {
             Ok(errors) => errors.iter().map(ToString::to_string).collect(),
             Err(error) => vec![error.to_string()],
@@ -492,11 +515,13 @@ impl Cli {
         for warning in self.debug_information_warnings().await {
             self.warn(&warning);
         }
+
         self.load_views(&self.settings.root, &args.views).await;
         self.apply_signal_settings().await?;
         if self.settings.config.step.runtime == config::StepRuntime::Enter {
             self.debugger.set_step_into_runtime(true).await?;
         }
+
         // Scripts behave the same in every checkout, so only a session at
         // a terminal keeps its breakpoints.
         if !args.batch
@@ -516,6 +541,7 @@ impl Cli {
                 return Ok(());
             }
         }
+
         for path in &args.command_files {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("failed to read command file {}", path.display()))?;
@@ -526,6 +552,7 @@ impl Cli {
                 }
             }
         }
+
         for (index, command) in args.commands.iter().enumerate() {
             let label = format!("--eval #{}", index + 1);
             if !self.run_scripted(command, label, OnError::Abort).await? {
@@ -542,11 +569,14 @@ impl Cli {
                     && self.debugger.core_dump().is_none();
                 return repl::run(self, confirm).await;
             }
+
             return self.run_stdin(OnError::Report).await;
         }
+
         if args.command_files.is_empty() && args.commands.is_empty() {
             return self.run_stdin(OnError::Abort).await;
         }
+
         Ok(())
     }
 
@@ -556,12 +586,15 @@ impl Cli {
             let Some(code) = uscope::signal_named(name) else {
                 bail!("unknown signal '{name}' in [signals]");
             };
+
             let mut policy = self.debugger.signal_policy(code).await?;
             for action in actions.actions() {
                 commands::apply_signal_action(&mut policy, action)?;
             }
+
             self.debugger.set_signal_policy(code, policy).await?;
         }
+
         Ok(())
     }
 
@@ -583,6 +616,7 @@ impl Cli {
                     )
                 ))?;
             }
+
             // Modules not proven to match the dump are always reported.
             for warning in format::core_module_warnings(core) {
                 self.warn(&warning);
@@ -593,6 +627,7 @@ impl Cli {
             } else {
                 "debugging"
             };
+
             emit(&format!(
                 "{} {}{}",
                 stdout.paint(Role::Success, action),
@@ -602,6 +637,7 @@ impl Cli {
                     .unwrap_or_default()
             ))?;
         }
+
         Ok(())
     }
 
@@ -617,6 +653,7 @@ impl Cli {
                 break;
             }
         }
+
         Ok(())
     }
 
@@ -656,17 +693,20 @@ impl Cli {
         if line.is_empty() || line.starts_with('#') {
             return Ok(true);
         }
+
         match self.execute(line).await? {
             Control::Continue(output) => {
                 if !output.is_empty() {
                     self.show(&output).await?;
                 }
+
                 Ok(true)
             }
             Control::ClearScreen => {
                 if !self.renderers.stdout_control {
                     bail!("cannot clear screen: stdout is not an ANSI terminal");
                 }
+
                 let mut stdout = io::stdout().lock();
                 stdout.write_all(b"\x1b[2J\x1b[H")?;
                 stdout.flush()?;
@@ -687,6 +727,7 @@ impl Cli {
             source_paths: source_paths.clone(),
             ..saved::Kept::default()
         };
+
         match saved::read(&path) {
             Err(message) => {
                 self.warn(&format!(
@@ -703,6 +744,7 @@ impl Cli {
                             if let Some(text) = &entry.line_text {
                                 kept.line_texts.insert(entry.location.clone(), text.clone());
                             }
+
                             if changed {
                                 self.warn(&format!(
                                     "{} changed since it was saved",
@@ -719,6 +761,7 @@ impl Cli {
                         }
                     }
                 }
+
                 let mut displays = 0;
                 for display in &contents.displays {
                     match self.layout(commands::Command::Print, &display.format) {
@@ -735,6 +778,7 @@ impl Cli {
                         )),
                     }
                 }
+
                 kept.written = contents;
                 let restored = [(restored, "breakpoint"), (displays, "display")]
                     .into_iter()
@@ -750,6 +794,7 @@ impl Cli {
                 }
             }
         }
+
         let _ = self.kept.set(std::sync::Mutex::new(kept));
     }
 
@@ -778,10 +823,12 @@ impl Cli {
             pending: true,
             ..uscope::BreakpointOptions::default()
         };
+
         let breakpoint = self.debugger.add_breakpoint_with(spec, options).await?;
         let Some(text) = &entry.line_text else {
             return Ok(false);
         };
+
         Ok(self
             .current_line_text(&breakpoint, source_paths)
             .await
@@ -797,6 +844,7 @@ impl Cli {
         if !matches!(breakpoint.spec, uscope::BreakpointSpec::Source { .. }) {
             return None;
         }
+
         let placed = self.placed(breakpoint).await;
         let (path, line) = placed.first()?.source.clone()?;
         saved::line_text(source_paths, &path, line.get())
@@ -808,6 +856,7 @@ impl Cli {
         let Some(kept) = self.kept.get() else {
             return;
         };
+
         if kept
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -815,9 +864,11 @@ impl Cli {
         {
             return;
         }
+
         let Ok(snapshot) = self.debugger.snapshot().await else {
             return;
         };
+
         let root = &self.settings.root;
         let source_paths = kept
             .lock()
@@ -829,6 +880,7 @@ impl Cli {
             let Some(location) = saved::location(&breakpoint.spec, root) else {
                 continue;
             };
+
             let known = kept
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -845,10 +897,13 @@ impl Cli {
                         .line_texts
                         .insert(location, text.clone());
                 }
+
                 text
             };
+
             entries.extend(saved::saved(breakpoint, root, line_text));
         }
+
         let (path, error) = {
             let mut kept = kept
                 .lock()
@@ -868,9 +923,11 @@ impl Cli {
                     })
                     .collect(),
             };
+
             if contents == kept.written {
                 return;
             }
+
             match saved::write(&kept.path, &contents) {
                 Ok(()) => {
                     kept.written = contents;
@@ -882,6 +939,7 @@ impl Cli {
                 }
             }
         };
+
         self.warn(&format!(
             "cannot save breakpoints to {}: {error}; none are saved for the rest of the session",
             self.renderers.stderr.path(&path)
@@ -926,6 +984,7 @@ fn page(pager: &str, text: &str) -> io::Result<bool> {
         // A pager that quits early closes its input, which is no error.
         let _ = input.write_all(text.as_bytes());
     }
+
     Ok(wait_for_child(&mut child)?.is_none_or(|status| status.code() != Some(127)))
 }
 

@@ -48,6 +48,7 @@ struct Stop {
     threads: Vec<(ThreadId, ThreadActivity, Backtrace)>,
     tasks: Vec<TaskSnapshot>,
     gaps: Vec<String>,
+
     /// Each suspended task's backtrace.
     suspended: Vec<(u64, Backtrace)>,
 }
@@ -66,6 +67,7 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         return Ok(None);
     };
+
     let mut threads = Vec::new();
     for thread in snapshot.threads.iter() {
         let activity = thread
@@ -83,6 +85,7 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
             .map_err(|error| failed(&format!("thread {}'s backtrace", thread.id), error))?;
         threads.push((thread.id, activity, trace));
     }
+
     let mut tasks = Vec::new();
     let mut gaps = Vec::new();
     let mut from = None;
@@ -103,6 +106,7 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
             None => break,
         }
     }
+
     let mut suspended = Vec::new();
     for task in tasks.iter().filter(|task| {
         matches!(task.state, TaskState::Blocked | TaskState::Runnable) && task.thread.is_none()
@@ -111,6 +115,7 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
         if task.detail.as_deref() == Some("queued in the blocking pool") {
             continue;
         }
+
         let trace = handle
             .at(StopContext {
                 stop: stop_id,
@@ -122,6 +127,7 @@ async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
             .map_err(|error| failed(&format!("task {}'s backtrace", task.id.number), error))?;
         suspended.push((task.id.number, trace));
     }
+
     Ok(Some(Stop {
         threads,
         tasks,
@@ -141,10 +147,12 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
     }) {
         return Err(format!("the tasks are incomplete: {gap}"));
     }
+
     let mut ids = BTreeSet::new();
     if let Some(task) = stop.tasks.iter().find(|task| !ids.insert(task.id)) {
         return Err(format!("task {} is listed twice", task.id.number));
     }
+
     for (thread, activity, trace) in &stop.threads {
         match activity {
             ThreadActivity::Unknown(reason) => {
@@ -159,6 +167,7 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
                         task.number, stop.gaps
                     ));
                 }
+
                 // Its frames reach tokio's dispatch, unless the thread is in
                 // glibc's clone3, starting another, which ends its unwind
                 // information before the syscall.
@@ -173,6 +182,7 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
                     }
                     _ => false,
                 };
+
                 if !in_clone3
                     && !trace
                         .frames
@@ -187,12 +197,15 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
             }
             ThreadActivity::Idle | ThreadActivity::Outside => {}
         }
+
         check_driven(trace).map_err(|problem| format!("thread {thread}: {problem}: {trace:#?}"))?;
     }
+
     for task in stop.tasks.iter().filter(|task| !task.internal) {
         let Some(thread) = task.thread else {
             continue;
         };
+
         let runs = stop.threads.iter().any(|(id, activity, _)| {
             *id == thread
                 && matches!(activity, ThreadActivity::Task { task: on, .. } if *on == task.id)
@@ -204,9 +217,11 @@ fn check_stop(stop: &Stop) -> Result<(), String> {
             ));
         }
     }
+
     for (task, trace) in &stop.suspended {
         check_awaits(trace).map_err(|problem| format!("task {task}: {problem}: {trace:#?}"))?;
     }
+
     Ok(())
 }
 
@@ -221,14 +236,17 @@ fn check_awaits(trace: &Backtrace) -> Result<(), String> {
     ) {
         return Err(format!("its awaits end at {}", trace.termination));
     }
+
     let mut objects = BTreeSet::new();
     for frame in trace.frames.iter() {
         let FrameKind::Async { object } = frame.kind else {
             continue;
         };
+
         let Some(function) = &frame.function else {
             return Err(format!("frame {} names no function", frame.level));
         };
+
         if !objects.insert((object, function.id)) {
             return Err(format!(
                 "frame {} repeats the future at {object}",
@@ -236,6 +254,7 @@ fn check_awaits(trace: &Backtrace) -> Result<(), String> {
             ));
         }
     }
+
     Ok(())
 }
 
@@ -248,16 +267,19 @@ fn check_driven(trace: &Backtrace) -> Result<(), String> {
             frame.role == CodeRole::RuntimeInternal && frame.segment != StackSegment::Future
         })
     };
+
     let mut objects = BTreeSet::new();
     for (index, frame) in trace.frames.iter().enumerate() {
         if frame.segment != StackSegment::Future {
             continue;
         }
+
         match frame.kind {
             FrameKind::Async { object } => {
                 let Some(function) = &frame.function else {
                     return Err(format!("frame {index} names no function"));
                 };
+
                 if !objects.insert((object, function.id)) {
                     return Err(format!("frame {index} repeats the future at {object}"));
                 }
@@ -265,6 +287,7 @@ fn check_driven(trace: &Backtrace) -> Result<(), String> {
             FrameKind::Awaited { .. } => {}
             kind => return Err(format!("frame {index} of a future is {kind:?}")),
         }
+
         let next = trace.frames.get(index + 1);
         if next.is_none_or(|next| next.segment != StackSegment::Future) && !driver(next) {
             return Err(format!(
@@ -272,6 +295,7 @@ fn check_driven(trace: &Backtrace) -> Result<(), String> {
             ));
         }
     }
+
     for future in trace.unfollowed.iter() {
         let at = usize::try_from(future.driver.get()).expect("a level fits usize");
         if !driver(trace.frames.get(at)) {
@@ -280,6 +304,7 @@ fn check_driven(trace: &Backtrace) -> Result<(), String> {
             ));
         }
     }
+
     Ok(())
 }
 
@@ -293,6 +318,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
     let mut scenario = checked("tokio-workers-o0");
     scenario.add_breakpoint("task_reached").await;
     scenario.run_to_stop().await;
+
     // The first task to arrive may stop every thread before any other task
     // has suspended, so stop at each task's arrival until one has: the
     // eight tasks all arrive before the program goes on.
@@ -304,6 +330,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
                 .any(|frame| matches!(frame.kind, FrameKind::Async { .. }))
         })
     };
+
     let mut stop = read(scenario.handle())
         .await
         .expect("the stop")
@@ -312,12 +339,14 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
         if suspended_in_async(&stop) {
             break;
         }
+
         scenario.resume_to_stop().await;
         stop = read(scenario.handle())
             .await
             .expect("the stop")
             .expect("stopped");
     }
+
     check_stop(&stop).expect("the stop holds");
     let (index, task) = stop
         .threads
@@ -376,9 +405,11 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
             frames: frames.into(),
             ..trace.clone()
         };
+
         sabotaged.suspended.push((0, trace));
         sabotaged
     };
+
     let repeated = sabotage(&|frames| frames.push(frames[at].clone()));
     let unnamed = sabotage(&|frames| frames[at].function = None);
     for (fault, sabotaged) in [
@@ -393,6 +424,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
     ] {
         assert!(check_stop(&sabotaged).is_err(), "{fault}");
     }
+
     scenario.shutdown().await;
 }
 
@@ -408,6 +440,7 @@ async fn the_checks_fail_on_a_future_nothing_drives() {
         .expect("the stop")
         .expect("stopped");
     check_stop(&stop).expect("the stop holds");
+
     // The thread that blocks on the runtime drives the future it was given.
     let (driving, last) = stop
         .threads
@@ -426,6 +459,7 @@ async fn the_checks_fail_on_a_future_nothing_drives() {
         change(&mut sabotaged.threads[driving].2);
         sabotaged
     };
+
     let undriven = thread_sabotage(&|trace| {
         let mut frames = trace.frames.to_vec();
         frames[last + 1].role = CodeRole::Ordinary;
@@ -440,5 +474,6 @@ async fn the_checks_fail_on_a_future_nothing_drives() {
     for (fault, sabotaged) in [("undriven", undriven), ("misplaced", misplaced)] {
         assert!(check_stop(&sabotaged).is_err(), "{fault}");
     }
+
     scenario.shutdown().await;
 }

@@ -17,9 +17,11 @@ use super::{
     RuntimeModel, RuntimeSignals, RuntimeStop, RuntimeTask, StartedTask, StoredValue, TaskContext,
     TaskLabels, TaskPage, TaskRef, TaskStarter, ThreadActivity, Unbound,
 };
+
 use crate::unwind::{
     DwarfRegister, R12, RAX, RBP, RDI, RETURN_ADDRESS as RIP, RSI, RSP, RegisterFile,
 };
+
 use crate::{
     AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress,
 };
@@ -28,15 +30,20 @@ use crate::{
 /// the same way wherever its debug information binds, and says it is
 /// unverified.
 const VERIFIED: (u64, u64) = (1, 27);
+
 /// What Go calls its tasks.
 pub(super) const TASK_NOUN: (&str, &str) = ("goroutine", "goroutines");
+
 pub(super) use exceptions::EXCEPTION_FILTERS;
+
 /// Linux's signal for urgent socket data, which the runtime preempts with.
 const SIGURG: i32 = 23;
+
 /// Linux's signals for faults, which the runtime turns into panics.
 const SIGBUS: i32 = 7;
 const SIGFPE: i32 = 8;
 const SIGSEGV: i32 = 11;
+
 /// How the runtime uses signals. A fault in Go code becomes a panic, and
 /// the runtime preempts with SIGURG, which may arrive whenever it still
 /// wants to preempt.
@@ -44,17 +51,22 @@ const SIGNALS: RuntimeSignals = RuntimeSignals {
     deferrable: &[SIGURG],
     handled: &[SIGBUS, SIGFPE, SIGSEGV],
 };
+
 /// Why goroutines cannot be read from a program without debug information.
 const STRIPPED: &str = "the program has no debug information describing Go's runtime";
+
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
+
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
 /// make the debugger read without end.
 const MAX_GOROUTINES: u64 = 1 << 24;
+
 /// How many entries of `allgs` a page of tasks scans for each task it may
 /// hold, and at least, whatever its limit.
 const SCAN_PER_TASK: u64 = 4;
 const MIN_SCAN: u64 = 256;
+
 /// The most profiler labels read from one goroutine.
 const MAX_LABELS: u64 = 64;
 
@@ -77,6 +89,7 @@ pub fn detect(
             })
         });
     };
+
     Some(
         GoRuntime::bind(image, version)
             .map(|model| Arc::new(model) as Arc<dyn RuntimeModel>)
@@ -106,31 +119,40 @@ fn version(producer: &str) -> Option<(u64, u64, Arc<str>)> {
 struct GoRuntime {
     image: Arc<dyn RuntimeImage + Send + Sync>,
     layout: Layout,
+
     /// Why every result may be wrong: a release the contract was not
     /// checked against.
     unverified: Option<Arc<str>>,
+
     /// Where the first thread runs before its thread pointer is set. A
     /// thread `clone` makes starts with the thread pointer of its own m,
     /// whose g slot is empty until the thread sets it.
     starting: Vec<AddressRange<ImageAddress>>,
+
     /// The functions whose goroutines are the runtime's own work, with
     /// those that are the program's despite being in the runtime.
     internal: Internal,
+
     /// The runtime's names for goroutine statuses and wait reasons, which
     /// are static data read at the first stop that needs them.
     names: OnceLock<Names>,
+
     /// The functions that report panics and fatal errors, and how what
     /// they report is laid out.
     hooks: exceptions::Hooks,
     exceptions: Result<exceptions::Layout, Missing>,
+
     /// How interface values hold their dynamic values.
     interfaces: Result<types::Interfaces, Missing>,
+
     /// `runtime.copystack(gp *g, newsize uintptr)`, which moves a
     /// goroutine's stack to grow or shrink it.
     copystack: Option<ImageAddress>,
+
     /// `runtime.newproc1`, which makes the goroutine a `go` statement
     /// starts and returns it.
     newproc1: Option<ImageAddress>,
+
     /// The functions cgo calls between Go and C through, each with the
     /// register that holds what it calls: `runtime.cgocall(fn, arg)` calls
     /// C, and `crosscall2(fn, a, n, ctxt)` the Go that C calls.
@@ -145,6 +167,7 @@ impl GoRuntime {
         if (major, minor) < OLDEST {
             return Err(format!("{release}'s runtime is too old to read").into());
         }
+
         let unverified = ((major, minor) != VERIFIED).then(|| {
             format!(
                 "{release} is unverified; its runtime is read as go{}.{}'s",
@@ -152,6 +175,7 @@ impl GoRuntime {
             )
             .into()
         });
+
         // An assembly function's symbol carries its ABI.
         let code = |name: &str| {
             let symbol = image
@@ -162,6 +186,7 @@ impl GoRuntime {
                 end: ImageAddress::new(symbol.address.get().checked_add(symbol.size?)?),
             })
         };
+
         let starting = code("runtime.settls").into_iter().collect();
 
         Ok(Self {
@@ -228,10 +253,12 @@ impl GoRuntime {
                 format!("runtime.allglen is {length}, beyond what runtime.allgs holds").into(),
             );
         }
+
         let end = start.saturating_add(count).min(length);
         let Some(read) = end.checked_sub(start).filter(|read| *read > 0) else {
             return Ok(Vec::new());
         };
+
         let mut bytes = vec![0; usize::try_from(read * 8).map_err(|_| "allgs is too large")?];
         if !stop.read(
             VirtualAddress::new(array.wrapping_add(start * 8)),
@@ -239,6 +266,7 @@ impl GoRuntime {
         ) {
             return Err(format!("runtime.allgs at {array:#x} is unreadable").into());
         }
+
         Ok(bytes
             .as_chunks::<8>()
             .0
@@ -260,6 +288,7 @@ impl GoRuntime {
             read_unsigned(stop, VirtualAddress::new(g.wrapping_add(offset)), size)
                 .ok_or_else(unreadable)
         };
+
         let word = |offset| field(offset, 8);
         let status = field(layout.status, 4)?;
         let statuses = &layout.statuses;
@@ -267,7 +296,9 @@ impl GoRuntime {
         if base == statuses.dead || Some(base) == statuses.dead_extra {
             return Ok(None);
         }
+
         let number = word(layout.goid)?;
+
         // A goroutine is on a thread while its m runs it, or runs the
         // runtime's code for it, as when it is being parked or scheduled.
         let m = word(layout.m)?;
@@ -279,9 +310,11 @@ impl GoRuntime {
                     || Arc::<str>::from(format!("the thread of goroutine {number} is unreadable")),
                 )
             };
+
             let procid = m_word(layout.m_procid)?;
             (procid != 0 && m_word(layout.m_curg)? == g).then(|| ThreadId::new(procid))
         };
+
         let state = if base == statuses.running || base == statuses.syscall {
             TaskState::Running
         } else if base == statuses.runnable || base == statuses.preempted {
@@ -296,6 +329,7 @@ impl GoRuntime {
         } else {
             TaskState::Unknown(format!("the goroutine's status {status:#x} is unknown").into())
         };
+
         // A waiting goroutine is described by why it waits, as the
         // runtime's own tracebacks do; any other by its status.
         let wait_reason = field(layout.wait_reason, 1)?;
@@ -312,9 +346,11 @@ impl GoRuntime {
                 .cloned()
                 .flatten()
         };
+
         let address = |value: u64| (value != 0).then(|| VirtualAddress::new(value));
         let on_thread = base == statuses.running || base == statuses.syscall;
         let entry = word(layout.startpc)?;
+
         // A parked goroutine resumes after the call that saved its
         // registers, except one that never ran, which begins at its entry.
         let resume = word(layout.sched_pc)?;
@@ -322,6 +358,7 @@ impl GoRuntime {
             address,
             after_call: resume != entry,
         });
+
         // A goroutine is created by a call to the runtime. The main
         // goroutine is the runtime's start-up's, which Go's traceback does
         // not name.
@@ -378,6 +415,7 @@ impl RuntimeModel for GoRuntime {
             .unwrap_or(u64::MAX)
             .saturating_mul(SCAN_PER_TASK)
             .max(MIN_SCAN);
+
         // One more than the scan shows whether any are left.
         let allgs = match self.allgs_from(stop, start, scanned.saturating_add(1)) {
             Ok(allgs) => allgs,
@@ -386,7 +424,9 @@ impl RuntimeModel for GoRuntime {
                 return page;
             }
         };
+
         let names = self.names(stop);
+
         // Without `g.labels`, every goroutine's labels are unknown, which
         // the page says once.
         let labels = self.layout.labels.as_ref();
@@ -394,11 +434,13 @@ impl RuntimeModel for GoRuntime {
             page.gaps
                 .push(format!("profiler labels are not read: {reason}").into());
         }
+
         for (index, &g) in (start..).zip(&allgs) {
             if page.value.tasks.len() == limit || index - start == scanned {
                 page.value.next = Some(index);
                 break;
             }
+
             match self.goroutine(stop, names, g) {
                 Ok(Some(task)) if program_only && task.internal => {}
                 Ok(Some(mut task)) => {
@@ -410,12 +452,14 @@ impl RuntimeModel for GoRuntime {
                             ),
                         }
                     }
+
                     page.value.tasks.push(task);
                 }
                 Ok(None) => {}
                 Err(reason) => page.gaps.push(reason),
             }
         }
+
         page
     }
 
@@ -436,6 +480,7 @@ impl RuntimeModel for GoRuntime {
         let Some((g, task)) = self.find(stop, task)? else {
             return Ok(None);
         };
+
         // A goroutine that runs, or makes a system call, has its registers
         // on its thread; any other saved them when it last stopped running.
         if task.state == TaskState::Running {
@@ -444,6 +489,7 @@ impl RuntimeModel for GoRuntime {
                 .map(|thread| Some(TaskContext::OnThread(thread)))
                 .ok_or_else(|| format!("the thread running goroutine {number} is unknown").into());
         }
+
         let word = |offset: u64| {
             read_unsigned(stop, VirtualAddress::new(g.wrapping_add(offset)), 8).ok_or_else(|| {
                 Arc::<str>::from(format!(
@@ -451,6 +497,7 @@ impl RuntimeModel for GoRuntime {
                 ))
             })
         };
+
         let (pc, sp, bp) = (
             word(layout.sched_pc)?,
             word(layout.sched_sp)?,
@@ -459,6 +506,7 @@ impl RuntimeModel for GoRuntime {
         if pc == 0 || sp == 0 {
             return Err(format!("goroutine {number} has no saved registers").into());
         }
+
         // A parked goroutine's frames are on its own stack, which a
         // corrupted record would have the walk read anywhere.
         let stack = self.stack(stop, g)?;
@@ -470,11 +518,14 @@ impl RuntimeModel for GoRuntime {
             )
             .into());
         }
+
         let mut registers = RegisterFile::new([(RIP, pc), (RSP, sp)]);
+
         // A saved frame pointer of zero is unknown, not a frame at zero.
         if bp != 0 {
             registers.set(RBP, bp);
         }
+
         Ok(Some(TaskContext::Saved {
             registers,
             after_call: task.resume.is_none_or(|resume| resume.after_call),
@@ -489,6 +540,7 @@ impl RuntimeModel for GoRuntime {
         let Some(gs) = self.thread_gs(stop, thread)? else {
             return Ok(Vec::new());
         };
+
         let mut stacks = Vec::new();
         for (g, segment) in [
             (gs.curg, StackSegment::Task),
@@ -498,11 +550,13 @@ impl RuntimeModel for GoRuntime {
             if g == 0 {
                 continue;
             }
+
             let stack = self.stack(stop, g)?;
             if !stack.is_empty() {
                 stacks.push((stack, segment));
             }
         }
+
         Ok(stacks)
     }
 
@@ -527,6 +581,7 @@ impl RuntimeModel for GoRuntime {
         if !self.allgs(stop)?.contains(&g) {
             return Err(format!("copystack moves {g:#x}, which is no goroutine").into());
         }
+
         let names = self.names(stop);
         self.goroutine(stop, names, g)?
             .map(|task| task.number)
@@ -557,6 +612,7 @@ impl RuntimeModel for GoRuntime {
         if !self.allgs(stop)?.contains(&g) {
             return Err(format!("newproc1 returns {g:#x}, which is no goroutine").into());
         }
+
         let names = self.names(stop);
         self.goroutine(stop, names, g)?
             .map(|task| {
@@ -645,6 +701,7 @@ impl RuntimeModel for GoRuntime {
                 .get(number)
                 .ok_or_else(|| Arc::<str>::from(format!("the frame's {name} is unknown")))
         };
+
         let switch = match name.as_deref() {
             Some("runtime.systemstack") => Switch::Returns,
             Some("runtime.asmcgocall") => {
@@ -667,15 +724,18 @@ impl RuntimeModel for GoRuntime {
                     VirtualAddress::new(gs.m.wrapping_add(self.threads()?.m_vdso_sp)),
                 )
                 .ok_or("the thread's m is unreadable")?;
+
                 // A signal's handler may make the call while the call it
                 // interrupted has published its own.
                 if vdso_sp == 0 || !self.stack(stop, gs.g)?.contains(&r12) {
                     return Ok(Crossing::Stay);
                 }
+
                 let mut registers = frame.clone();
                 registers.set(RSP, r12);
                 return Ok(Crossing::Resume(registers));
             }
+
             // A new thread begins on the stack `clone` gives it, whose
             // address is still in rsi; the thread that made it goes on on
             // its own.
@@ -695,10 +755,12 @@ impl RuntimeModel for GoRuntime {
                 .into());
             }
         };
+
         let layout = self.goroutines()?;
         let gs = self
             .thread_gs(stop, thread)?
             .ok_or("the thread runs no goroutine")?;
+
         // Before a switch to the system stack, the frame is a call like any
         // other on the goroutine's stack, as one switching to a goroutine
         // is on the system stack until it has switched. The frame's own
@@ -711,19 +773,23 @@ impl RuntimeModel for GoRuntime {
             Switch::Returns | Switch::Abandons if !on_system => return Ok(Crossing::Stay),
             Switch::Returns | Switch::Abandons => {}
         }
+
         // A system stack with no goroutine begins at the switch.
         if gs.curg == 0 {
             return Ok(Crossing::Outermost);
         }
+
         self.listed(stop, gs.curg)?;
         let read = |offset: u64| {
             word(stop, VirtualAddress::new(gs.curg.wrapping_add(offset))).ok_or_else(|| {
                 Arc::<str>::from(format!("the goroutine at {:#x} is unreadable", gs.curg))
             })
         };
+
         if read(layout.m)? != gs.m {
             return Err("the thread's goroutine is running on another thread".into());
         }
+
         let (saved_pc, sp, bp) = (
             read(layout.sched_pc)?,
             read(layout.sched_sp)?,
@@ -732,10 +798,12 @@ impl RuntimeModel for GoRuntime {
         if sp == 0 {
             return Err("the thread's goroutine saved no registers when it switched".into());
         }
+
         let mut registers = RegisterFile::new([(RSP, sp)]);
         if bp != 0 {
             registers.set(RBP, bp);
         }
+
         Ok(match switch {
             Switch::Returns => {
                 registers.set(RIP, pc);
@@ -776,13 +844,16 @@ impl GoRuntime {
         if !self.stack(stop, gs.g0)?.contains(&sp) {
             return Ok(Crossing::Stay);
         }
+
         if !after_call {
             return Err("asmcgocall is between a goroutine's stack and the system stack".into());
         }
+
         let read = |address: u64, what: &str| {
             word(stop, VirtualAddress::new(address))
                 .ok_or_else(|| Arc::<str>::from(format!("asmcgocall's {what} is unreadable")))
         };
+
         let g = read(sp.wrapping_add(8), "goroutine")?;
         let saved = read(sp, "saved stack pointer")?;
         let caller = if g == 0 {
@@ -798,6 +869,7 @@ impl GoRuntime {
                     format!("asmcgocall's goroutine {g:#x} was {saved:#x} deep in no stack it has")
                 })?
         };
+
         let mut registers = frame.clone();
         registers.set(RSP, caller);
         Ok(Crossing::Resume(registers))
@@ -822,6 +894,7 @@ impl GoRuntime {
         if system.contains(&sp) {
             return Ok(Crossing::Stay);
         }
+
         let layout = self.goroutines()?;
         let saved = word(
             stop,
@@ -833,6 +906,7 @@ impl GoRuntime {
                 format!("cgocallback's frame at {saved:#x} is not on the system stack").into(),
             );
         }
+
         let mut registers = frame.clone();
         registers.set(RSP, saved);
         Ok(Crossing::Resume(registers))
@@ -846,9 +920,11 @@ enum Switch {
     /// It switches to the system stack, and returns to its caller on the
     /// goroutine's stack once the function it runs there returns.
     Returns,
+
     /// It switches to the system stack and never returns; the goroutine
     /// resumes where it saved its registers.
     Abandons,
+
     /// It switches from the system stack to a goroutine's.
     Resumes,
 }
@@ -883,6 +959,7 @@ impl GoRuntime {
         {
             return Ok(Some((g, found)));
         }
+
         // An unreadable goroutine may be the one sought, so it is absent
         // only once every goroutine was read.
         let mut unreadable = None;
@@ -900,6 +977,7 @@ impl GoRuntime {
                 }
             }
         }
+
         unreadable.map_or(Ok(None), |reason| {
             Err(format!("goroutine {number} was not found, and {reason}").into())
         })
@@ -914,6 +992,7 @@ impl GoRuntime {
         let Some(gs) = self.thread_gs(stop, thread)? else {
             return Ok(ThreadActivity::Idle);
         };
+
         let (task, stack) = if gs.g == gs.g0 {
             (gs.curg, StackSegment::System)
         } else if gs.g == gs.gsignal {
@@ -921,9 +1000,11 @@ impl GoRuntime {
         } else {
             (gs.g, StackSegment::Task)
         };
+
         if task == 0 {
             return Ok(ThreadActivity::Idle);
         }
+
         self.listed(stop, task)?;
         let number = word(stop, VirtualAddress::new(task.wrapping_add(layout.goid)))
             .ok_or_else(|| format!("the thread's goroutine at {task:#x} is unreadable"))?;
@@ -947,6 +1028,7 @@ impl GoRuntime {
                 return Err("the thread is starting, before its goroutine is set".into());
             }
         }
+
         let offset = match threads.tls_g {
             ThreadLocal::Offset(offset) => offset,
             ThreadLocal::Slot(slot) => {
@@ -956,20 +1038,24 @@ impl GoRuntime {
                     .ok_or("the slot of the goroutine's place is unreadable")?
             }
         };
+
         let slot = VirtualAddress::new(pointer.wrapping_add_signed(offset));
         let g = word(stop, slot).ok_or("the thread's goroutine is unreadable")?;
         if g == 0 {
             return Ok(None);
         }
+
         let read = |address: u64| {
             word(stop, VirtualAddress::new(address)).ok_or_else(|| {
                 Arc::<str>::from(format!("the thread's goroutine at {g:#x} is unreadable"))
             })
         };
+
         let m = read(g.wrapping_add(threads.g_m))?;
         if m == 0 {
             return Err(format!("the thread's goroutine at {g:#x} has no m").into());
         }
+
         Ok(Some(ThreadGs {
             g,
             m,
@@ -1044,14 +1130,17 @@ impl Names {
             let Some(symbol) = runtime.image.symbol(name) else {
                 return Vec::new();
             };
+
             let Some(count) = symbol.size.map(|size| size / 16) else {
                 return Vec::new();
             };
+
             let base = stop.load_bias().wrapping_load(symbol.address).get();
             (0..count.min(256))
                 .map(|index| string(stop, VirtualAddress::new(base.wrapping_add(index * 16))))
                 .collect()
         };
+
         Self {
             statuses: strings("runtime.gStatusStrings"),
             wait_reasons: strings("runtime.waitReasonStrings"),
@@ -1077,6 +1166,7 @@ fn read_labels(stop: &dyn RuntimeStop, layout: &Labels, g: u64) -> Result<TaskLa
     if set == 0 {
         return Ok(Vec::new());
     }
+
     let layout = layout.set.as_ref().map_err(Arc::clone)?;
     let list = set.wrapping_add(layout.list);
     let (array, length) = word(stop, at(list))
@@ -1085,6 +1175,7 @@ fn read_labels(stop: &dyn RuntimeStop, layout: &Labels, g: u64) -> Result<TaskLa
     if length > MAX_LABELS {
         return Err(format!("{length} labels are more than {MAX_LABELS}").into());
     }
+
     (0..length)
         .map(|index| {
             let label = array.wrapping_add(index.wrapping_mul(layout.stride));
@@ -1092,6 +1183,7 @@ fn read_labels(stop: &dyn RuntimeStop, layout: &Labels, g: u64) -> Result<TaskLa
                 string(stop, at(label.wrapping_add(offset)))
                     .ok_or_else(|| Arc::<str>::from(format!("label {index} is unreadable")))
             };
+
             Ok((text(layout.key)?, text(layout.value)?))
         })
         .collect()

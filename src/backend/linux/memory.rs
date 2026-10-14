@@ -30,6 +30,7 @@ impl<P: InspectionOps> Controller<P> {
                 maximum: MAX_PUBLIC_MEMORY_READ,
             });
         }
+
         address
             .get()
             .checked_add(byte_count)
@@ -69,6 +70,7 @@ pub(super) struct LogicalMemoryRead {
 
 pub(super) enum MemoryAccessError {
     Inaccessible,
+
     /// Only the first `readable` bytes of the word are accessible, such as
     /// where a core dump's file-backed memory ends inside a word.
     Partial {
@@ -120,12 +122,14 @@ pub(super) fn read_logical_block(
                     site.original_byte;
             }
         }
+
         check_traps_hidden(address, &bytes, breakpoints);
         return Ok(LogicalMemoryRead {
             bytes,
             completion: MemoryReadCompletion::Complete,
         });
     }
+
     let mut bytes = Vec::with_capacity(size);
     while bytes.len() < size {
         let next = address.get() + bytes.len() as u64;
@@ -139,6 +143,7 @@ pub(super) fn read_logical_block(
             });
         }
     }
+
     Ok(LogicalMemoryRead {
         bytes,
         completion: MemoryReadCompletion::Complete,
@@ -162,12 +167,14 @@ pub(super) fn read_logical_memory_with(
             maximum: MAX_LOGICAL_MEMORY_READ,
         }));
     }
+
     if size == 0 {
         return Ok(LogicalMemoryRead {
             bytes: Vec::new(),
             completion: MemoryReadCompletion::Complete,
         });
     }
+
     let end = address
         .get()
         .checked_add(size as u64)
@@ -185,6 +192,7 @@ pub(super) fn read_logical_memory_with(
             Err(MemoryAccessError::Inaccessible) => (0_u64.to_le_bytes(), 0),
             Err(MemoryAccessError::Fatal(error)) => return Err(error),
         };
+
         let last_word_address = current.saturating_add(word_size - 1);
         for (&site_address, site) in
             breakpoints.range(VirtualAddress::new(current)..=VirtualAddress::new(last_word_address))
@@ -194,6 +202,7 @@ pub(super) fn read_logical_memory_with(
                 word[offset_within(offset)?] = site.original_byte;
             }
         }
+
         let readable_end = current.saturating_add(readable);
         let selected_start = address.get().max(current);
         let selected_end = end.min(readable_end);
@@ -202,6 +211,7 @@ pub(super) fn read_logical_memory_with(
             let stop = offset_within(selected_end - current)?;
             bytes.extend_from_slice(&word[start..stop]);
         }
+
         if readable < word_size && readable_end < end {
             return Ok(LogicalMemoryRead {
                 completion: MemoryReadCompletion::Incomplete {
@@ -211,13 +221,16 @@ pub(super) fn read_logical_memory_with(
                 bytes,
             });
         }
+
         if current.saturating_add(word_size) >= end {
             break;
         }
+
         current = current
             .checked_add(word_size)
             .ok_or(Error::AddressOverflow)?;
     }
+
     check_traps_hidden(address, &bytes, breakpoints);
     Ok(LogicalMemoryRead {
         bytes,
@@ -235,6 +248,7 @@ fn check_traps_hidden(
     if !cfg!(debug_assertions) || bytes.is_empty() {
         return;
     }
+
     let end = VirtualAddress::new(address.get().saturating_add(bytes.len() as u64));
     for (&site_address, site) in breakpoints.range(address..end) {
         let offset = usize::try_from(site_address.get() - address.get()).unwrap_or(usize::MAX);

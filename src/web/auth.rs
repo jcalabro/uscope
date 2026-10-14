@@ -101,8 +101,10 @@ pub fn set_cookie(port: u16, token: &str, public: Option<&PublicUrl>) -> String 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicUrl {
     pub https: bool,
+
     /// The `Host` the proxy sends, as `proxy.example` or `proxy.example:8080`.
     pub host: String,
+
     /// The path every route lies under, beginning and ending with `/`.
     pub base: String,
 }
@@ -133,6 +135,7 @@ impl std::str::FromStr for PublicUrl {
         } else {
             return Err(format!("{text:?} is not an http:// or https:// URL"));
         };
+
         let (host, path) = rest
             .split_once('/')
             .map_or((rest, ""), |(host, path)| (host, path));
@@ -143,6 +146,7 @@ impl std::str::FromStr for PublicUrl {
         if !host_ok {
             return Err(format!("{text:?} has no host this server could check"));
         }
+
         // The path goes into the page's HTML and the cookie as it is.
         let plain = path
             .bytes()
@@ -152,12 +156,14 @@ impl std::str::FromStr for PublicUrl {
                 "{text:?} has a path this server would not serve under"
             ));
         }
+
         let trimmed = path.trim_matches('/');
         let base = if trimmed.is_empty() {
             "/".to_owned()
         } else {
             format!("/{trimmed}/")
         };
+
         Ok(Self {
             https,
             host: host.to_ascii_lowercase(),
@@ -178,9 +184,11 @@ pub fn cookie(header: &str, port: u16) -> Option<&str> {
 /// Which `Host` and `Origin` values belong to this server.
 pub struct Origins {
     hosts: Vec<String>,
+
     /// Pages served from elsewhere that may use the server anyway, such as
     /// a development server proxying to it.
     extra: Vec<String>,
+
     /// The proxy the pages are served through, whose host and origin are
     /// this server's as well.
     public: Option<PublicUrl>,
@@ -198,6 +206,7 @@ impl Origins {
         if address.ip().is_loopback() {
             hosts.push(format!("localhost:{port}"));
         }
+
         Self {
             hosts,
             extra: extra_origins,
@@ -221,9 +230,11 @@ impl Origins {
         let Some(host) = host.filter(|host| self.knows(host)) else {
             return false;
         };
+
         let Some(origin) = origin else {
             return false;
         };
+
         let proxied = self
             .public
             .as_ref()
@@ -253,6 +264,7 @@ mod tests {
         for wrong in ["", "c-123", "c-12345", "c-1235", "v-1234", "C-1234"] {
             assert_eq!(tokens.role(wrong), None, "{wrong:?}");
         }
+
         let minted = Tokens::mint().expect("mint");
         assert_ne!(minted.token(Role::Control), minted.token(Role::View));
         assert_eq!(minted.token(Role::Control).len(), 2 + 32);
@@ -287,6 +299,7 @@ mod tests {
             Some("127.0.0.1:7341"),
             Some("http://127.0.0.1:5173")
         ));
+
         // Another page, a rebound name, a mismatch, or no browser at all.
         assert!(!allows(Some("127.0.0.1:7341"), Some("http://evil.example")));
         assert!(!allows(
@@ -323,6 +336,7 @@ mod tests {
         let allows = |host, origin| origins.allows(Some(host), Some(origin));
         assert!(allows("proxy.example", "https://proxy.example"));
         assert!(allows("127.0.0.1:7341", "http://127.0.0.1:7341"));
+
         // The proxy's host with another scheme, or with the server's origin.
         assert!(!allows("proxy.example", "http://proxy.example"));
         assert!(!allows("proxy.example", "http://127.0.0.1:7341"));
@@ -346,6 +360,7 @@ mod tests {
         ] {
             assert!(bad.parse::<PublicUrl>().is_err(), "{bad}");
         }
+
         assert_eq!(
             "http://p.example".parse::<PublicUrl>().expect("a URL").base,
             "/"

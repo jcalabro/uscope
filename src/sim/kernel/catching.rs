@@ -13,8 +13,10 @@ pub struct UserCatch {
     pub calls: Vec<u64>,
     pub entry: bool,
     pub exit: bool,
+
     /// `$arg0 == value`.
     pub arg0: Option<u64>,
+
     /// `$ret == value`, which a call's entry cannot judge, and so stops.
     pub ret: Option<i64>,
 }

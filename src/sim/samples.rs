@@ -22,9 +22,11 @@ use crate::{LoadedModule, ModuleId, ModuleImageId};
 /// How often a run samples, as a chance in a thousand that a burst ends
 /// in one: never, now and then, often, or after every burst.
 const RATES: [u64; 4] = [0, 50, 250, 1000];
+
 /// The bytes of stack a sample may copy: too few for one frame, a few
 /// frames, the recorder's default, and the most an event takes.
 const STACK_BYTES: [u32; 4] = [64, 512, 8192, 65528];
+
 /// The deepest stack the recorder unwinds.
 const DEPTH_LIMIT: usize = 128;
 
@@ -39,9 +41,11 @@ pub struct Sampler {
 enum Unwound {
     /// Every frame, to the thread's first.
     Whole,
+
     /// The innermost frames, ending explicitly where unwinding could not
     /// go on.
     Truncated,
+
     /// The innermost frames, ending at a caller read from a return address
     /// the program overwrote.
     Corrupt,
@@ -69,25 +73,30 @@ impl Sampler {
         let Some(thread) = kernel.threads.get(&tid) else {
             return Ok(None);
         };
+
         // A thread inside a system call is in the kernel, which the
         // events exclude.
         if thread.state != State::Running || thread.returning.is_some() || self.rate == 0 {
             return Ok(None);
         }
+
         if !choices.chance(Stream::Sample, self.rate) {
             return Ok(None);
         }
+
         let stack_bytes = *choices.pick(Stream::Sample, &STACK_BYTES);
         let record = kernel.sample(tid, stack_bytes);
         if kernel.gap.is_some() {
             return Ok(None);
         }
+
         let Some(Ok((decode::Record::Sample(sample), _))) = decode::next(&record) else {
             return Err(Failure::simulator(
                 "samples",
                 format!("the recorder cannot decode the sample of thread {tid}"),
             ));
         };
+
         let registers = decode::DWARF_REGISTERS
             .iter()
             .copied()
@@ -118,6 +127,7 @@ impl Sampler {
         if thread.shadow.lost {
             return Ok(None);
         }
+
         let space = &kernel.processes[&thread.tgid].space;
         let held = |slot: u64| space.peek(slot);
         let copied_to = thread.registers.general[crate::sim::cpu::RSP] + sample.stack.len() as u64;
@@ -185,6 +195,7 @@ fn judge(
         None if complete => return Err("sample is complete without a frame".to_owned()),
         None => return Ok(Unwound::Truncated),
     }
+
     for (level, frame) in frames.iter().enumerate().skip(1) {
         let address = address(frame);
         let Some(call) = calls.len().checked_sub(level).map(|index| calls[index]) else {
@@ -193,6 +204,7 @@ fn judge(
                  frames deep: {calls:x?}"
             ));
         };
+
         let held = held(call.slot);
         if held != Some(call.return_address) {
             let caller = held.unwrap_or_default().wrapping_sub(1);
@@ -203,14 +215,17 @@ fn judge(
                     call.return_address, call.slot
                 ));
             }
+
             if level + 1 != frames.len() || complete {
                 return Err(format!(
                     "sample goes on past frame {level}, whose return address the program \
                      overwrote, ending {end:?}"
                 ));
             }
+
             return Ok(Unwound::Corrupt);
         }
+
         if address != call.return_address - 1 {
             return Err(format!(
                 "sample's frame {level} is at {address:#x}, but its call returns to {:#x}",
@@ -218,6 +233,7 @@ fn judge(
             ));
         }
     }
+
     match (frames.len() < depth, complete) {
         (true, true) => Err(format!(
             "sample says it is complete after {} frames, but the thread is {depth} frames deep",

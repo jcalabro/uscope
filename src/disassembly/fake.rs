@@ -14,9 +14,11 @@ use crate::{
 pub struct FakeSource {
     pub base: u64,
     pub bytes: Vec<u8>,
+
     /// Readable address ranges; every other address is unreadable.
     pub readable: Vec<AddressRange<u64>>,
     pub starts: BTreeMap<VirtualAddress, BoundaryEvidence>,
+
     /// The address of the instruction the selected thread is about to
     /// execute, with its registers.
     pub stopped: Option<(VirtualAddress, RegisterFile)>,
@@ -44,6 +46,7 @@ impl FakeSource {
         if !self.readable.iter().any(|range| range.contains(address)) {
             return None;
         }
+
         let offset = usize::try_from(address.checked_sub(self.base)?).ok()?;
         self.bytes.get(offset).copied()
     }

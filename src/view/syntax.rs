@@ -100,6 +100,7 @@ pub enum Language {
     D,
     Nim,
     Ada,
+
     /// Every language.
     Any,
 }
@@ -154,12 +155,15 @@ pub struct File {
 pub struct View {
     /// The file it came from.
     pub source: Arc<str>,
+
     /// The line of its `view` keyword.
     pub line: u32,
     pub language: Language,
     pub pattern: Pattern,
+
     /// The language and pattern as written, to name the view by.
     pub header: Arc<str>,
+
     /// Whether it is an `extend`, which adds to the view that presents
     /// the type rather than presenting it.
     pub extend: bool,
@@ -178,6 +182,7 @@ impl View {
                         _ => None,
                     }));
                 }
+
                 Shape::If {
                     then, otherwise, ..
                 } => {
@@ -187,12 +192,14 @@ impl View {
                 _ => {}
             }
         }
+
         let mut names = Vec::new();
         for statement in &self.statements {
             if let Statement::Show(shape) = statement {
                 walk(shape, &mut names);
             }
         }
+
         names
     }
 
@@ -230,10 +237,13 @@ pub enum TypeExpr {
     /// A type by name: a captured argument, a `type` statement's name, or
     /// a program type, with pointers.
     Named { name: String, pointers: u8 },
+
     /// The type of an expression's value.
     TypeOf(Expr),
+
     /// One argument of a type, by position.
     Arg { of: Box<Self>, index: u32 },
+
     /// A type declared inside another, as Zig's `Self.Header`.
     Nested { of: Box<Self>, name: String },
 }
@@ -242,6 +252,7 @@ pub enum TypeExpr {
 #[derive(Debug, Clone)]
 pub enum Piece {
     Literal(String),
+
     /// `{EXPR}`, or `{EXPR as FORMAT}`.
     Hole {
         value: Expr,
@@ -258,28 +269,36 @@ pub enum Statement {
         alternatives: Vec<Expr>,
         line: u32,
     },
+
     /// `type NAME = TYPE or TYPE…`: the first alternative that resolves.
     Type {
         name: String,
         alternatives: Vec<TypeExpr>,
         line: u32,
     },
+
     /// `check EXPR`: an invariant checked before the value is presented.
     Check(Expr),
+
     /// `summary "TEXT {EXPR} TEXT"`.
     Summary(Vec<Piece>),
+
     /// `field NAME = EXPR`: a named child.
     Field { name: String, value: Expr },
+
     /// `show SHAPE`.
     Show(Shape),
+
     /// `hide NAME, …`: members and fields left out of the children.
     Hide { names: Vec<String>, line: u32 },
+
     /// `format NAME, … as FORMAT`: members and fields written another way.
     Format {
         names: Vec<String>,
         format: Format,
         line: u32,
     },
+
     /// `visualize "NAME" { INPUT = EXPR, … }`: a drawing the web page
     /// makes of the value with the renderer `NAME`.
     Visualize(Visualize),
@@ -308,8 +327,10 @@ pub struct Input {
 pub enum InputValue {
     /// A value, by the first alternative that binds.
     Value(Vec<Expr>),
+
     /// `bytes(PTR, LEN)`: `LEN` bytes of memory at `PTR`, read at once.
     Bytes { pointer: Expr, length: Expr },
+
     /// A string in double quotes, which the renderer gets as it is.
     Text(String),
 }
@@ -319,21 +340,29 @@ pub enum InputValue {
 pub enum Format {
     /// An integer in hexadecimal, in its type's width.
     Hex,
+
     /// An integer as the character it codes.
     Char,
+
     /// A value's bytes in memory, in hexadecimal.
     Bytes,
+
     /// An array or slice of bytes as text, when they are valid UTF-8
     /// without control characters.
     Utf8,
+
     /// An array or slice of 16-bit units as UTF-16 text.
     Utf16,
+
     /// An integer as the enumerators of `TYPE` whose bits it sets.
     Flags(TypeExpr),
+
     /// An integer as the enumerator of `TYPE` it equals.
     Enum(TypeExpr),
+
     /// An integer count of a unit of time, as a duration.
     Duration(TimeUnit),
+
     /// An integer count of a unit of time since the Unix epoch, as the UTC
     /// date and time it is.
     Time(TimeUnit),
@@ -375,6 +404,7 @@ impl TimeUnit {
 #[derive(Debug, Clone)]
 pub enum Count {
     Known(Expr),
+
     /// `_`: the generators decide.
     Unknown,
 }
@@ -391,13 +421,16 @@ pub struct Link {
 pub enum Generator {
     /// `range(N)`: 0, 1, …, N - 1.
     Range(Expr),
+
     /// `list(HEAD, P => NEXT)`: HEAD, then each node's next, until a null
     /// pointer or HEAD again.
     List { head: Expr, next: Link },
+
     /// `inorder(ROOT, P => LEFT, P => RIGHT)`: a binary tree's nodes, each
     /// after its left subtree and before its right; a null pointer is an
     /// empty tree.
     Inorder { root: Expr, left: Link, right: Link },
+
     /// `kernel("NAME", ARG, …)`: the items a kernel yields, each a word
     /// for each of the clause's variables.
     Kernel {
@@ -429,18 +462,22 @@ pub struct Clause {
 pub enum Shape {
     /// `text(PTR [, LEN])`.
     Text { pointer: Expr, length: Option<Expr> },
+
     /// `value(EXPR)`: present the value as another.
     Value(Expr),
+
     /// `empty("TEXT")`.
     /// `empty("TEXT {EXPR} TEXT")`: a value that holds nothing, summarized
     /// as its text, with each hole's value's summary in its place.
     Empty(Vec<Piece>),
+
     /// `sequence(COUNT) CLAUSES => ELEMENT`.
     Sequence {
         count: Count,
         clauses: Vec<Clause>,
         element: Expr,
     },
+
     /// `map(COUNT) CLAUSES => KEY : VALUE`.
     Map {
         count: Count,
@@ -448,18 +485,22 @@ pub enum Shape {
         key: Expr,
         value: Expr,
     },
+
     /// `if COND { SHAPE } else { SHAPE }`.
     If {
         condition: Expr,
         then: Box<Self>,
         otherwise: Box<Self>,
     },
+
     /// `record { NAME = EXPR, … }`: a record of the members it names, each
     /// a name or a position.
     Record(Vec<(String, Expr)>),
+
     /// `dynamic(PTR, TYPE)`: what a pointer points to, as a type that may
     /// be chosen as the program runs.
     Dynamic { pointer: Expr, ty: DynamicType },
+
     /// What a `match` with no `_` arm shows when no arm names its value:
     /// a problem that says the value.
     Unmatched(Expr),
@@ -470,9 +511,11 @@ pub enum Shape {
 pub enum DynamicType {
     /// One type, as a `type` statement names it.
     Fixed(TypeExpr),
+
     /// `arg(TYPE, EXPR)`: the argument of a type at a position the
     /// program's data holds, as a `std::variant`'s index does.
     Argument { of: TypeExpr, index: Expr },
+
     /// `TYPE of CODE`: a type that names the type arguments of the
     /// function whose code `CODE` addresses by its parameters' names.
     Function { ty: TypeExpr, code: Expr },
@@ -482,6 +525,7 @@ pub enum DynamicType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
     Name(String),
+
     /// `**`: any run of segments, including none.
     AnyRun,
 }
@@ -491,6 +535,7 @@ pub enum Segment {
 pub struct Pattern {
     pub path: Vec<Segment>,
     pub base: String,
+
     /// The arguments' patterns, when the pattern has an argument list. A
     /// type may have more arguments than its pattern lists.
     pub arguments: Option<Vec<ArgumentPattern>>,
@@ -501,10 +546,13 @@ pub struct Pattern {
 pub enum ArgumentPattern {
     /// `_`: anything.
     Wildcard,
+
     /// A capital name, which captures the argument for the body.
     Capture(String),
+
     /// An integer argument's value.
     Value(IntegerValue),
+
     /// A type's pattern.
     Type(Pattern),
 }
@@ -523,6 +571,7 @@ pub fn parse(source: &str, text: &str) -> File {
             )],
         };
     }
+
     let mut views = Vec::new();
     let mut errors = Vec::new();
     if let Err(error) = parser.header() {
@@ -531,11 +580,13 @@ pub fn parse(source: &str, text: &str) -> File {
             errors: vec![error],
         };
     }
+
     loop {
         parser.skip_blank();
         if parser.at_end() {
             break;
         }
+
         let start = parser.position;
         match parser.view() {
             Ok(view) => {
@@ -550,10 +601,12 @@ pub fn parse(source: &str, text: &str) -> File {
                     ));
                     break;
                 }
+
                 views.push(Arc::new(view));
             }
             Err(error) => {
                 errors.push(error);
+
                 // Resume at the next view.
                 parser.position = start;
                 let resumed = parser.skip_to_next_view();
@@ -567,6 +620,7 @@ pub fn parse(source: &str, text: &str) -> File {
             }
         }
     }
+
     File { views, errors }
 }
 
@@ -574,8 +628,10 @@ struct Parser<'a> {
     source: &'a Arc<str>,
     text: &'a str,
     position: usize,
+
     /// The offset of each line's first byte.
     lines: Vec<usize>,
+
     /// Whether the expressions read are members of braces, which end at a
     /// line that begins the next member.
     members: bool,
@@ -686,6 +742,7 @@ impl<'a> Parser<'a> {
         if !bytes.first().copied().is_some_and(is_word_start) {
             return None;
         }
+
         let length = bytes
             .iter()
             .take_while(|byte| is_word_continue(**byte))
@@ -743,6 +800,7 @@ impl<'a> Parser<'a> {
                     .map_or_else(|| self.rest().chars().take(1).collect(), str::to_owned)
             ),
         };
+
         self.error(format!("expected {expected}, found {found}"))
     }
 
@@ -763,6 +821,7 @@ impl<'a> Parser<'a> {
                 format!("a view file begins with `uscope-views {VERSION}`"),
             ));
         }
+
         self.skip_inline();
         let digits = self.rest().bytes().take_while(u8::is_ascii_digit).count();
         let version = self.rest()[..digits].parse::<u32>().ok();
@@ -773,6 +832,7 @@ impl<'a> Parser<'a> {
                 format!("this uscope reads views of version {VERSION}"),
             ));
         }
+
         self.end_of_statement()
     }
 
@@ -786,8 +846,10 @@ impl<'a> Parser<'a> {
             if line_start && matches!(self.peek_word(), Some("view" | "extend")) {
                 return true;
             }
+
             self.position += self.rest().chars().next().map_or(1, char::len_utf8);
         }
+
         false
     }
 
@@ -811,6 +873,7 @@ impl<'a> Parser<'a> {
             Some("extend") => true,
             _ => return Err(self.unexpected("`view` or `extend`")),
         };
+
         self.position += if extend { "extend".len() } else { "view".len() };
         self.skip_inline();
         let language_start = self.position;
@@ -825,6 +888,7 @@ impl<'a> Parser<'a> {
         self.position += language_word.len();
         self.skip_inline();
         let pattern_start = self.position;
+
         // A pattern's segments in backticks may hold braces.
         let pattern_end = outside_backticks(self.rest())
             .find(|(_, character)| *character == '{')
@@ -834,6 +898,7 @@ impl<'a> Parser<'a> {
         else {
             return Err(self.unexpected("a type pattern, then `{`"));
         };
+
         let pattern_text = self.text[pattern_start..pattern_end].trim();
         let pattern = parse_pattern(pattern_text, 0).map_err(|message| {
             self.error_at(pattern_start, format!("in the pattern: {message}"))
@@ -850,14 +915,17 @@ impl<'a> Parser<'a> {
             if self.eat("}") {
                 break;
             }
+
             if self.at_end() {
                 return Err(self.error_at(start, "the view is not closed with `}`"));
             }
+
             if statements.len() == MAX_STATEMENTS {
                 return Err(self.error(format!(
                     "a view may hold at most {MAX_STATEMENTS} statements"
                 )));
             }
+
             let statement_start = self.position;
             let statement = self.statement()?;
             match statement {
@@ -879,9 +947,11 @@ impl<'a> Parser<'a> {
                 Statement::Show(_) => shown = true,
                 _ => {}
             }
+
             statements.push(statement);
             self.end_of_statement()?;
         }
+
         self.end_of_statement()?;
         Ok(View {
             source: Arc::clone(self.source),
@@ -900,6 +970,7 @@ impl<'a> Parser<'a> {
         let Some(keyword) = self.peek_word() else {
             return Err(self.unexpected("a statement"));
         };
+
         match keyword {
             "let" => {
                 self.position += keyword.len();
@@ -910,6 +981,7 @@ impl<'a> Parser<'a> {
                 while self.eat_word_after_blank("or") {
                     alternatives.push(self.expression()?);
                 }
+
                 Ok(Statement::Let {
                     name,
                     alternatives,
@@ -925,6 +997,7 @@ impl<'a> Parser<'a> {
                 while self.eat_word_after_blank("or") {
                     alternatives.push(self.type_expr(0)?);
                 }
+
                 Ok(Statement::Type {
                     name,
                     alternatives,
@@ -952,6 +1025,7 @@ impl<'a> Parser<'a> {
                 self.position += keyword.len();
                 Ok(Statement::Show(self.shape(0)?))
             }
+
             // A statement-level `if` or `match` chooses between shapes.
             "if" | "match" => Ok(Statement::Show(self.shape(0)?)),
             "hide" => {
@@ -993,6 +1067,7 @@ impl<'a> Parser<'a> {
         if !is_renderer_name(&name) {
             return Err(self.error_at(start, RENDERER_NAME.to_owned()));
         }
+
         self.skip_inline();
         if !self.eat("{") {
             return Ok(Visualize {
@@ -1005,22 +1080,26 @@ impl<'a> Parser<'a> {
                 }],
             });
         }
+
         let mut inputs: Vec<Input> = Vec::new();
         loop {
             self.skip_blank();
             if self.eat("}") {
                 return Ok(Visualize { name, line, inputs });
             }
+
             if inputs.len() == MAX_INPUTS {
                 return Err(self.error(format!(
                     "a `visualize` may name at most {MAX_INPUTS} inputs"
                 )));
             }
+
             let start = self.position;
             let input = self.name("an input's name")?;
             if inputs.iter().any(|existing| existing.name == input) {
                 return Err(self.error_at(start, format!("the drawing has two inputs `{input}`")));
             }
+
             self.skip_inline();
             self.expect("=", "after the input's name")?;
             self.skip_inline();
@@ -1041,8 +1120,10 @@ impl<'a> Parser<'a> {
                 while self.eat_word_after_blank("or") {
                     alternatives.push(self.member_expression()?);
                 }
+
                 InputValue::Value(alternatives)
             };
+
             inputs.push(Input {
                 name: input,
                 line: input_line,
@@ -1081,6 +1162,7 @@ impl<'a> Parser<'a> {
             if !self.eat(",") {
                 return Ok(names);
             }
+
             names.push(self.name(what)?);
         }
     }
@@ -1093,6 +1175,7 @@ impl<'a> Parser<'a> {
         let Some(at) = hole.rfind(" as ") else {
             return (end, None);
         };
+
         let saved = self.position;
         self.position = start + at + " as ".len();
         let format = self.format().ok().filter(|_| {
@@ -1110,6 +1193,7 @@ impl<'a> Parser<'a> {
         let Some(word) = self.word().map(str::to_owned) else {
             return Err(self.unexpected("a format"));
         };
+
         Ok(match word.as_str() {
             "hex" => Format::Hex,
             "char" => Format::Char,
@@ -1155,6 +1239,7 @@ impl<'a> Parser<'a> {
         if self.eat_word(word) {
             return true;
         }
+
         self.position = start;
         false
     }
@@ -1164,10 +1249,12 @@ impl<'a> Parser<'a> {
         if depth > MAX_SHAPE_DEPTH {
             return Err(self.error(format!("shapes may nest at most {MAX_SHAPE_DEPTH} deep")));
         }
+
         self.skip_inline();
         let Some(word) = self.peek_word() else {
             return Err(self.unexpected("a shape"));
         };
+
         match word {
             "text" => {
                 self.position += word.len();
@@ -1179,6 +1266,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+
                 self.close_call("text")?;
                 Ok(Shape::Text { pointer, length })
             }
@@ -1206,6 +1294,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Count::Known(self.expression()?)
                 };
+
                 self.close_call(word)?;
                 let clauses = self.clauses()?;
                 self.skip_blank();
@@ -1242,6 +1331,7 @@ impl<'a> Parser<'a> {
                 } else {
                     self.branch(depth)?
                 };
+
                 Ok(Shape::If {
                     condition,
                     then: Box::new(then),
@@ -1277,6 +1367,7 @@ impl<'a> Parser<'a> {
                         DynamicType::Fixed(ty)
                     }
                 };
+
                 self.close_call("dynamic")?;
                 Ok(Shape::Dynamic { pointer, ty })
             }
@@ -1304,18 +1395,22 @@ impl<'a> Parser<'a> {
             if self.eat("}") {
                 break;
             }
+
             if arms.len() == MAX_ARMS {
                 return Err(self.error(format!("a match may have at most {MAX_ARMS} arms")));
             }
+
             let arm_start = self.position;
             if default.is_some() {
                 return Err(self.error("the `_` arm is a match's last"));
             }
+
             let value = if self.eat_word("_") {
                 None
             } else {
                 Some(self.expression()?)
             };
+
             self.skip_blank();
             self.expect("=>", "after the arm's value")?;
             self.skip_blank();
@@ -1331,12 +1426,15 @@ impl<'a> Parser<'a> {
                 }
                 None => default = Some(shape),
             }
+
             self.skip_blank();
             self.eat(",");
         }
+
         if arms.is_empty() {
             return Err(self.error("a match needs an arm with a value"));
         }
+
         let mut shape = default.unwrap_or(Shape::Unmatched(scrutinee));
         for (condition, then) in arms.into_iter().rev() {
             shape = Shape::If {
@@ -1345,6 +1443,7 @@ impl<'a> Parser<'a> {
                 otherwise: Box::new(shape),
             };
         }
+
         Ok(shape)
     }
 
@@ -1359,11 +1458,13 @@ impl<'a> Parser<'a> {
             if self.eat("}") {
                 return Ok(Shape::Record(members));
             }
+
             if members.len() == MAX_RECORD_MEMBERS {
                 return Err(self.error(format!(
                     "a record may have at most {MAX_RECORD_MEMBERS} members"
                 )));
             }
+
             let start = self.position;
             let digits = self.rest().bytes().take_while(u8::is_ascii_digit).count();
             let name = if digits > 0 {
@@ -1372,9 +1473,11 @@ impl<'a> Parser<'a> {
             } else {
                 self.name("a member's name")?
             };
+
             if members.iter().any(|(existing, _)| *existing == name) {
                 return Err(self.error_at(start, format!("the record has two members `{name}`")));
             }
+
             self.skip_inline();
             self.expect("=", "after the member's name")?;
             members.push((name, self.member_expression()?));
@@ -1392,9 +1495,11 @@ impl<'a> Parser<'a> {
             if self.peek_word() != Some("for") {
                 break;
             }
+
             if clauses.len() == MAX_CLAUSES {
                 return Err(self.error(format!("generators may nest at most {MAX_CLAUSES} deep")));
             }
+
             self.position += "for".len();
             let mut variables = vec![self.name("the generator's variable")?];
             loop {
@@ -1402,14 +1507,17 @@ impl<'a> Parser<'a> {
                 if !self.eat(",") {
                     break;
                 }
+
                 if variables.len() == crate::view::kernel::MAX_WORDS {
                     return Err(self.error(format!(
                         "a kernel's items have at most {} words",
                         crate::view::kernel::MAX_WORDS
                     )));
                 }
+
                 variables.push(self.name("the generator's next variable")?);
             }
+
             self.expect_word("in", "after the generator's variable")?;
             self.skip_inline();
             let start = self.position;
@@ -1417,6 +1525,7 @@ impl<'a> Parser<'a> {
             if variables.len() > 1 && !matches!(generator, Generator::Kernel { .. }) {
                 return Err(self.error_at(start, "only a kernel's items have several variables"));
             }
+
             let mut items = Vec::new();
             loop {
                 self.skip_blank();
@@ -1434,15 +1543,18 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+
             clauses.push(Clause {
                 variables,
                 generator,
                 items,
             });
         }
+
         if clauses.is_empty() {
             return Err(self.unexpected("`for` and a generator after the count"));
         }
+
         Ok(clauses)
     }
 
@@ -1452,11 +1564,13 @@ impl<'a> Parser<'a> {
         let Some(word @ ("range" | "list" | "inorder" | "kernel")) = self.peek_word() else {
             return Err(self.unexpected("a generator: `range`, `list`, `inorder`, or `kernel`"));
         };
+
         self.position += word.len();
         self.open_call(word)?;
         if word == "kernel" {
             return self.kernel();
         }
+
         let first = self.expression()?;
         let generator = match word {
             "range" => Generator::Range(first),
@@ -1470,6 +1584,7 @@ impl<'a> Parser<'a> {
                 right: self.link()?,
             },
         };
+
         self.close_call(word)?;
         Ok(generator)
     }
@@ -1482,21 +1597,25 @@ impl<'a> Parser<'a> {
         if !is_kernel_name(&name) {
             return Err(self.error_at(start, KERNEL_NAME.to_owned()));
         }
+
         let mut arguments = Vec::new();
         loop {
             self.skip_blank();
             if !self.eat(",") {
                 break;
             }
+
             if arguments.len() == crate::view::kernel::MAX_ARGUMENTS {
                 return Err(self.error(format!(
                     "a kernel takes at most {} arguments",
                     crate::view::kernel::MAX_ARGUMENTS
                 )));
             }
+
             self.skip_blank();
             arguments.push(self.expression()?);
         }
+
         self.close_call("kernel")?;
         Ok(Generator::Kernel {
             name,
@@ -1550,6 +1669,7 @@ impl<'a> Parser<'a> {
             self.position += name.len();
             self.open_call(name)?;
         }
+
         Ok(call)
     }
 
@@ -1569,11 +1689,13 @@ impl<'a> Parser<'a> {
         if !self.eat("\"") {
             return Err(self.unexpected("a string in double quotes"));
         }
+
         let mut text = String::new();
         loop {
             let Some(character) = self.rest().chars().next() else {
                 return Err(self.error_at(start, "the string is not closed"));
             };
+
             self.position += character.len_utf8();
             match character {
                 '"' => return Ok(text),
@@ -1588,6 +1710,7 @@ impl<'a> Parser<'a> {
         let Some(character) = self.rest().chars().next() else {
             return Err(self.error_at(start, "the string is not closed"));
         };
+
         self.position += character.len_utf8();
         Ok(match character {
             'n' => '\n',
@@ -1610,18 +1733,21 @@ impl<'a> Parser<'a> {
         if !self.eat("\"") {
             return Err(self.unexpected("a summary in double quotes"));
         }
+
         let mut pieces = Vec::new();
         let mut literal = String::new();
         loop {
             let Some(character) = self.rest().chars().next() else {
                 return Err(self.error_at(start, "the summary is not closed"));
             };
+
             match character {
                 '"' => {
                     self.position += 1;
                     if !literal.is_empty() {
                         pieces.push(Piece::Literal(literal));
                     }
+
                     return Ok(pieces);
                 }
                 '\n' => return Err(self.error_at(start, "the summary is not closed")),
@@ -1634,6 +1760,7 @@ impl<'a> Parser<'a> {
                     if !literal.is_empty() {
                         pieces.push(Piece::Literal(std::mem::take(&mut literal)));
                     }
+
                     let end = self.rest().find('}').ok_or_else(|| {
                         self.error("the `{` in the summary is not closed with `}`")
                     })?;
@@ -1642,6 +1769,7 @@ impl<'a> Parser<'a> {
                     if hole.contains(['"', '\n']) {
                         return Err(self.error("a summary's `{…}` holds one expression"));
                     }
+
                     let (value_end, format) = self.hole_format(hole_start, hole_start + end);
                     pieces.push(Piece::Hole {
                         value: self.expression_text(hole_start, value_end)?,
@@ -1663,8 +1791,10 @@ impl<'a> Parser<'a> {
         if depth > MAX_PATTERN_DEPTH {
             return Err(self.error("the type nests too deeply"));
         }
+
         self.skip_inline();
         let mut ty = self.type_operand(depth)?;
+
         // `.NAME` or `::NAME` after `typeof(…)` or `arg(…)` names a type
         // declared inside it.
         while matches!(
@@ -1678,15 +1808,18 @@ impl<'a> Parser<'a> {
             } else {
                 break;
             };
+
             self.position += separator;
             let Some(name) = self.word() else {
                 return Err(self.unexpected("the name of a type declared inside it"));
             };
+
             ty = TypeExpr::Nested {
                 of: Box::new(ty),
                 name: name.to_owned(),
             };
         }
+
         Ok(ty)
     }
 
@@ -1697,6 +1830,7 @@ impl<'a> Parser<'a> {
             self.close_call("typeof")?;
             return Ok(TypeExpr::TypeOf(expression));
         }
+
         if self.eat_call("arg")? {
             let of = self.type_expr(depth + 1)?;
             self.skip_blank();
@@ -1713,12 +1847,14 @@ impl<'a> Parser<'a> {
                 index,
             });
         }
+
         let start = self.position;
         let end = self.scan_type_name();
         let text = self.text[start..end].trim();
         if text.is_empty() {
             return Err(self.unexpected("a type"));
         }
+
         self.position = end;
         let name =
             text.trim_end_matches(|character: char| character == '*' || character.is_whitespace());
@@ -1755,8 +1891,10 @@ impl<'a> Parser<'a> {
                 }
                 _ => {}
             }
+
             index += 1;
         }
+
         index.min(self.text.len())
     }
 
@@ -1777,6 +1915,7 @@ impl<'a> Parser<'a> {
         if raw.trim().is_empty() {
             return Err(self.error_at(start, "expected an expression"));
         }
+
         let text = blank_comments(raw)
             .ok_or_else(|| self.error_at(start, "the text has no character here"))?;
         let line = self.location(start).0;
@@ -1841,17 +1980,20 @@ impl<'a> Parser<'a> {
                     if depth == 0 && STOP_WORDS.contains(&word) {
                         return end;
                     }
+
                     index += length;
                     end = index;
                     continue;
                 }
                 _ => {}
             }
+
             index += 1;
             if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
                 end = index;
             }
         }
+
         end
     }
 
@@ -1865,6 +2007,7 @@ impl<'a> Parser<'a> {
                 rest = after;
                 continue;
             }
+
             if trimmed.starts_with('#') {
                 match trimmed.find('\n') {
                     Some(line_end) => {
@@ -1874,13 +2017,16 @@ impl<'a> Parser<'a> {
                     None => return true,
                 }
             }
+
             if trimmed.is_empty() || trimmed.starts_with('}') {
                 return true;
             }
+
             let length = trimmed
                 .bytes()
                 .take_while(|byte| is_word_continue(*byte))
                 .count();
+
             // In braces of members, a line that begins `NAME =` begins the
             // next member.
             if self.members && length > 0 {
@@ -1889,6 +2035,7 @@ impl<'a> Parser<'a> {
                     return true;
                 }
             }
+
             return STATEMENTS.contains(&&trimmed[..length]);
         }
     }
@@ -1906,6 +2053,7 @@ fn skip_literal(text: &str, start: usize, quote: u8) -> usize {
             _ => index += 1,
         }
     }
+
     text.len()
 }
 
@@ -1942,6 +2090,7 @@ fn blank_comments(text: &str) -> Option<String> {
             }
         }
     }
+
     Some(out)
 }
 
@@ -1955,10 +2104,12 @@ fn parse_pattern(text: &str, depth: usize) -> Result<Pattern, String> {
     if depth > MAX_PATTERN_DEPTH {
         return Err("the pattern nests too deeply".to_owned());
     }
+
     let text = text.trim();
     if text.is_empty() {
         return Err("expected a type pattern".to_owned());
     }
+
     let (qualified, arguments) = split_arguments(text)?;
     let mut segments = split_path(qualified.trim())?;
     let base = match segments.pop() {
@@ -1966,6 +2117,7 @@ fn parse_pattern(text: &str, depth: usize) -> Result<Pattern, String> {
         Some(Segment::AnyRun) => return Err("`**` cannot end a pattern".to_owned()),
         None => return Err("expected a type's name".to_owned()),
     };
+
     let arguments = arguments
         .map(|arguments| {
             arguments
@@ -1986,14 +2138,17 @@ fn parse_argument(text: &str, depth: usize) -> Result<ArgumentPattern, String> {
     if text == "_" {
         return Ok(ArgumentPattern::Wildcard);
     }
+
     if let Some(value) = crate::type_identity::parse_integer(text) {
         return Ok(ArgumentPattern::Value(value));
     }
+
     let capture = text.starts_with(|character: char| character.is_ascii_uppercase())
         && text.bytes().all(is_word_continue);
     if capture {
         return Ok(ArgumentPattern::Capture(text.to_owned()));
     }
+
     parse_pattern(text, depth + 1).map(ArgumentPattern::Type)
 }
 
@@ -2006,11 +2161,13 @@ fn split_arguments(text: &str) -> Result<(&str, Option<Vec<&str>>), String> {
     else {
         return Ok((text, None));
     };
+
     let close = match text.as_bytes()[open] {
         b'<' => '>',
         b'(' => ')',
         _ => ']',
     };
+
     let inner = text[open + 1..]
         .strip_suffix(close)
         .ok_or_else(|| format!("the arguments must end the pattern with `{close}`"))?;
@@ -2032,15 +2189,19 @@ fn split_arguments(text: &str) -> Result<(&str, Option<Vec<&str>>), String> {
             _ => {}
         }
     }
+
     if depth != 0 {
         return Err("the pattern's brackets do not balance".to_owned());
     }
+
     if !inner.trim().is_empty() {
         arguments.push(&inner[start..]);
     }
+
     if arguments.iter().any(|argument| argument.trim().is_empty()) {
         return Err("an argument is empty".to_owned());
     }
+
     Ok((&text[..open], Some(arguments)))
 }
 
@@ -2066,6 +2227,7 @@ fn split_path(text: &str) -> Result<Vec<Segment>, String> {
         if index < skip {
             continue;
         }
+
         if text[index..].starts_with("::") {
             parts.push(&text[start..index]);
             start = index + 2;
@@ -2075,6 +2237,7 @@ fn split_path(text: &str) -> Result<Vec<Segment>, String> {
             start = index + 1;
         }
     }
+
     parts.push(&text[start..]);
     let mut segments = Vec::new();
     for part in parts {
@@ -2083,9 +2246,11 @@ fn split_path(text: &str) -> Result<Vec<Segment>, String> {
             if segments.last() == Some(&Segment::AnyRun) {
                 return Err("`**` follows `**`".to_owned());
             }
+
             segments.push(Segment::AnyRun);
             continue;
         }
+
         let name = part
             .strip_prefix('`')
             .and_then(|quoted| quoted.strip_suffix('`'))
@@ -2095,7 +2260,9 @@ fn split_path(text: &str) -> Result<Vec<Segment>, String> {
         if name.is_empty() || !plain {
             return Err(format!("`{part}` is not a name"));
         }
+
         segments.push(Segment::Name(name.to_owned()));
     }
+
     Ok(segments)
 }

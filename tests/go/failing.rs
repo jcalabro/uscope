@@ -24,10 +24,13 @@ enum Expected {
     /// A panic nothing recovered, with the frame selected that raised it,
     /// and the line marked in the source.
     Unhandled(&'static str, &'static str),
+
     /// A fatal error.
     Fatal,
+
     /// The program's own breakpoint instruction.
     ProgramBreakpoint,
+
     /// No stop: the program ends as it does alone.
     Nothing,
 }
@@ -129,6 +132,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     let StopReason::LanguageException(exception) = &reason else {
                         panic!("{context}: {reason:?}");
                     };
+
                     // The runtime prints the same message, which for a
                     // fault goes on with the signal that raised it.
                     assert!(
@@ -144,6 +148,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                             (function.to_owned(), line),
                             "{context}"
                         );
+
                         // The value the program panicked with can be shown.
                         let text = exception.value.as_deref().expect("a panic's value");
                         let expression = Expression::parse(text).expect("an expression");
@@ -153,6 +158,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                         else {
                             panic!("{context}: {text} is not a value");
                         };
+
                         assert!(
                             matches!(value.state, VariableState::Available { .. }),
                             "{context}: {text} is {:?}",
@@ -164,7 +170,9 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     } else {
                         assert_eq!(exception.kind, LanguageExceptionKind::Fatal);
                     }
+
                     check_case(&scenario, case, &context).await;
+
                     // Go's checkdead unlocks the scheduler before it calls
                     // fatal, and nothing marks the program panicking until
                     // fatal runs on, so another thread going idle meanwhile
@@ -178,12 +186,15 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                     {
                         next = scenario.resume_to_stop().await;
                     }
+
                     next
                 }
             };
+
             let StopReason::Exited(ExitStatus::Code(code)) = reason else {
                 panic!("{context}: {reason:?}");
             };
+
             // A program's own breakpoint kills it when no debugger runs it,
             // and runs on past it when one does.
             let debugged = std::fs::read_to_string(&errors).expect("read standard error");
@@ -192,6 +203,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                 assert_eq!(debugged, "", "{context}");
             } else {
                 assert_eq!(Some(code), status.map(i64::from), "{context}");
+
                 // What the program printed, as a recovered panic's handler,
                 // or nothing from the deferred calls `os.Exit` skips.
                 let shown = std::fs::read_to_string(&out).expect("read standard output");
@@ -203,6 +215,7 @@ async fn failing_programs_stop_where_the_runtime_reports_them() {
                 );
             }
         }
+
         scenario.shutdown().await;
     }
 }
@@ -214,6 +227,7 @@ async fn check_case(scenario: &Scenario, case: &str, context: &str) {
         "goroutine" => {
             assert!(listed(scenario, 1).await.is_some(), "{context}");
         }
+
         // Each says what it waits for.
         "deadlock" => assert_eq!(
             listed(scenario, 1)
@@ -263,6 +277,7 @@ fn exception(reason: &StopReason, context: &str) -> (LanguageExceptionKind, Stri
     let StopReason::LanguageException(exception) = reason else {
         panic!("{context}: {reason:?}");
     };
+
     (exception.kind, exception.message.to_string())
 }
 
@@ -331,6 +346,7 @@ async fn a_panic_preempted_as_it_begins_stops_once() {
         let (mut scenario, reason) = launched(fixture, "recovered", raised).await;
         let (kind, _) = exception(&reason, fixture);
         assert_eq!(kind, LanguageExceptionKind::Raised, "{fixture}");
+
         // In the runtime's frame, r14 holds the goroutine, whose stack
         // guard the check compares the stack pointer with at 16(R14).
         let trace = scenario
@@ -344,6 +360,7 @@ async fn a_panic_preempted_as_it_begins_stops_once() {
             .await;
         let g = integer(&scenario, "$r14").await.expect("the goroutine");
         let guard = u64::try_from(g).expect("an address") + 16;
+
         // `stackPreempt`, which always fails the check.
         scenario
             .operation(

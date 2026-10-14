@@ -30,6 +30,7 @@ pub(super) struct ModuleMapping {
     pub(super) inode: u64,
     pub(super) start: u64,
     pub(super) file_offset: u64,
+
     /// Whether the file was unlinked or replaced after it was mapped, so the
     /// path may now name a different file or none.
     pub(super) deleted: bool,
@@ -92,6 +93,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(module) = self.modules.remove(&id) else {
             return;
         };
+
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::ModuleUnloaded {
             revision: self.revision,
@@ -112,11 +114,13 @@ impl<P: InspectionOps> Controller<P> {
         for id in dynamic {
             self.unregister_module(id);
         }
+
         // Without the main module there is nothing to reset. Launches register
         // it before any stop, so this only guards a state that cannot arise.
         let Some(main) = self.modules.get_mut(&crate::ModuleId::new(0)) else {
             return;
         };
+
         main.loaded = LoadedModule::main(main.image.id(), LoadBias::default());
         main.tls = None;
         if self.drop_library_locations() {
@@ -138,6 +142,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// location to them.
     pub(super) fn refresh_modules(&mut self) -> Result<bool> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+
         // The leader may have exited before the rest of its process.
         let pid = inferior.memory_thread();
         let main_loaded = inferior.loaded_module;
@@ -177,6 +182,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or_else(|| Error::internal("a load for each new module"))?
             {
                 Ok(debug) => debug,
+
                 #[cfg_attr(
                     not(debug_assertions),
                     expect(unused_variables, reason = "only recorded")
@@ -186,11 +192,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                     continue;
                 }
             };
+
             let loaded = LoadedModule {
                 id: module_id,
                 image: image_id,
                 load_bias,
             };
+
             self.modules.insert(
                 module_id,
                 RuntimeModule {
@@ -210,6 +218,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             });
         }
+
         let main = self
             .modules
             .get_mut(&main_loaded.id)
@@ -239,7 +248,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             mapped_modules.insert(mapping, module.clone());
             Some(module)
         };
+
         let executable_inode = self.executable_identity.inode;
+
         // A library with no code maps nothing executable; the loader lists
         // an object at its first page, which holds image address zero.
         let code_less = headers
@@ -256,12 +267,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             if mapping.inode == executable_inode {
                 continue;
             }
+
             if let Some(module) = identify(mapping)
                 && module.0 != *self.executable
             {
                 observed.push(module);
             }
         }
+
         self.mapped_modules = mapped_modules;
         observed
     }
@@ -278,6 +291,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if known {
                 continue;
             }
+
             let module_id = crate::ModuleId::new(self.next_module_id);
             self.next_module_id = self
                 .next_module_id
@@ -290,6 +304,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
             new.push((path, load_bias, module_id, image_id));
         }
+
         Ok(new)
     }
 
@@ -332,6 +347,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     let to = VirtualAddress::new(vdso?.start);
                     return (to != from.start).then_some(MovedCode { from, to });
                 }
+
                 let biases = files
                     .iter()
                     .filter(|(file, _)| file == path)
@@ -339,6 +355,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if biases.clone().any(|observed| observed == bias) {
                     return None;
                 }
+
                 let mut new = biases.filter(|&observed| {
                     !self.modules.values().any(|other| {
                         other.image.path() == path && other.loaded.load_bias == observed
@@ -381,6 +398,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 None => files.push((path.clone(), *image)),
             }
         }
+
         let mut files = if files.is_empty() {
             Vec::new()
         } else {
@@ -432,9 +450,11 @@ pub(super) fn read_maps(pid: Pid) -> std::io::Result<String> {
     if !maps.is_empty() {
         return Ok(maps);
     }
+
     let Ok(threads) = fs::read_dir(format!("/proc/{pid}/task")) else {
         return Ok(maps);
     };
+
     Ok(threads
         .filter_map(|thread| fs::read_to_string(thread.ok()?.path().join("maps")).ok())
         .find(|maps| !maps.is_empty())
@@ -451,9 +471,11 @@ pub(super) fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
 pub(super) struct ProcessMappings {
     /// Executable mappings of files.
     pub(super) files: Vec<ModuleMapping>,
+
     /// Other mappings of files' first pages. A library with no code maps
     /// only these, so one is a module where the loader lists one.
     pub(super) headers: Vec<ModuleMapping>,
+
     /// The vDSO, which no file backs.
     pub(super) vdso: Option<Range<u64>>,
 }
@@ -479,6 +501,7 @@ pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf
     if mapping.deleted {
         return None;
     }
+
     // `/proc/<pid>/root` reads as `/`, so resolving a path through it would
     // leave the process's root; such paths name the mapped file already.
     let path = if mapping.path.starts_with("/proc") {
@@ -486,9 +509,11 @@ pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf
     } else {
         fs::canonicalize(&mapping.path).ok()?
     };
+
     if fs::metadata(&path).ok()?.ino() != mapping.inode {
         return None;
     }
+
     let bias = mapped_module_load_bias(mapping).ok()?;
     Some((path, bias))
 }
@@ -515,6 +540,7 @@ pub(super) fn loader_link_maps(
     else {
         return Ok(Vec::new());
     };
+
     let dynamic_start = main.virtual_address(dynamic.range.start)?;
     let entries = (dynamic.range.end.get() - dynamic.range.start.get()) / DYNAMIC_ENTRY_SIZE;
     let mut rendezvous = None;
@@ -527,6 +553,7 @@ pub(super) fn loader_link_maps(
         if tag == DT_NULL {
             break;
         }
+
         if tag == DT_DEBUG {
             rendezvous = Some(VirtualAddress::new(read_word_offset(
                 ptrace, pid, address, 8,
@@ -534,9 +561,11 @@ pub(super) fn loader_link_maps(
             break;
         }
     }
+
     let Some(rendezvous) = rendezvous.filter(|address| address.get() != 0) else {
         return Ok(Vec::new());
     };
+
     // The public ELF loader rendezvous begins with r_version followed by the
     // aligned r_map pointer. Each public link_map begins with l_addr and ends
     // its debugger-visible prefix with l_next/l_prev.
@@ -549,10 +578,12 @@ pub(super) fn loader_link_maps(
                 "link_map traversal exceeded its bound or formed a cycle".to_owned(),
             )));
         }
+
         let load_bias = LoadBias::new(ptrace.read_word(pid, current.get())?);
         result.push((load_bias, current));
         current = VirtualAddress::new(read_word_offset(ptrace, pid, current.get(), 24)?);
     }
+
     Ok(result)
 }
 
@@ -566,6 +597,7 @@ pub(super) fn parse_maps(maps: &str) -> Result<Vec<ModuleMapping>> {
     let mut mappings = Vec::new();
     for line in maps.lines() {
         let invalid = || backend_error(LinuxError::InvalidMapping(line.to_owned()));
+
         // The pathname is the sixth field and may itself contain spaces, so it
         // must be taken as the untouched remainder of the line rather than one
         // whitespace-delimited token. The kernel escapes control characters but
@@ -580,12 +612,15 @@ pub(super) fn parse_maps(maps: &str) -> Result<Vec<ModuleMapping>> {
         ) else {
             return Err(invalid());
         };
+
         let Some(path) = fields.next().map(str::trim_start) else {
             continue;
         };
+
         if inode == "0" || !path.starts_with('/') {
             continue;
         }
+
         let (path, deleted) = path
             .strip_suffix(" (deleted)")
             .map_or((path, false), |path| (path, true));
@@ -601,6 +636,7 @@ pub(super) fn parse_maps(maps: &str) -> Result<Vec<ModuleMapping>> {
             executable: permissions.contains('x'),
         });
     }
+
     mappings.sort();
     mappings.dedup();
     Ok(mappings)
@@ -616,6 +652,7 @@ pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<LoadBia
         if file_offset & PAGE_MASK != mapping.file_offset {
             continue;
         }
+
         // Linkers such as mold start segments of different permissions in
         // one page of the file; the mapping maps the one with its own.
         let executable = matches!(
@@ -625,6 +662,7 @@ pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<LoadBia
         if executable != mapping.executable {
             continue;
         }
+
         let image_start = segment.address() & PAGE_MASK;
         return mapping
             .start
@@ -632,5 +670,6 @@ pub(super) fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<LoadBia
             .map(LoadBias::new)
             .ok_or_else(|| backend_error(LinuxError::LoadBias(mapping.path.clone())));
     }
+
     Err(backend_error(LinuxError::LoadBias(mapping.path.clone())))
 }

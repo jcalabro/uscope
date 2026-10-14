@@ -33,6 +33,7 @@ pub(super) fn storage_from_pieces(
     if pieces.len() > MAX_LOCATION_PIECES {
         return Err(VariableUnavailableReason::EvaluationLimit.into());
     }
+
     let bits = byte_size
         .checked_mul(8)
         .ok_or(VariableUnavailableReason::EvaluationLimit)?;
@@ -74,6 +75,7 @@ fn whole(
             address: None,
         }
     };
+
     match &piece.location {
         Location::Empty => {
             Err(VariableUnavailableReason::OptimizedOut(OptimizedOutReason::EmptyLocation).into())
@@ -86,10 +88,12 @@ fn whole(
                     "register value is shorter than the scalar type".into(),
                 ));
             }
+
             let raw = match endian {
                 RunTimeEndian::Little => Arc::from(&register.bytes[..size]),
                 RunTimeEndian::Big => Arc::from(&register.bytes[register.bytes.len() - size..]),
             };
+
             Ok(bytes(
                 VariableValueSource::Register(register.descriptor),
                 raw,
@@ -116,6 +120,7 @@ fn whole(
                     "implicit value is shorter than its object".into(),
                 ));
             }
+
             Ok(bytes(
                 VariableValueSource::Constant,
                 Arc::from(&raw[..size]),
@@ -149,6 +154,7 @@ fn composite(
                 ));
             }
         };
+
         let end = offset
             .checked_add(size)
             .filter(|end| *end <= bits)
@@ -173,6 +179,7 @@ fn composite(
         );
         offset = end;
     }
+
     // Bits no piece describes are undefined (DWARF 5 section 2.6.1.2).
     if offset < bits {
         push(
@@ -184,6 +191,7 @@ fn composite(
             },
         );
     }
+
     if resolved
         .iter()
         .all(|piece| piece.location == PieceLocation::Undefined)
@@ -192,6 +200,7 @@ fn composite(
             VariableUnavailableReason::OptimizedOut(OptimizedOutReason::EmptyLocation).into(),
         );
     }
+
     let composite = ValueStorage::Composite(CompositeStorage {
         pieces: resolved.into(),
         start: 0,
@@ -226,11 +235,13 @@ fn push(pieces: &mut Vec<StoragePiece>, piece: StoragePiece) {
             }
             _ => false,
         };
+
         if joined {
             last.size += piece.size;
             return;
         }
     }
+
     pieces.push(piece);
 }
 
@@ -252,6 +263,7 @@ fn piece_location(
             .and_then(|length| length.checked_mul(8))
             .is_some_and(|available| needed <= available)
     };
+
     Ok(match location {
         Location::Empty => PieceLocation::Undefined,
         Location::Address { address } => PieceLocation::Memory {
@@ -265,12 +277,14 @@ fn piece_location(
                         "a DWARF location piece extends past its register".into(),
                     ));
                 }
+
                 PieceLocation::Bytes {
                     source: VariableValueSource::Register(register.descriptor),
                     raw: register.bytes,
                     bit_offset,
                 }
             }
+
             // The other pieces may still be read.
             Err(VariableRuntimeError::Unavailable(reason)) => PieceLocation::Unavailable(reason),
             Err(error) => return Err(error.into()),
@@ -287,6 +301,7 @@ fn piece_location(
                     "a DWARF location piece extends past its implicit value".into(),
                 ));
             }
+
             PieceLocation::Bytes {
                 source: VariableValueSource::Constant,
                 raw,
@@ -299,6 +314,7 @@ fn piece_location(
                     "an implicit pointer piece has a bit offset".into(),
                 ));
             }
+
             PieceLocation::ImplicitPointer {
                 debug_info_offset: u64::try_from(value.0)
                     .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
@@ -325,6 +341,7 @@ fn extended_value(value: Value, needed: u64) -> Result<Arc<[u8]>, EvaluateError>
         Value::F32(value) => (value.to_bits().to_le_bytes().to_vec(), None),
         Value::F64(value) => (value.to_bits().to_le_bytes().to_vec(), None),
     };
+
     let length = usize::try_from(needed.div_ceil(8))
         .ok()
         .filter(|length| *length <= MAX_EVALUATION_MEMORY_BYTES)
@@ -332,6 +349,7 @@ fn extended_value(value: Value, needed: u64) -> Result<Arc<[u8]>, EvaluateError>
     if length <= bytes.len() {
         return Ok(bytes.into());
     }
+
     let negative = bytes.last().is_some_and(|byte| byte & 0x80 != 0);
     let fill = match (value, signed, negative) {
         // A float, or a generic value that zeros would make positive.
@@ -339,11 +357,13 @@ fn extended_value(value: Value, needed: u64) -> Result<Arc<[u8]>, EvaluateError>
         (_, Some(true), true) => Some(0xff),
         (_, Some(_), _) | (_, None, false) => Some(0),
     };
+
     let Some(fill) = fill else {
         return Err(EvaluateError::Malformed(
             "a DWARF location piece is wider than the value it holds".into(),
         ));
     };
+
     let mut extended = bytes;
     extended.resize(length, fill);
     Ok(extended.into())

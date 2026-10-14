@@ -107,6 +107,7 @@ fn without_elapsed(output: &str) -> String {
         rest = &rest[start..];
         rest = rest.find(')').map_or("", |end| &rest[end + 1..]);
     }
+
     kept.push_str(rest);
     kept
 }
@@ -142,12 +143,14 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
         if no_color {
             command.env("NO_COLOR", "1");
         }
+
         succeeded(&command.stdin(Stdio::null()).output().expect("run uscope")).0
     };
 
     // The local file's context, the project's hidden bytes, and the flag's
     // syntax over the user's.
     let plain = session(&["--disassembly-syntax", "intel"], true);
+
     // After the breakpoint's line and the stop's header, `list`'s. A stop
     // after a run of a second or more, as under load, says how long it ran.
     let plain = without_elapsed(&plain);
@@ -155,6 +158,7 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
         .split("basic.c:10\n")
         .nth(3)
         .expect("the listing after the stop's");
+
     // The line has a breakpoint, which the margin marks.
     assert!(
         listing
@@ -167,6 +171,7 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
         "{plain}"
     );
     assert!(plain.contains("<main>: push rbp"), "{plain}");
+
     // NO_COLOR outranks the user's `color = "always"`, which applies
     // without it, even in batch mode.
     assert!(!plain.contains("\x1b["), "{plain}");
@@ -193,6 +198,7 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
         let line = show_line(&shown, key);
         assert!(line.ends_with(&format!("# {origin}")), "{line}");
     }
+
     assert!(
         show_line(&shown, "source.context").contains("[0, 0]"),
         "{shown}"
@@ -258,6 +264,7 @@ fn launch_configurations_start_by_name_and_are_never_guessed() {
         )),
         "{stdout}"
     );
+
     // The only configuration starts alone, and the command line's
     // arguments and environment replace and override its own.
     let (stdout, _) = succeeded(&project.run(&[
@@ -350,6 +357,7 @@ fn a_project_acts_only_once_trusted() {
     );
     let (stdout, _) = succeeded(&project.run(&session));
     assert!(stdout.contains("SIGUSR2"), "{stdout}");
+
     // A presentation setting changes without asking again; a command does.
     project.project("[startup]\ncommands = [\"handle SIGUSR2\"]\n[ui]\nprompt = \">> \"\n");
     succeeded(&project.run(&session));
@@ -366,6 +374,7 @@ fn a_project_acts_only_once_trusted() {
         ),
         "{stderr}"
     );
+
     // A project cannot trust itself.
     project.project("[projects]\ntrust = \"always\"\n");
     let stderr = failed(&project.run(&session));
@@ -389,6 +398,7 @@ fn an_interactive_session_asks_once_whether_to_trust_a_project() {
         session.set_expect_timeout(Some(std::time::Duration::from_secs(5)));
         session
     };
+
     let mut session = start(&project);
     session
         .expect("bm = \"break main\"")
@@ -422,6 +432,7 @@ fn the_step_setting_enters_the_runtime_until_turned_off() {
     project.project("[step]\nruntime = \"enter\"\n");
     let shapes = fixture("build/test-programs/tokio-shapes-o0");
     let source = "tests/fixtures/rust/tokio/shapes/src/main.rs";
+
     // The first receive's marker is also the start of the second's.
     let at = |marker: &str| format!("break {source}:{}", support::source_line(source, marker));
     let (first, again) = (at("// INTO: recv"), at("// INTO: recv-again"));

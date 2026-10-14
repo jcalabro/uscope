@@ -23,6 +23,7 @@ pub struct Catalog<'a> {
     pub functions: &'a mut Vec<FunctionInfo>,
     pub code_instances: &'a mut Vec<CodeInstanceInfo>,
     pub lines: &'a mut LineTables,
+
     /// Interns a source path.
     pub source_file: &'a mut dyn FnMut(PathBuf) -> SourceFileId,
 }
@@ -46,6 +47,7 @@ pub fn complete<'code>(
         first_instance: catalog.code_instances.len(),
         source_file: &mut *catalog.source_file,
     };
+
     // Every function is declared before any inlined call names one.
     let mut declared = Vec::new();
     for function in table.functions() {
@@ -53,9 +55,11 @@ pub fn complete<'code>(
             declared.push((function, builder.declare(function)?));
         }
     }
+
     for (function, (id, positions, inlined)) in declared {
         builder.define(function, id, &positions, &inlined, code)?;
     }
+
     catalog
         .lines
         .append(&builder.lines, |file| file)
@@ -89,6 +93,7 @@ impl Described {
                 _ => merged.push((start, end)),
             }
         }
+
         Self(merged)
     }
 
@@ -104,6 +109,7 @@ struct Builder<'a, 'catalog> {
     instances: Vec<CodeInstanceInfo>,
     lines: LineTables,
     files: HashMap<Arc<str>, SourceFileId>,
+
     /// The function each name names, for inlined calls: the first function
     /// of that name that is not a wrapper.
     by_name: HashMap<Arc<str>, FunctionId>,
@@ -117,6 +123,7 @@ impl Builder<'_, '_> {
         if let Some(id) = self.files.get(path) {
             return *id;
         }
+
         let id = (self.source_file)(PathBuf::from(path.as_ref()));
         self.files.insert(Arc::clone(path), id);
         id
@@ -203,16 +210,20 @@ impl Builder<'_, '_> {
         } else {
             crate::debug_info::roles::symbol_role(&name)
         };
+
         let language = if go {
             SourceLanguage::Go
         } else {
             SourceLanguage::Unknown
         };
+
         let id = self.new_function(Arc::clone(&name), declaration, language, role)?;
+
         // An ABI wrapper shares its function's name.
         if function.facts.special != Some(super::SpecialFunction::Wrapper) {
             self.by_name.entry(name).or_insert(id);
         }
+
         Ok((id, positions, inlined))
     }
 
@@ -255,6 +266,7 @@ impl Builder<'_, '_> {
         let Some((last, _)) = positions.last() else {
             return Ok(());
         };
+
         let too_many = |_| super::malformed("too many line rows");
         self.lines.begin_sequence().map_err(too_many)?;
         for (pcs, position) in positions {
@@ -275,6 +287,7 @@ impl Builder<'_, '_> {
                     .map_err(too_many)?;
             }
         }
+
         self.lines
             .push_row(&Row {
                 address: last.end,
@@ -294,6 +307,7 @@ impl Builder<'_, '_> {
         physical: CodeInstanceId,
     ) -> Result<()> {
         let table = self.table;
+
         // Each entry's ranges and its parent entry, by tree index.
         let mut entries = BTreeMap::<i32, (Vec<AddressRange<ImageAddress>>, i32)>::new();
         for run in runs.iter().filter(|run| run.value >= 0) {
@@ -302,17 +316,21 @@ impl Builder<'_, '_> {
                 if index < 0 {
                     break;
                 }
+
                 if depth == MAX_INLINE_DEPTH {
                     return Err(super::malformed("the inline tree is too deep"));
                 }
+
                 let parent = if let Some((_, parent)) = entries.get(&index) {
                     *parent
                 } else {
                     value_at(runs, table.inlined_call(function, index)?.parent_pc)
                 };
+
                 if parent == index {
                     return Err(super::malformed("an inlined call is its own caller"));
                 }
+
                 let (ranges, _) = entries.entry(index).or_insert_with(|| (Vec::new(), parent));
                 match ranges.last_mut() {
                     Some(last) if last.end.get() == run.start => {
@@ -320,10 +338,13 @@ impl Builder<'_, '_> {
                     }
                     _ => ranges.push(range(run.start, run.end)),
                 }
+
                 index = parent;
             }
         }
+
         let mut instances = BTreeMap::<i32, CodeInstanceId>::new();
+
         // Parents first, so each instance names its parent's.
         let mut pending = entries.keys().copied().collect::<Vec<_>>();
         while !pending.is_empty() {
@@ -339,6 +360,7 @@ impl Builder<'_, '_> {
                     deferred.push(index);
                     continue;
                 };
+
                 let call = table.inlined_call(function, index)?;
                 let name = table.inlined_name(&call)?;
                 let call_site = table
@@ -348,6 +370,7 @@ impl Builder<'_, '_> {
                     Some(id) => *id,
                     None => self.inlined_function(function, &call, name, ranges)?,
                 };
+
                 let instance = self.new_instance(
                     callee,
                     Some(parent_instance),
@@ -360,11 +383,14 @@ impl Builder<'_, '_> {
                 )?;
                 instances.insert(index, instance);
             }
+
             if deferred.len() == before {
                 return Err(super::malformed("the inline tree's calls form a cycle"));
             }
+
             pending = deferred;
         }
+
         Ok(())
     }
 }
@@ -386,10 +412,12 @@ impl Builder<'_, '_> {
                 .and_then(|position| self.location(&position.file, call.start_line)),
             None => None,
         };
+
         let facts = super::GoFunctionFacts {
             special: call.special,
             ..super::GoFunctionFacts::default()
         };
+
         let role = crate::debug_info::roles::go_role(&name, Some(facts), false);
         let id = self.new_function(Arc::clone(&name), declaration, SourceLanguage::Go, role)?;
         self.by_name.insert(name, id);

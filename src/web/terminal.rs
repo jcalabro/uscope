@@ -23,6 +23,7 @@ pub fn interactive() -> bool {
 /// Starts the helper, which must happen before any debugger exists.
 pub fn start_opener() -> io::Result<PipeWriter> {
     let (links, writer) = io::pipe()?;
+
     // The first helper starts the one that stays and exits at once, so the
     // one that stays is no child of this process.
     let status = Command::new(std::env::current_exe()?)
@@ -36,6 +37,7 @@ pub fn start_opener() -> io::Result<PipeWriter> {
             "the browser helper failed: {status}"
         )));
     }
+
     Ok(writer)
 }
 
@@ -56,6 +58,7 @@ pub fn run_helper(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
             ExitCode::FAILURE
         };
     }
+
     // Its own session, so Ctrl+C in the terminal reaches neither the helper
     // nor a browser it starts.
     let _ = nix::unistd::setsid();
@@ -76,6 +79,7 @@ pub fn run_helper(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
             std::thread::spawn(move || child.wait());
         }
     }
+
     ExitCode::SUCCESS
 }
 

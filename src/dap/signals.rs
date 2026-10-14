@@ -22,6 +22,7 @@ struct Filter {
     label: &'static str,
     description: &'static str,
     default: bool,
+
     /// The signals the filter covers; `None` covers every other signal.
     signals: Option<&'static [&'static str]>,
 }
@@ -112,6 +113,7 @@ const SYSCALLS: &str = "syscalls";
 pub struct Selection {
     stopping: BTreeSet<u64>,
     exceptions: ExceptionStops,
+
     /// The system calls that stop, every call when empty, when the filter
     /// is on.
     syscalls: Option<Arc<[uscope::syscalls::SyscallId]>>,
@@ -146,8 +148,10 @@ fn syscall_list(text: &str) -> Result<Arc<[uscope::syscalls::SyscallId]>, String
         if named.is_empty() {
             return Err(format!("unknown system call '{name}'"));
         }
+
         calls.extend(named);
     }
+
     Ok(calls.into())
 }
 
@@ -198,8 +202,10 @@ impl Selection {
                     }
                     Err(message) => breakpoints.push(unverified(&message)),
                 }
+
                 continue;
             }
+
             if let Some(chosen) = exceptions.with(id, true) {
                 if condition.is_some() {
                     breakpoints.push(unverified(&format!(
@@ -207,14 +213,17 @@ impl Selection {
                     )));
                     continue;
                 }
+
                 exceptions = chosen;
                 breakpoints.push(json!({"verified": true}));
                 continue;
             }
+
             let Some(filter) = FILTERS.iter().find(|filter| filter.id == id) else {
                 breakpoints.push(unverified(&format!("unknown exception filter '{id}'")));
                 continue;
             };
+
             let signals = match condition.map(signal_list).transpose() {
                 Ok(signals) => signals,
                 Err(message) => {
@@ -222,9 +231,11 @@ impl Selection {
                     continue;
                 }
             };
+
             enabled.insert(filter.id, signals);
             breakpoints.push(json!({"verified": true}));
         }
+
         (
             Self {
                 exceptions,
@@ -256,6 +267,7 @@ impl Selection {
                 },
             }
         }
+
         Self {
             stopping,
             exceptions: ExceptionStops::default(),
@@ -293,11 +305,13 @@ mod tests {
         ] {
             assert!(selection.stops(code(name)), "{name}");
         }
+
         for name in [
             "SIGALRM", "SIGURG", "SIGCHLD", "SIGWINCH", "SIGPROF", "SIGPWR",
         ] {
             assert!(!selection.stops(code(name)), "{name}");
         }
+
         let advertised = filters();
         let defaults = advertised
             .as_array()

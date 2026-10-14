@@ -40,6 +40,7 @@ impl Objdump {
             let (Some(address), Some(bytes)) = (fields.next(), fields.next()) else {
                 continue;
             };
+
             let Some(address) = address
                 .trim()
                 .strip_suffix(':')
@@ -47,6 +48,7 @@ impl Objdump {
             else {
                 continue;
             };
+
             let bytes = bytes
                 .split_whitespace()
                 .map(|byte| u8::from_str_radix(byte, 16).expect("objdump byte"))
@@ -54,6 +56,7 @@ impl Objdump {
             let text = fields.next().unwrap_or_default().trim().to_owned();
             instructions.insert(address, ObjdumpInstruction { bytes, text });
         }
+
         assert!(!instructions.is_empty(), "{} is empty", path.display());
         Self { instructions }
     }
@@ -151,6 +154,7 @@ impl Modules {
                 .await;
             images.insert(record.module.id, image);
         }
+
         Self {
             records: snapshot.modules.to_vec(),
             images,
@@ -209,6 +213,7 @@ async fn assert_module_matches_objdump(
                 !matches!(boundary, TargetBoundary::Crossed { .. }),
                 "{context}: {address:#x} is inside an instruction: {boundary:?}"
             );
+
             // Decoding past the section's end may cross padding into the next
             // section; only conflicts inside the section matter.
             let conflicts = block
@@ -228,11 +233,14 @@ async fn assert_module_matches_objdump(
                 if instruction.address.get() - bias >= end {
                     break;
                 }
+
                 address = instruction.end().get() - bias;
             }
+
             if let BlockCompletion::Unreadable { address: stop, .. } = block.completion {
                 assert!(stop.get() - bias >= end, "{context}: unreadable at {stop}");
             }
+
             blocks.push(block);
         }
 
@@ -255,6 +263,7 @@ async fn assert_module_matches_objdump(
             let InstructionContent::Decoded(decoded) = &instruction.content else {
                 continue;
             };
+
             let targets = |kind| {
                 decoded
                     .references
@@ -262,6 +271,7 @@ async fn assert_module_matches_objdump(
                     .filter(move |reference| reference.kind == kind)
                     .map(|reference| reference.address.get() - bias)
             };
+
             assert_eq!(
                 targets(InstructionReferenceKind::BranchTarget).next(),
                 objdump.branch_target(),
@@ -274,9 +284,11 @@ async fn assert_module_matches_objdump(
                     "{context}+{address:#x} {objdump:?}: {decoded:?}"
                 );
             }
+
             compared += 1;
         }
     }
+
     assert!(compared > 0, "{context}: {file_name} had no code");
     compared
 }
@@ -301,11 +313,13 @@ fn pair_with_objdump<'a, 'b>(
         while let Some((&objdump, _)) = expected.next_if(|&(&objdump, _)| objdump < address) {
             missing.push(objdump);
         }
+
         match expected.next_if(|&(&objdump, _)| objdump == address) {
             Some((_, objdump)) => pairs.push((address, instruction, objdump)),
             None => invented.push(address),
         }
     }
+
     missing.extend(expected.map(|(&address, _)| address));
     missing.truncate(4);
     invented.truncate(4);
@@ -344,6 +358,7 @@ async fn faulted_with_breakpoints(fixture: &str) -> (Scenario, Modules) {
             .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(bias + address)))
             .await;
     }
+
     (scenario, modules)
 }
 
@@ -364,6 +379,7 @@ async fn the_c_library_and_loader_decode_like_objdump() {
         let compared = assert_module_matches_objdump(&scenario, &modules, library, "live").await;
         assert!(compared > 10_000, "{library}: {compared}");
     }
+
     scenario.shutdown().await;
 }
 
@@ -397,6 +413,7 @@ async fn core_dumps_decode_verified_files_like_objdump() {
         for file in files {
             assert_module_matches_objdump(&scenario, &modules, file, core).await;
         }
+
         scenario.shutdown().await;
     }
 }
@@ -413,6 +430,7 @@ fn assert_function_blocks(
     let DisassemblyView::Function { blocks, .. } = &disassembly.view else {
         panic!("{context}: a function query returned a window");
     };
+
     let actual = blocks
         .iter()
         .map(|block| (block.range.start.get() - bias, block.range.end.get() - bias))
@@ -436,6 +454,7 @@ fn assert_function_blocks(
             );
             next = instruction.end();
         }
+
         assert_eq!(next, block.range.end, "{context}");
     }
 }
@@ -469,6 +488,7 @@ async fn functions_cover_every_debug_information_range() {
                 .map(|range| (range.start.get(), range.end.get()))
                 .collect::<Vec<_>>();
             ranges.sort_unstable();
+
             // Every range resolves to the same function.
             for (start, _) in &ranges {
                 let disassembly = disassemble(
@@ -483,6 +503,7 @@ async fn functions_cover_every_debug_information_range() {
                 let DisassemblyView::Function { function, .. } = &disassembly.view else {
                     unreachable!();
                 };
+
                 assert_eq!(function.module, record.module.id);
                 assert_eq!(
                     function.origin,
@@ -492,8 +513,10 @@ async fn functions_cover_every_debug_information_range() {
                     "{context}"
                 );
             }
+
             split += usize::from(ranges.len() > 1);
         }
+
         assert!(
             names.iter().any(|name| &**name == "main"),
             "{fixture}: {names:?}"
@@ -505,6 +528,7 @@ async fn functions_cover_every_debug_information_range() {
             );
             assert_split_main_names_each_range(&scenario, &modules, fixture).await;
         }
+
         scenario.shutdown().await;
     }
 }
@@ -520,6 +544,7 @@ async fn assert_split_main_names_each_range(scenario: &Scenario, modules: &Modul
     let DisassemblyView::Function { function, blocks } = &disassembly.view else {
         panic!("not a function");
     };
+
     assert_eq!(function.name.as_ref(), "main");
     let names = blocks
         .iter()
@@ -557,11 +582,13 @@ async fn functions_known_only_by_symbols_use_their_extents() {
         let Some(extent) = symbol.extent() else {
             continue;
         };
+
         let address = VirtualAddress::new(bias + extent.range.start.get());
         let disassembly = disassemble(&scenario, query(DisassemblyRange::Function(address))).await;
         let DisassemblyView::Function { function, .. } = &disassembly.view else {
             panic!("not a function");
         };
+
         // The preferred symbol at the start may be an alias or an
         // enclosing function.
         let named = image
@@ -589,6 +616,7 @@ async fn functions_known_only_by_symbols_use_their_extents() {
         );
         origins.insert((named.name.to_string(), named.provenance));
     }
+
     for expected in [
         ("asm_nested_outer", SymbolExtentProvenance::Declared),
         ("asm_unsized", SymbolExtentProvenance::Inferred),
@@ -645,6 +673,7 @@ async fn context_before_an_address_is_proven_from_known_starts() {
     for pair in block.instructions.windows(2) {
         assert_eq!(pair[0].end(), pair[1].address);
     }
+
     for instruction in block.instructions.iter() {
         let objdump = &oracle.instructions[&(instruction.address.get() - bias)];
         assert_eq!(*instruction.bytes, *objdump.bytes);
@@ -697,21 +726,25 @@ async fn assert_marked_data(scenario: &Scenario, marked: u64, context: &str) {
     let DisassemblyView::Function { function, blocks } = &disassembly.view else {
         panic!("not a function");
     };
+
     assert_eq!(function.name.as_ref(), "disasm_marked_data", "{context}");
     let [block] = &blocks[..] else {
         panic!("{context}: {blocks:?}");
     };
+
     let starts = block
         .instructions
         .iter()
         .map(|instruction| instruction.address.get() - marked)
         .collect::<Vec<_>>();
     assert_eq!(starts, [0, 2, 4, 9], "{context}");
+
     // The marker is a code symbol and, where the assembler describes
     // assembly functions, a debug-information function too.
     let [conflict] = &block.conflicts[..] else {
         panic!("{context}: {:?}", block.conflicts);
     };
+
     let evidence = conflict.evidence;
     assert!(
         matches!(
@@ -763,6 +796,7 @@ async fn assert_hidden_data(scenario: &Scenario, hidden: u64, context: &str) {
     let DisassemblyView::Function { blocks, .. } = &disassembly.view else {
         panic!("not a function");
     };
+
     let block = &blocks[0];
     assert_eq!(block.instructions.len(), 2, "{context}: {block:#?}");
     assert_eq!(block.instructions[1].bytes.len(), 10);
@@ -842,8 +876,10 @@ async fn assert_syntaxes_agree(
         let DisassemblyView::Function { blocks, .. } = disassembly.view else {
             panic!("not a function");
         };
+
         renderings.push(blocks[0].instructions.to_vec());
     }
+
     let att = renderings.pop().expect("AT&T");
     let intel = renderings.pop().expect("Intel");
     assert_eq!(intel.len(), att.len());
@@ -854,6 +890,7 @@ async fn assert_syntaxes_agree(
         assert_eq!(intel.references, att.references);
         assert_eq!(intel.indirect_target, att.indirect_target);
     }
+
     assert!(
         att.iter()
             .any(|instruction| decoded(instruction).text().contains('%'))
@@ -935,6 +972,7 @@ async fn assert_named_targets(scenario: &Scenario, modules: &Modules, fixture: &
     let DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("not a function");
     };
+
     let operands = blocks[0]
         .instructions
         .iter()
@@ -944,6 +982,7 @@ async fn assert_named_targets(scenario: &Scenario, modules: &Modules, fixture: &
     let [operand] = operands[..] else {
         panic!("{fixture}: {operands:#?}");
     };
+
     assert_eq!(
         operand.address.get(),
         modules.symbol(fixture, "disasm_counter")
@@ -999,6 +1038,7 @@ async fn code_that_no_verified_file_or_dump_holds_is_unreadable() {
         .expect("text")
         .address();
     let address = missing.start.get() + text;
+
     // Whatever module precedes the library, nothing proven reaches its code.
     let (boundary, leading, block) =
         into_window(disassemble(&scenario, window(address, 2, 4)).await);
@@ -1025,6 +1065,7 @@ async fn code_that_no_verified_file_or_dump_holds_is_unreadable() {
         allow_module_mismatch: true,
         ..CoreDumpOptions::new(Scenario::fixture("crash-gcc-o0-memoryless.core"))
     };
+
     let unverified = Scenario::open_core("unverified", &options);
     let location = unverified
         .operation("location", unverified.handle().current_location())
@@ -1048,11 +1089,13 @@ async fn code_that_no_verified_file_or_dump_holds_is_unreadable() {
         block.completion,
         BlockCompletion::Unreadable { address, .. } if address == pc
     ));
+
     // The function's ranges come from the metadata; its bytes do not.
     let function = disassemble(&unverified, query(DisassemblyRange::Function(pc))).await;
     let DisassemblyView::Function { function, blocks } = function.view else {
         panic!("not a function");
     };
+
     assert_eq!(function.name.as_ref(), "crash_segv");
     assert!(blocks[0].instructions.is_empty());
     assert!(matches!(
@@ -1080,6 +1123,7 @@ async fn requests_are_validated() {
             Err(Error::InvalidDisassemblyWindow { before: b, after: a }) if (b, a) == (before, after)
         ));
     }
+
     assert!(matches!(
         scenario
             .handle()
@@ -1087,6 +1131,7 @@ async fn requests_are_validated() {
             .await,
         Err(Error::NoFunctionContainsAddress(address)) if address.get() == 8
     ));
+
     // Outside every module, nothing is readable or known.
     let (boundary, _, block) = into_window(disassemble(&scenario, window(8, 1, 1)).await);
     assert_eq!(
@@ -1113,6 +1158,7 @@ async fn function_instructions(scenario: &Scenario, address: u64) -> Vec<Disasse
     let DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("a function query returned a window");
     };
+
     blocks
         .iter()
         .flat_map(|block| block.instructions.iter().cloned())
@@ -1167,6 +1213,7 @@ async fn printf_call(
     let [call] = &calls[..] else {
         panic!("{fixture}: {calls:#?}");
     };
+
     call.clone()
 }
 
@@ -1236,6 +1283,7 @@ async fn assert_targets_away_from_the_stop(scenario: &Scenario, modules: &Module
     );
     assert_eq!(symbol(slot), Some(("disasm_slot", 0)));
     assert_eq!(symbol(target), Some(("disasm_target_one", 0)));
+
     // The dynamic loader filled the slot at startup.
     let (slot, target) = loaded(&targets[&symbol_address("disasm_call_got")]);
     assert_eq!(
@@ -1301,6 +1349,7 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
             .add_breakpoint_spec(BreakpointSpec::Address(address))
             .await;
     }
+
     for label in INDIRECT_BRANCHES {
         let pc = symbol_address(label);
         assert_eq!(
@@ -1315,6 +1364,7 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
             .references
             .first()
             .map(|reference| reference.address.get());
+
         // The slot holding each target, and the target.
         let expected = match label {
             "disasm_call_slot" => (encoded, symbol_address("disasm_target_one")),
@@ -1336,6 +1386,7 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
             "disasm_return" => (Some(register(&registers, "rsp")), return_site),
             _ => unreachable!(),
         };
+
         let target = indirect_target(&instruction);
         let context = format!("{fixture}: {label}: {target:#?}");
         let (slot, destination) = match target {
@@ -1343,6 +1394,7 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
             IndirectTarget::Memory { slot, target } => (Some(slot), target),
             _ => panic!("{context}: unresolved at the stop"),
         };
+
         assert_eq!(
             (
                 slot.map(|slot| slot.address.get()),
@@ -1469,6 +1521,7 @@ async fn indirect_branch_sites(
             }
         }
     }
+
     sites
 }
 
@@ -1487,6 +1540,7 @@ async fn assert_executed_targets(
     scenario.add_breakpoint("main").await;
     scenario.run_to_stop().await;
     let modules = Modules::load(&scenario).await;
+
     // The functions of layout.S hide data in code, which decoding misreads.
     let layout = ["disasm_marked_data", "disasm_hidden_data"];
     let mut sites = indirect_branch_sites(&scenario, &modules, fixture, &layout).await;
@@ -1498,12 +1552,14 @@ async fn assert_executed_targets(
             let found = found.into_iter().map(|site| site.get() - bias).collect();
             library_sites.insert(Arc::clone(&record.path), found);
         }
+
         sites.extend(
             library_sites[&record.path]
                 .iter()
                 .map(|site| VirtualAddress::new(bias + site)),
         );
     }
+
     for site in &sites {
         scenario
             .add_breakpoint_spec(BreakpointSpec::Address(*site))
@@ -1525,11 +1581,13 @@ async fn assert_executed_targets(
             }
             other => panic!("{fixture}: unexpected stop {other:?}"),
         };
+
         // A step may land on another site, which resuming would skip.
         if !sites.contains(&pc) {
             stop = scenario.resume_to_stop().await;
             continue;
         }
+
         let instruction = instruction_at(&scenario, pc.get()).await;
         let current = decoded(&instruction);
         let context = format!("{fixture}: {pc}: {current:#?}");
@@ -1545,10 +1603,12 @@ async fn assert_executed_targets(
                     (false, ControlFlow::Return) => "return address",
                     (false, _) => "memory a register addresses",
                 };
+
                 (kind, target.address)
             }
             _ => panic!("{context}: unresolved at the stop"),
         };
+
         stop = scenario.step_to_stop(StepKind::Instruction).await;
         assert_eq!(
             stop,
@@ -1561,6 +1621,7 @@ async fn assert_executed_targets(
         assert_eq!(location.await.address, target, "{kind}: {context}");
         *verified.entry(kind).or_default() += 1;
     }
+
     scenario.shutdown().await;
     verified
 }
@@ -1598,6 +1659,7 @@ fn dynamic_slots(file_name: &str) -> BTreeMap<u64, String> {
             let object::RelocationTarget::Symbol(index) = relocation.target() else {
                 return None;
             };
+
             let name = symbols.symbol_by_index(index).ok()?.name().ok()?;
             Some((offset, name.to_owned()))
         })
@@ -1636,12 +1698,14 @@ async fn linkage_jumps(
                 }
                 other => panic!("{file_name}: {other:?}"),
             };
+
             // The first stub jumps to the lazy-binding resolver.
             if let Some(name) = slots.get(&slot) {
                 jumps.insert(name.clone(), instruction.clone());
             }
         }
     }
+
     jumps
 }
 
@@ -1676,6 +1740,7 @@ async fn core_dumps_name_the_targets_their_saved_slots_hold() {
             "{name}"
         );
     }
+
     // crash-gcc-o0 links with lazy binding, so abort's slot still points
     // back into its stub.
     assert_eq!(target("abort").address, jumps["abort"].end());
@@ -1693,14 +1758,17 @@ async fn core_dumps_name_the_targets_their_saved_slots_hold() {
         let IndirectTarget::Unreadable { slot, address, .. } = indirect_target(jump) else {
             panic!("{name}: {jump:#?}");
         };
+
         assert_eq!(slot.address, *address, "{name}");
     }
+
     scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn a_register_that_a_restarted_system_call_replaces_is_never_used() {
     let child = support::ExternalProcess::spawn(&Scenario::fixture("attach-restart"));
+
     // Attaching must interrupt pause(2).
     support::wait_for_system_call(child.process_id(), 34);
     let debugger = child.attach().await;

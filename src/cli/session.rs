@@ -14,6 +14,7 @@ use super::config::{
     self, Answer, AttachTarget, Files, Launch, LaunchTarget, Origin, Settings, StartupCommand,
     Trust, TrustStore, UserFile,
 };
+
 use super::terminal::{ColorEnvironment, Renderer, Role};
 use crate::Args;
 
@@ -31,17 +32,21 @@ pub enum Target {
 pub struct Session {
     pub settings: Settings,
     pub target: Target,
+
     /// How `run` launches the program.
     pub launch: LaunchSettings,
+
     /// The settings files' startup commands, then the launch
     /// configuration's.
     pub startup: Vec<StartupCommand>,
     pub command_files: Vec<PathBuf>,
     pub commands: Vec<String>,
     pub batch: bool,
+
     /// The session's view files, those named last first.
     pub views: Vec<PathBuf>,
     pub source_paths: SourcePathMap,
+
     /// Where modules' separate debug files are found.
     pub debug_files: uscope::DebugFileOptions,
 }
@@ -69,6 +74,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
     } else if let Some((choice, variable)) = ColorEnvironment::current().choice() {
         settings.override_color(choice, Origin::Environment(variable));
     }
+
     if let Some(syntax) = args.disassembly_syntax {
         settings.override_syntax(syntax);
     }
@@ -84,6 +90,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
             .collect(),
         working_directory: args.cwd.clone(),
     };
+
     let explicit = args.executable.is_some() || args.attach.is_some() || args.core.is_some();
     let chosen = match (&args.launch, explicit) {
         (Some(name), _) => Some(chosen_launch(&settings, &files, trusted, name)?),
@@ -104,6 +111,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
             ),
         },
     };
+
     let target = match chosen {
         Some(chosen) => {
             let origin = settings.origin(&format!("launch.{}", chosen.name));
@@ -114,11 +122,13 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
                     text: text.clone(),
                 });
             }
+
             views.extend(chosen.views.iter().map(|path| settings.root.join(path)));
             launch_target(chosen, &settings.root, args, &mut launch)?
         }
         None => explicit_target(args)?,
     };
+
     views.extend(args.views.iter().cloned());
 
     let mut source_paths = SourcePathMap::new();
@@ -127,11 +137,13 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
             .push(from, to)
             .context("invalid --source-map rule")?;
     }
+
     for rule in &settings.config.source_map {
         source_paths
             .push(&rule.from, settings.root.join(&rule.to))
             .context("invalid [[source-map]] rule")?;
     }
+
     let debug_info = &settings.config.debug_info;
     let debug_files = uscope::DebugFileOptions {
         directories: args
@@ -148,6 +160,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
         debuginfod: args.debuginfod || debug_info.debuginfod,
         ..uscope::DebugFileOptions::default()
     };
+
     uscope::pool::configure(None, debug_info.jobs).context("cannot load debug information")?;
     Ok(Session {
         debug_files,
@@ -205,11 +218,13 @@ fn launch_target(
             chosen.name
         )
     };
+
     Ok(match chosen.target(root)? {
         LaunchTarget::Program(program) => {
             if args.arguments.is_empty() {
                 launch.arguments = chosen.args.iter().map(OsString::from).collect();
             }
+
             let mut environment = chosen
                 .env
                 .iter()
@@ -225,18 +240,22 @@ fn launch_target(
                         .map_or_else(|| root.to_path_buf(), |cwd| root.join(cwd)),
                 );
             }
+
             Target::Program(program)
         }
         other => {
             if !args.arguments.is_empty() {
                 launched("an argument after --")?;
             }
+
             if !args.environment.is_empty() {
                 launched("--env")?;
             }
+
             if args.cwd.is_some() {
                 launched("--cwd")?;
             }
+
             match other {
                 LaunchTarget::Attach(target, executable) => Target::Attach {
                     process: attach_process(&target)?,
@@ -272,6 +291,7 @@ fn explicit_target(args: &Args) -> Result<Target> {
             debug_files: uscope::DebugFileOptions::default(),
         }));
     }
+
     if let Some(attach) = &args.attach {
         let target = attach
             .parse()
@@ -281,9 +301,11 @@ fn explicit_target(args: &Args) -> Result<Target> {
             executable: args.executable.clone(),
         });
     }
+
     let Some(executable) = args.executable.clone() else {
         bail!("the command line names no program, process, or core");
     };
+
     Ok(Target::Program(executable))
 }
 
@@ -293,6 +315,7 @@ fn attach_process(target: &AttachTarget) -> Result<ProcessId> {
         AttachTarget::Pid(pid) => return Ok(ProcessId::new(*pid)),
         AttachTarget::Name(name) => name,
     };
+
     let found = uscope::processes_named(name)?;
     match found.as_slice() {
         [] => bail!("no process is named '{name}'"),
@@ -316,16 +339,19 @@ fn decide_trust(files: &Files, flag: bool, interactive: bool, renderer: Renderer
     let Some(acting) = files.acting() else {
         return Ok(true);
     };
+
     let root = &files.root;
     let warn = |message: String| {
         eprintln!("{}: {message}", renderer.paint(Role::Warning, "warning"));
     };
+
     let left_out = |why: &str| {
         format!(
             "left out the startup commands, aliases, and launch configurations of the project at {}, {why}",
             root.display()
         )
     };
+
     match files.trust_policy() {
         Trust::Always => return Ok(true),
         Trust::Never => {
@@ -334,13 +360,16 @@ fn decide_trust(files: &Files, flag: bool, interactive: bool, renderer: Renderer
         }
         Trust::Ask => {}
     }
+
     if flag {
         return Ok(true);
     }
+
     let mut store = TrustStore::load()?;
     if store.trusts(root, &acting) {
         return Ok(true);
     }
+
     if !interactive {
         bail!(
             "the project at {} has startup commands, aliases, or launch configurations that have not been trusted:\n\n{}\nPass --trust-project to use them in this session, or run `uscope config trust` to trust them until they change.",
@@ -348,6 +377,7 @@ fn decide_trust(files: &Files, flag: bool, interactive: bool, renderer: Renderer
             indent(&acting)
         );
     }
+
     let answer = config::ask_trust(root, &acting, &mut io::stdin().lock(), &mut io::stderr())
         .context("cannot ask whether to trust the project")?;
     match answer {
@@ -357,6 +387,7 @@ fn decide_trust(files: &Files, flag: bool, interactive: bool, renderer: Renderer
                     "trusted the project for this session only: {error}"
                 ));
             }
+
             Ok(true)
         }
         Answer::Once => Ok(true),

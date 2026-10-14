@@ -22,15 +22,20 @@ pub struct ExpressionRecord {
     /// Where its operations are in [`TableKind::ExpressionBytes`].
     pub bytes: U32,
     pub length: U32,
+
     /// The unit it was read from, in [`TableKind::EvaluationUnits`].
     pub unit: U32,
+
     /// Its indexed addresses, by index.
     pub addresses: Span<IndexedAddressRecord>,
+
     /// The procedures it calls, by `.debug_info` offset.
     pub procedures: Span<ProcedureRecord>,
+
     /// Its unit's DWARF version.
     pub version: U16,
     pub address_size: u8,
+
     /// Whether its unit is 64-bit DWARF.
     pub dwarf64: u8,
 }
@@ -60,6 +65,7 @@ impl Record for IndexedAddressRecord {
 )]
 pub struct ProcedureRecord {
     pub offset: U64,
+
     /// Its location, or [`NONE`] for an entry without one.
     pub list: U32,
 }
@@ -91,6 +97,7 @@ pub struct LocationEntryRecord {
     pub start: U64,
     pub end: U64,
     pub expression: U32,
+
     /// [`DEFAULT`] for a default location, whose range is zero.
     pub flags: u8,
 }
@@ -110,8 +117,10 @@ pub const DEFAULT: u8 = 1;
 pub struct EvaluationUnitRecord {
     /// Where the unit begins in `.debug_info`, when [`unit_flags::OFFSET`].
     pub offset: U64,
+
     /// Its base types, by unit offset.
     pub base_types: Span<BaseTypeRecord>,
+
     /// Its `DW_AT_language`, when [`unit_flags::LANGUAGE`].
     pub language: U16,
     pub flags: u8,
@@ -124,7 +133,9 @@ impl Record for EvaluationUnitRecord {
 /// [`EvaluationUnitRecord::flags`].
 pub mod unit_flags {
     pub const OFFSET: u8 = 1 << 0;
+
     pub const LANGUAGE: u8 = 1 << 1;
+
     pub const ALL: u8 = OFFSET | LANGUAGE;
 }
 
@@ -170,6 +181,7 @@ pub struct LocationListId(pub u32);
 pub struct EvaluationUnit {
     pub offset: Option<u64>,
     pub language: Option<gimli::DwLang>,
+
     /// Base types by unit offset.
     pub base_types: Vec<(u64, ValueType)>,
 }
@@ -218,13 +230,16 @@ impl LocationsBuilder {
                 value_type: u8::try_from(code + 1).map_err(|_| TooLarge)?,
             });
         }
+
         let mut flags = 0;
         if unit.offset.is_some() {
             flags |= unit_flags::OFFSET;
         }
+
         if unit.language.is_some() {
             flags |= unit_flags::LANGUAGE;
         }
+
         self.units.push(EvaluationUnitRecord {
             offset: unit.offset.unwrap_or(0).into(),
             base_types: Span::new(first, index(base_types.len())?),
@@ -265,12 +280,14 @@ impl LocationsBuilder {
                 && found.addresses().eq(addresses.iter().copied())
                 && found.procedures().eq(procedures.iter().copied())
         };
+
         if let Some(id) = self
             .pooled_expressions
             .find(hash, |id| same(self.tables(), id))
         {
             return Ok(ExpressionId(id));
         }
+
         let id = index(self.expressions.len())?;
         let record = ExpressionRecord {
             bytes: index(self.bytes.len())?.into(),
@@ -282,6 +299,7 @@ impl LocationsBuilder {
             address_size: encoding.address_size,
             dwarf64: u8::from(encoding.format == gimli::Format::Dwarf64),
         };
+
         self.bytes.extend_from_slice(bytes);
         index(self.bytes.len())?;
         self.addresses.extend(
@@ -316,9 +334,11 @@ impl LocationsBuilder {
                 .map(|(range, expression)| (range, expression.id()))
                 .eq(entries.iter().copied())
         };
+
         if let Some(id) = self.pooled_lists.find(hash, |id| same(self.tables(), id)) {
             return Ok(LocationListId(id));
         }
+
         let id = index(self.lists.len())?;
         self.lists.push(LocationListRecord {
             entries: Span::new(index(self.entries.len())?, index(entries.len())?),
@@ -368,6 +388,7 @@ impl LocationsBuilder {
         let mut lists = Vec::<LocationListId>::with_capacity(other.lists.len());
         let mut procedures = Vec::new();
         let mut entries = Vec::new();
+
         // An expression names lists pooled before it, and a list names
         // expressions pooled before it, so each is pooled once what it
         // names is.
@@ -395,6 +416,7 @@ impl LocationsBuilder {
                     continue;
                 }
             }
+
             let list = tables.list(LocationListId(index(lists.len())?));
             entries.clear();
             entries.extend(
@@ -403,6 +425,7 @@ impl LocationsBuilder {
             );
             lists.push(self.list(&entries)?);
         }
+
         Ok((expressions, lists))
     }
 
@@ -601,6 +624,7 @@ impl<'a> Expression<'a> {
 pub enum Procedure<'a> {
     /// One whose locations say what it computes.
     Located(LocationList<'a>),
+
     /// An entry without a location, which computes nothing.
     Unlocated,
 }
@@ -664,6 +688,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("an evaluation unit is malformed".into());
     }
+
     if !tables
         .lists
         .iter()
@@ -679,6 +704,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a location list is malformed".into());
     }
+
     if !tables.expressions.iter().all(|record| {
         (record.unit.get() as usize) < tables.units.len()
             && (2..=5).contains(&record.version.get())
@@ -712,5 +738,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("an expression is malformed".into());
     }
+
     Ok(())
 }

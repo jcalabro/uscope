@@ -18,21 +18,29 @@ use crate::{Architecture, ByteOrder, PointerWidth, TargetDescription};
 pub trait Format {
     /// What a table of this format holds.
     type Kind: Copy + Ord + Debug;
+
     /// The first bytes of every image of the format.
     const MAGIC: [u8; 8];
+
     /// What the tables mean, beyond their layout: bump it with any change
     /// to what is stored, so that no older image is read as newer.
     const REVISION: u32;
+
     /// How many kinds of table the format has.
     const KINDS: usize;
+
     /// The fingerprint of every record's layout.
     fn fingerprint() -> u64;
+
     /// The kind a directory number names, if the format has it.
     fn kind(number: u32) -> Option<Self::Kind>;
+
     /// A kind's number in the directory.
     fn number(kind: Self::Kind) -> u32;
+
     /// A kind's slot among the format's `KINDS`.
     fn index(kind: Self::Kind) -> usize;
+
     /// One record's size in a table of `kind`.
     fn stride(kind: Self::Kind) -> usize;
 }
@@ -61,6 +69,7 @@ pub fn structure<F: Format, const N: usize>(
     if trailer.checksum.get() != twox_hash::XxHash3_64::oneshot(&bytes[..trailer_start]) {
         return Err(ImageError::Checksum);
     }
+
     check_directory::<F, N>(bytes, header, trailer_start)
 }
 
@@ -70,31 +79,38 @@ fn check_header<F: Format>(bytes: &[u8], limits: Limits) -> Result<&Header, Imag
     if header.magic != F::MAGIC {
         return Err(ImageError::NotAnImage);
     }
+
     if header.format.get() != format::FORMAT_VERSION {
         return Err(ImageError::Format {
             found: header.format.get(),
             expected: format::FORMAT_VERSION,
         });
     }
+
     if header.normalization.get() != F::REVISION {
         return Err(ImageError::Normalization {
             found: header.normalization.get(),
             expected: F::REVISION,
         });
     }
+
     if header.layout.get() != F::fingerprint() {
         return Err(ImageError::Layout);
     }
+
     let length = header.length.get();
     if length > limits.bytes {
         return Err(ImageError::TooLarge);
     }
+
     if length != bytes.len() as u64 {
         return Err(ImageError::Truncated);
     }
+
     if target_of(header).is_none() || header.flags != 0 || header.reserved != [0; 24] {
         return Err(malformed("the header has fields it does not define"));
     }
+
     Ok(header)
 }
 
@@ -111,10 +127,12 @@ fn check_directory<F: Format, const N: usize>(
             "the directory lists more tables than there are kinds",
         ));
     }
+
     let directory_end = size_of::<Header>() + count * size_of::<DirectoryEntry>();
     if directory_end > trailer_start {
         return Err(ImageError::Truncated);
     }
+
     let entries = <[DirectoryEntry]>::ref_from_bytes(&bytes[size_of::<Header>()..directory_end])
         .map_err(|_| ImageError::Truncated)?;
     let mut tables = [None; N];
@@ -126,15 +144,18 @@ fn check_directory<F: Format, const N: usize>(
         if previous_kind.is_some_and(|previous| previous >= kind) {
             return Err(malformed("tables are out of order or repeated"));
         }
+
         previous_kind = Some(kind);
         let stride = entry.stride.get() as usize;
         if stride != F::stride(kind) {
             return Err(malformed(format!("{kind:?} has the wrong record size")));
         }
+
         let rows = entry.count.get();
         if rows == 0 || rows > MAX_ROWS {
             return Err(malformed(format!("{kind:?} has {rows} rows")));
         }
+
         let table_length = (stride as u64)
             .checked_mul(rows)
             .filter(|table_length| *table_length == entry.length.get())
@@ -147,24 +168,29 @@ fn check_directory<F: Format, const N: usize>(
         let (Ok(offset), Ok(end)) = (usize::try_from(offset), usize::try_from(end)) else {
             return Err(ImageError::TooLarge);
         };
+
         if offset % format::TABLE_ALIGNMENT != 0 || offset < previous_end {
             return Err(malformed(format!("{kind:?} is misplaced")));
         }
+
         if bytes[previous_end..offset].iter().any(|byte| *byte != 0) {
             return Err(malformed("padding between tables is not zero"));
         }
+
         previous_end = end;
         tables[F::index(kind)] = Some(Placed {
             offset,
             length: end - offset,
         });
     }
+
     if bytes[previous_end..trailer_start]
         .iter()
         .any(|byte| *byte != 0)
     {
         return Err(malformed("padding before the trailer is not zero"));
     }
+
     Ok(tables)
 }
 
@@ -216,6 +242,7 @@ impl<'a, F: Format> Tables<'a, F> {
         if count == 0 {
             return;
         }
+
         assert!(
             self.tables.iter().all(|(added, ..)| *added != kind),
             "{kind:?} is added once"
@@ -260,6 +287,7 @@ impl<'a, F: Format> Tables<'a, F> {
             )
             .ok_or(ImageError::TooLarge)?;
         }
+
         let length = offset
             .checked_add(size_of::<Trailer>())
             .ok_or(ImageError::TooLarge)?;
@@ -269,12 +297,14 @@ impl<'a, F: Format> Tables<'a, F> {
         buffer[..directory_start].copy_from_slice(header.as_bytes());
         buffer[directory_start..directory_start + directory_length]
             .copy_from_slice(entries.as_bytes());
+
         // Each table is freed once copied, so the tables and the image
         // are not all held at once.
         for ((_, _, _, table), start) in self.tables.into_iter().zip(offsets) {
             let rows = table.bytes();
             buffer[start..start + rows.len()].copy_from_slice(rows);
         }
+
         let checksum = twox_hash::XxHash3_64::oneshot(&buffer[..offset]);
         buffer[offset..].copy_from_slice(
             Trailer {
@@ -322,16 +352,19 @@ pub const fn target_of(header: &Header) -> Option<TargetDescription> {
         2 => Architecture::Aarch64,
         _ => return None,
     };
+
     let byte_order = match header.byte_order {
         1 => ByteOrder::Little,
         2 => ByteOrder::Big,
         _ => return None,
     };
+
     let pointer_width = match header.address_size {
         4 => PointerWidth::Bits32,
         8 => PointerWidth::Bits64,
         _ => return None,
     };
+
     Some(TargetDescription {
         architecture,
         byte_order,

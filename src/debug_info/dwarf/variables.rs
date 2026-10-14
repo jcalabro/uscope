@@ -25,6 +25,7 @@ use crate::debug_info::{
     Accessed, CallSite, CallSiteId, EntryParameter, Located, ObjectKey, ObjectStorage, PlannedStep,
     Step, TextLocation, VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError,
 };
+
 use crate::inspection::InspectionBudget;
 use crate::{
     AddressRange, ByteOrder, CodeInstanceId, DereferenceReference, DereferencedValue, Error,
@@ -38,24 +39,29 @@ use super::{
     DieKey, DieWalk, DwarfError, Reader, UnitCatalog, Units, die_code_ranges, die_reference,
     is_type_unit, unit_dwarf,
 };
+
 use crate::image::variables::{
     Capture, ConstantValue, DataObject, Function, Metadata, MetadataAbsence, Object, ObjectId,
     ValueDescription, VariableView,
 };
+
 use die::{
     copy_name, data_object_scope_ranges, debug_info_offset, declaration_with_origins,
     is_type_scope, origin_chain, strict_flag, string_with_origins, type_with_origins,
     variable_order_key,
 };
+
 use evaluate::FrameBaseCache;
 use globals::load_globals;
 pub(in crate::debug_info) use identity::{produced_language, source_language};
+
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
     LocationListId, LocationTables, LocationsBuilder, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
 };
+
 use types::{
     DynamicAggregateChild, TypeArenaBuilder, TypeEntry, TypeMetadataEntry, TypeResolution,
 };
@@ -63,6 +69,7 @@ use types::{
 mod call_sites;
 mod codec;
 pub(super) mod coroutine;
+
 mod dedup;
 mod die;
 mod evaluate;
@@ -143,27 +150,34 @@ struct Scope {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     lexical_depth: u32,
     frame_base: Metadata<LocationListId>,
+
     /// True within subprograms and inlined subroutines, whose formal
     /// parameters some producers, such as Zig, nest in lexical blocks.
     routine: bool,
     function: usize,
+
     /// The innermost containing inline instance, or `None` when the scope
     /// belongs directly to the physical frame.
     instance: Option<CodeInstanceId>,
+
     /// The code instance whose code the scope is in: `instance`, or the
     /// physical frame's.
     code_instance: Option<CodeInstanceId>,
+
     /// The file declaring a Go function, and so its variables, whose
     /// declarations give only their line.
     go_file: Option<SourceFileId>,
+
     /// For a Rust scope, whose compiler names variables of its own, what
     /// kind it is.
     rust: Option<RustScope>,
+
     /// The line of the await whose future this scope, or one enclosing it,
     /// declares as `__awaitee`: rustc binds the value it gives as `result`
     /// in a block within.
     awaitee: Option<crate::LineNumber>,
     malformed: Option<Arc<str>>,
+
     /// Whether the scope is in a subprogram's definition, abstract or
     /// concrete, rather than in a declaration inside a type.
     defined: bool,
@@ -182,24 +196,32 @@ pub(super) struct DwarfVariableInfo {
 
 pub(super) struct LoadedVariables {
     pub types: Arc<[crate::TypeNode]>,
+
     /// The data objects and the functions whose frames show them.
     pub variables: crate::image::variables::Variables,
+
     /// The calls the functions make.
     pub calls: crate::image::calls::Calls,
+
     /// What reading values of some types takes beyond their layout.
     pub type_facts: crate::image::type_facts::TypeFacts,
+
     /// Every location the variables and types name.
     pub locations: LocationsBuilder,
+
     /// Integer constants the units declare at their top level, by name,
     /// and Rust trait objects' vtables, by address, with the concrete type
     /// each is for.
     pub declarations: crate::image::declarations::Declarations,
+
     /// The coroutine each code instance that runs one is passed, as the
     /// body of an `async fn` is passed its future.
     pub coroutine_bodies: BTreeMap<CodeInstanceId, TypeId>,
+
     /// Every type named as a coroutine, with what it is or why its layout
     /// cannot be read as one.
     pub coroutines: BTreeMap<TypeId, std::result::Result<crate::CoroutineInfo, Arc<str>>>,
+
     /// The generic type arguments of each code instance of a generic
     /// function, by their parameters' names.
     pub function_generics: BTreeMap<CodeInstanceId, crate::FunctionGenerics>,
@@ -214,6 +236,7 @@ fn unit_producer(
     let Some(root) = entries.next_dfs()? else {
         return Ok(None);
     };
+
     super::string_attribute(dwarf, unit, root, gimli::DW_AT_producer)
 }
 
@@ -235,6 +258,7 @@ fn system_v_returns<'data>(
         .ok()
         .flatten()
         .unwrap_or_else(|| Arc::from("returned"));
+
     // Named for the function, as C's are.
     let name = super::own_name(language, &name).map_or(name, Arc::from);
     let rewritten = std::iter::once(entry)
@@ -282,10 +306,12 @@ fn fused_block_ranges(
         depth: isize,
         offset: usize,
         block: bool,
+
         /// Its own ranges, fused; a block with none takes its parent's.
         own: Vec<AddressRange<ImageAddress>>,
         ranges: Vec<AddressRange<ImageAddress>>,
     }
+
     fn close(
         open: Open,
         stack: &mut [Open],
@@ -295,10 +321,12 @@ fn fused_block_ranges(
         if open.block && !open.own.is_empty() && ranges != open.own {
             fused.insert(open.offset, ranges.clone());
         }
+
         if let Some(parent) = stack.last_mut() {
             parent.ranges.extend(ranges);
         }
     }
+
     let mut fused = HashMap::new();
     let mut stack = Vec::<Open>::new();
     let mut entries = unit.entries();
@@ -307,12 +335,14 @@ fn fused_block_ranges(
         while let Some(open) = stack.pop_if(|open| open.depth >= depth) {
             close(open, &mut stack, &mut fused);
         }
+
         let ranges = match entry.tag() {
             gimli::DW_TAG_subprogram
             | gimli::DW_TAG_lexical_block
             | gimli::DW_TAG_inlined_subroutine => die_code_ranges(dwarf, unit, entry, code)?,
             _ => continue,
         };
+
         stack.push(Open {
             depth,
             offset: entry.offset().0,
@@ -321,9 +351,11 @@ fn fused_block_ranges(
             ranges,
         });
     }
+
     while let Some(open) = stack.pop() {
         close(open, &mut stack, &mut fused);
     }
+
     Ok(fused)
 }
 
@@ -363,6 +395,7 @@ pub(super) fn load_variable_info<'data>(
     let instance_ids = code.instance_ids;
     let mut walked = Walked::default();
     let phase = crate::span!("variables.evaluation_units");
+
     // Every location is pooled once, in the tables the image will hold.
     let pool = std::sync::Mutex::new(LocationsBuilder::default());
     load_evaluation_units(
@@ -406,6 +439,7 @@ pub(super) fn load_variable_info<'data>(
 
     types.freeze();
     let phase = crate::span!("variables.main_walk");
+
     // The file of each declaration, which the walk would otherwise spell
     // again for each variable.
     let mut declared_files = die::DeclaredFiles::default();
@@ -417,12 +451,14 @@ pub(super) fn load_variable_info<'data>(
         instance_ids,
         locals,
     };
+
     if !merge::walk_units_apart(&cx, &mut walked, &mut types, files, &pool, walk_ahead) {
         crate::count!("units_walked_in_order", units.len());
         for (unit_index, unit) in units.iter().enumerate() {
             if is_type_unit(unit) {
                 continue;
             }
+
             walk_unit(
                 &cx,
                 unit_index,
@@ -452,6 +488,7 @@ pub(super) fn load_variable_info<'data>(
             .objects
             .sort_by_key(|index| variable_order_key(&objects[*index as usize]));
     }
+
     drop(phase);
     let phase = crate::span!("variables.constants_and_members");
     let constants = types.named_constants();
@@ -461,6 +498,7 @@ pub(super) fn load_variable_info<'data>(
     let phase = crate::span!("variables.finalize_types");
     types.finalize_type_graph();
     drop(phase);
+
     // Types and symbolic names past the budget stand in for what could not
     // be built, which fails the load once nothing more is built.
     types.budget.check()?;
@@ -472,12 +510,15 @@ pub(super) fn load_variable_info<'data>(
         for (_, ty) in &mut vtables {
             *ty = remap.id(*ty);
         }
+
         for (_, ty, _) in &mut unnamed_parameters {
             *ty = remap.id(*ty);
         }
+
         for (_, ty) in &mut abstract_bodies {
             *ty = remap.id(*ty);
         }
+
         for generics in function_generics.values_mut() {
             *generics = generics
                 .iter()
@@ -485,6 +526,7 @@ pub(super) fn load_variable_info<'data>(
                 .collect();
         }
     }
+
     drop(phase);
     let _phase = crate::span!("variables.catalog");
     let finalized_types = std::mem::take(&mut types.entries)
@@ -503,6 +545,7 @@ pub(super) fn load_variable_info<'data>(
                 TypeEntry::Malformed(description) => description,
                 TypeEntry::Building => "type graph did not finish building".into(),
             };
+
             TypeNode::Malformed {
                 reference: TypeReference {
                     image: image_id,
@@ -519,6 +562,7 @@ pub(super) fn load_variable_info<'data>(
             crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)
         {
             coroutine_bodies.insert(instance, coroutine);
+
             // The body's future is what the parameter points to.
             if let Some(object) = object {
                 let future = &mut objects[object];
@@ -529,6 +573,7 @@ pub(super) fn load_variable_info<'data>(
             }
         }
     }
+
     for (instance, ty) in abstract_bodies {
         if let Some(coroutine) =
             crate::debug_info::coroutines::pinned_coroutine(&finalized_types, ty)
@@ -536,6 +581,7 @@ pub(super) fn load_variable_info<'data>(
             coroutine_bodies.entry(instance).or_insert(coroutine);
         }
     }
+
     Ok(LoadedVariables {
         coroutines,
         coroutine_bodies,
@@ -619,6 +665,7 @@ struct Walked {
     procedures: Vec<(u64, Metadata<LocationListId>)>,
     vtables: Vec<(u64, TypeId)>,
     go_function_entries: Vec<(ImageAddress, u32)>,
+
     /// The instances passed an unnamed parameter, as an `async fn`'s body
     /// is passed its future, its type, and its data object, when locals
     /// are read.
@@ -639,6 +686,7 @@ impl Names {
         if let Some(held) = self.0.get(&*name) {
             return Arc::clone(held);
         }
+
         self.0.insert(Arc::clone(&name));
         name
     }
@@ -688,6 +736,7 @@ fn walk_unit<'data>(
     let nim = types.produced_language(unit_index) == Some(SourceLanguage::Nim);
     let ada = source_language(languages[unit_index], None) == SourceLanguage::Ada;
     let rust = languages[unit_index] == Some(gimli::DW_LANG_Rust);
+
     // Go names the register ABI its x86-64 code calls with among the
     // flags of each unit's producer, as `go1.27.1; -N -l regabi`.
     let go_registers = go
@@ -697,6 +746,7 @@ fn walk_unit<'data>(
                 .split_once(';')
                 .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == "regabi"))
         });
+
     // Other languages' x86-64 code returns as the System V convention
     // says, or, for the languages that leave theirs unspecified, as it
     // for scalars.
@@ -719,8 +769,10 @@ fn walk_unit<'data>(
     } else {
         HashMap::new()
     };
+
     let mut walk = DieWalk::new(unit)?;
     let mut scopes = Vec::<Option<Scope>>::new();
+
     // The concrete instances of abstract functions open at this point
     // of the walk, innermost last.
     let mut concrete = Vec::<ConcreteRoutine>::new();
@@ -745,6 +797,7 @@ fn walk_unit<'data>(
                 },
             )?;
         }
+
         if !main_walk_reads(die.tag, depth) {
             // Nothing here reads such a DIE's attributes; all it has is
             // its scope for the DIEs within it: its parent's, or none
@@ -755,11 +808,14 @@ fn walk_unit<'data>(
             } else {
                 scopes.last().and_then(Clone::clone)
             };
+
             scopes.push(scope);
             continue;
         }
+
         let entry = walk.decode()?;
         let parent = scopes.last().and_then(Clone::clone);
+
         // A concrete DIE standing for an abstract one covers it.
         if let Some(routine) = concrete.last_mut()
             && matches!(
@@ -778,18 +834,21 @@ fn walk_unit<'data>(
         let scope = match entry.tag() {
             gimli::DW_TAG_subprogram => {
                 let defined = strict_flag(entry, gimli::DW_AT_declaration) == Ok(false);
+
                 // The types a function's code uses are the program's
                 // types too, though no data holds them: a view may name
                 // the type only an inlined function returns.
                 if defined {
                     types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
                 }
+
                 let ranges =
                     die_code_ranges(dwarf, unit, entry, &catalog.code).map(Arc::<[_]>::from)?;
                 let key = DieKey {
                     unit: unit_index,
                     offset: entry.offset().0,
                 };
+
                 if rust
                     && defined
                     && !ranges.is_empty()
@@ -800,6 +859,7 @@ fn walk_unit<'data>(
                         function_generics.insert(*instance, Arc::from(generics));
                     }
                 }
+
                 let function = functions.len();
                 if go && defined {
                     // A func value holds the address its code begins at.
@@ -814,6 +874,7 @@ fn walk_unit<'data>(
                         go_function_entries.push((address, row(function)));
                     }
                 }
+
                 functions.push(Function {
                     ranges: Arc::clone(&ranges),
                     objects: Vec::new(),
@@ -890,6 +951,7 @@ fn walk_unit<'data>(
                     Ok(_) => (Arc::clone(&parent.ranges), None),
                     Err(error) => (Arc::clone(&parent.ranges), Some(error.to_string().into())),
                 };
+
                 Scope {
                     ranges,
                     lexical_depth: parent.lexical_depth.saturating_add(1),
@@ -936,6 +998,7 @@ fn walk_unit<'data>(
                     Ok(ranges) => (ranges, None),
                     Err(error) => (Vec::new().into(), Some(error.to_string().into())),
                 };
+
                 Scope {
                     ranges,
                     lexical_depth: parent.lexical_depth.saturating_add(1),
@@ -960,6 +1023,7 @@ fn walk_unit<'data>(
             tag if is_type_scope(tag) => None,
             _ => parent.clone(),
         };
+
         // An empty extent is deliberate containment (a rangeless inline
         // instance) and must stay empty through every descendant scope;
         // only a nested subprogram starts an independent extent.
@@ -995,6 +1059,7 @@ fn walk_unit<'data>(
                 covered: std::collections::HashSet::new(),
             });
         }
+
         match entry.tag() {
             gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
                 if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
@@ -1034,12 +1099,14 @@ fn walk_unit<'data>(
             }
             _ => {}
         }
+
         if depth == 1
             && entry.tag() == gimli::DW_TAG_variable
             && let Some((address, ty)) = rust_vtable(dwarf, unit_index, unit, entry, types)
         {
             vtables.push((address, ty));
         }
+
         // A Go interface may hold a value of any type the runtime
         // describes, which no data need mention.
         if depth == 1
@@ -1051,11 +1118,13 @@ fn walk_unit<'data>(
                 offset: entry.offset().0,
             });
         }
+
         let kind = match entry.tag() {
             gimli::DW_TAG_variable => Some(VariableKind::Local),
             gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
             _ => None,
         };
+
         if entry.tag() == gimli::DW_TAG_variable
             && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
             && let Some(offset) = entry.attr_value(DW_AT_GO_CLOSURE_OFFSET)
@@ -1069,6 +1138,7 @@ fn walk_unit<'data>(
                 }),
                 _ => Err(Arc::from("a closure's captured variable is malformed")),
             };
+
             // One capture it cannot describe leaves them all unknown,
             // rather than the closure seeming to capture less.
             let captures = &mut functions[scope.function].captures;
@@ -1081,6 +1151,7 @@ fn walk_unit<'data>(
                 Err(reason) => *captures = Err(reason),
             }
         }
+
         let owning_scope = kind.and_then(|kind| {
             parent.as_ref().filter(|scope| {
                 !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
@@ -1111,6 +1182,7 @@ fn walk_unit<'data>(
             if owning_scope.is_none() && parent.as_ref().is_some_and(|scope| scope.defined) {
                 types.reach(unit_index, entry.attr_value(gimli::DW_AT_type));
             }
+
             if let Some(scope) = owning_scope {
                 // Concrete inline-instance entries reference their
                 // abstract origin for descriptive metadata.
@@ -1118,6 +1190,7 @@ fn walk_unit<'data>(
                     Ok(chain) => (chain, None),
                     Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
                 };
+
                 // Go marks its results as variable parameters.
                 let kind = if kind == VariableKind::Parameter
                     && go
@@ -1136,12 +1209,14 @@ fn walk_unit<'data>(
                 } else {
                     kind
                 };
+
                 let object_name = match kind {
                     VariableKind::Parameter => "parameter",
                     VariableKind::Result | VariableKind::Returned => "result",
                     VariableKind::Local => "variable",
                     VariableKind::Global => "global",
                 };
+
                 let mut nameless = false;
                 let (name, name_error) =
                     match string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name)
@@ -1188,6 +1263,7 @@ fn walk_unit<'data>(
                     })
                 });
                 let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
+
                 // A Go local exists from the line after its declaration.
                 let go_declaration = match (go, kind, &declaration) {
                     (true, VariableKind::Local, Ok(Some(declared))) => {
@@ -1198,8 +1274,10 @@ fn walk_unit<'data>(
                     }
                     _ => None,
                 };
+
                 let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
                 let type_info = types.variable_type(type_unit, type_value);
+
                 // Go names a variable it moved to the heap `&name`, and
                 // describes the pointer to it.
                 let (name, type_info, escaped) = match (go, name.strip_prefix('&')) {
@@ -1228,6 +1306,7 @@ fn walk_unit<'data>(
                     }
                     _ => (name, type_info, None),
                 };
+
                 // A variable with no name that says it is the
                 // compiler's own, as gfortran's temporaries do, is no
                 // defect. Go and gfortran start the names of their own
@@ -1273,6 +1352,7 @@ fn walk_unit<'data>(
                 {
                     enclosing.awaitee = declared_line;
                 }
+
                 // rustc passes the body of an `async fn` its future
                 // as an unnamed parameter.
                 if kind == VariableKind::Parameter
@@ -1282,6 +1362,7 @@ fn walk_unit<'data>(
                 {
                     unnamed_parameters.push((instance, *ty, Some(objects.len())));
                 }
+
                 types
                     .budget
                     .charge("data objects", size_of::<DataObject>())?;
@@ -1321,6 +1402,7 @@ fn walk_unit<'data>(
 
         scopes.push(scope);
     }
+
     while let Some(routine) = concrete.pop() {
         add_abstract_only_variables(
             dwarf,
@@ -1338,6 +1420,7 @@ fn walk_unit<'data>(
             },
         )?;
     }
+
     Ok(())
 }
 
@@ -1352,12 +1435,14 @@ fn remap_catalog(remap: &dedup::Remap, objects: &mut [DataObject], functions: &m
             *ty = remap.id(*ty);
         }
     }
+
     for function in functions {
         if let Ok(captures) = &mut function.captures {
             for capture in captures {
                 remap.resolution(&mut capture.type_info);
             }
         }
+
         if let Some(returns::ReturnConvention::SystemV(convention)) = &mut function.returns {
             remap.resolution(&mut convention.ty);
         }
@@ -1381,6 +1466,7 @@ struct AbstractTargets<'a, 'data, 'units> {
     names: &'a mut Names,
     types: &'a mut TypeArenaBuilder<'units, 'data>,
     files: &'a mut Files,
+
     /// The instances whose abstract function takes an unnamed parameter,
     /// as an `async fn`'s body takes its future, and its type.
     bodies: &'a mut Vec<(CodeInstanceId, TypeId)>,
@@ -1402,6 +1488,7 @@ fn add_abstract_only_variables<'data>(
     let Some(unit) = units.get(routine.origin.unit) else {
         return Ok(());
     };
+
     let mut tree = unit.entries_tree(Some(gimli::UnitOffset(routine.origin.offset)))?;
     let mut children = tree.root()?.children();
     let mut awaitee = routine.scope.awaitee;
@@ -1411,14 +1498,17 @@ fn add_abstract_only_variables<'data>(
             unit: routine.origin.unit,
             offset: entry.offset().0,
         };
+
         let kind = match entry.tag() {
             gimli::DW_TAG_variable => VariableKind::Local,
             gimli::DW_TAG_formal_parameter => VariableKind::Parameter,
             _ => continue,
         };
+
         if routine.covered.contains(&key) {
             continue;
         }
+
         let Some(name) = string_attribute_of(dwarf, unit, entry)? else {
             // An inlined `async fn` body may keep no DIE for the future
             // its abstract function takes, which still says what it runs.
@@ -1431,11 +1521,14 @@ fn add_abstract_only_variables<'data>(
             {
                 targets.bodies.push((instance, ty));
             }
+
             continue;
         };
+
         if targets.locals == Locals::LeftOut {
             continue;
         }
+
         let declaration = declaration_with_origins(dwarf, units, unit, entry, &[], targets.files)
             .ok()
             .flatten();
@@ -1443,6 +1536,7 @@ fn add_abstract_only_variables<'data>(
         if &*name == "__awaitee" {
             awaitee = declared_line;
         }
+
         let type_info = targets
             .types
             .variable_type(routine.origin.unit, entry.attr_value(gimli::DW_AT_type));
@@ -1480,6 +1574,7 @@ fn add_abstract_only_variables<'data>(
             malformed: routine.scope.malformed.clone(),
         });
     }
+
     Ok(())
 }
 
@@ -1516,6 +1611,7 @@ fn origin_awaitee<'data>(
                 .and_then(crate::LineNumber::new);
         }
     }
+
     None
 }
 
@@ -1533,6 +1629,7 @@ fn async_fn_body<'data>(
     if let Ok(Some(name)) = super::str_attribute(dwarf, unit, entry, gimli::DW_AT_name) {
         return crate::debug_info::coroutines::is_async_fn_body(&name);
     }
+
     origin_chain(units, unit_index, entry)
         .ok()
         .and_then(|chain| {
@@ -1576,6 +1673,7 @@ fn nim_name(name: &str, kind: VariableKind) -> Option<&str> {
         VariableKind::Local => number,
         _ => return None,
     };
+
     let plain = base.starts_with(|first: char| first.is_ascii_alphabetic())
         && !base.ends_with('_')
         && base
@@ -1627,10 +1725,12 @@ fn rust_vtable<'data>(
     if !name.ends_with("::{vtable}") {
         return None;
     }
+
     let gimli::AttributeValue::Exprloc(expression) = entry.attr_value(gimli::DW_AT_location)?
     else {
         return None;
     };
+
     let mut operations = expression.operations(unit.encoding());
     let address = match operations.next().ok()?? {
         gimli::Operation::Address { address } => address,
@@ -1639,9 +1739,11 @@ fn rust_vtable<'data>(
         }
         _ => return None,
     };
+
     if operations.next().ok()?.is_some() {
         return None;
     }
+
     let vtable_type = types.reference(unit_index, entry.attr_value(gimli::DW_AT_type))?;
     let vtable_entry = types.units[vtable_type.unit]
         .entry(gimli::UnitOffset(vtable_type.offset))
@@ -1682,6 +1784,7 @@ impl VariableInfo for DwarfVariableInfo {
                 return Err(Error::VariableNotFound(global.variable.to_string()));
             }
         };
+
         let mut frame_base = FrameBaseCache::Empty;
         let resumption = self.function_at(address).and_then(|function| {
             self.resumption(
@@ -1698,6 +1801,7 @@ impl VariableInfo for DwarfVariableInfo {
             if budget.consume_variable_value().is_err() {
                 break;
             }
+
             let mut variable = self.inspect_data_object(
                 object,
                 Some(address),
@@ -1709,8 +1813,10 @@ impl VariableInfo for DwarfVariableInfo {
             if let Some(resumption) = &resumption {
                 resumption.check(object, &mut variable);
             }
+
             variables.push(variable);
         }
+
         Ok(variables)
     }
 
@@ -1760,12 +1866,14 @@ impl VariableInfo for DwarfVariableInfo {
                 ))));
             }
         };
+
         // A generic value has its type argument, laid out as its shape.
         let ty = match self.generic_type(ty, variable.instance(), address, runtime, budget)? {
             generic::Generic::Resolved(argument) => argument,
             generic::Generic::Unresolved(shape, _) => shape,
             generic::Generic::Plain => ty,
         };
+
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
             Ok(storage) => {
                 // A running async body's variable that the await it
@@ -1784,11 +1892,13 @@ impl VariableInfo for DwarfVariableInfo {
                     crate::model::ValueStorage::Memory(address) => Some(address),
                     _ => None,
                 };
+
                 if let Some(reason) =
                     resumption.and_then(|resumption| resumption.stale(variable, memory))
                 {
                     return Ok(Err(VariableState::Unavailable(reason)));
                 }
+
                 Ok(Ok(Located { ty, storage }))
             }
             Err(error) => {
@@ -1824,11 +1934,13 @@ impl VariableInfo for DwarfVariableInfo {
                         "an untyped step unexpectedly reached storage".into(),
                     ))));
                 };
+
                 // A place a composite's piece holds is that piece's.
                 let storage = match self.value_shape(ty) {
                     Ok(shape) => storage::narrow(storage, shape.byte_size()),
                     Err(_) => storage,
                 };
+
                 Ok(Ok(Located { ty, storage }))
             }
             Err(error) => {
@@ -1861,9 +1973,11 @@ impl VariableInfo for DwarfVariableInfo {
         let VariableState::Available { value, .. } = state else {
             return Ok(Err(state));
         };
+
         let Ok(shape) = self.value_shape(at.ty) else {
             return Ok(Ok(None));
         };
+
         Ok(self
             .text_location(at.ty, &shape, &value, &at.storage, runtime, budget)
             .map_err(VariableState::Unavailable))
@@ -1889,6 +2003,7 @@ impl VariableInfo for DwarfVariableInfo {
                 ));
             }
         };
+
         self.materialize_inspected_value(at.ty, type_info, &at.storage, context, runtime, budget)
     }
 
@@ -1915,6 +2030,7 @@ impl VariableInfo for DwarfVariableInfo {
                 VariableState::Unavailable(exhaustion.into()),
             ));
         }
+
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
     }
@@ -2135,6 +2251,7 @@ pub(super) fn fuzz_expression(data: &[u8]) {
         version: 5,
         address_size: 8,
     };
+
     let Ok(id) = pool
         .unit(&location::EvaluationUnit::default())
         .and_then(|unit| {
@@ -2149,6 +2266,7 @@ pub(super) fn fuzz_expression(data: &[u8]) {
     else {
         return;
     };
+
     let mut budget = InspectionBudget::default();
     if let Ok(pieces) = evaluate(
         pool.tables().expression(id),
@@ -2175,11 +2293,13 @@ fn fuzz_storage(
         pointer_width: crate::PointerWidth::Bits64,
         byte_order: ByteOrder::Little,
     };
+
     let Ok(storage) =
         pieces::storage_from_pieces(pieces, 16, None, RunTimeEndian::Little, target, runtime)
     else {
         return;
     };
+
     let _ = storage::read(&storage, 16, runtime, budget);
     let _ = storage::read_bits(&storage, 3, 61, ByteOrder::Little, runtime, budget);
     let _ = storage::offset(storage, 8).map(|storage| storage::narrow(storage, 8));

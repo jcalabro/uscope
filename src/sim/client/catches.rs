@@ -36,6 +36,7 @@ impl Client {
                 .ok_or_else(|| Failure::simulator("client", format!("no call {name}")))?;
             calls.push(call);
         }
+
         let phases = [
             CatchPhase::Entry,
             CatchPhase::Exit,
@@ -48,6 +49,7 @@ impl Client {
             1 => (Some("$ret == 0"), None, Some(0)),
             _ => (None, None, None),
         };
+
         let condition = text
             .map(Condition::parse)
             .transpose()
@@ -59,6 +61,7 @@ impl Client {
             arg0,
             ret,
         };
+
         self.note(format!("catch {calls:?} at {phase:?} if {text:?}"));
         let catchpoint = self
             .handle
@@ -86,8 +89,10 @@ impl Client {
         if ids.is_empty() {
             return Ok(());
         }
+
         let id = *self.choices.borrow_mut().pick(Stream::Client, &ids);
         self.note(format!("remove catchpoint {id}"));
+
         // From the request on, the catchpoint may be gone.
         self.shared.catches.borrow_mut().remove(&id);
         self.handle

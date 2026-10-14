@@ -43,6 +43,7 @@ async fn source_step_into_stops_after_the_physical_prologue_with_readable_parame
                 break;
             }
         }
+
         assert!(
             entered,
             "{} did not enter {} within the source-step budget",
@@ -146,6 +147,7 @@ async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
                     break;
                 }
             }
+
             assert!(
                 reached,
                 "{fixture} did not reach main line {expected_line} within the step budget"
@@ -172,6 +174,7 @@ async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
             );
             exit = scenario.step_to_stop(StepKind::OverSource).await;
         }
+
         assert_eq!(
             exit,
             StopReason::Exited(ExitStatus::Code(0)),
@@ -382,6 +385,7 @@ async fn next_walks_the_entire_rust_boundary_fixture_to_a_normal_exit() {
             assert_eq!(location_line(&closing), Some(46), "{fixture}");
             exit = scenario.step_to_stop(StepKind::OverSource).await;
         }
+
         assert_eq!(exit, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
@@ -527,6 +531,7 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
                 scenario.handle().remove_all_breakpoints(),
             )
             .await;
+
         // A compiler may give the closing brace a line of its own, which
         // the first step stops on.
         let mut location = None;
@@ -547,6 +552,7 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
                 break;
             }
         }
+
         let location = location.expect("a step was taken");
         assert_eq!(
             location_function(&location),
@@ -582,6 +588,7 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
                 scenario.run_to_stop().await,
                 StopReason::Breakpoint { .. }
             ));
+
             // The first call, relay(3), reaches load's last line.
             scenario
                 .add_source_breakpoint("repeated-calls.c", line_of("LOAD_RETURN"))
@@ -626,11 +633,13 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
                         "{fixture}: stepping over stopped in relay's second call: {index:?}"
                     );
                 }
+
                 location = Some(here);
                 if function.as_deref() == Some("main") {
                     break;
                 }
             }
+
             // Returning into the middle of the call's line, a step may stop
             // there if the compiler marks it a statement, or at the next.
             let location = location.expect("a step was taken");
@@ -695,6 +704,7 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
         Some("rt_load"),
         "the golden binary changed"
     );
+
     // The rest of main and rt_start has no statement before the program
     // exits its group.
     let reason = scenario.step_to_stop(StepKind::OverSource).await;
@@ -708,6 +718,7 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
             "stepping over stopped in a new frame: {reason:?} at {location:?}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -721,6 +732,7 @@ async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
+
     // The first hit came through the assembly; the second, from main, is
     // declined.
     scenario
@@ -905,6 +917,7 @@ async fn recursive_tail_call_completion_ignores_inner_frames_at_the_shared_retur
             format!("recursive tail-call next {fixture}"),
             Scenario::fixture(fixture),
         );
+
         // The first descend_tail activation (value == 2) tail-calls
         // mutual_tail(1), whose inner recursion returns through the same
         // code address as this step's own return site. Only the outer
@@ -1243,6 +1256,7 @@ async fn inline_next_is_owned_by_the_selected_thread() {
         let mut scenario = Scenario::launch(fixture);
         scenario.add_breakpoint("thread_caller").await;
         scenario.run_to_stop().await;
+
         // The other worker runs during the step; without the breakpoint it
         // runs the same code, reaching the step's internal breakpoints.
         scenario.remove_all_breakpoints().await;
@@ -1356,6 +1370,7 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
     let StopReason::Breakpoint { address, .. } = scenario.run_to_stop().await else {
         panic!("expected breakpoint")
     };
+
     let disassembly = scenario
         .operation(
             "disassemble breakpoint_target",
@@ -1368,6 +1383,7 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
     let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("a function query returned a window");
     };
+
     let hidden = blocks
         .iter()
         .flat_map(|block| block.instructions.iter())
@@ -1380,6 +1396,7 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
             kind: StepKind::Instruction
         }
     );
+
     // The original instruction ran, not the trap: execution continues
     // after it rather than one byte past the breakpoint.
     let registers = scenario
@@ -1556,6 +1573,7 @@ async fn source_steps_skip_non_statement_line_rows() {
         Some("middle"),
         "step stopped on a non-statement row instead of returning to middle"
     );
+
     // The return address in middle sits on a non-statement row for the
     // already-executed call line (11); the step must continue to the next
     // statement row even though the activation changed at the return.
@@ -1639,6 +1657,7 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
     let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("a function query returned a window");
     };
+
     let syscall = blocks
         .iter()
         .flat_map(|block| block.instructions.iter())
@@ -1766,14 +1785,17 @@ async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() 
             call = Some(address);
             break;
         }
+
         scenario.step_to_stop(StepKind::Instruction).await;
     }
+
     let call = call.expect("a direct call follows the argument setup");
     let depth = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await
         .frames
         .len();
+
     // Deeper activations return to the same address first; only this
     // activation's return completes the step.
     assert_eq!(
@@ -1869,6 +1891,7 @@ async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact
         arguments: vec!["smash".into()],
         ..LaunchOptions::default()
     };
+
     assert!(matches!(
         scenario.run_with_to_stop(options).await,
         StopReason::Breakpoint { .. }
@@ -1881,6 +1904,7 @@ async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact
     step_to_orphan_line(&mut scenario, StepKind::OverSource, "READ_CANARY").await;
     assert_finish_refused(&scenario, "READ_CANARY").await;
     step_to_orphan_line(&mut scenario, StepKind::OverSource, "CHECK_CANARY").await;
+
     // The program exits with 0 only if the data its smashed return address
     // points to still holds what it stored.
     assert_eq!(
@@ -1948,8 +1972,10 @@ async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
         {
             break;
         }
+
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(&reason, StopReason::Breakpoint { address, hits } if *address == loop_head && hits.len() == 2),
         "the golden binary changed: {reason:?}"
@@ -2056,12 +2082,14 @@ async fn advance_boundary_to_line(
         if line == target {
             return location;
         }
+
         assert!(
             line < target,
             "{fixture} skipped target line {target} and stopped at {line}"
         );
         boundary_source_step(scenario, StepKind::OverSource, "advance boundary call site").await;
     }
+
     panic!("{fixture} did not reach main line {target} within the step budget");
 }
 
@@ -2109,8 +2137,10 @@ async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &s
         {
             return;
         }
+
         boundary_source_step(scenario, StepKind::IntoSource, "enter inline frame").await;
     }
+
     panic!("{fixture} did not reach {function}:{line} within the step budget");
 }
 
@@ -2135,6 +2165,7 @@ async fn advance_to_boundary_inline_call(
         if is_main_call {
             return location;
         }
+
         assert_eq!(
             scenario.step_to_stop(StepKind::OverSource).await,
             StopReason::Step {
@@ -2143,6 +2174,7 @@ async fn advance_to_boundary_inline_call(
             "{fixture}"
         );
     }
+
     panic!("{fixture} did not reach the inline_adjust call in main");
 }
 
@@ -2379,6 +2411,7 @@ async fn d_steps_into_a_function_and_back_to_its_caller() {
             names.starts_with(&["add", "D main"]),
             "{fixture}: {trace:?}"
         );
+
         // druntime, which has no debug information, by its symbols' names.
         assert!(
             trace.frames.iter().any(|frame| frame

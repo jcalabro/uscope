@@ -66,6 +66,7 @@ fn read(ring: &Ring, tail: u64) -> (Vec<Event>, u64) {
         bytes[8..].copy_from_slice(&words[1].load(Ordering::Relaxed).to_le_bytes());
         bytes
     };
+
     let mut events = Vec::new();
     let mut position = tail;
     while position < head {
@@ -79,6 +80,7 @@ fn read(ring: &Ring, tail: u64) -> (Vec<Event>, u64) {
             argument: word >> 8,
             more: Vec::new(),
         };
+
         position += 1;
         while position < head && record(position)[12] == abi::CONTINUED {
             let bytes = record(position);
@@ -86,8 +88,10 @@ fn read(ring: &Ring, tail: u64) -> (Vec<Event>, u64) {
             event.more.extend_from_slice(&bytes[13..]);
             position += 1;
         }
+
         events.push(event);
     }
+
     (events, position)
 }
 
@@ -138,6 +142,7 @@ fn a_ring_uscope_freed_is_taken_again_but_not_after_a_fork() {
         .join()
         .unwrap()
     };
+
     let (first, _) = emit();
     let (other, _) = emit();
     assert!(!ptr::eq(first, other), "a retired ring is uscope's to read");
@@ -175,6 +180,7 @@ fn concurrent_threads_reuse_the_rings_a_reader_frees() {
         let made = MADE_COUNT.load(Ordering::Acquire).min(abi::MOST_RINGS);
         MADE[..made].iter().filter_map(OnceLock::get).copied()
     };
+
     // Where uscope last read each ring that other tests made.
     let mut tails = made()
         .map(|ring| {
@@ -215,21 +221,25 @@ fn concurrent_threads_reuse_the_rings_a_reader_frees() {
                         *tail = next;
                         seen.extend(events.iter().map(|event| text(event).to_vec()));
                     }
+
                     if state == abi::RING_RETIRED {
                         ring.header.state.store(abi::RING_FREE, Ordering::Release);
                     }
                 }
             };
+
             while !done.load(Ordering::Acquire) {
                 sweep();
                 std::thread::yield_now();
             }
+
             sweep();
             seen
         });
         for lane in lanes {
             lane.join().unwrap();
         }
+
         done.store(true, Ordering::Release);
         reader.join().unwrap()
     });
@@ -242,9 +252,11 @@ fn concurrent_threads_reuse_the_rings_a_reader_frees() {
             }
         }
     }
+
     let mut sorted = seen.clone();
     sorted.sort();
     assert_eq!(sorted, expected, "every message, once and whole");
+
     // Rings are read in any order, so only a thread's own are in order.
     for writer in expected.chunks(MESSAGES) {
         let prefix = &writer[0][..4];

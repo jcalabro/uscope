@@ -61,6 +61,7 @@ pub(super) struct MemoryImage {
 pub(super) enum MemoryImageError {
     #[error("memory at {0:#x} is unreadable")]
     Unreadable(u64),
+
     #[error("{0}")]
     Malformed(&'static str),
 }
@@ -84,6 +85,7 @@ pub(super) fn read_memory_image(
         if length > limit {
             return Err(Malformed("the image extends past its memory"));
         }
+
         let mut data =
             vec![0; usize::try_from(length).map_err(|_| Malformed("the image is too large"))?];
         if read(start, &mut data) {
@@ -102,6 +104,7 @@ pub(super) fn read_memory_image(
     if header.e_type.get(endian) != elf::ET_DYN {
         return Err(Malformed("the image is not a shared object"));
     }
+
     let program_headers_end = table_end(
         header.e_phoff.get(endian),
         header.e_phnum.get(endian).into(),
@@ -140,11 +143,13 @@ pub(super) fn read_memory_image(
         if address.checked_sub(offset) != Some(link_base) {
             return Err(Malformed("the image is not laid out as its file"));
         }
+
         let contents_end = offset
             .checked_add(file_size)
             .ok_or(Malformed("a loadable segment overflows"))?;
         size = size.max(contents_end);
     }
+
     let load_bias = start
         .checked_sub(link_base)
         .map(LoadBias::new)
@@ -178,6 +183,7 @@ pub(super) fn vdso_mapping(maps: &str) -> Option<Range<u64>> {
         if fields.nth(4).map(str::trim_start) != Some(VDSO_NAME) {
             continue;
         }
+
         let Some((start, end)) = range.and_then(|range| {
             let (start, end) = range.split_once('-')?;
             Some((
@@ -187,12 +193,14 @@ pub(super) fn vdso_mapping(maps: &str) -> Option<Range<u64>> {
         }) else {
             continue;
         };
+
         match &mut mapping {
             None => mapping = Some(start..end),
             Some(mapping) if mapping.end == start => mapping.end = end,
             Some(_) => break,
         }
     }
+
     mapping
 }
 
@@ -225,11 +233,13 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(load_bias) = self.registered_vdso(mapping.start) {
             return Some((module(load_bias), None));
         }
+
         let read = self.read_vdso(pid, mapping);
         #[cfg(debug_assertions)]
         if let Err(error) = &read {
             record!("the vDSO at {:#x} is unusable: {error}", mapping.start);
         }
+
         read.ok()
             .map(|image| (module(image.load_bias), Some(image.data)))
     }
@@ -240,6 +250,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Err(MemoryImageError::Unreadable(mapping.start));
         };
+
         read_memory_image(
             mapping.start,
             mapping.end,
@@ -333,6 +344,7 @@ mod tests {
             reader(&memory, mapping.start, memory.len()),
         )
         .expect("the vDSO is an image");
+
         // The kernel links its vDSO at zero.
         assert_eq!(image.load_bias.get(), mapping.start);
         assert_eq!(image.data, memory[..image.data.len()]);
@@ -350,6 +362,7 @@ mod tests {
             .unwrap();
         assert!(loadable < sections, "{loadable:#x} {sections:#x}");
         assert!(object.section_by_name(".eh_frame").is_some());
+
         // Its one note segment, aligned to 8 bytes, also holds notes aligned
         // to 4, so the segment finds the build-id the note sections name.
         let build_id = object.build_id().unwrap();

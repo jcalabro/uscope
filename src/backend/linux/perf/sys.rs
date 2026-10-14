@@ -42,43 +42,69 @@ pub const ATTR_SIZE: u32 = 136;
 const _: () = assert!(std::mem::size_of::<Attr>() == ATTR_SIZE as usize);
 
 pub const TYPE_SOFTWARE: u32 = 1;
+
 pub const TYPE_BREAKPOINT: u32 = 5;
+
 pub const COUNT_SW_CPU_CLOCK: u64 = 0;
+
 /// An event that counts nothing, for the records of mappings and threads.
 pub const COUNT_SW_DUMMY: u64 = 9;
+
 /// A write breakpoint, which only the simulator's conformance tests set.
 #[cfg(test)]
 pub const BREAKPOINT_WRITE: u32 = 2;
+
 pub const BREAKPOINT_EXECUTE: u32 = 4;
 
 /// `perf_event_attr` flag bits.
 pub mod flag {
     pub const DISABLED: u64 = 1 << 0;
+
     pub const INHERIT: u64 = 1 << 1;
+
     pub const EXCLUDE_KERNEL: u64 = 1 << 5;
+
     pub const EXCLUDE_HV: u64 = 1 << 6;
+
     pub const MMAP: u64 = 1 << 8;
+
     pub const COMM: u64 = 1 << 9;
+
     pub const ENABLE_ON_EXEC: u64 = 1 << 12;
+
     pub const TASK: u64 = 1 << 13;
+
     pub const WATERMARK: u64 = 1 << 14;
+
     pub const SAMPLE_ID_ALL: u64 = 1 << 18;
+
     pub const EXCLUDE_CALLCHAIN_KERNEL: u64 = 1 << 21;
+
     pub const MMAP2: u64 = 1 << 23;
+
     pub const COMM_EXEC: u64 = 1 << 24;
+
     pub const USE_CLOCKID: u64 = 1 << 25;
+
     pub const CONTEXT_SWITCH: u64 = 1 << 26;
 }
 
 /// `perf_event_attr.sample_type` bits.
 pub mod sample {
     pub const TID: u64 = 1 << 1;
+
     pub const TIME: u64 = 1 << 2;
+
     pub const CALLCHAIN: u64 = 1 << 5;
+
     pub const CPU: u64 = 1 << 7;
+
     pub const PERIOD: u64 = 1 << 8;
+
     pub const REGS_USER: u64 = 1 << 12;
+
     pub const STACK_USER: u64 = 1 << 13;
+
     pub const IDENTIFIER: u64 = 1 << 16;
 }
 
@@ -102,6 +128,7 @@ pub fn counts(fd: &OwnedFd) -> std::io::Result<(u64, u64)> {
             format!("a perf event's counts read {read} of 16 bytes"),
         ));
     }
+
     let [
         c0,
         c1,
@@ -141,10 +168,13 @@ pub fn open(attr: &Attr, pid: i32, cpu: i32) -> std::io::Result<OwnedFd> {
             FLAG_FD_CLOEXEC,
         )
     };
+
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
+
     let fd = i32::try_from(fd).map_err(|_| std::io::Error::from_raw_os_error(libc::EBADF))?;
+
     // SAFETY: the kernel just returned this descriptor, which nothing else
     // owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -153,12 +183,14 @@ pub fn open(attr: &Attr, pid: i32, cpu: i32) -> std::io::Result<OwnedFd> {
 /// Enables or disables an event.
 pub fn enable(fd: &OwnedFd, enabled: bool) -> std::io::Result<()> {
     let request = if enabled { IOC_ENABLE } else { IOC_DISABLE };
+
     // SAFETY: the request takes an integer argument, and the descriptor is
     // a perf event this process owns.
     let result = unsafe { libc::ioctl(fd.as_raw_fd(), request, 0) };
     if result < 0 {
         return Err(std::io::Error::last_os_error());
     }
+
     Ok(())
 }
 
@@ -171,6 +203,7 @@ pub fn set_output(fd: &OwnedFd, ring: &OwnedFd) -> std::io::Result<()> {
     if result < 0 {
         return Err(std::io::Error::last_os_error());
     }
+
     Ok(())
 }
 
@@ -187,6 +220,7 @@ impl Ring {
     pub fn map(fd: OwnedFd, pages: usize) -> std::io::Result<Self> {
         let page = page_size();
         let length = (pages + 1) * page;
+
         // SAFETY: a fresh shared mapping of the event's descriptor, which
         // the kernel sizes and owns; nothing else refers to it.
         let base = unsafe {
@@ -199,9 +233,11 @@ impl Ring {
                 0,
             )
         };
+
         if base == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
+
         let base = std::ptr::NonNull::new(base.cast::<u8>())
             .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
         Ok(Self {
@@ -232,6 +268,7 @@ impl Ring {
 #[derive(Debug)]
 pub struct RingMemory {
     base: std::ptr::NonNull<u8>,
+
     /// Where the data begins.
     data: usize,
     size: usize,
@@ -243,6 +280,7 @@ pub struct RingMemory {
 enum Owner {
     /// The kernel's mapping, of this many bytes.
     Mapping { length: usize },
+
     /// A block from [`RingMemory::heap`].
     Heap(std::ptr::NonNull<[AtomicU64]>),
 }
@@ -257,6 +295,7 @@ unsafe impl Send for RingMemory {}
 
 /// `perf_event_mmap_page` offsets.
 pub const DATA_HEAD: usize = 1024;
+
 pub const DATA_TAIL: usize = 1032;
 
 /// Where a heap ring's data begins: just past its metadata words.
@@ -281,6 +320,7 @@ impl RingMemory {
             size,
             owner: Owner::Heap(block),
         };
+
         (memory, base)
     }
 
@@ -304,14 +344,18 @@ impl RingMemory {
         let Ok(available) = usize::try_from(head.wrapping_sub(tail)) else {
             return 0;
         };
+
         if available == 0 || available > size {
             return 0;
         }
+
         let Ok(start) = usize::try_from(tail % size as u64) else {
             return 0;
         };
+
         let first = available.min(size - start);
         out.reserve(available);
+
         // SAFETY: [tail, head) lies inside the data, which the kernel does
         // not write until the tail passes it; the destination has the
         // capacity just reserved, and the two never overlap.
@@ -322,6 +366,7 @@ impl RingMemory {
             std::ptr::copy_nonoverlapping(data, destination.add(first), available - first);
             out.set_len(out.len() + available);
         }
+
         self.word(DATA_TAIL).store(head, Ordering::Release);
         available
     }
@@ -358,6 +403,7 @@ pub fn readable(fd: &OwnedFd) -> bool {
         tv_sec: 0,
         tv_nsec: 0,
     };
+
     rustix::event::poll(&mut fds, Some(&now)).is_ok_and(|ready| ready > 0)
         && fds[0].revents().contains(PollFlags::IN)
 }

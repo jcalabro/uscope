@@ -44,6 +44,7 @@ pub const DEFAULT_CAPACITY: u64 = 4 << 30;
 pub enum Setting {
     /// No cache: every load reads its debug information.
     Off,
+
     /// The cache in this directory.
     Directory(PathBuf),
 }
@@ -54,9 +55,11 @@ pub enum CacheError {
     #[error("cannot use the image cache in {path}: {error}")]
     Open {
         path: PathBuf,
+
         #[source]
         error: std::io::Error,
     },
+
     #[error("the image cache is already {running}, so it cannot be {requested}")]
     AlreadyConfigured { running: String, requested: String },
 }
@@ -78,12 +81,15 @@ pub fn resolve(
         Some(Setting::Directory(path)) => return Some(path),
         None => {}
     }
+
     if let Some(variable) = variable {
         return (!variable.is_empty()).then(|| PathBuf::from(variable));
     }
+
     if under_test {
         return None;
     }
+
     let base = xdg
         .filter(|xdg| Path::new(xdg).is_absolute())
         .map(PathBuf::from)
@@ -125,6 +131,7 @@ pub fn configure(setting: Option<Setting>) -> Result<(), CacheError> {
     if let Some(error) = failure {
         return Err(error);
     }
+
     if chosen.as_ref().map(|cache| &cache.directory) != directory.as_ref() {
         return Err(CacheError::AlreadyConfigured {
             running: describe(chosen.as_ref()),
@@ -132,6 +139,7 @@ pub fn configure(setting: Option<Setting>) -> Result<(), CacheError> {
                 .map_or_else(|| "off".to_owned(), |path| format!("in {}", path.display())),
         });
     }
+
     Ok(())
 }
 
@@ -181,11 +189,13 @@ impl Key {
         for revision in crate::image::revisions() {
             digest.write(&revision.to_le_bytes());
         }
+
         digest.write(&(inputs.len() as u64).to_le_bytes());
         for input in inputs {
             digest.write(&(input.len() as u64).to_le_bytes());
             digest.write(input);
         }
+
         Self(digest.finish_128())
     }
 }
@@ -195,8 +205,10 @@ impl Key {
 pub enum Lookup {
     /// A valid image, and the file it was read from.
     Hit { image: Box<Image>, stamp: FileStamp },
+
     /// No entry, or none that could be read.
     Miss,
+
     /// An entry that failed validation, which was removed.
     Corrupt(ImageError),
 }
@@ -207,6 +219,7 @@ pub enum Lookup {
 pub struct WriteError {
     key: Key,
     directory: PathBuf,
+
     #[source]
     error: std::io::Error,
 }
@@ -231,6 +244,7 @@ impl ImageCache {
             path: directory.to_owned(),
             error,
         };
+
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -239,6 +253,7 @@ impl ImageCache {
         let cache = Self {
             directory: directory.to_owned(),
         };
+
         cache.evict(capacity).map_err(open)?;
         Ok(cache)
     }
@@ -266,6 +281,7 @@ impl ImageCache {
                 return Lookup::Miss;
             }
         };
+
         match Image::from_bytes(bytes, Limits::default()) {
             Ok(image) => {
                 // Eviction takes the entries used longest ago first.
@@ -308,6 +324,7 @@ impl ImageCache {
             directory: self.directory.clone(),
             error,
         };
+
         let temporary = self.directory.join(format!(
             ".{key}.{}.{}{TEMPORARY}",
             std::process::id(),
@@ -324,6 +341,7 @@ impl ImageCache {
             let _ = std::fs::remove_file(&temporary);
             return Err(failed(error));
         }
+
         Ok(())
     }
 
@@ -338,10 +356,12 @@ impl ImageCache {
             if !name.ends_with(SUFFIX) && !name.ends_with(TEMPORARY) {
                 continue;
             }
+
             // Another process may have removed it meanwhile.
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
+
             if metadata.is_file() {
                 entries.push((
                     (metadata.mtime(), metadata.mtime_nsec()),
@@ -350,19 +370,23 @@ impl ImageCache {
                 ));
             }
         }
+
         let mut held = entries.iter().map(|(_, _, length)| length).sum::<u64>();
         entries.sort();
         for (_, path, length) in entries {
             if held <= capacity {
                 break;
             }
+
             match std::fs::remove_file(&path) {
                 Ok(()) => record!("image cache: evicted {}", path.display()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
+
             held -= length;
         }
+
         Ok(())
     }
 }
@@ -378,6 +402,7 @@ fn read_entry(path: &Path) -> std::io::Result<(AlignedBytes, FileStamp)> {
     if !metadata.is_file() {
         return Err(unusable("not a file"));
     }
+
     let length = usize::try_from(metadata.len())
         .ok()
         .filter(|length| *length as u64 <= Limits::default().bytes)

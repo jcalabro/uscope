@@ -15,6 +15,7 @@ use crate::eval::syntax::ast::{BinaryOp, NodeKind};
 use crate::eval::target::{
     Lookup, Planned, Refusal, Register, Scope, StepKind, TypeLookup, TypeQuery,
 };
+
 use crate::eval::types::{Category, Ty, TypeSource, category, is_character, representation};
 use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
@@ -30,12 +31,16 @@ use super::syntax::{
 pub enum ViewObject<St> {
     /// `self`, the value presented.
     This,
+
     /// A member of `self`, by its planned step.
     Member(St),
+
     /// A `let`, by position.
     Let(usize),
+
     /// A generator's variable, by nesting depth.
     Variable(usize),
+
     /// A global of the value's module, by a step that reaches it from
     /// anywhere.
     Global(St),
@@ -78,6 +83,7 @@ pub enum BoundFormat {
 #[derive(Debug, Clone)]
 pub enum BoundPiece<St> {
     Literal(String),
+
     /// A value's summary, or the value written in `format`.
     Hole {
         program: ViewProgram<St>,
@@ -94,6 +100,7 @@ pub enum TextSource<St> {
         program: ViewProgram<St>,
         width: usize,
     },
+
     /// An array or slice of characters, with the step to its first.
     Elements {
         program: ViewProgram<St>,
@@ -126,6 +133,7 @@ pub enum BoundGenerator<St> {
         left: ViewProgram<St>,
         right: ViewProgram<St>,
     },
+
     /// A kernel's items, each as many words as the clause has variables.
     Kernel {
         kernel: Arc<super::kernel::Kernel>,
@@ -138,6 +146,7 @@ pub enum BoundGenerator<St> {
 #[derive(Debug, Clone)]
 pub enum BoundItem<St> {
     Filter(ViewProgram<St>),
+
     /// A value computed once for each of the clause's values, at the next
     /// position.
     Let(ViewProgram<St>),
@@ -158,6 +167,7 @@ impl<St> BoundClause<St> {
             BoundGenerator::Kernel { words, .. } => *words,
             _ => 1,
         };
+
         variables
             + self
                 .items
@@ -211,13 +221,16 @@ pub enum BoundShape<St> {
         then: Box<Self>,
         otherwise: Box<Self>,
     },
+
     /// A record whose members are its children, before the view's fields.
     Record(Vec<BoundField<St>>),
+
     /// What a pointer points to, as a type that may be chosen at run time.
     Dynamic {
         pointer: ViewProgram<St>,
         ty: BoundDynamic<St>,
     },
+
     /// A `match` whose arms name no value it has: a problem saying the
     /// value.
     Unmatched {
@@ -230,18 +243,21 @@ pub enum BoundShape<St> {
 #[derive(Debug, Clone)]
 pub enum BoundDynamic<St> {
     Fixed(TypeReference),
+
     /// A type's arguments, of which `index` chooses one; a value argument
     /// is `None`.
     Argument {
         types: Arc<[Option<TypeReference>]>,
         index: ViewProgram<St>,
     },
+
     /// The one type among `candidates` that `pattern` names when its
     /// captures `known` does not name are the type arguments of the
     /// function whose code `code` addresses.
     Function {
         code: ViewProgram<St>,
         name: Arc<str>,
+
         /// Whether `name` is a parameter's, which names its argument.
         argument: bool,
         pattern: Arc<Pattern>,
@@ -293,6 +309,7 @@ pub struct BoundDrawing<St> {
 pub struct BoundInput<St> {
     pub name: Arc<str>,
     pub value: BoundInputValue<St>,
+
     /// The part of the presented value the input is, as a drawing's
     /// `select` names one: `""` for `self`, else members and indices.
     pub path: Option<Arc<str>>,
@@ -302,11 +319,13 @@ pub struct BoundInput<St> {
 #[derive(Debug, Clone)]
 pub enum BoundInputValue<St> {
     Value(ViewProgram<St>),
+
     /// `bytes(PTR, LEN)`: an address and a count of bytes.
     Bytes {
         pointer: ViewProgram<St>,
         length: ViewProgram<St>,
     },
+
     /// A string, as written.
     Text(Arc<str>),
 }
@@ -315,24 +334,30 @@ pub enum BoundInputValue<St> {
 #[derive(Debug, Clone)]
 pub struct BoundView<St> {
     pub view: Arc<View>,
+
     /// Each `let`, computed at most once per presentation.
     pub lets: Vec<ViewProgram<St>>,
     pub checks: Vec<BoundCheck<St>>,
     pub fields: Vec<BoundField<St>>,
     pub summary: Option<Vec<BoundPiece<St>>>,
     pub shape: BoundShape<St>,
+
     /// The names of members and fields left out of the children, with
     /// the lines that hide them.
     pub hidden: Vec<(Arc<str>, u32)>,
+
     /// How members and fields are written, by name, with the lines that
     /// say so; a later one wins.
     pub formats: Vec<(Arc<str>, BoundFormat, u32)>,
+
     /// The bytes of `self`, which `format self as utf8` writes as the
     /// summary of a shape that does not present another value.
     pub self_text: Option<TextSource<St>>,
+
     /// The `extend`s that add to this view, each bound in a scope of its
     /// own, in the order they are tried.
     pub extensions: Vec<Arc<Self>>,
+
     /// Its `visualize` statements, in order, each bound or not.
     pub visualizers: Vec<BoundVisualizer<St>>,
 }
@@ -360,6 +385,7 @@ impl<St> BoundView<St> {
                 _ => {}
             }
         }
+
         let mut named = Vec::new();
         record_members(&self.shape, &mut named);
         named.extend(
@@ -375,6 +401,7 @@ impl<St> BoundView<St> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
     pub line: u32,
+
     /// The part of the view that failed, as written.
     pub part: String,
     pub reason: String,
@@ -398,11 +425,13 @@ pub struct ViewScope<'a, S: Scope> {
     base: &'a S,
     self_type: TypeReference,
     captures: &'a Captures,
+
     /// The set the view came from, whose kernels it calls before the
     /// built-in ones.
     set: &'a super::ViewSet,
     types: Vec<(String, TypeReference)>,
     lets: Vec<(String, Ty, bool)>,
+
     /// The generators' variables and clauses' `let`s in scope, by
     /// position, with their types and whether each is a place.
     variables: Vec<(String, Ty, bool)>,
@@ -463,6 +492,7 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
         if outermost {
             return Ok(Lookup::NotFound);
         }
+
         let named = |names: &[(String, Ty, bool)], object: fn(usize) -> Self::Object| {
             let index = names.iter().rposition(|(named, ..)| named == name)?;
             let (_, ty, place) = &names[index];
@@ -477,11 +507,13 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
                 },
             })
         };
+
         if let Some(found) = named(&self.variables, ViewObject::Variable)
             .or_else(|| named(&self.lets, ViewObject::Let))
         {
             return Ok(found);
         }
+
         match self.captures.iter().find(|(captured, _)| captured == name) {
             Some((_, Captured::Value(value))) => {
                 return Ok(Lookup::Constant(Exact::from(*value)));
@@ -489,12 +521,14 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
             Some((_, Captured::Type(_))) => return Ok(Lookup::NotFound),
             None => {}
         }
+
         if name == "self" {
             return Ok(Lookup::Object {
                 object: ViewObject::This,
                 ty: Ok(self.self_type),
             });
         }
+
         match self.base.plan(self.self_type, StepKind::Member(name)) {
             Ok(Planned { step, result, .. }) => Ok(Lookup::Object {
                 object: ViewObject::Member(step),
@@ -519,6 +553,7 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
             {
                 return TypeLookup::Found(*reference);
             }
+
             if let Some((_, Captured::Type(reference))) = self
                 .captures
                 .iter()
@@ -527,6 +562,7 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
                 return TypeLookup::Found(*reference);
             }
         }
+
         self.base.lookup_type(query)
     }
 
@@ -576,6 +612,7 @@ pub fn bind<S: Scope>(
 ) -> Result<BoundView<S::Step>, Rejection> {
     let mut scope = ViewScope::new(base, self_type, captures, set);
     let mut lets = Vec::new();
+
     // `let`s and `type`s, in order: each sees those before it.
     for statement in &view.statements {
         match statement {
@@ -598,6 +635,7 @@ pub fn bind<S: Scope>(
                 scope.lets.push((name.clone(), ty, place));
                 lets.push(program);
             }
+
             Statement::Type {
                 name,
                 alternatives,
@@ -616,6 +654,7 @@ pub fn bind<S: Scope>(
             _ => {}
         }
     }
+
     let mut checks = Vec::new();
     let mut fields = Vec::new();
     let mut summary = None;
@@ -643,6 +682,7 @@ pub fn bind<S: Scope>(
                         .map(|name| (Arc::<str>::from(name.as_str()), *line)),
                 );
             }
+
             Statement::Format {
                 names,
                 format,
@@ -661,6 +701,7 @@ pub fn bind<S: Scope>(
             Statement::Let { .. } | Statement::Type { .. } => {}
         }
     }
+
     // A view that does not `show` presents the value's members, and its
     // bases as members named by their types.
     let shape = match shape {
@@ -668,6 +709,7 @@ pub fn bind<S: Scope>(
         None if view.extend => BoundShape::Record(Vec::new()),
         None => members(&mut scope, view.line)?,
     };
+
     let self_text = match formats
         .iter()
         .rev()
@@ -680,6 +722,7 @@ pub fn bind<S: Scope>(
         }
         _ => None,
     };
+
     let bound = BoundView {
         view: Arc::clone(view),
         lets,
@@ -693,10 +736,12 @@ pub fn bind<S: Scope>(
         extensions: Vec::new(),
         visualizers,
     };
+
     if !view.extend {
         let self_ty = presented(&bound.shape, scope.self_type);
         check_against(&bound, &bound.named_programs(), &self_ty, &scope)?;
     }
+
     Ok(bound)
 }
 
@@ -755,12 +800,14 @@ fn bind_visualizer<S: Scope>(
                 },
                 InputValue::Text(text) => BoundInputValue::Text(text.as_str().into()),
             };
+
             inputs.push(BoundInput {
                 name: input.name.as_str().into(),
                 value,
                 path,
             });
         }
+
         Ok(BoundDrawing { renderer, inputs })
     })();
     BoundVisualizer {
@@ -780,12 +827,14 @@ fn input_path<St>(expr: &Expr, program: &ViewProgram<St>) -> Option<Arc<str>> {
     ) {
         return None;
     }
+
     let text = expr.text();
     let path = match text.strip_prefix("self") {
         Some(rest) if rest.is_empty() || rest.starts_with('[') => rest,
         Some(rest) if rest.starts_with('.') => &rest[1..],
         _ => text,
     };
+
     is_part_path(path).then(|| path.into())
 }
 
@@ -798,27 +847,34 @@ fn is_part_path(path: &str) -> bool {
             let Some(end) = index.find(']') else {
                 return false;
             };
+
             if end == 0 || !index[..end].bytes().all(|byte| byte.is_ascii_digit()) {
                 return false;
             }
+
             rest = &index[end + 1..];
         } else {
             if !first {
                 let Some(after) = rest.strip_prefix('.') else {
                     return false;
                 };
+
                 rest = after;
             }
+
             let end = rest
                 .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
                 .unwrap_or(rest.len());
             if end == 0 || rest.as_bytes()[0].is_ascii_digit() {
                 return false;
             }
+
             rest = &rest[end..];
         }
+
         first = false;
     }
+
     true
 }
 
@@ -834,6 +890,7 @@ fn first_alternative<A, T>(
             Err(reason) => reasons.push(reason),
         }
     }
+
     Err(reasons.join("; or "))
 }
 
@@ -858,6 +915,7 @@ fn members<S: Scope>(
             Mode::Read,
         )?));
     };
+
     let mut fields = Vec::new();
     for (index, base) in bases.iter().enumerate() {
         let name = scope
@@ -874,10 +932,12 @@ fn members<S: Scope>(
             )?,
         });
     }
+
     for member in members.iter().filter(|member| !member.artificial) {
         let Some(name) = member.name.as_deref() else {
             continue;
         };
+
         fields.push(BoundField {
             name: name.into(),
             program: bind_part(
@@ -887,6 +947,7 @@ fn members<S: Scope>(
             )?,
         });
     }
+
     Ok(BoundShape::Record(fields))
 }
 
@@ -922,6 +983,7 @@ fn bind_format<S: Scope>(
             }),
         }
     };
+
     Ok(match format {
         Format::Hex => BoundFormat::Hex,
         Format::Char => BoundFormat::Char,
@@ -976,6 +1038,7 @@ fn check_against<St>(
             });
         }
     }
+
     for (name, format, line) in &bound.formats {
         let line = *line;
         let result = if name.as_ref() == "self" {
@@ -986,6 +1049,7 @@ fn check_against<St>(
                 .find(|(candidate, _)| candidate == name)
                 .map(|(_, program)| program.result().clone())
         };
+
         let Some(ty) = result else {
             return Err(Rejection {
                 line,
@@ -993,6 +1057,7 @@ fn check_against<St>(
                 reason: format!("`{name}` is neither a member nor a field the view shows"),
             });
         };
+
         if let Err(reason) = suits(*format, &ty, types) {
             return Err(Rejection {
                 line,
@@ -1001,6 +1066,7 @@ fn check_against<St>(
             });
         }
     }
+
     Ok(())
 }
 
@@ -1031,15 +1097,18 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
             _ => false,
         },
     };
+
     if ok {
         return Ok(());
     }
+
     let what = match format {
         BoundFormat::Bytes => "a value in memory",
         BoundFormat::Utf8 => "an array or slice of bytes",
         BoundFormat::Utf16 => "an array of 16-bit units",
         _ => "an integer",
     };
+
     Err(format!("the format writes {what}"))
 }
 
@@ -1056,6 +1125,7 @@ fn explain<S: Scope>(
             scope.self_name()
         );
     }
+
     if at.is_empty() || at == expr.text() {
         error.message.clone()
     } else {
@@ -1155,9 +1225,11 @@ fn conjuncts(expr: &Expr) -> Vec<Expr> {
             _ => out.push(tree.span(id).text(text).trim().to_owned()),
         }
     }
+
     let Some(tree) = expr.expression.tree() else {
         return vec![expr.clone()];
     };
+
     let mut texts = Vec::new();
     split(tree, tree.root(), expr.expression.text(), &mut texts);
     let parsed = texts
@@ -1181,23 +1253,27 @@ fn bind_check<S: Scope>(
     scope: &ViewScope<'_, S>,
 ) -> Result<BoundCheck<S::Step>, Rejection> {
     let program = bind_condition_part(expr, scope)?;
+
     // A comparison's sides say why it failed.
     let sides = expr.expression.tree().and_then(|tree| {
         let NodeKind::Binary { op, left, right } = tree.kind(tree.root()) else {
             return None;
         };
+
         if !matches!(
             op,
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
         ) {
             return None;
         }
+
         let side = |id| {
             let text = tree.span(id).text(expr.expression.text()).trim().to_owned();
             let expression = Expression::parse_view(&text).ok()?;
             let program = bind_value(&expression, scope).ok()?;
             Some((text, program))
         };
+
         Some([side(*left)?, side(*right)?])
     });
     Ok(BoundCheck {
@@ -1234,6 +1310,7 @@ fn bind_shape<S: Scope>(
                 element: element?,
             }
         }
+
         Shape::Map {
             count,
             clauses,
@@ -1247,6 +1324,7 @@ fn bind_shape<S: Scope>(
             let (key, value) = bound?;
             BoundShape::Map { scan, key, value }
         }
+
         Shape::If {
             condition,
             then,
@@ -1290,6 +1368,7 @@ fn bind_dynamic_type<S: Scope>(
         part: "dynamic".to_owned(),
         reason,
     };
+
     match ty {
         DynamicType::Fixed(ty) => resolve_type(ty, scope)
             .map(BoundDynamic::Fixed)
@@ -1324,8 +1403,10 @@ fn bind_dynamic_type<S: Scope>(
                     "a type a function's arguments complete is named with its arguments".to_owned(),
                 ));
             };
+
             let pattern = super::syntax::type_pattern(name)
                 .map_err(|reason| rejected(format!("`{name}`: {reason}")))?;
+
             // A parameter's name alone is the argument itself.
             let argument = is_capture_name(name);
             let candidates = if argument {
@@ -1333,9 +1414,11 @@ fn bind_dynamic_type<S: Scope>(
             } else {
                 candidates(&pattern, scope)
             };
+
             if candidates.is_empty() && !argument {
                 return Err(rejected(format!("no type is `{name}`")));
             }
+
             Ok(BoundDynamic::Function {
                 code: bind_category(
                     code,
@@ -1365,6 +1448,7 @@ fn bind_scan<S: Scope>(
         Count::Known(count) => Some(bind_integer(count, scope)?),
         Count::Unknown => None,
     };
+
     let mut bound = Vec::new();
     for clause in clauses {
         match bind_clause(clause, scope) {
@@ -1375,6 +1459,7 @@ fn bind_scan<S: Scope>(
             }
         }
     }
+
     Ok(BoundScan {
         count,
         clauses: bound,
@@ -1403,6 +1488,7 @@ fn bind_clause<S: Scope>(
             let right = bind_link(right, &ty, scope)?;
             (BoundGenerator::Inorder { root, left, right }, ty)
         }
+
         Generator::Kernel {
             name,
             line,
@@ -1417,6 +1503,7 @@ fn bind_clause<S: Scope>(
                     part: format!("kernel(\"{name}\")"),
                     reason: "no kernel has that name".to_owned(),
                 })?;
+
             // Each is a 64-bit word to the kernel.
             let arguments = arguments
                 .iter()
@@ -1444,9 +1531,11 @@ fn bind_clause<S: Scope>(
             )
         }
     };
+
     for variable in &clause.variables {
         scope.variables.push((variable.clone(), ty.clone(), false));
     }
+
     let mut items = Vec::new();
     for item in &clause.items {
         items.push(match item {
@@ -1460,7 +1549,9 @@ fn bind_clause<S: Scope>(
             }
         });
     }
+
     let clause = BoundClause { generator, items };
+
     // The scanner steps between clauses' values by this width.
     debug_assert_eq!(
         scope.variables.len() - before,
@@ -1538,6 +1629,7 @@ fn bind_text_source<S: Scope>(
         part: pointer.text().to_owned(),
         reason: "`text` takes a pointer to characters, or an array or slice of them".to_owned(),
     };
+
     match category(scope, program.result()) {
         Category::Pointer(Some(target)) => {
             let width = text_unit_width(scope, &target).ok_or_else(refuse)?;
@@ -1548,6 +1640,7 @@ fn bind_text_source<S: Scope>(
             let Ty::Program(from) = program.result() else {
                 return Err(refuse());
             };
+
             let planned = scope
                 .plan(*from, StepKind::Index { available: 1 })
                 .map_err(|refusal| Rejection {
@@ -1558,6 +1651,7 @@ fn bind_text_source<S: Scope>(
             if planned.consumed != 1 {
                 return Err(refuse());
             }
+
             Ok(TextSource::Elements {
                 program,
                 first: planned.step,
@@ -1580,6 +1674,7 @@ fn resolve_type<S: Scope>(
                     "`{name}*`: a `type` names a type; write the pointer where it is used"
                 ));
             }
+
             match scope.lookup_type(&TypeQuery {
                 name: name.clone(),
                 tag: None,
@@ -1615,6 +1710,7 @@ fn resolve_type<S: Scope>(
                     TypeLookup::NotFound => {}
                 }
             }
+
             Err(format!("`{outer}` declares no type `{name}`"))
         }
         TypeExpr::TypeOf(expr) => {
@@ -1657,6 +1753,7 @@ fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeRefer
             "`{name}`: `{unknown}` is neither an argument the pattern captured nor a type the view names"
         ));
     }
+
     let mut found = Vec::<TypeReference>::new();
     for candidate in candidates(&pattern, scope) {
         let Some(identity) = scope
@@ -1665,12 +1762,14 @@ fn construct<S: Scope>(name: &str, scope: &ViewScope<'_, S>) -> Result<TypeRefer
         else {
             continue;
         };
+
         if super::pattern::matches_with(&pattern, identity, scope, known.clone()).is_some()
             && !found.iter().any(|other| scope.same_type(*other, candidate))
         {
             found.push(candidate);
         }
     }
+
     match found.as_slice() {
         [reference] => Ok(*reference),
         [] => Err(format!("no type is `{name}`")),
@@ -1694,6 +1793,7 @@ fn known_types<S: Scope>(scope: &ViewScope<'_, S>) -> Captures {
         known.retain(|(captured, _)| captured != type_name);
         known.push((type_name.clone(), Captured::Type(*reference)));
     }
+
     known
 }
 

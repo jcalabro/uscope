@@ -132,10 +132,13 @@ pub const MAX_RENDERER_BYTES: usize = 256 * 1024;
 #[derive(Debug)]
 pub struct ViewSet {
     views: Vec<Arc<View>>,
+
     /// Each base name's views, in order.
     by_base: BTreeMap<String, Vec<usize>>,
+
     /// Each kernel, by name, with where it was loaded from.
     kernels: BTreeMap<String, (Arc<str>, Arc<kernel::Kernel>)>,
+
     /// Each renderer, by name.
     renderers: BTreeMap<String, Arc<crate::Renderer>>,
     errors: Vec<syntax::Error>,
@@ -152,6 +155,7 @@ impl ViewSet {
             views.extend(file.views);
             errors.extend(file.errors);
         }
+
         let mut by_base = BTreeMap::<String, Vec<usize>>::new();
         for (index, view) in views.iter().enumerate() {
             by_base
@@ -159,6 +163,7 @@ impl ViewSet {
                 .or_default()
                 .push(index);
         }
+
         Self {
             views,
             by_base,
@@ -183,21 +188,25 @@ impl ViewSet {
                 column: 0,
                 message: format!("renderer `{name}`: {message}"),
             };
+
             if !syntax::is_renderer_name(name) {
                 self.errors.push(error(syntax::RENDERER_NAME.to_owned()));
                 continue;
             }
+
             if source.len() > MAX_RENDERER_BYTES {
                 self.errors.push(error(format!(
                     "a renderer may be at most {MAX_RENDERER_BYTES} bytes long"
                 )));
                 continue;
             }
+
             if self.renderers.contains_key(name) {
                 self.errors
                     .push(error("an earlier renderer has the same name".to_owned()));
                 continue;
             }
+
             self.renderers.insert(
                 name.to_owned(),
                 Arc::new(crate::Renderer::new(name, origin, source)),
@@ -231,15 +240,18 @@ impl ViewSet {
                 column: 0,
                 message: format!("kernel `{name}`: {message}"),
             };
+
             if !syntax::is_kernel_name(name) {
                 self.errors.push(error(syntax::KERNEL_NAME.to_owned()));
                 continue;
             }
+
             if self.kernels.contains_key(name) {
                 self.errors
                     .push(error("an earlier kernel has the same name".to_owned()));
                 continue;
             }
+
             match kernel::Kernel::new(name, source, wasm) {
                 Ok(kernel) => {
                     self.kernels
@@ -312,6 +324,7 @@ impl ViewSet {
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub name: Arc<ViewName>,
+
     /// `None` when it bound.
     pub rejection: Option<Rejection>,
 }
@@ -355,6 +368,7 @@ pub fn stands_for_container(types: &dyn TypeSource, mut ty: TypeReference) -> bo
         let Some(info) = types.type_info(ty) else {
             return false;
         };
+
         if info
             .identity
             .as_deref()
@@ -363,6 +377,7 @@ pub fn stands_for_container(types: &dyn TypeSource, mut ty: TypeReference) -> bo
         {
             return true;
         }
+
         match info.kind {
             crate::TypeKind::Named {
                 target: Some(target),
@@ -372,6 +387,7 @@ pub fn stands_for_container(types: &dyn TypeSource, mut ty: TypeReference) -> bo
             _ => return false,
         }
     }
+
     false
 }
 
@@ -392,6 +408,7 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
         let Some(identity) = info.identity.as_deref() else {
             continue;
         };
+
         let mut candidates = Vec::new();
         for views in sets {
             // A Go type is also named by its kind, as every map is by `map`.
@@ -412,6 +429,7 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
             found.dedup();
             candidates.extend(found.into_iter().map(|index| (&views.views[index], *views)));
         }
+
         let mut base = None;
         let mut extensions = Vec::new();
         for (view, set) in candidates {
@@ -419,12 +437,15 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
             if base.is_some() && !view.extend {
                 continue;
             }
+
             if !pattern::language_matches(view.language, identity.language) {
                 continue;
             }
+
             let Some(captures) = pattern::matches(&view.pattern, identity, scope) else {
                 continue;
             };
+
             match bind::bind(view, set, ty, &captures, scope) {
                 Ok(bound) if view.extend => extensions.push((view, set, captures, bound)),
                 Ok(bound) => {
@@ -440,6 +461,7 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
                 }),
             }
         }
+
         // `extend`s with no view to add to add to the value's members.
         if base.is_none()
             && let Some((view, set, captures, _)) = extensions.first()
@@ -457,22 +479,27 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
                 }),
             }
         }
+
         let Some(mut base) = base else {
             continue;
         };
+
         for (view, _, _, extension) in extensions {
             let rejection = bind::check_extension(&base, &extension, ty, scope).err();
             if rejection.is_none() {
                 base.extensions.push(Arc::new(extension));
             }
+
             choice.candidates.push(Candidate {
                 name: name_of(view),
                 rejection,
             });
         }
+
         choice.bound = Some(Arc::new(base));
         return choice;
     }
+
     choice
 }
 
@@ -485,6 +512,7 @@ fn wrappers(types: &dyn TypeSource, ty: TypeReference) -> Vec<(TypeReference, &T
         let Some(info) = types.type_info(current) else {
             break;
         };
+
         let next = match &info.kind {
             crate::TypeKind::Modified { target, .. }
             | crate::TypeKind::Named {
@@ -493,11 +521,13 @@ fn wrappers(types: &dyn TypeSource, ty: TypeReference) -> Vec<(TypeReference, &T
             } => Some(*target),
             _ => None,
         };
+
         chain.push((current, info));
         match next {
             Some(next) => current = next,
             None => break,
         }
     }
+
     chain
 }

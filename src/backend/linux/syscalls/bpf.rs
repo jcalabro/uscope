@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use aya::maps::{
     Array, ArrayOfMaps, HashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues, RingBuf,
 };
+
 use aya::programs::{BtfTracePoint, FEntry, FExit, Iter};
 use aya::{Btf, Ebpf, EbpfLoader};
 use aya_obj::btf::BtfKind;
@@ -33,6 +34,7 @@ use super::launch::{self, Gate, GateOptions};
 use super::ptrace::{
     Finished, Target, TraceOptions, monotonic, seed_descriptors, seed_descriptors_as,
 };
+
 use crate::syscalls::captures::{self, CopyKind};
 use crate::syscalls::specs::{self, Arg, Count, MemKind, Ret, Struct};
 use crate::syscalls::stats::{self, BUCKETS, Folded};
@@ -40,6 +42,7 @@ use crate::syscalls::{
     Abi, CallStack, Capture, CaptureState, Device, EventFlags, InFlight, Outcome, Pid, ProcessEnd,
     ReadAt, SyscallEvent, SyscallId, SyscallStats, Tid, TraceEvent,
 };
+
 use crate::unwind::DwarfRegister;
 use crate::unwind::sample::SampledState;
 
@@ -84,11 +87,13 @@ const CONFIG_STACK_COPY: u32 = 32;
 const CONFIG_GENERATION: u32 = 64;
 
 const CALL_PROCESS_EXITED: u8 = 8;
+
 /// The flags a call record shares with [`EventFlags`].
 const CALL_EVENT_FLAGS: u8 = EventFlags::ENTRY_UNSEEN.0 | EventFlags::ABI_UNCERTAIN.0;
 
 /// A call's slot in the CALLS map: its ABI and number.
 const SLOTS: u32 = 3072;
+
 // Each chosen call's statistics row is a `u16` in its CALLS entry.
 const _: () = assert!(SLOTS <= 1 << 16, "statistics rows outgrow their u16");
 
@@ -335,6 +340,7 @@ pub const fn errno_slot(call: SyscallId) -> u32 {
         Abi::X86_32 => 1,
         Abi::X32 => 2,
     };
+
     abi << 10 | (call.number & 1023)
 }
 
@@ -372,6 +378,7 @@ pub fn encode_call(
         },
         captures: 0,
     };
+
     record.as_bytes().to_vec()
 }
 
@@ -394,10 +401,12 @@ pub fn call_spec(call: SyscallId, options: &TraceOptions) -> RawCallSpec {
         )),
         ..RawCallSpec::default()
     };
+
     if let Some(described) = specs::spec(call) {
         if described.ret == Ret::Fd {
             spec.makes = MAKES_RESULT;
         }
+
         let pair = described.args.iter().position(|arg| {
             matches!(
                 arg,
@@ -412,6 +421,7 @@ pub fn call_spec(call: SyscallId, options: &TraceOptions) -> RawCallSpec {
             spec.makes_arg = arg;
         }
     }
+
     for copy in captures::copies(call, options.limits, options.verbose) {
         let (count, count_arg) = match copy.count {
             Count::One => (0, 0),
@@ -419,6 +429,7 @@ pub fn call_spec(call: SyscallId, options: &TraceOptions) -> RawCallSpec {
             Count::Return => (2, 0),
             Count::PointedBy(n) => (3, n),
         };
+
         spec.args[usize::from(copy.arg)] = RawArgCopy {
             kind: match copy.kind {
                 CopyKind::Path => 1,
@@ -442,6 +453,7 @@ pub fn call_spec(call: SyscallId, options: &TraceOptions) -> RawCallSpec {
             limit: copy.limit,
         };
     }
+
     spec
 }
 
@@ -457,9 +469,11 @@ fn reads_at_entry(call: SyscallId) -> bool {
 pub enum Record {
     /// A call, at its exit, or as its thread ended inside it.
     Call(SyscallEvent),
+
     /// The arguments a call read at its entry; its exit follows.
     Entry(SyscallEvent),
     Event(TraceEvent),
+
     /// The stack of the thread whose call or signal follows.
     Stack(SampledStack),
 }
@@ -469,10 +483,13 @@ pub enum Record {
 pub struct SampledStack {
     pub thread: Tid,
     pub process: Pid,
+
     /// The user registers by DWARF number.
     pub registers: [(DwarfRegister, u64); 17],
+
     /// The kernel's walk of the frame pointers, the instruction first.
     pub chain: Vec<u64>,
+
     /// The stack's bytes from its pointer up, if copied.
     pub copy: Vec<u8>,
 }
@@ -482,10 +499,13 @@ pub struct SampledStack {
 pub enum DecodeError {
     #[error("a record of {0} bytes is shorter than its header says")]
     Short(usize),
+
     #[error("unknown record kind {0}")]
     Kind(u32),
+
     #[error("a call record names ABI {0}")]
     Abi(u8),
+
     #[error("a capture of argument {0} is malformed")]
     Capture(u8),
 }
@@ -567,10 +587,12 @@ pub fn decode(bytes: &[u8]) -> Result<Record, DecodeError> {
             let word =
                 |at: usize| i32::from_le_bytes(raw.info[at..at + 4].try_into().unwrap_or_default());
             let code = word(8);
+
             // Processes send with SI_USER, SI_QUEUE, SI_TKILL, and the like.
             let sender = (code <= 0 && code != -2)
                 .then(|| u32::try_from(word(16)).ok().map(Pid::new))
                 .flatten();
+
             // The rest of a siginfo holds no field of any kind of signal.
             let mut info = [0_u8; 128];
             info[..raw.info.len()].copy_from_slice(&raw.info);
@@ -659,9 +681,11 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
         });
         at = start + len.next_multiple_of(8);
     }
+
     let unseen = raw.flags & EventFlags::ENTRY_UNSEEN.0 != 0;
     let exited_inside = raw.flags & CALL_PROCESS_EXITED != 0;
     let call = SyscallId::new(abi, raw.nr);
+
     // Only these end a thread inside them. Any other call returns first,
     // so its return went unseen: a function's exit programs are skipped
     // for calls in progress whenever another tracer attaches to it.
@@ -675,6 +699,7 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
             count: 1,
         }));
     }
+
     let event = SyscallEvent {
         thread: Tid::new(header.tid),
         process: Pid::new(header.tgid),
@@ -693,6 +718,7 @@ fn call_record(header: RawRecord, bytes: &[u8]) -> Result<Record, DecodeError> {
         stack: None,
         flags: EventFlags(raw.flags & CALL_EVENT_FLAGS),
     };
+
     Ok(if header.kind == RECORD_ENTRY {
         Record::Entry(event)
     } else {
@@ -711,6 +737,7 @@ fn descriptor(process: Pid, raw: &RawFileRecord, name: &[u8]) -> TraceEvent {
         ANON_INODE_FS_MAGIC => format!("anon_inode:{name}"),
         _ => String::new(),
     };
+
     let kind = raw.mode & S_IFMT;
     let device = (kind == S_IFCHR || kind == S_IFBLK).then_some(Device {
         block: kind == S_IFBLK,
@@ -753,10 +780,12 @@ pub fn fold(
             });
         }
     }
+
     for (key, count) in errnos {
         let (Some(call), Ok(errno)) = (call_of(key.slot), u16::try_from(key.err)) else {
             continue;
         };
+
         if count > 0 {
             *folded
                 .by_call
@@ -767,6 +796,7 @@ pub fn fold(
                 .or_default() += count;
         }
     }
+
     folded
 }
 
@@ -775,14 +805,19 @@ pub fn fold(
 pub enum BpfError {
     #[error("{0}")]
     Unavailable(String),
+
     #[error("starting the program failed: {0}")]
     Spawn(#[source] std::io::Error),
+
     #[error("process {0} does not exist")]
     NoProcess(u32),
+
     #[error("loading the BPF programs failed: {0}")]
     Load(String),
+
     #[error("tracing failed: {0}")]
     System(#[from] nix::errno::Errno),
+
     #[error("following what the program maps, for its stacks, failed: {0}")]
     Mappings(#[source] super::super::perf::OpenError),
 }
@@ -822,13 +857,17 @@ const CAP_BPF: u32 = 39;
 pub struct Probe {
     /// The kernel's release, as `uname -r` prints it.
     pub release: String,
+
     /// Its major and minor version.
     pub version: Option<(u32, u32)>,
     pub btf: bool,
+
     /// The effective capability set.
     pub capabilities: u64,
+
     /// The lockdown mode in force, when the kernel has one.
     pub lockdown: Option<String>,
+
     /// A BPF filesystem that delegates commands, which offers a token.
     pub token: Option<std::path::PathBuf>,
 }
@@ -884,6 +923,7 @@ impl Probe {
                 self.release
             )));
         }
+
         if !self.btf {
             return Err(BpfError::Unavailable(
                 "uscope syscalls' BPF engine needs the kernel's BTF, and /sys/kernel/btf/vmlinux \
@@ -892,6 +932,7 @@ impl Probe {
                     .to_owned(),
             ));
         }
+
         let bpf = self.has(CAP_BPF) || self.has(CAP_SYS_ADMIN);
         let perfmon = self.has(CAP_PERFMON) || self.has(CAP_SYS_ADMIN);
         let missing = match (bpf, perfmon) {
@@ -900,6 +941,7 @@ impl Probe {
             (false, true) => Some("lacks CAP_BPF"),
             (true, false) => Some("lacks CAP_PERFMON"),
         };
+
         if let Some(missing) = missing {
             let token = self.token.as_ref().map_or_else(String::new, |path| {
                 format!(
@@ -912,6 +954,7 @@ impl Probe {
                 "uscope syscalls needs CAP_BPF and CAP_PERFMON, and this process {missing}.\n{REMEDY}{token}"
             )));
         }
+
         if self.lockdown.as_deref() == Some("confidentiality") {
             return Err(BpfError::Unavailable(
                 "the kernel is locked down for confidentiality, which forbids BPF programs to \
@@ -920,6 +963,7 @@ impl Probe {
                     .to_owned(),
             ));
         }
+
         Ok(())
     }
 }
@@ -934,12 +978,15 @@ fn version(release: &str) -> Option<(u32, u32)> {
 pub struct BpfOptions {
     /// Count in the kernel and report no calls, only their statistics.
     pub count_only: bool,
+
     /// The ring buffer's bytes: a power of two, in pages.
     pub ring: u32,
+
     /// With stacks, copy each stack's top to unwind by call-frame
     /// information, rather than trust the kernel's walk alone.
     pub stack_copy: bool,
     pub attach: AttachMode,
+
     /// Percent of one CPU the trace may cost, giving up detail to stay
     /// inside it.
     pub budget: Option<f64>,
@@ -963,8 +1010,10 @@ pub enum AttachMode {
     /// The chosen calls' functions when they can, else the tracepoints.
     #[default]
     Auto,
+
     /// The tracepoints every call on the host passes.
     Tracepoints,
+
     /// The chosen calls' functions, or not at all.
     Functions,
 }
@@ -1011,9 +1060,11 @@ fn attachment(
         functions: Vec::new(),
         reason,
     };
+
     if mode == AttachMode::Tracepoints {
         return Ok(tracepoints("asked for".to_owned()));
     }
+
     let why = if all {
         "every call is traced".to_owned()
     } else {
@@ -1028,6 +1079,7 @@ fn attachment(
                 }
             }
         }
+
         match missing {
             Some(call) => format!(
                 "{} has no kernel function that BTF describes",
@@ -1049,6 +1101,7 @@ fn attachment(
             }
         }
     };
+
     if mode == AttachMode::Functions {
         Err(format!("--attach fentry cannot be used: {why}"))
     } else {
@@ -1075,18 +1128,23 @@ fn load_error(error: impl std::fmt::Display) -> BpfError {
 struct Loaded {
     ebpf: Ebpf,
     targets: HashMap<MapData, u32, u8>,
+
     /// The call each row of statistics counts.
     rows: Vec<SyscallId>,
+
     /// The chosen calls' slots in CALLS.
     slots: Vec<u32>,
+
     /// What waits out the programs running, and what it is set to.
     fence: (
         ArrayOfMaps<MapData, Array<MapData, u32>>,
         Array<MapData, u32>,
     ),
+
     /// The half of the statistics being counted into.
     generation: u32,
     attachment: Attachment,
+
     /// Whether the kernel counts any calls, whose statistics are read
     /// once the trace ends.
     counting: bool,
@@ -1158,28 +1216,34 @@ impl Loaded {
             } else {
                 CONFIG_STREAM
             };
+
             if options.follow {
                 flags |= CONFIG_FOLLOW;
             }
+
             if launch {
                 flags |= CONFIG_SKIP_UNSEEN;
             }
+
             if options.stacks.is_some() {
                 flags |= CONFIG_STACKS;
                 if engine.stack_copy {
                     flags |= CONFIG_STACK_COPY;
                 }
             }
+
             let raw = RawConfig {
                 flags,
                 elements: u32::try_from(options.limits.elements).unwrap_or(u32::MAX),
                 sample: 0,
                 rows,
             };
+
             let mut value = [0; CONFIG_BYTES];
             value.copy_from_slice(raw.as_bytes());
             config.set(0, value, 0).map_err(load_error)?;
         }
+
         attach(&mut ebpf, &btf, &attachment)?;
         let targets =
             HashMap::try_from(ebpf.take_map("TARGETS").ok_or_else(|| missing("TARGETS"))?)
@@ -1238,6 +1302,7 @@ impl Loaded {
                     let mut spec =
                         RawCallSpec::read_from_bytes(&calls.get(&slot, 0).map_err(load_error)?)
                             .map_err(|_| BpfError::Load("a CALLS value has another size".into()))?;
+
                     // Paths stay whole for the descriptors they name, and
                     // structures for their fields.
                     for arg in &mut spec.args {
@@ -1247,10 +1312,12 @@ impl Loaded {
                             arg.limit = arg.limit.min(CAPPED_BYTES);
                         }
                     }
+
                     let mut value = [0; SPEC_BYTES];
                     value.copy_from_slice(spec.as_bytes());
                     calls.set(slot, value, 0).map_err(load_error)?;
                 }
+
                 Ok(())
             }
             Step::Sample(every) => {
@@ -1295,6 +1362,7 @@ impl Loaded {
                 Vec::new()
             }
         };
+
         let now = monotonic();
         let mut calls: Vec<InFlight> = listed
             .as_chunks::<{ size_of::<RawInFlightRecord>() }>()
@@ -1419,6 +1487,7 @@ impl Loaded {
                 stats.set(old * rows + row, zeros, 0).map_err(load_error)?;
             }
         }
+
         if let Some(map) = self.ebpf.map_mut("ERRNOS") {
             let mut errnos = PerCpuHashMap::<_, Bytes<ERRNO_KEY_BYTES>, u64>::try_from(map)
                 .map_err(load_error)?;
@@ -1433,6 +1502,7 @@ impl Loaded {
                 errnos.remove(&key).map_err(load_error)?;
             }
         }
+
         Ok(folded)
     }
 
@@ -1488,6 +1558,7 @@ fn attach(ebpf: &mut Ebpf, btf: &Btf, attachment: &Attachment) -> Result<(), Bpf
         if !attachment.functions.is_empty() && matches!(name, "sys_enter" | "sys_exit") {
             continue;
         }
+
         let program: &mut BtfTracePoint = ebpf
             .program_mut(name)
             .ok_or_else(|| missing(name))?
@@ -1496,6 +1567,7 @@ fn attach(ebpf: &mut Ebpf, btf: &Btf, attachment: &Attachment) -> Result<(), Bpf
         program.load(tracepoint, btf).map_err(load_error)?;
         program.attach().map_err(load_error)?;
     }
+
     for (slot, function) in attachment.functions.iter().enumerate() {
         let enter = format!("enter_{slot}");
         let program: &mut FEntry = ebpf
@@ -1514,6 +1586,7 @@ fn attach(ebpf: &mut Ebpf, btf: &Btf, attachment: &Attachment) -> Result<(), Bpf
         program.load(function, btf).map_err(load_error)?;
         program.attach().map_err(load_error)?;
     }
+
     let iterator: &mut Iter = ebpf
         .program_mut("in_flight")
         .ok_or_else(|| missing("in_flight"))?
@@ -1536,6 +1609,7 @@ fn cpu_time() -> u64 {
             u64::try_from(time.tv_sec()).unwrap_or(0) * 1_000_000_000
                 + u64::try_from(time.tv_usec()).unwrap_or(0) * 1_000
         };
+
         nanoseconds(usage.user_time()) + nanoseconds(usage.system_time())
     })
 }
@@ -1566,6 +1640,7 @@ pub fn trace(
         Target::Launch(command) => Start::Launch(command),
         Target::Attach(pids) => Start::Attach(pids),
     };
+
     run(start, options, engine, stop, sink)
 }
 
@@ -1646,6 +1721,7 @@ fn run(
         },
         _ => Scope::default(),
     };
+
     let launch = matches!(start, Start::Launch(_) | Start::Held(_));
     let mut loaded = Loaded::load(options, engine, launch, scope)?;
     sink.attached_by(&loaded.attachment);
@@ -1681,15 +1757,18 @@ fn run(
         perf: Vec::new(),
         lost: 0,
     };
+
     let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
     let ring_end = reader.end;
     let Reader { sink, .. } = reader;
     if loaded.counting {
         sink.counted(loaded.counted(first));
     }
+
     drop(loaded);
     let status = gate.as_mut().map(Gate::finish);
     result?;
+
     // The launched program's status is the one its parent reaped.
     let end = match status {
         Some(Ok(Some(status))) => {
@@ -1705,6 +1784,7 @@ fn run(
         Some(Err(error)) if ring_end.is_none() => return Err(BpfError::Spawn(error)),
         _ => ring_end,
     };
+
     Ok(Finished { end })
 }
 
@@ -1734,6 +1814,7 @@ fn begin(
             if options.stacks.is_some() {
                 mappings.push(perf::Events::open(pid, &MAPPINGS).map_err(BpfError::Mappings)?);
             }
+
             seed_descriptors(pid, sink);
             live.insert(Pid::new(pid));
             sink.attached(pid);
@@ -1754,6 +1835,7 @@ fn begin(
                 // Enabled as it executes, as the profiler's are.
                 mappings.push(perf::Events::open(pid, &MAPPINGS).map_err(BpfError::Mappings)?);
             }
+
             // Held at its gate, it has the descriptors it will execute with.
             seed_descriptors(pid, sink);
             live.insert(Pid::new(pid));
@@ -1766,21 +1848,25 @@ fn begin(
                 if ended(pid) {
                     return Err(BpfError::NoProcess(pid));
                 }
+
                 loaded.target(pid)?;
                 if let Some(stacks) = &options.stacks {
                     mappings.push(
                         perf::Events::attach(pid, &MAPPINGS, MAPPING_EVENTS)
                             .map_err(BpfError::Mappings)?,
                     );
+
                     // What it mapped before, while it is there to read.
                     stacks
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .read_maps(Pid::new(pid));
                 }
+
                 live.insert(Pid::new(pid));
                 sink.attached(pid);
             }
+
             Pid::new(pids.first().copied().unwrap_or(0))
         }
         Start::Cgroup(traced, namespace) => {
@@ -1793,10 +1879,12 @@ fn begin(
                     seed_descriptors_as(process, shown, sink);
                 }
             }
+
             cgroup = Some(traced);
             Pid::new(0)
         }
     };
+
     Ok(Begun {
         first,
         live,
@@ -1821,21 +1909,28 @@ const MAPPING_EVENTS: usize = 65_536;
 struct Reader<'a> {
     sink: &'a mut dyn Sink,
     follow: bool,
+
     /// The cgroup traced, which the trace lasts as long as.
     cgroup: Option<Cgroup>,
     budget: Option<Budget>,
+
     /// When the budget's window began, and the CPU time spent by then.
     window: (u64, u64),
+
     /// The traced processes still running.
     live: BTreeSet<Pid>,
     first: Pid,
     end: Option<ProcessEnd>,
+
     /// Arguments read at a call's entry, by thread, until its exit.
     entries: BTreeMap<Tid, SyscallEvent>,
+
     /// Unwinds each stack, when stacks were asked for.
     stacks: Option<super::stacks::SharedStacks>,
+
     /// Each thread's stack, until the call or signal it precedes.
     sampled: BTreeMap<Tid, SampledStack>,
+
     /// What the traced processes map, as they map it, for their stacks.
     mappings: Vec<perf::Events>,
     batch: Vec<Record>,
@@ -1873,10 +1968,12 @@ impl Reader<'_> {
                             nix::sys::signal::Signal::SIGKILL,
                         );
                     }
+
                     // Attached processes run on untraced.
                     None => self.live.clear(),
                 }
             }
+
             // Processes that ended without a record, as when the ring was
             // full, are seen in /proc; whatever they sent is in the ring
             // before they are.
@@ -1890,19 +1987,24 @@ impl Reader<'_> {
             for pid in gone {
                 self.live.remove(&pid);
             }
+
             if stopping && launched.is_some_and(|pid| !self.live.contains(&Pid::new(pid))) {
                 self.live.clear();
             }
+
             let ended = match &self.cgroup {
                 Some(cgroup) => stopping || !cgroup.exists(),
                 None => self.live.is_empty(),
             };
+
             if ended {
                 self.drain(&mut ring);
+
                 // Whatever was lost since the last tick.
                 self.report_lost(loaded, monotonic());
                 break;
             }
+
             let now = monotonic();
             if now - last_tick >= u64::from(TICK_MS) * 1_000_000 {
                 last_tick = now;
@@ -1914,12 +2016,15 @@ impl Reader<'_> {
                         let counted = loaded.take_counted(self.first)?;
                         self.sink.counted(counted);
                     }
+
                     self.sink.end_segment(now);
                 }
+
                 if let Some(after) = self.sink.in_flight_after() {
                     self.sink.in_flight(&loaded.in_flight(after));
                 }
             }
+
             let mut fds = [nix::poll::PollFd::new(
                 ring.as_fd(),
                 nix::poll::PollFlags::POLLIN,
@@ -1929,13 +2034,16 @@ impl Reader<'_> {
                 Err(error) => return Err(BpfError::System(error)),
             }
         }
+
         self.report_lost(loaded, monotonic());
         for event in loaded.unfinished() {
             self.sink.event(TraceEvent::Call(event));
         }
+
         for (_, entry) in std::mem::take(&mut self.entries) {
             self.sink.event(TraceEvent::Call(entry));
         }
+
         Ok(())
     }
 
@@ -1946,6 +2054,7 @@ impl Reader<'_> {
         let Some(budget) = &mut self.budget else {
             return Ok(());
         };
+
         let spent = cpu_time() + loaded.run_time().unwrap_or(0);
         if self.window.0 == 0 {
             if loaded.run_time().is_none() {
@@ -1955,13 +2064,16 @@ impl Reader<'_> {
                      so the budget holds uscope's own CPU time alone",
                 );
             }
+
             self.window = (now, spent);
             return Ok(());
         }
+
         let (began, before) = self.window;
         if now - began < 1_000_000_000 {
             return Ok(());
         }
+
         let used = spent.saturating_sub(before);
         if let Some(step) = budget.after(used, now - began) {
             loaded.give_up(step)?;
@@ -1973,6 +2085,7 @@ impl Reader<'_> {
                 ),
             );
         }
+
         self.window = (now, spent);
         Ok(())
     }
@@ -2008,10 +2121,12 @@ impl Reader<'_> {
                 }
             }
         }
+
         self.map();
         for record in std::mem::take(&mut batch) {
             self.handle(record);
         }
+
         self.batch = batch;
     }
 
@@ -2021,16 +2136,19 @@ impl Reader<'_> {
         let Some(stacks) = &self.stacks else {
             return;
         };
+
         self.perf.clear();
         for events in &mut self.mappings {
             events.drain(&mut self.perf);
         }
+
         let mut records = Vec::new();
         let mut offset = 0;
         while let Some(Ok((record, length))) = perf::decode::next(&self.perf[offset..]) {
             records.push((record.time().unwrap_or(0), offset));
             offset += length;
         }
+
         records.sort_unstable();
         let mut stacks = stacks
             .lock()
@@ -2040,6 +2158,7 @@ impl Reader<'_> {
                 Some(Ok((perf::decode::Record::Mmap(mmap), _))) if mmap.executable => {
                     stacks.mapped(&mmap);
                 }
+
                 Some(Ok((
                     perf::decode::Record::Comm {
                         pid, exec: true, ..
@@ -2092,6 +2211,7 @@ impl Reader<'_> {
                         self.sink.event(TraceEvent::Call(entry));
                     }
                 }
+
                 self.sink.event(TraceEvent::Call(call));
             }
             Record::Event(mut event) => {
@@ -2099,13 +2219,16 @@ impl Reader<'_> {
                 if let TraceEvent::Descriptor { time, .. } = &mut event {
                     *time = monotonic();
                 }
+
                 if let TraceEvent::Signal { thread, stack, .. } = &mut event {
                     *stack = self.unwind(*thread);
                 }
+
                 match &event {
                     TraceEvent::Spawn { child, thread, .. } if !*thread && self.follow => {
                         self.live.insert(Pid::led_by(*child));
                     }
+
                     TraceEvent::Exec {
                         thread, process, ..
                     } if *thread != process.leader() => {
@@ -2119,10 +2242,12 @@ impl Reader<'_> {
                         if *process == self.first {
                             self.end = Some(*end);
                         }
+
                         self.live.remove(process);
                     }
                     _ => {}
                 }
+
                 self.sink.event(event);
             }
         }
@@ -2188,6 +2313,7 @@ mod tests {
             attachment(false, &sigaction, AttachMode::Auto, true, &no_x32).expect("tracepoints");
         assert_eq!(fallen.name(), "tp_btf");
     }
+
     use crate::syscalls::captures::MOST_BYTES;
 
     /// The object's BTF: each struct's size and its members' names and
@@ -2208,6 +2334,7 @@ mod tests {
             let end = start + data[start..].iter().position(|&b| b == 0).expect("NUL");
             String::from_utf8_lossy(&data[start..end]).into_owned()
         };
+
         let mut structs = BTreeMap::new();
         let mut at = types;
         while at < types + type_len {
@@ -2215,6 +2342,7 @@ mod tests {
             let kind = (info >> 24) & 0x1f;
             let vlen = (info & 0xffff) as usize;
             at += 12;
+
             // Each kind's trailing data, by the BTF format.
             let trailing = match kind {
                 1 | 14 | 15 | 17 => 4,
@@ -2224,6 +2352,7 @@ mod tests {
                 19 => 16 * vlen,
                 _ => 0,
             };
+
             if kind == 4 {
                 let members = (0..vlen)
                     .map(|index| {
@@ -2233,8 +2362,10 @@ mod tests {
                     .collect();
                 structs.insert(name(name_off), (size, members));
             }
+
             at += trailing;
         }
+
         structs
     }
 
@@ -2335,10 +2466,12 @@ mod tests {
                 wanted: if state == 1 { u32::MAX } else { 0 },
                 ..RawCaptureHeader::default()
             };
+
             tail.extend_from_slice(header.as_bytes());
             tail.extend_from_slice(data);
             tail.resize(tail.len().next_multiple_of(8), 0);
         }
+
         let record = RawCallRecord {
             header: RawRecord {
                 kind,
@@ -2355,6 +2488,7 @@ mod tests {
             flags,
             captures: u16::try_from(captures.len()).expect("small"),
         };
+
         let mut bytes = record.as_bytes().to_vec();
         bytes.extend_from_slice(&tail);
         bytes
@@ -2366,6 +2500,7 @@ mod tests {
         let Ok(Record::Call(call)) = decode(&bytes) else {
             panic!("a call");
         };
+
         assert_eq!(
             (call.thread, call.process, call.call.name(), call.outcome),
             (
@@ -2389,11 +2524,13 @@ mod tests {
         let Ok(Record::Call(call)) = decode(&bytes) else {
             panic!("a call");
         };
+
         assert_eq!(
             (call.outcome, call.entered, call.exited),
             (Outcome::ProcessExited, None, None)
         );
         assert!(call.flags.contains(EventFlags::ENTRY_UNSEEN));
+
         // Every other call returns before its thread ends, so one held
         // then had its return go unseen.
         let bytes = call_bytes(RECORD_CALL, CALL_PROCESS_EXITED, &[]);
@@ -2418,8 +2555,10 @@ mod tests {
             follow: true,
             stacks: None,
         };
+
         let execve = SyscallId::named(Abi::X86_64, "execve").expect("execve");
         let spec = call_spec(execve, &options);
+
         // The path and argv at entry; the environment only counted.
         assert_eq!(
             spec.args[..3]
@@ -2451,6 +2590,7 @@ mod tests {
             bytes: 0,
             log2_ns: [0; BUCKETS],
         };
+
         one.log2_ns[7] = 3;
         let mut two = one;
         two.min_ns = 20;
@@ -2484,14 +2624,17 @@ mod tests {
             lockdown: None,
             token: None,
         };
+
         let message = probe.check().expect_err("unprivileged").to_string();
         assert!(message.contains("has neither"), "{message}");
         assert!(message.contains("--engine ptrace"), "{message}");
+
         // A token a container offers is named, and why it goes unused.
         let offered = Probe {
             token: Some("/sys/fs/bpf".into()),
             ..probe.clone()
         };
+
         let message = offered.check().expect_err("unprivileged").to_string();
         assert!(
             message.contains("/sys/fs/bpf offers a BPF token, which uscope cannot use"),
@@ -2501,11 +2644,13 @@ mod tests {
             capabilities: (1 << CAP_BPF) | (1 << CAP_PERFMON),
             ..probe
         };
+
         assert!(able.check().is_ok());
         let old = Probe {
             version: version("5.10.0-23-amd64"),
             ..able
         };
+
         assert!(old.check().expect_err("old").to_string().contains("5.15"));
         assert_eq!(version("7.2.5-200.fc44.x86_64"), Some((7, 2)));
     }

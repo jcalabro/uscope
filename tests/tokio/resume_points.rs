@@ -23,9 +23,11 @@ use crate::support::Scenario;
 /// What the test knows of one body that runs its own dispatch.
 struct Body {
     name: String,
+
     /// Where the future's state number is, and its size.
     state: (u64, u64),
     dispatch: Arc<[AddressRange<ImageAddress>]>,
+
     /// The state's number, its kind, the line it waits at, and where the
     /// debugger says the dispatch leaves for it.
     points: BTreeMap<u64, (CoroutineStateKind, u64, ImageAddress)>,
@@ -39,15 +41,18 @@ fn bodies(image: &ModuleImage) -> BTreeMap<ImageAddress, Body> {
         if !matches!(instance.kind(), CodeInstanceKind::OutOfLine) {
             continue;
         }
+
         let Some(function) = image.function(instance.function()) else {
             continue;
         };
+
         let (Some(Ok(points)), Some(Ok(coroutine))) = (
             image.resume_points(instance.id()),
             function.coroutine().and_then(|ty| image.coroutine(ty)),
         ) else {
             continue;
         };
+
         let entry = instance
             .ranges()
             .map(|range| range.start)
@@ -78,6 +83,7 @@ fn bodies(image: &ModuleImage) -> BTreeMap<ImageAddress, Body> {
             },
         );
     }
+
     bodies
 }
 
@@ -114,6 +120,7 @@ async fn the_processor_leaves_each_dispatch_where_the_debugger_says() {
         while matches!(reason, StopReason::Breakpoint { .. }) {
             let entry = register(&scenario, "pc").await;
             let body = &bodies[&ImageAddress::new(entry - bias)];
+
             // The future is the body's first argument.
             let state_at = VirtualAddress::new(register(&scenario, "rdi").await + body.state.0);
             let read = scenario
@@ -132,6 +139,7 @@ async fn the_processor_leaves_each_dispatch_where_the_debugger_says() {
                     )
                     .await;
             }
+
             let state = original
                 .iter()
                 .rev()
@@ -146,10 +154,12 @@ async fn the_processor_leaves_each_dispatch_where_the_debugger_says() {
             seen.insert((body.name.clone(), state));
             reason = scenario.resume_to_stop().await;
         }
+
         assert!(
             matches!(reason, StopReason::Exited { .. }),
             "{fixture}: {reason:?}"
         );
+
         // Every body ran from its start, and resumed from each await the
         // program waits at.
         let waits = ["// AWAIT: leaf", "// AWAIT: middle", "// AWAIT: walk"]
@@ -167,6 +177,7 @@ async fn the_processor_leaves_each_dispatch_where_the_debugger_says() {
                 }
             }
         }
+
         assert!(
             seen.iter().any(|(_, state)| *state > 2),
             "{fixture}: no body resumed: {seen:?}"
@@ -196,6 +207,7 @@ async fn saved_registers(scenario: &Scenario) -> Vec<(&'static str, u64)> {
     for name in SAVED {
         saved.push((name, register(scenario, name).await));
     }
+
     saved
 }
 
@@ -221,6 +233,7 @@ async fn leave_dispatch(scenario: &mut Scenario, body: &Body, bias: u64) -> Imag
         if !body.dispatch.iter().any(|range| range.contains(pc)) {
             return pc;
         }
+
         scenario.step_to_stop(StepKind::Instruction).await;
     }
 }
@@ -255,6 +268,7 @@ async fn probe_every_state(
         for (name, value) in &saved {
             assign(scenario, &format!("${name} = {value:#x}")).await;
         }
+
         assign(scenario, &format!("$pc = {entry:#x}")).await;
     }
 }

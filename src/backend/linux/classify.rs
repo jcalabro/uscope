@@ -46,6 +46,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             WatchStatus::Absent
         };
+
         // Only an int3 reports SI_KERNEL. Watchpoint traps and SIGTRAPs sent
         // by a process also stop after an instruction, and rewinding the PC
         // for them would execute that instruction twice.
@@ -88,11 +89,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return WatchStatus::Absent;
         };
+
         let consult = code == Some(TRAP_HARDWARE_BREAKPOINT)
             || (code == Some(libc::TRAP_TRACE) && !inferior.watch.plan.is_empty());
         if !consult {
             return WatchStatus::Absent;
         }
+
         let status = match self
             .ptrace
             .read_debug_register(pid, debug_registers::STATUS_REGISTER)
@@ -100,6 +103,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Ok(status) => status,
             Err(error) => return WatchStatus::Unknown(format!("reading DR6 failed: {error}")),
         };
+
         let _ = self.ptrace.write_debug_register(
             pid,
             debug_registers::STATUS_REGISTER,
@@ -108,6 +112,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !debug_registers::status_has_hits(status) {
             return WatchStatus::Absent;
         }
+
         match inferior.watch.plan.owners_for_status(status) {
             Ok(owners) => WatchStatus::Hits(owners),
             Err(unknown) => WatchStatus::Unknown(format!(
@@ -148,9 +153,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             if original == BREAKPOINT_OPCODE || inferior.breakpoints.contains_key(&address) {
                 return None;
             }
+
             registers.rip = address.get();
             self.ptrace.set_registers(pid, registers).ok()
         };
+
         rewind().is_some()
     }
 
@@ -178,6 +185,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let Some(source) = code.source(VirtualAddress::new(address)) else {
                     return false;
                 };
+
                 inferior
                     .breakpoints
                     .get(&source)
@@ -186,9 +194,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             if !carried {
                 return None;
             }
+
             registers.rip = address;
             self.ptrace.set_registers(pid, registers).ok()
         };
+
         rewind().is_some()
     }
 }
@@ -231,8 +241,10 @@ pub(super) const fn is_stopping_signal(signal: Signal) -> bool {
 pub(super) enum WatchStatus {
     /// No debug exception reported a watchpoint slot.
     Absent,
+
     /// These watchpoints own the reported slots.
     Hits(BTreeSet<WatchpointId>),
+
     /// The status could not be read or names an unowned slot.
     Unknown(String),
 }
@@ -256,12 +268,15 @@ pub(super) fn classify_stop_evidence(
     if is_superseded(&siginfo) {
         return ClassifiedStop::Superseded;
     }
+
     if signal == Signal::SIGSTOP && starting {
         return ClassifiedStop::ThreadStart;
     }
+
     if debugger_requested {
         return ClassifiedStop::DebuggerRequested;
     }
+
     if signal == Signal::SIGTRAP
         && siginfo
             .as_ref()
@@ -281,6 +296,7 @@ pub(super) fn classify_stop_evidence(
             }
         };
     }
+
     if signal == Signal::SIGTRAP
         && siginfo.as_ref().is_ok_and(is_single_step_trap)
         && matches!(
@@ -299,12 +315,15 @@ pub(super) fn classify_stop_evidence(
             },
         };
     }
+
     if let Some(address) = breakpoint {
         return ClassifiedStop::Breakpoint(address);
     }
+
     if removed {
         return ClassifiedStop::RemovedTrap;
     }
+
     if let Some(address) = program_trap {
         return ClassifiedStop::ProgramTrap(address);
     }

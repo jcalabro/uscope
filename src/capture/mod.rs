@@ -108,6 +108,7 @@ impl Capture {
         if id == NONE {
             return "";
         }
+
         Strings(&self.strings).get(StrId(id))
     }
 
@@ -162,6 +163,7 @@ impl Capture {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0)
         };
+
         (time("start"), time("end"))
     }
 
@@ -184,6 +186,7 @@ impl Capture {
                 )
             };
         }
+
         put!(settings, Settings);
         put!(modules, Modules);
         put!(processes, Processes);
@@ -228,6 +231,7 @@ impl Capture {
                 &bytes[placed.offset..placed.offset + placed.length]
             })
         };
+
         let capture = Self {
             strings: table(CaptureTable::Strings).to_vec(),
             settings: rows_of(table(CaptureTable::Settings))?,
@@ -259,6 +263,7 @@ impl Capture {
             syscall_stats: rows_of(table(CaptureTable::SyscallStats))?,
             syscall_errnos: rows_of(table(CaptureTable::SyscallErrnos))?,
         };
+
         capture.validate().map_err(ImageError::Malformed)?;
         Ok(capture)
     }
@@ -273,6 +278,7 @@ impl Capture {
         if !crate::image::valid_pool(&self.strings, true) {
             return Err("the string pool is not NUL-terminated UTF-8".into());
         }
+
         let string = |id: u32, what: &str| {
             if id == NONE || crate::image::valid_reference(&self.strings, id, true) {
                 Ok(())
@@ -280,6 +286,7 @@ impl Capture {
                 Err(format!("{what} names no string"))
             }
         };
+
         let index = |id: u32, len: usize, what: &str| {
             if id == NONE || (id as usize) < len {
                 Ok(())
@@ -287,17 +294,21 @@ impl Capture {
                 Err(format!("{what} {id} is out of bounds"))
             }
         };
+
         for setting in &self.settings {
             string(setting.key.get(), "a setting")?;
             string(setting.value.get(), "a setting's value")?;
         }
+
         for module in &self.modules {
             string(module.path.get(), "a module")?;
             string(module.build_id.get(), "a build id")?;
         }
+
         for process in &self.processes {
             string(process.name.get(), "a process")?;
         }
+
         for thread in &self.threads {
             string(thread.name.get(), "a thread")?;
             index(
@@ -306,6 +317,7 @@ impl Capture {
                 "a thread's process",
             )?;
         }
+
         for mapping in &self.mappings {
             index(
                 mapping.process.get(),
@@ -318,24 +330,29 @@ impl Capture {
                 "a mapping's module",
             )?;
         }
+
         for frame in &self.frames {
             index(frame.module.get(), self.modules.len(), "a frame's module")?;
             if FrameKind::from_number(frame.kind).is_none() {
                 return Err(format!("a frame has unknown kind {}", frame.kind));
             }
+
             if role_of(frame.role).is_none() {
                 return Err(format!("a frame has unknown role {}", frame.role));
             }
         }
+
         for (position, stack) in self.stacks.iter().enumerate() {
             let parent = stack.parent.get();
             if parent != NONE && parent as usize >= position {
                 return Err("a stack's parent does not precede it".into());
             }
+
             if stack.frame.get() as usize >= self.frames.len() {
                 return Err("a stack names no frame".into());
             }
         }
+
         // Rows grouped by thread, which `time` gives the time of.
         let grouped =
             |ranges: &[ThreadRange], rows: usize, time: &dyn Fn(usize) -> i64, what: &str| {
@@ -345,6 +362,7 @@ impl Capture {
                     if range.thread.get() == NONE || range.start.get() != next {
                         return Err(format!("{what} ranges do not tile their table"));
                     }
+
                     next = range
                         .start
                         .get()
@@ -353,14 +371,17 @@ impl Capture {
                     if next as usize > rows {
                         return Err(format!("{what} range is out of bounds"));
                     }
+
                     let group = range.start.get() as usize..next as usize;
                     if group.clone().skip(1).any(|row| time(row - 1) > time(row)) {
                         return Err(format!("{what} are out of time order"));
                     }
                 }
+
                 if next as usize != rows {
                     return Err(format!("{what} ranges do not cover their table"));
                 }
+
                 Ok(())
             };
         grouped(
@@ -373,6 +394,7 @@ impl Capture {
             index(sample.stack.get(), self.stacks.len(), "samples")?;
             index(sample.task.get(), self.tasks.len(), "samples")?;
         }
+
         // Queries total the weights.
         let samples = (self.samples.iter()).try_fold(0_u64, |total, sample| {
             total.checked_add(sample.weight.get())
@@ -385,6 +407,7 @@ impl Capture {
                 u64::MAX
             ));
         }
+
         grouped(
             &self.off_cpu_ranges,
             self.off_cpu.len(),
@@ -394,25 +417,31 @@ impl Capture {
         if self.off_cpu.iter().any(|interval| interval.preempted > 1) {
             return Err("an off-CPU interval has an unknown cause".into());
         }
+
         if !self.frame_symbols.is_empty() && self.frame_symbols.len() != self.frames.len() {
             return Err("symbols do not describe every frame".into());
         }
+
         for range in &self.frame_symbols {
             let end = u64::from(range.start.get()) + u64::from(range.count.get());
             if end > self.lines.len() as u64 {
                 return Err("a frame's lines are out of bounds".into());
             }
         }
+
         for line in &self.lines {
             if line.function.get() as usize >= self.functions.len() {
                 return Err("a line names no function".into());
             }
+
             string(line.file.get(), "a line's file")?;
         }
+
         for function in &self.functions {
             if role_of(function.role).is_none() || function.reserved != [0; 3] {
                 return Err("a function has an unknown role".into());
             }
+
             string(function.name.get(), "a function")?;
             string(function.file.get(), "a function's file")?;
             index(
@@ -421,11 +450,13 @@ impl Capture {
                 "a function's module",
             )?;
         }
+
         for site in &self.sites {
             string(site.name.get(), "a site")?;
             string(site.file.get(), "a site's file")?;
             index(site.module.get(), self.modules.len(), "a site's module")?;
         }
+
         let mut next = 0;
         for range in &self.zone_ranges {
             index(
@@ -436,6 +467,7 @@ impl Capture {
             if range.start.get() != next {
                 return Err("zone ranges do not tile their table".into());
             }
+
             next = range
                 .start
                 .get()
@@ -452,51 +484,64 @@ impl Capture {
                 return Err("zones of one depth overlap or are out of order".into());
             }
         }
+
         if next as usize != self.zones.len() {
             return Err("zone ranges do not cover their table".into());
         }
+
         for zone in &self.zones {
             if zone.site.get() as usize >= self.sites.len() {
                 return Err("a zone names no site".into());
             }
+
             if zone.end.get() < zone.start.get() {
                 return Err("a zone ends before it begins".into());
             }
+
             if zone.flags.get() & !ZONE_FLAGS != 0 || zone.reserved.get() != 0 {
                 return Err("a zone has unknown flags".into());
             }
+
             string(zone.value.get(), "a label's value")?;
         }
+
         for plot in &self.plots {
             index(plot.site.get(), self.sites.len(), "a plot's site")?;
             index(plot.thread.get(), self.threads.len(), "a plot's thread")?;
         }
+
         for marker in &self.markers {
             if MarkerKind::from_number(marker.kind).is_none() {
                 return Err(format!("a marker has unknown kind {}", marker.kind));
             }
+
             index(marker.thread.get(), self.threads.len(), "a marker's thread")?;
             index(marker.site.get(), self.sites.len(), "a marker's site")?;
             string(marker.text.get(), "a marker's text")?;
         }
+
         for task in &self.tasks {
             string(task.runtime.get(), "a task's runtime")?;
             string(task.labels.get(), "a task's labels")?;
             index(task.root.get(), self.frames.len(), "a task's root")?;
         }
+
         for wait in &self.task_waits {
             index(wait.task.get(), self.tasks.len(), "a wait's task")?;
             index(wait.stack.get(), self.stacks.len(), "a wait's stack")?;
             string(wait.state.get(), "a wait's state")?;
         }
+
         for gap in &self.gaps {
             if GapReason::from_number(gap.reason).is_none() {
                 return Err(format!("a gap has unknown reason {}", gap.reason));
             }
+
             if gap.end.get() < gap.start.get() {
                 return Err("a gap ends before it begins".into());
             }
         }
+
         if self
             .gaps
             .windows(2)
@@ -504,6 +549,7 @@ impl Capture {
         {
             return Err("gaps overlap or are out of time order".into());
         }
+
         self.validate_syscalls()
     }
 
@@ -516,6 +562,7 @@ impl Capture {
                 Err(format!("{what} {id} is out of bounds"))
             }
         };
+
         let blob = |start: u32, len: u32, what: &str| {
             let fits = start == NONE && len == 0
                 || u64::from(start) + u64::from(len) <= self.syscall_blobs.len() as u64;
@@ -525,6 +572,7 @@ impl Capture {
                 Err(format!("{what} bytes are out of bounds"))
             }
         };
+
         for call in &self.syscalls {
             index(call.thread.get(), self.threads.len(), "a call's thread")?;
             index(call.stack.get(), self.stacks.len(), "a call's stack")?;
@@ -538,19 +586,23 @@ impl Capture {
             {
                 return Err("a call's captured bytes are malformed".into());
             }
+
             if call.abi > 2 || CallOutcome::from_number(call.outcome).is_none() {
                 return Err("a call has an unknown ABI or outcome".into());
             }
         }
+
         let mut calls = 0;
         for note in &self.syscall_notes {
             if note.calls.get() < calls || note.calls.get() as usize > self.syscalls.len() {
                 return Err("a note is out of order among the calls".into());
             }
+
             calls = note.calls.get();
             if NoteKind::from_number(note.kind).is_none() {
                 return Err(format!("a note has unknown kind {}", note.kind));
             }
+
             index(note.thread.get(), self.threads.len(), "a note's thread")?;
             index(note.process.get(), self.processes.len(), "a note's process")?;
             index(note.stack.get(), self.stacks.len(), "a note's stack")?;
@@ -559,8 +611,10 @@ impl Capture {
             {
                 return Err("a note's text names no string".into());
             }
+
             blob(note.blob.get(), note.blob_len.get(), "a note's")?;
         }
+
         for stat in &self.syscall_stats {
             index(
                 stat.process.get(),
@@ -572,6 +626,7 @@ impl Capture {
                 return Err("statistics name no errnos or no ABI".into());
             }
         }
+
         Ok(())
     }
 }

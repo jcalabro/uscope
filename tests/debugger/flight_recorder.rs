@@ -41,6 +41,7 @@ fn failing_scenarios_keep_a_flight_recording() {
             .find(needle)
             .unwrap_or_else(|| panic!("the recording lacks {needle:?}:\n{contents}"))
     };
+
     let order = [
         "started for",
         "request add breakpoint",

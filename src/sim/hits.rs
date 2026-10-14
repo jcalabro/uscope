@@ -24,6 +24,7 @@ pub enum Known {
     Absent,
     Holds,
     Fails,
+
     /// The debugger alone can tell, or the condition may not evaluate.
     Unknown,
 }
@@ -34,6 +35,7 @@ pub struct Policy {
     pub hit_condition: Option<HitCondition>,
     pub condition: Known,
     pub logs: bool,
+
     /// Whether the breakpoint was enabled, which a disabled one is not at
     /// any hit, since it counts none.
     pub enabled: bool,
@@ -84,10 +86,12 @@ impl Policy {
 pub struct Published {
     pub logged: BTreeMap<u64, u64>,
     pub condition_failures: BTreeMap<u64, u64>,
+
     /// The stops whose events were heard. A stop event names one thread's
     /// reason, so the hits of a stop the client saw no snapshot of are
     /// unknown.
     pub stops: BTreeSet<u64>,
+
     /// How many times the reader of these events fell behind, after which
     /// the counts are incomplete.
     pub gaps: u64,
@@ -107,12 +111,16 @@ pub struct Baseline {
 pub struct Found {
     /// A hit counted that did not stop.
     pub declined: bool,
+
     /// A stop at a hit whose condition the client knew held.
     pub held: bool,
+
     /// A hit logged a message.
     pub logged: bool,
+
     /// A temporary breakpoint stopped and was gone.
     pub temporary_stopped: bool,
+
     /// A temporary breakpoint stopped more than one thread.
     pub temporary_shared: bool,
 }
@@ -133,6 +141,7 @@ fn stopping_hits(snapshot: &StateSnapshot) -> BTreeMap<u64, BTreeSet<u64>> {
             }
         }
     }
+
     stopping
 }
 
@@ -172,6 +181,7 @@ pub fn judge(
             .copied()
             .unwrap_or(0)
     };
+
     // A thread not resumed since an earlier stop keeps that stop's reason,
     // whose hits were judged then.
     let stopped_since = |id| {
@@ -184,6 +194,7 @@ pub fn judge(
             })
             .unwrap_or_default()
     };
+
     for (&id, kept) in policies {
         if snapshot
             .breakpoints
@@ -192,19 +203,23 @@ pub fn judge(
         {
             continue;
         }
+
         // The stop that deleted it may be one the client saw no snapshot
         // of, as when it killed the process first.
         let stopped = stopped_since(id);
         if stopped.is_empty() && !seen_all && kept.temporary {
             continue;
         }
+
         judge_vanished(id, kept, &stopped, &mut found)?;
     }
+
     for breakpoint in snapshot.breakpoints.iter() {
         let id = breakpoint.id.get();
         let Some(kept) = policies.get(&id).filter(|kept| !kept.versions.is_empty()) else {
             continue;
         };
+
         let versions = &kept.versions;
         let before = count_before(id);
         let now = breakpoint.hit_count;
@@ -213,37 +228,44 @@ pub fn judge(
                 "breakpoint {id}'s hit count went down from {before} to {now}"
             ));
         }
+
         if now > before && versions.iter().all(|policy| !policy.enabled) {
             return Err(format!(
                 "breakpoint {id} counted hits {}..={now} while disabled",
                 before + 1
             ));
         }
+
         let stopped = stopped_since(id);
         if kept.temporary && !stopped.is_empty() {
             return Err(format!(
                 "temporary breakpoint {id} stopped at hits {stopped:?}, but outlived the stop"
             ));
         }
+
         for &hit in &stopped {
             if hit > now {
                 return Err(format!(
                     "breakpoint {id} stopped at hit {hit}, but counts {now} hits"
                 ));
             }
+
             if !versions.iter().any(|policy| policy.may_stop(hit)) {
                 return Err(format!(
                     "breakpoint {id} stopped at hit {hit}, which none of {versions:?} lets stop"
                 ));
             }
+
             found.held |= versions
                 .iter()
                 .all(|policy| policy.condition == Known::Holds);
         }
+
         for hit in before + 1..=now {
             if stopped.contains(&hit) {
                 continue;
             }
+
             found.declined = true;
             if versions.iter().all(|policy| policy.must_stop(hit)) {
                 return Err(format!(
@@ -251,11 +273,13 @@ pub fn judge(
                 ));
             }
         }
+
         if complete {
             let earlier = baseline.map(|baseline| &baseline.published);
             found.logged |= judge_published(id, versions, before, now, published, earlier)?;
         }
     }
+
     Ok(found)
 }
 
@@ -278,6 +302,7 @@ fn judge_vanished(
             }
         ));
     }
+
     if let Some(hit) = stopped
         .iter()
         .find(|&&hit| !kept.versions.iter().any(|policy| policy.may_stop(hit)))
@@ -287,6 +312,7 @@ fn judge_vanished(
             kept.versions
         ));
     }
+
     found.temporary_stopped = true;
     found.temporary_shared |= stopped.len() > 1;
     Ok(())
@@ -307,6 +333,7 @@ fn judge_published(
         counts.get(&id).copied().unwrap_or(0)
             - before.and_then(|b| b.get(&id)).copied().unwrap_or(0)
     };
+
     let logged = since(
         &published.logged,
         before_published.map(|published| &published.logged),
@@ -324,6 +351,7 @@ fn judge_published(
             before + 1
         ));
     }
+
     let failed = since(
         &published.condition_failures,
         before_published.map(|published| &published.condition_failures),
@@ -338,6 +366,7 @@ fn judge_published(
              value was known under {versions:?}"
         ));
     }
+
     Ok(logged > 0)
 }
 
@@ -450,30 +479,39 @@ mod tests {
                 &published(logs),
             )
         };
+
         let counted = policy(at_least_three, Known::Absent, false);
+
         // Hits 2 and 3 counted; 3 stopped, as it must.
         assert!(judge_with(vec![counted], baseline(1, 0), stop(3, &[3]), 0).is_ok());
+
         // Hit 3 had to stop.
         assert!(judge_with(vec![counted], baseline(1, 0), stop(3, &[]), 0).is_err());
+
         // Hit 2 may not stop.
         assert!(judge_with(vec![counted], baseline(1, 0), stop(3, &[2, 3]), 0).is_err());
+
         // A stop judged at an earlier stop is not judged again.
         assert!(judge_with(vec![counted], baseline(3, 0), stop(3, &[3]), 0).is_ok());
+
         // A condition known to fail never stops; an unknown one may.
         let never = policy(None, Known::Fails, false);
         assert!(judge_with(vec![never], baseline(0, 0), stop(1, &[1]), 0).is_err());
         let unknown = policy(None, Known::Unknown, false);
         assert!(judge_with(vec![unknown], baseline(0, 0), stop(1, &[]), 0).is_ok());
+
         // Changed while running from failing to stopping: hit 1 may have
         // stopped under either.
         let always = policy(None, Known::Holds, false);
         assert!(judge_with(vec![never, always], baseline(0, 0), stop(1, &[1]), 0).is_ok());
         assert!(judge_with(vec![never, always], baseline(0, 0), stop(1, &[]), 0).is_ok());
+
         // A breakpoint that logs logs instead of stopping, once per hit.
         let logging = policy(None, Known::Holds, true);
         assert!(judge_with(vec![logging], baseline(0, 4), stop(2, &[]), 6).is_ok());
         assert!(judge_with(vec![logging], baseline(0, 4), stop(2, &[]), 5).is_err());
         assert!(judge_with(vec![logging], baseline(0, 4), stop(2, &[2]), 6).is_err());
+
         // A count never goes down within a process.
         assert!(judge_with(vec![always], baseline(2, 0), stop(1, &[]), 0).is_err());
     }
@@ -492,11 +530,13 @@ mod tests {
                 &published(0),
             )
         };
+
         let enabled = policy(None, Known::Absent, false);
         let disabled = Policy {
             enabled: false,
             ..enabled
         };
+
         assert!(judge_with(vec![disabled], stop(1, &[])).is_ok());
         assert!(judge_with(vec![disabled], stop(2, &[])).is_err());
         assert!(judge_with(vec![disabled], stop(2, &[2])).is_err());
@@ -523,16 +563,19 @@ mod tests {
                 published,
             )
         };
+
         let judge_with = |temporary, now| judge_after(temporary, now, &published(0));
         let gone = |stopped: &[u64]| StateSnapshot {
             breakpoints: Arc::from([]),
             ..stop(0, stopped)
         };
+
         let found = judge_with(true, gone(&[2])).expect("deleted by its stop");
         assert!(found.temporary_stopped);
         assert!(judge_with(true, stop(2, &[2])).is_err());
         assert!(judge_with(true, gone(&[])).is_err());
         assert!(judge_with(false, gone(&[2])).is_err());
+
         // A stop the client heard of but saw no snapshot of, as when it
         // killed the process first, may have deleted it, as may one whose
         // event it missed.
@@ -540,15 +583,18 @@ mod tests {
             stops: BTreeSet::from([2]),
             ..published(0)
         };
+
         let found = judge_after(true, gone(&[]), &unseen).expect("an unseen stop");
         assert!(!found.temporary_stopped);
         let missed = Published {
             gaps: 1,
             ..published(0)
         };
+
         let found = judge_after(true, gone(&[]), &missed).expect("a stop may have been missed");
         assert!(!found.temporary_stopped);
         assert!(judge_after(false, gone(&[]), &missed).is_err());
+
         // A hit judged at an earlier stop deleted nothing at this one.
         assert!(judge_with(true, gone(&[1])).is_err());
     }

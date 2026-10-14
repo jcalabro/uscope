@@ -12,6 +12,7 @@ async fn hold_one_child(name: &str) -> (support::ExternalProcess, HeldChild) {
     let mut held = scenario
         .operation("hold forks", scenario.handle().hold_forks())
         .await;
+
     // The child inherits this trap, and must lose it before it is held.
     scenario.add_breakpoint("child_work").await;
     let _running = scenario.start_resuming().await;
@@ -25,6 +26,7 @@ async fn hold_one_child(name: &str) -> (support::ExternalProcess, HeldChild) {
         uscope::still_held(&child.process()).expect("read the child's state"),
         "the child waits, untraced, for a session"
     );
+
     // Only one session at a time can trace from this process.
     scenario.shutdown().await;
     (parent, child)
@@ -56,12 +58,14 @@ fn child_exit(mut parent: support::ExternalProcess) -> Option<i32> {
 async fn a_held_fork_child_is_debugged_by_a_session_of_its_own() {
     let (parent, child) = hold_one_child("held child's parent").await;
     let mut scenario = attach_held(child).await;
+
     // The child has not run: it reaches the breakpoint after its fork.
     scenario.add_breakpoint("child_work").await;
     assert!(matches!(
         scenario.resume_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
+
     // Detached, it runs on rather than stopping again for job control.
     scenario.shutdown().await;
     assert_eq!(child_exit(parent), Some(7));
@@ -87,6 +91,7 @@ async fn a_held_fork_child_no_session_takes_runs_on_and_is_never_mistaken() {
         start_time: held.start_time + 1,
         ..held
     };
+
     assert!(matches!(
         Debugger::attach_held(stale).await,
         Err(Error::HeldProcessGone(process)) if process == held.process_id.get()
@@ -133,6 +138,7 @@ async fn a_vfork_child_runs_breakpointed_code_untraced_and_the_parent_still_stop
 #[tokio::test]
 async fn a_system_child_that_execs_under_a_breakpoint_is_not_killed() {
     let mut scenario = Scenario::launch("vfork");
+
     // libc's symbols resolve once the program has loaded it.
     scenario.add_breakpoint("main").await;
     assert!(matches!(

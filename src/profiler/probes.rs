@@ -18,6 +18,7 @@ use crate::capture::CaptureBuilder;
 use crate::capture::records::{
     MarkerKind, NONE, ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MISMATCHED, Zone,
 };
+
 use crate::model::Tid;
 
 /// A module's instrumentation: where its control block links, and its
@@ -38,6 +39,7 @@ pub struct SiteRecord {
     pub line: u32,
     pub name: String,
     pub file: String,
+
     /// Where its state byte links.
     pub state: u64,
 }
@@ -53,6 +55,7 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
     let Some(control) = file.section_by_name("uscope_probe_control") else {
         return Ok(None);
     };
+
     let block = control
         .data()
         .ok()
@@ -61,12 +64,14 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
     if block[..8] != abi::MAGIC {
         return Err("its control block is not one".into());
     }
+
     let version = u16::from_le_bytes([block[8], block[9]]);
     if version != abi::ABI {
         return Err(format!(
             "its probes are ABI version {version}, which this uscope does not read"
         ));
     }
+
     let sites = file
         .section_by_name("uscope_sites")
         .ok_or("it has a control block but no sites")?;
@@ -76,6 +81,7 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
     if !data.len().is_multiple_of(abi::SITE_SIZE) {
         return Err("its site table is cut short".into());
     }
+
     // The bytes a site names, from whichever section holds them.
     let bytes = |address: u64, length: u32| {
         file.sections().find_map(|section| {
@@ -85,39 +91,47 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
                 .flatten()
         })
     };
+
     let text = |at: u64, record: &[u8], what: &str| -> Result<String, String> {
         let offset = i32::from_le_bytes(record[..4].try_into().unwrap_or_default());
         let length = u32::from_le_bytes(record[4..8].try_into().unwrap_or_default());
         if length > MOST_NAME {
             return Err(format!("a site's {what} is too long"));
         }
+
         let bytes = bytes(at.wrapping_add_signed(i64::from(offset)), length)
             .ok_or_else(|| format!("a site's {what} is not in the file"))?;
         String::from_utf8(bytes.to_vec()).map_err(|_| format!("a site's {what} is not UTF-8"))
     };
+
     let mut table = Table {
         control: control.address(),
         sites: Vec::new(),
     };
+
     let (records, _) = data.as_chunks::<{ abi::SITE_SIZE }>();
     for (index, record) in records.iter().enumerate() {
         let at = sites.address() + (index * abi::SITE_SIZE) as u64;
         let field = |offset: usize| {
             u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap_or_default())
         };
+
         if record[0] != abi::SITE_VERSION {
             return Err(format!(
                 "a site is version {}, which this uscope does not read",
                 record[0]
             ));
         }
+
         let kind = record[1];
         if kind == abi::SITE_NONE {
             continue;
         }
+
         if kind > abi::SITE_TRIGGER {
             return Err(format!("a site has unknown kind {kind}"));
         }
+
         let state = (at + 24).wrapping_add_signed(i64::from(field(24).cast_signed()));
         let key = i32::try_from(state.wrapping_sub(table.control).cast_signed())
             .map_err(|_| "a site's state is too far from its control block")?;
@@ -130,6 +144,7 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
             state,
         });
     }
+
     Ok(Some(table))
 }
 
@@ -147,9 +162,11 @@ pub fn control(bytes: &[u8]) -> Result<Control, &'static str> {
     if bytes.len() < abi::CONTROL_SIZE || bytes[..8] != abi::MAGIC {
         return Err("the control block is not one");
     }
+
     let word = |offset: usize| {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
     };
+
     let capacity = word(40);
     Ok(Control {
         rings: word(20)
@@ -166,6 +183,7 @@ pub struct RingHeader {
     /// Its size, as a power of two of records.
     pub size: u8,
     pub clock: u16,
+
     /// The thread that took it.
     pub thread: Tid,
     pub state: u32,
@@ -184,23 +202,29 @@ pub fn ring_header(bytes: &[u8]) -> Result<RingHeader, &'static str> {
     if bytes.len() < abi::RING_HEADER {
         return Err("a ring's header is cut short");
     }
+
     let word = |offset: usize| {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
     };
+
     let long = |offset: usize| {
         u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or_default())
     };
+
     if word(0) != abi::RING_MAGIC || bytes[4] != abi::RING_VERSION {
         return Err("a ring is not one");
     }
+
     let size = bytes[5];
     if !(abi::LEAST_RING_SIZE..=abi::MOST_RING_SIZE).contains(&u32::from(size)) {
         return Err("a ring has an unknown size");
     }
+
     let state = word(12);
     if state > abi::RING_CLAIMED {
         return Err("a ring has an unknown state");
     }
+
     // A thread sets its ring's clock as it takes the ring, so only a ring
     // whose records are read has one.
     let clock = u16::from(bytes[6]);
@@ -210,6 +234,7 @@ pub fn ring_header(bytes: &[u8]) -> Result<RingHeader, &'static str> {
     {
         return Err("a ring has an unknown clock");
     }
+
     Ok(RingHeader {
         size,
         clock,
@@ -228,12 +253,14 @@ pub const fn copy_span(tail: u64, header: RingHeader) -> (Range<u64>, u64) {
     } else {
         tail
     };
+
     // A head that went back is not the ring's: nothing is copied.
     let end = if header.head < start {
         start
     } else {
         header.head
     };
+
     (start..end, start.saturating_sub(tail))
 }
 
@@ -252,6 +279,7 @@ pub fn slots(span: &Range<u64>, size: u8) -> [Range<usize>; 2] {
     if count == 0 {
         return [0..0, 0..0];
     }
+
     let first = record_bytes(span.start % capacity);
     let wrap = record_bytes(capacity);
     let length = record_bytes(count);
@@ -276,8 +304,10 @@ pub struct Decoded {
     pub time: u64,
     pub key: u32,
     pub kind: u8,
+
     /// A plot's value.
     pub value: f64,
+
     /// A message's or label's text, in [`Decoder::text`].
     pub text: Range<usize>,
 }
@@ -287,8 +317,10 @@ pub struct Decoded {
 pub struct Decoder {
     pub events: Vec<Decoded>,
     pub text: Vec<u8>,
+
     /// Records that broke the ABI.
     pub malformed: u64,
+
     /// Records that continued an event whose first record was overwritten.
     pub orphaned: u64,
 }
@@ -319,6 +351,7 @@ impl Decoder {
                 value: 0.0,
                 text: 0..0,
             };
+
             // The records that continue it.
             let more = match event.kind {
                 abi::ZONE_BEGIN | abi::ZONE_END | abi::FRAME | abi::LABEL_END | abi::TRIGGER => 0,
@@ -331,6 +364,7 @@ impl Decoder {
                     continue;
                 }
             };
+
             let continued = records[index..]
                 .iter()
                 .take(more)
@@ -342,11 +376,13 @@ impl Decoder {
                 index += continued;
                 continue;
             }
+
             let start = self.text.len();
             for record in &records[index..index + more] {
                 self.text.extend_from_slice(&record[..12]);
                 self.text.extend_from_slice(&record[13..]);
             }
+
             index += more;
             if event.kind == abi::PLOT {
                 event.value =
@@ -359,8 +395,10 @@ impl Decoder {
                     self.malformed += 1 + more as u64;
                     continue;
                 }
+
                 event.text = start..self.text.len();
             }
+
             self.events.push(event);
         }
     }
@@ -413,6 +451,7 @@ impl Anchors {
         if ticks <= 0 {
             return self.latest.1;
         }
+
         let since = i128::from(tsc) - i128::from(self.latest.0);
         (i128::from(self.latest.1) + since * nanoseconds / ticks).max(0) as u64
     }
@@ -440,8 +479,10 @@ struct Open {
 #[derive(Debug, Clone, Default)]
 struct Thread {
     open: Vec<Open>,
+
     /// Whether records were lost before its next event.
     lost: bool,
+
     /// When its records were last lost: a zone that ends with no begin
     /// began before then.
     unknown_since: Option<i64>,
@@ -471,8 +512,10 @@ impl Stacks {
             for open in state.open.drain(..) {
                 builder.zone(thread, zone(open, time, ZONE_ENDED_UNSEEN));
             }
+
             state.unknown_since = Some(time);
         }
+
         let at = (thread, event.site);
         match event.kind {
             abi::ZONE_BEGIN | abi::LABEL_BEGIN => {
@@ -481,6 +524,7 @@ impl Stacks {
                 } else {
                     NONE
                 };
+
                 state.open.push(Open {
                     site: event.site,
                     start: time,
@@ -531,16 +575,20 @@ fn end(builder: &mut CaptureBuilder, thread: u32, state: &mut Thread, site: u32,
                 zone(open, time, ZONE_ENDED_UNSEEN | ZONE_MISMATCHED),
             );
         }
+
         if let Some(open) = state.open.pop() {
             builder.zone(thread, zone(open, time, 0));
         }
+
         return;
     }
+
     let began = Open {
         site,
         start: time,
         value: NONE,
     };
+
     match state.unknown_since {
         Some(since) => {
             for open in state.open.drain(..).rev() {
@@ -549,10 +597,12 @@ fn end(builder: &mut CaptureBuilder, thread: u32, state: &mut Thread, site: u32,
                     zone(open, time, ZONE_ENDED_UNSEEN | ZONE_MISMATCHED),
                 );
             }
+
             let began = Open {
                 start: since,
                 ..began
             };
+
             builder.zone(thread, zone(began, time, ZONE_BEGAN_UNSEEN));
         }
         None => builder.zone(
@@ -609,6 +659,7 @@ mod tests {
             Written::Plot(value) => (abi::PLOT, 0, value.to_le_bytes().to_vec()),
             Written::Message(text) => (abi::MESSAGE, text.len() as u32, text.clone()),
         };
+
         let mut first = [0; abi::RECORD];
         first[..8].copy_from_slice(&(index as u64).to_le_bytes());
         first[8..12].copy_from_slice(&7_u32.to_le_bytes());
@@ -622,6 +673,7 @@ mod tests {
             record[13..13 + high.len()].copy_from_slice(high);
             all.push(record);
         }
+
         all
     }
 
@@ -651,6 +703,7 @@ mod tests {
                     None => return,
                 }
             }
+
             if let Some(record) = self.pending.pop_front() {
                 let capacity = self.slots.len() as u64;
                 self.slots[(self.written % capacity) as usize] = record;
@@ -688,12 +741,14 @@ mod tests {
                 written: 0,
                 head: 0,
             };
+
             let (mut tail, mut accounted, mut decoder) = (0, 0, Decoder::default());
             let rounds = schedule.iter().copied().chain(std::iter::once((usize::MAX, 0)));
             for (before, during) in rounds {
                 for _ in 0..before.min(1 << 20) {
                     writer.step();
                 }
+
                 let header = RingHeader { size, clock: 0, thread: Tid::new(0), state: abi::RING_ACTIVE, interrupted: 0, head: writer.head };
                 let (span, mut lost) = copy_span(tail, header);
                 let mut copied = Vec::new();
@@ -703,6 +758,7 @@ mod tests {
                         writer.step();
                     }
                 }
+
                 let first = first_whole(writer.head, size).max(span.start).min(span.end);
                 lost += first - span.start;
                 decoder.clear();
@@ -720,9 +776,11 @@ mod tests {
                         Written::Zone(_) => {}
                     }
                 }
+
                 accounted += lost + expected.iter().map(|&index| encoded[index].len() as u64).sum::<u64>();
                 tail = span.end;
             }
+
             prop_assert_eq!(accounted + decoder.orphaned, total);
         }
     }
@@ -758,11 +816,13 @@ mod tests {
             if let Some(at) = swapped {
                 events.swap(at, at + 1);
             }
+
             let mut builder = CaptureBuilder::new();
             let thread = builder.thread(crate::model::Pid::new(1), Tid::new(1), 0);
             let sites: Vec<u32> = (0..4).map(|site| builder.site(&site.to_string(), "", 0, NONE, abi::SITE_ZONE)).collect();
             let mut stacks = Stacks::default();
             let mut read = 0;
+
             // The true zones whose begin and end were both read with no loss
             // between them, by site, start, and end.
             let mut whole = std::collections::BTreeSet::new();
@@ -774,13 +834,16 @@ mod tests {
                     for zone in &mut open {
                         zone.2 = false;
                     }
+
                     if begin {
                         open.push((site, time, false));
                     } else {
                         open.pop();
                     }
+
                     continue;
                 }
+
                 read += 1;
                 if begin {
                     open.push((site, time, true));
@@ -789,9 +852,11 @@ mod tests {
                 {
                     whole.insert((sites[site as usize], start, time));
                 }
+
                 let kind = if begin { abi::ZONE_BEGIN } else { abi::ZONE_END };
                 stacks.apply(&mut builder, thread, &Event { time, site: sites[site as usize], kind, value: 0.0, text: "" });
             }
+
             stacks.close(&mut builder, events.len() as i64 * 10);
             let capture = builder.finish();
             prop_assert_eq!(capture.validate(), Ok(()));
@@ -842,14 +907,17 @@ mod tests {
             bytes[12..16].copy_from_slice(&state.to_le_bytes());
             ring_header(&bytes).map(|header| header.clock)
         };
+
         for state in [abi::RING_ACTIVE, abi::RING_RETIRED] {
             for clock in [abi::CLOCK_MONOTONIC, abi::CLOCK_TSC] {
                 assert_eq!(header(state, clock as u8), Ok(clock));
             }
+
             for clock in [0, 3, u8::MAX] {
                 assert_eq!(header(state, clock), Err("a ring has an unknown clock"));
             }
         }
+
         for state in [abi::RING_FREE, abi::RING_CLAIMED] {
             assert_eq!(header(state, 0), Ok(0));
         }

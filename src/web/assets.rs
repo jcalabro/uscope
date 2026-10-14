@@ -23,8 +23,10 @@ const UNBUILT: &str = "<!doctype html><meta charset=utf-8><title>uscope web</tit
 pub struct Asset {
     pub bytes: Cow<'static, [u8]>,
     pub media_type: &'static str,
+
     /// Whether the name carries a content hash, so it can be cached forever.
     pub immutable: bool,
+
     /// Whether it is the page itself, `index.html`.
     pub page: bool,
 }
@@ -39,6 +41,7 @@ pub fn find(path: &str) -> Option<Asset> {
     {
         return None;
     }
+
     let page = name.is_empty()
         || !name
             .rsplit('/')
@@ -111,6 +114,7 @@ mod tests {
         for hostile in ["/../Cargo.toml", "/assets/../../etc/passwd", "/.git/config"] {
             assert!(find(hostile).is_none(), "{hostile}");
         }
+
         assert!(find("/missing.js").is_none());
     }
 }

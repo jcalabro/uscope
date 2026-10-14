@@ -39,6 +39,7 @@ pub fn write<M: Machine>(
     else {
         return Ok(None);
     };
+
     let byte_size = value.type_info.as_ref().and_then(|info| info.byte_size);
     Ok(match format {
         BoundFormat::Hex => integer(stored).map(|integer| hex(integer, byte_size)),
@@ -69,12 +70,14 @@ pub fn write<M: Machine>(
                 }
                 _ => return Ok(None),
             };
+
             utf8_at(address.get(), length, machine)?
         }
         BoundFormat::Bytes => {
             let (VariableValueSource::Memory(address), Some(size)) = (source, byte_size) else {
                 return Ok(None);
             };
+
             let shown = size.min(MAX_BYTES);
             let bytes = machine.read(address.get(), usize::try_from(shown).unwrap_or(0))?;
             let mut text = bytes
@@ -85,6 +88,7 @@ pub fn write<M: Machine>(
             if shown < size {
                 text.push_str(" …");
             }
+
             Some(text)
         }
         BoundFormat::Utf16 => {
@@ -93,6 +97,7 @@ pub fn write<M: Machine>(
             else {
                 return Ok(None);
             };
+
             let read = size.min(MAX_UTF16_BYTES) & !1;
             let bytes = machine.read(address.get(), usize::try_from(read).unwrap_or(0))?;
             let order = machine.byte_order();
@@ -130,6 +135,7 @@ fn utf8_at<M: Machine>(address: u64, length: u64, machine: &mut M) -> Result<Opt
         Err(Stop::Missing(_)) => return Ok(None),
         Err(stop) => return Err(stop),
     };
+
     let completion = if shown == length {
         TextCompletion::Complete
     } else {
@@ -137,6 +143,7 @@ fn utf8_at<M: Machine>(address: u64, length: u64, machine: &mut M) -> Result<Opt
             length: Some(length),
         }
     };
+
     Ok(utf8_text(&TextSummary {
         bytes: Arc::from(bytes),
         completion,
@@ -155,6 +162,7 @@ pub fn utf8_text(text: &TextSummary) -> Option<TextSummary> {
         TextCompletion::Truncated { .. } => false,
         _ => return None,
     };
+
     let valid = match std::str::from_utf8(&text.bytes) {
         Ok(valid) => valid,
         Err(error) if !complete && error.error_len().is_none() => {
@@ -162,6 +170,7 @@ pub fn utf8_text(text: &TextSummary) -> Option<TextSummary> {
         }
         Err(_) => return None,
     };
+
     let printable = valid
         .chars()
         .all(|character| !character.is_control() || matches!(character, '\t' | '\n' | '\r'));
@@ -198,6 +207,7 @@ fn hex(value: i128, byte_size: Option<u64>) -> String {
     } else {
         (1_u128 << bits) - 1
     };
+
     format!("{:#x}", value.cast_unsigned() & mask)
 }
 
@@ -224,9 +234,11 @@ fn enumerators<M: Machine>(
     let Some(info) = machine.type_info(enumeration) else {
         return Vec::new();
     };
+
     let TypeKind::Enumeration { enumerators, .. } = &info.kind else {
         return Vec::new();
     };
+
     enumerators
         .iter()
         .filter_map(|enumerator| Some((Arc::clone(&enumerator.name), signed(enumerator.value)?)))
@@ -242,6 +254,7 @@ fn flags(value: i128, enumerators: &[(Arc<str>, i128)]) -> String {
             .find(|(_, flag)| *flag == 0)
             .map_or_else(|| "0".to_owned(), |(name, _)| name.to_string());
     }
+
     let mut names = Vec::new();
     let mut covered = 0_i128;
     for (name, flag) in enumerators {
@@ -250,10 +263,12 @@ fn flags(value: i128, enumerators: &[(Arc<str>, i128)]) -> String {
             covered |= flag;
         }
     }
+
     let rest = value & !covered;
     if rest != 0 {
         names.push(format!("{:#x}", rest.cast_unsigned()));
     }
+
     names.join(" | ")
 }
 
@@ -263,12 +278,14 @@ fn duration(value: i128, unit: TimeUnit) -> String {
     let Some(total) = value.checked_mul(i128::try_from(unit.nanoseconds()).unwrap_or(1)) else {
         return format!("{value}{}", unit_suffix(unit));
     };
+
     let negative = total < 0;
     let total = total.unsigned_abs();
     let mut output = String::new();
     if negative {
         output.push('-');
     }
+
     if total == 0 {
         output.push_str("0s");
     } else if total < 1_000 {
@@ -286,12 +303,15 @@ fn duration(value: i128, unit: TimeUnit) -> String {
         if hours > 0 {
             let _ = write!(output, "{hours}h");
         }
+
         if hours > 0 || minutes > 0 {
             let _ = write!(output, "{minutes}m");
         }
+
         output.push_str(&decimal(seconds, SECOND));
         output.push('s');
     }
+
     output
 }
 
@@ -304,6 +324,7 @@ fn time(value: i128, unit: TimeUnit) -> Option<String> {
     let second = i128::try_from(SECOND).ok()?;
     let (seconds, nanoseconds) = (total.div_euclid(second), total.rem_euclid(second));
     let (days, of_day) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+
     // Howard Hinnant's `civil_from_days`, in 400-year eras from 0000-03-01.
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
@@ -317,11 +338,13 @@ fn time(value: i128, unit: TimeUnit) -> Option<String> {
     } else {
         shifted_month - 9
     };
+
     let year = year_of_era + era * 400 + i128::from(month <= 2);
     let mut output = String::new();
     if year < 0 {
         output.push('-');
     }
+
     let _ = write!(
         output,
         "{:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
@@ -335,6 +358,7 @@ fn time(value: i128, unit: TimeUnit) -> Option<String> {
         output.push('.');
         output.push_str(fraction.trim_end_matches('0'));
     }
+
     output.push_str(" +0000 UTC");
     Some(output)
 }
@@ -355,6 +379,7 @@ fn decimal(value: u128, scale: u128) -> String {
     if fraction == 0 {
         return whole.to_string();
     }
+
     let digits = scale.ilog10() as usize;
     let fraction = format!("{fraction:0digits$}");
     format!("{whole}.{}", fraction.trim_end_matches('0'))
@@ -424,6 +449,7 @@ mod tests {
                 "{value} {unit:?}"
             );
         }
+
         assert_eq!(time(i128::MAX, TimeUnit::Seconds), None);
     }
 
@@ -436,6 +462,7 @@ mod tests {
             })
             .map(|text| text.bytes.to_vec())
         };
+
         let cut = TextCompletion::Truncated { length: None };
         assert_eq!(
             text("tab\tµ\n".as_bytes(), TextCompletion::Complete),
@@ -444,6 +471,7 @@ mod tests {
         assert_eq!(text(b"", TextCompletion::Complete), None);
         assert_eq!(text(&[0xff, 0, 1], TextCompletion::Complete), None);
         assert_eq!(text(b"nul\0", TextCompletion::Complete), None);
+
         // A character cut short by the read is left out, unless the bytes
         // were whole.
         assert_eq!(text(&[b'a', 0xc2], cut), Some(b"a".to_vec()));

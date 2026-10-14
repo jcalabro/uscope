@@ -9,8 +9,11 @@ use crate::syscalls::table::X32_SYSCALL_BIT;
 use crate::syscalls::{Abi, SyscallId};
 
 pub const OP_ENTRY: u8 = 1;
+
 pub const OP_EXIT: u8 = 2;
+
 pub const OP_SECCOMP: u8 = 3;
+
 pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 
 /// What `PTRACE_GET_SYSCALL_INFO` says about a stopped thread.
@@ -18,9 +21,11 @@ pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 pub struct SyscallInfo {
     pub op: u8,
     pub arch: u32,
+
     /// For an entry or seccomp stop.
     pub number: u64,
     pub args: [u64; 6],
+
     /// For an exit stop.
     pub value: i64,
 }
@@ -32,6 +37,7 @@ pub fn syscall_info(pid: Pid) -> Result<SyscallInfo, Errno> {
     for (index, arg) in args.iter_mut().enumerate() {
         *arg = word(32 + index * 8);
     }
+
     Ok(SyscallInfo {
         op: buffer[0],
         arch: u32::from_le_bytes(buffer[4..8].try_into().unwrap_or_default()),
@@ -61,6 +67,7 @@ pub fn from_registers(arch: u32, registers: &libc::user_regs_struct) -> (Syscall
         },
         value: 0,
     };
+
     (call_id(&info), info.args)
 }
 

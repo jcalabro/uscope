@@ -37,12 +37,14 @@ pub async fn candidates(
                     candidates.push((spec.name.to_owned(), "keyword"));
                 }
             }
+
             for variable in variables
                 .iter()
                 .flat_map(|snapshot| snapshot.variables.iter())
             {
                 candidates.push((variable.name.to_string(), "variable"));
             }
+
             for (_, image) in presenter.code.modules() {
                 for global in image.globals() {
                     if global.name == global.qualified_name {
@@ -59,6 +61,7 @@ pub async fn candidates(
             } else {
                 format!("{qualifier}::")
             };
+
             for (_, image) in presenter.code.modules() {
                 for global in image.globals() {
                     if let Some(rest) = global.qualified_name.strip_prefix(prefix.as_str()) {
@@ -85,6 +88,7 @@ pub async fn candidates(
         }
         Completing::Nothing => {}
     }
+
     candidates
 }
 

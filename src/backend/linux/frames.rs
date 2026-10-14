@@ -14,6 +14,7 @@ use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RETURN_ADDRESS,
     RSP, RegisterFile, collect_frames,
 };
+
 pub(super) use crate::unwind::{UnwindModule, unwind_module_for};
 use crate::{
     AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
@@ -66,6 +67,7 @@ impl<P: InspectionOps> Controller<P> {
             frame: PresentedFrame::Physical,
             hidden_inline_frames: 0,
         };
+
         // Presentations describe inline frames of the main image only; an
         // instruction elsewhere, or anywhere after exec replaced the image,
         // is presented as its physical frame.
@@ -79,6 +81,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(physical());
         };
+
         let location = self.module_image.locate(image_address);
         let chain = match &location.inline_frames {
             InlineFrameLookup::Unique(chain) => chain,
@@ -128,6 +131,7 @@ impl<P: InspectionOps> Controller<P> {
             }) => self.entered_new_task(),
             _ => false,
         };
+
         let visible = default_inline_visible_count(
             &self.module_image,
             chain.instances.as_ref(),
@@ -146,6 +150,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(site) = inferior.breakpoints.get(&address) else {
             return Ok(BTreeSet::new());
         };
+
         let mut instances = BTreeSet::new();
 
         for id in site.owners.iter().filter_map(|owner| match owner {
@@ -165,6 +170,7 @@ impl<P: InspectionOps> Controller<P> {
             else {
                 continue;
             };
+
             for resolved in breakpoint.locations.iter() {
                 if runtime_breakpoint_address(inferior, resolved.location)? == address {
                     instances.extend(resolved.code_instances.iter().copied());
@@ -182,20 +188,24 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
     ) -> Result<ExecutionLocation> {
         let inferior = self.stopped_root(stop_id, root)?;
+
         // A task's saved registers locate its innermost frame as a caller's
         // are located, before the call it is parked in.
         let Some(pid) = root.thread() else {
             return self.outer_frame_location(inferior, root, frame);
         };
+
         if frame.get() != 0 {
             return self.outer_frame_location(inferior, root, frame);
         }
+
         let registers = self.ptrace.registers(pid)?;
         let address = VirtualAddress::new(registers.rip);
         let modules = self.unwind_modules(inferior);
         let (module, image_address) =
             unwind_module_for(&modules, address).ok_or(Error::AddressOutsideModule)?;
         let mut image = module.image.locate(image_address);
+
         // The stop presentation describes inline frames of the main image only.
         if module.loaded.id == inferior.loaded_module.id {
             let presentation = self.presentation_for_stopped_thread(pid)?;
@@ -241,6 +251,7 @@ impl<P: InspectionOps> Controller<P> {
             )?
             .trace
         };
+
         if trace
             .frames
             .iter()
@@ -250,6 +261,7 @@ impl<P: InspectionOps> Controller<P> {
             self.describe_awaited(inferior, stop_id, root, &mut frames);
             trace.frames = frames.into();
         }
+
         Ok(trace)
     }
 
@@ -338,9 +350,11 @@ impl<P: InspectionOps> Controller<P> {
                     Some(native) => *native,
                     None => self.ptrace.registers(*pid)?,
                 };
+
                 let stacks = self.thread_stacks(inferior, &runtimes, *pid);
                 (Some(native), x86_64_registers(&native), false, stacks)
             }
+
             // A parked task's frames are all on its own stack.
             RootOrigin::Saved {
                 registers,
@@ -349,6 +363,7 @@ impl<P: InspectionOps> Controller<P> {
             } => (None, registers.clone(), *after_call, Vec::new()),
             RootOrigin::Suspended { .. } => return Err(Error::FrameSuspended),
         };
+
         let instruction = registers
             .get(RETURN_ADDRESS)
             .ok_or(Error::LocationUnavailable)?;
@@ -357,20 +372,24 @@ impl<P: InspectionOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
+
         let mut cross = |module: ModuleId, registers: &RegisterFile, after_call: bool| {
             let runtime = runtimes
                 .iter()
                 .find(|runtime| runtime.module.id == module)?;
+
             // A parked task's frames are all on its own stack.
             let Some(pid) = root.thread() else {
                 return Some(Ok(Crossing::Stay));
             };
+
             Some(self.with_runtime_stop(inferior, runtime, pid, |stop| {
                 runtime
                     .model
                     .cross(stop, debug_thread_id(pid), registers, after_call)
             }))
         };
+
         let mut provider = RoleCallerProvider {
             dwarf: DwarfCallerProvider {
                 modules: self.unwind_modules(inferior),
@@ -391,6 +410,7 @@ impl<P: InspectionOps> Controller<P> {
             carried: None,
             dispatched: false,
         };
+
         Ok((native, after_call, walk(&mut provider, initial)))
     }
 
@@ -440,7 +460,9 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(resolved) = self.resolve_async_frame(inferior, root, frame)? {
             return Ok(resolved);
         }
+
         let level = frame.get() as usize;
+
         // Every activation presents at least one logical frame, so unwinding
         // one activation per level always reaches the requested frame.
         let max_frames = level.saturating_add(1).min(DEFAULT_MAX_FRAMES);
@@ -492,6 +514,7 @@ impl<P: InspectionOps> Controller<P> {
                 frames: frame_level(expanded.trace.frames.len())?,
             });
         };
+
         let FrameOrigin {
             activation,
             jump,
@@ -500,6 +523,7 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(future) = future {
             return Ok(self.suspended_frame(frame, selected, &expanded.futures[future]));
         }
+
         let physical = &stack.frames[activation];
         let code = jump.or_else(|| {
             stack
@@ -520,6 +544,7 @@ impl<P: InspectionOps> Controller<P> {
             | FrameKind::Async { .. }
             | FrameKind::Awaited { .. } => PresentedFrame::Physical,
         };
+
         // Only code a function describes has a source scope.
         let scope = match (selected.kind, selected.code_instance) {
             (_, None) => FrameScope::Unavailable,
@@ -533,6 +558,7 @@ impl<P: InspectionOps> Controller<P> {
                 Some(_),
             ) => FrameScope::Function,
         };
+
         // The jump discarded the frame's registers and its stack's place:
         // only entry values recover what was passed to it.
         if jump.is_some() {
@@ -577,6 +603,7 @@ impl<P: InspectionOps> Controller<P> {
         if frame.segment != StackSegment::Task {
             return None;
         }
+
         let stack_pointer = frame.registers.get(RSP)?;
         let low = match (root.thread(), root.context) {
             (Some(pid), _) => self.task_stack(inferior, pid)?.low,
@@ -585,6 +612,7 @@ impl<P: InspectionOps> Controller<P> {
             }
             (None, ExecutionContext::Thread(_)) => return None,
         };
+
         Some(low..stack_pointer)
     }
 
@@ -609,6 +637,7 @@ impl<P: InspectionOps> Controller<P> {
                 ),
             ));
         };
+
         module
             .unwind
             .cfa(
@@ -632,6 +661,7 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<ExecutionLocation> {
         let resolved = self.resolve_frame(inferior, root, frame)?;
         let selected = resolved.frame.ok_or(Error::AmbiguousInlineFrame)?;
+
         // A suspended frame whose resume address is unknown has no code to
         // locate.
         let instruction = selected.instruction.ok_or(Error::FrameSuspended)?;
@@ -643,6 +673,7 @@ impl<P: InspectionOps> Controller<P> {
         let mut location = module.image.locate(address);
         location.function = selected.function;
         location.source = selected.source;
+
         // A caller is located just before its return address, but its
         // symbol offset describes the frame's own instruction.
         let lookup = module.loaded.virtual_address(address)?;
@@ -663,6 +694,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(task) = owner.task else {
             return owner.thread == pid;
         };
+
         self.inferior.as_ref().is_some_and(|inferior| {
             self.current_task(inferior, pid)
                 .is_some_and(|current| current == Ok(Some(task)))
@@ -696,6 +728,7 @@ impl<P: InspectionOps> Controller<P> {
             image: &self.module_image,
             unwind: self.unwind_info.as_ref(),
         };
+
         std::iter::once(main)
             .chain(
                 self.modules
@@ -753,6 +786,7 @@ impl<P: InspectionOps> Controller<P> {
         if let (Some(pid), Some(presentation)) = (thread, presentation) {
             stop.presentations.insert(pid, presentation);
         }
+
         stop.selected = context;
         stop.selected_thread = thread;
         self.bump_revision();
@@ -852,6 +886,7 @@ pub(super) fn presentation_visible_count(
     if matches!(presentation.frame, PresentedFrame::Ambiguous(_)) {
         return Err(Error::AmbiguousInlineFrame);
     }
+
     let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
         return match presentation.frame {
             PresentedFrame::Physical => Ok(0),
@@ -860,6 +895,7 @@ pub(super) fn presentation_visible_count(
             }
         };
     };
+
     let visible = match presentation.frame {
         PresentedFrame::Physical => 0,
         PresentedFrame::Inline(selected) => chain
@@ -870,6 +906,7 @@ pub(super) fn presentation_visible_count(
             .ok_or(Error::LocationUnavailable)?,
         PresentedFrame::Ambiguous(_) => return Err(Error::AmbiguousInlineFrame),
     };
+
     let hidden =
         u32::try_from(chain.instances.len() - visible).map_err(|_| Error::LocationUnavailable)?;
     if hidden != presentation.hidden_inline_frames {
@@ -888,6 +925,7 @@ pub(super) fn apply_presentation(
     let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
         return Ok(());
     };
+
     let selected_instance = visible
         .checked_sub(1)
         .and_then(|index| chain.instances.get(index).copied())
@@ -924,6 +962,7 @@ pub(super) fn source_for_code_instance(
             .then(|| location.source.clone())
             .flatten();
     };
+
     let visible = if location.physical_instance == Some(selected) {
         0
     } else {
@@ -933,6 +972,7 @@ pub(super) fn source_for_code_instance(
             .position(|instance| *instance == selected)?
             + 1
     };
+
     visible_source(module_image, location, &chain.instances, visible)
 }
 
@@ -963,6 +1003,7 @@ pub(super) fn code_instance_is_active(location: &ImageLocation, selected: CodeIn
     if location.physical_instance == Some(selected) {
         return true;
     }
+
     match &location.inline_frames {
         InlineFrameLookup::None => false,
         InlineFrameLookup::Unique(chain) => chain.instances.contains(&selected),
@@ -1000,9 +1041,11 @@ pub(super) struct FrameOrigin {
     /// whose function left by a tail call, the one whose state replaced it;
     /// for a future's frame, the one that drives it.
     pub(super) activation: usize,
+
     /// For a frame whose function left by a tail call, the module and an
     /// address within its jump.
     pub(super) jump: Option<(ModuleId, ImageAddress)>,
+
     /// For a frame of a future a frame drives, the future, in
     /// [`Expanded::futures`].
     pub(super) future: Option<usize>,
@@ -1012,8 +1055,10 @@ pub(super) struct FrameOrigin {
 pub(super) struct Expanded {
     pub(super) trace: Backtrace,
     pub(super) origins: Vec<FrameOrigin>,
+
     /// The futures whose frames the trace shows, where frames drive them.
     pub(super) futures: Vec<futures::AsyncFrame>,
+
     /// The declared types of the futures frames drive that cannot be read.
     pub(super) lost: Vec<crate::TypeReference>,
 }
@@ -1054,6 +1099,7 @@ impl Expanded {
                 self.futures.len()
             );
         }
+
         for note in self.trace.unfollowed.iter() {
             debug_assert!(
                 usize::try_from(note.driver.get()).is_ok_and(|driver| driver < frames.len()),
@@ -1089,6 +1135,7 @@ fn expand_inline_backtrace(
                 future: None,
             },
         );
+
         // A signal interrupted its frame rather than calling it.
         if let Some((module, address)) = code
             && !physical.context.signal_frame
@@ -1097,6 +1144,7 @@ fn expand_inline_backtrace(
                 let Ok(instruction) = module.loaded.virtual_address(jump.instruction) else {
                     break;
                 };
+
                 let lookup = module.loaded.virtual_address(jump.lookup)?;
                 push_code_frames(
                     &mut frames,
@@ -1117,6 +1165,7 @@ fn expand_inline_backtrace(
                 );
             }
         }
+
         for frame in &mut frames[first..] {
             frame.segment = physical.segment;
         }
@@ -1133,9 +1182,11 @@ fn expand_inline_backtrace(
         futures: Vec::new(),
         lost: Vec::new(),
     };
+
     if cfg!(debug_assertions) {
         expanded.check_invariants(stack.frames.len());
     }
+
     Ok(expanded)
 }
 
@@ -1155,6 +1206,7 @@ fn expand_activation<'a>(
     } else {
         FrameKind::Physical
     };
+
     let lookup = stack.lookup_address(activation);
     let located = lookup.and_then(|address| unwind_module_for(modules, address));
     let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
@@ -1162,6 +1214,7 @@ fn expand_activation<'a>(
         frames.push(StackFrame::new(level, kind, None, context.instruction));
         return Ok(None);
     };
+
     // The stop presentation describes the main image only; innermost
     // frames in other modules show their complete inline chain.
     let presentation =
@@ -1204,6 +1257,7 @@ fn push_code_frames(
             Some(presentation) => presentation_visible_count(&location, presentation)?,
             None => chain.instances.len(),
         };
+
         let mut source = visible_source(module_image, &location, &chain.instances, visible);
 
         for &instance_id in chain.instances[..visible].iter().rev() {
@@ -1233,6 +1287,7 @@ fn push_code_frames(
             ));
             source = call_site(instance);
         }
+
         source
     } else {
         location.source.clone()
@@ -1273,6 +1328,7 @@ fn push_code_frames(
 pub(super) struct PhysicalFrame {
     pub(super) context: FrameContext,
     pub(super) registers: RegisterFile,
+
     /// Whose stack the activation is on.
     pub(super) segment: StackSegment,
 }
@@ -1283,6 +1339,7 @@ pub(super) struct PhysicalStack {
     /// The live registers of a thread's stack; `None` for registers a task
     /// saved, which hold only some of them.
     pub(super) native: Option<libc::user_regs_struct>,
+
     /// Whether the innermost activation's instruction is a return address,
     /// as a parked task's is.
     pub(super) after_call: bool,
@@ -1319,15 +1376,19 @@ pub(super) struct StackRoot {
 pub(super) enum RootOrigin {
     /// A stopped thread's live registers.
     Thread(Pid),
+
     /// The registers a parked task saved. Any other register is unknown.
     Saved {
         registers: RegisterFile,
+
         /// Whether the saved instruction is a return address.
         after_call: bool,
+
         /// A stopped thread of the process, through which its memory is
         /// read.
         reader: Pid,
     },
+
     /// A suspended task's future, of type `ty`, which the code of `module`
     /// describes. Its frames are the chain of awaits the future holds.
     Suspended {
@@ -1370,9 +1431,11 @@ pub(super) enum FrameRegisters {
     /// The thread's own registers, which every logical frame of the
     /// innermost activation shares.
     Thread(libc::user_regs_struct),
+
     /// The registers the unwinder reconstructed for a caller's activation.
     /// Registers a callee could overwrite without saving are absent.
     Caller(RegisterFile),
+
     /// None: the frame's function left by a tail call, which discarded
     /// them.
     Discarded,
@@ -1384,10 +1447,13 @@ pub(super) enum FrameScope {
     /// No single function scope applies: the code has no debug information,
     /// or an innermost frame has no single compatible inline chain.
     Unavailable,
+
     /// The physical function's own scope.
     Function,
+
     /// One inline instance's scope.
     Inline(CodeInstanceId),
+
     /// A suspended async function's, whose future of type `ty` at
     /// `object` is in the state numbered `state`.
     Suspended {
@@ -1401,11 +1467,14 @@ pub(super) enum FrameScope {
 /// variables.
 pub(super) struct ResolvedFrame {
     pub(super) id: StackFrameId,
+
     /// The logical frame whose source scope the frame's variables follow.
     pub(super) presented: PresentedFrame,
+
     /// The frame as the backtrace describes it; absent for an innermost
     /// frame whose inline presentation is ambiguous.
     pub(super) frame: Option<StackFrame>,
+
     /// The module describing the frame's code, and the frame's address in
     /// its image: the instruction itself for the innermost activation and
     /// signal frames, otherwise the byte before the return address.
@@ -1413,8 +1482,10 @@ pub(super) struct ResolvedFrame {
     pub(super) scope: FrameScope,
     pub(super) registers: FrameRegisters,
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
+
     /// The index of the physical activation containing the frame.
     pub(super) activation: usize,
+
     /// For a frame on its task's own stack, the part of that stack below
     /// the frame's stack pointer: only the frame's callees use it, so a
     /// pointer of the frame's to it is stale.
@@ -1441,16 +1512,20 @@ pub(super) fn describe_address(
 /// else is unwound by its call-frame information.
 pub(super) struct RoleCallerProvider<'a, 'c> {
     pub(super) dwarf: DwarfCallerProvider<'a>,
+
     /// The stacks a runtime runs the thread on, and whose each is.
     pub(super) stacks: Vec<(std::ops::Range<u64>, StackSegment)>,
+
     /// Whose stack a frame on none of them is on.
     pub(super) other: StackSegment,
     pub(super) cross: &'c mut CrossStacks<'c>,
+
     /// Whose stack the current frame is on, when its callee's is: a frame
     /// is on its callee's stack unless the callee switched stacks or a
     /// signal interrupted it. A runtime knows its stacks' bounds only
     /// roughly where the system gave them, as the top of a thread's.
     pub(super) carried: Option<StackSegment>,
+
     /// Whether a frame on the current stack gave the thread to a task, so
     /// that the task that switched to this stack may have left it.
     pub(super) dispatched: bool,
@@ -1491,6 +1566,7 @@ impl RoleCallerProvider<'_, '_> {
                 register: "rsp".into(),
             });
         };
+
         let mut registers = RegisterFile::new([]);
         for (slot, register) in SIGCONTEXT_REGISTERS.iter().enumerate() {
             let address = context + UCONTEXT_MCONTEXT + 8 * slot as u64;
@@ -1499,8 +1575,10 @@ impl RoleCallerProvider<'_, '_> {
                     address: VirtualAddress::new(address),
                 });
             };
+
             registers.set(*register, value);
         }
+
         let instruction = registers.get(RETURN_ADDRESS).unwrap_or(0);
         self.dwarf.first = false;
         self.dwarf.registers = registers;
@@ -1525,6 +1603,7 @@ pub(super) type CrossStacks<'c> = dyn FnMut(ModuleId, &RegisterFile, bool) -> Op
 impl CallerProvider for RoleCallerProvider<'_, '_> {
     fn caller(&mut self, current: &FrameContext) -> CallerResult {
         self.carried = Some(self.segment());
+
         // A handler returns to its signal trampoline's first instruction,
         // so the trampoline is named by its own address, not the one
         // before it, as glibc's alone allows with a byte to spare.
@@ -1547,6 +1626,7 @@ impl RoleCallerProvider<'_, '_> {
         if self.role_at(current.instruction) == Some(CodeRole::SignalTrampoline) {
             return self.interrupted();
         }
+
         let role = self.dwarf.lookup_address(current).and_then(|lookup| {
             unwind_module_for(&self.dwarf.modules, lookup)
                 .map(|(module, address)| (module.loaded.id, module.image.code_role(address)))
@@ -1554,6 +1634,7 @@ impl RoleCallerProvider<'_, '_> {
         let unresolved = |reason: Arc<str>| {
             CallerResult::Finished(UnwindTermination::UnresolvedStackSwitch { reason })
         };
+
         match role {
             Some((_, CodeRole::Outermost)) => CallerResult::Finished(UnwindTermination::Complete),
             Some((module, CodeRole::StackSwitch)) => {
@@ -1565,6 +1646,7 @@ impl RoleCallerProvider<'_, '_> {
                     Some(Ok(Crossing::Outermost)) => {
                         CallerResult::Finished(UnwindTermination::Complete)
                     }
+
                     // The task the runtime names now may not be the one
                     // that switched here, whose frames lie beyond.
                     Some(Ok(Crossing::Resume(_) | Crossing::Continue(_))) if self.dispatched => {
@@ -1580,6 +1662,7 @@ impl RoleCallerProvider<'_, '_> {
                         let Some(instruction) = registers.get(RETURN_ADDRESS) else {
                             return unresolved("the task saved no instruction".into());
                         };
+
                         self.dwarf.first = false;
                         self.dwarf.registers = registers;
                         self.carried = None;
@@ -1596,6 +1679,7 @@ impl RoleCallerProvider<'_, '_> {
                 self.dispatched = true;
                 self.dwarf.caller(current)
             }
+
             // The runtime entered the frame by a trap, faking a call from
             // the instruction that trapped, which its caller's pc names.
             Some((_, CodeRole::TrapEntry)) => match self.dwarf.caller(current) {
@@ -1647,6 +1731,7 @@ impl DwarfCallerProvider<'_> {
                 if let UnwindTermination::NoUnwindInfo { address } = &mut termination {
                     *address = lookup;
                 }
+
                 termination
             })
     }
@@ -1657,10 +1742,12 @@ impl CallerProvider for DwarfCallerProvider<'_> {
         let Some(lookup) = self.lookup_address(current) else {
             return CallerResult::Finished(UnwindTermination::Complete);
         };
+
         self.first = false;
         let Some((module, image_address)) = unwind_module_for(&self.modules, lookup) else {
             return CallerResult::Finished(UnwindTermination::ModuleNotFound { address: lookup });
         };
+
         let step = match module
             .unwind
             .unwind(image_address, &self.registers, &mut self.memory)
@@ -1670,15 +1757,19 @@ impl CallerProvider for DwarfCallerProvider<'_> {
                 if let UnwindTermination::NoUnwindInfo { address } = &mut termination {
                     *address = lookup;
                 }
+
                 return CallerResult::Finished(termination);
             }
         };
+
         let Some(instruction) = step.registers.get(RETURN_ADDRESS) else {
             return CallerResult::Finished(UnwindTermination::Complete);
         };
+
         if instruction == 0 {
             return CallerResult::Finished(UnwindTermination::Complete);
         }
+
         if step.cfa.get() == current.cfa.map_or(0, VirtualAddress::get)
             && instruction == current.instruction.get()
         {

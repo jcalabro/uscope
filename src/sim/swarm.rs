@@ -29,40 +29,56 @@ pub struct Weights {
 pub struct Swarm {
     pub program: usize,
     pub variant: usize,
+
     /// Which of the program's manifest runs, and so which arguments.
     pub run: usize,
+
     /// How the world chooses its actions.
     pub policy: Policy,
+
     /// How often, in a thousand, other actors act before a call the
     /// controller makes into the kernel.
     pub preempt: u64,
+
     /// The fault the run plans, if any.
     pub fault: Option<Plan>,
+
     /// The most instructions one `Run` action executes.
     pub burst: u64,
+
     /// The controller queue's capacity.
     pub queue_capacity: usize,
+
     /// The event channel's capacity; small ones make clients lag.
     pub event_capacity: usize,
+
     /// Whether launches stop at the program's first instruction.
     pub stop_at_entry: bool,
+
     /// How many requests the client makes before it shuts down.
     pub requests: u64,
+
     /// How many times the client may launch the program.
     pub launches: u64,
+
     /// Breakpoints the client adds before its first launch.
     pub early_breakpoints: u64,
+
     /// How the debug registers answer the tracer.
     pub debug: DebugBehavior,
+
     /// Whether the client favors watching memory.
     pub watching: bool,
+
     /// Whether the program starts untraced, for the client to attach to
     /// before it launches anything, and how many instructions the program
     /// runs before the client acts.
     pub attach: Option<u64>,
+
     /// Whether the session holds the children the program forks, for
     /// sessions of their own.
     pub follow: bool,
+
     /// Whether the client stops at system calls.
     pub catching: bool,
 }
@@ -73,6 +89,7 @@ impl Swarm {
         let mut index = |count: usize| {
             usize::try_from(choices.below(Stream::Swarm, count as u64)).expect("an index fits")
         };
+
         let program = index(corpus.programs.len());
         let variant = index(corpus.programs[program].variants.len());
         let run = index(corpus.programs[program].runs.len());
@@ -84,6 +101,7 @@ impl Swarm {
             deliver: pick(&weight),
             poll: pick(&weight),
         };
+
         let policy = if pick(&[0, 1]) == 0 {
             Policy::Walk(weights)
         } else {
@@ -92,6 +110,7 @@ impl Swarm {
                 horizon: pick(&[64, 512, 4096]),
             }
         };
+
         let preempt = pick(&[0, 20, 200, 600]);
         let creates_threads = corpus.programs[program].variants[variant]
             .functions

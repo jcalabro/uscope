@@ -30,9 +30,11 @@ use super::{ActiveKind, Controller, StepOwner, StepStart};
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Starter {
     runtime: RuntimeId,
+
     /// Where the starter begins in its image, by which its runtime knows
     /// it.
     entry: ImageAddress,
+
     /// Whether the starter names its task as it begins, rather than once
     /// it returns.
     names_at_entry: bool,
@@ -44,6 +46,7 @@ pub(super) enum NewTask {
     /// Watching for the step's task to enter a runtime's task starter, at
     /// these entries.
     Watching(BTreeMap<VirtualAddress, Starter>),
+
     /// The step's task entered `starter` on `thread`, which returns to
     /// `returns_to` with the stack pointer at `stack`.
     Starting {
@@ -53,6 +56,7 @@ pub(super) enum NewTask {
         returns_to: VirtualAddress,
         stack: u64,
     },
+
     /// The task started, and the step waits for it where it begins: at
     /// its function's entry, or at any statement of its coroutine's
     /// inlined body, the first of which it runs ends the step.
@@ -60,6 +64,7 @@ pub(super) enum NewTask {
         entries: BTreeSet<VirtualAddress>,
         statements: bool,
     },
+
     /// The task began, and the step goes on in it as a step in.
     Entered,
 }
@@ -72,6 +77,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return starters;
         };
+
         for runtime in self.runtimes(inferior) {
             for starter in runtime.model.task_starters() {
                 if let Ok(address) = runtime.module.virtual_address(starter.entry) {
@@ -86,6 +92,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         starters
     }
 
@@ -104,6 +111,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
+
         match state {
             NewTask::Watching(starters) | NewTask::Starting { starters, .. }
                 if starters.contains_key(&address) =>
@@ -115,6 +123,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     self.enter_starter(pid, address, starters)?;
                 }
             }
+
             NewTask::Starting {
                 starter,
                 thread,
@@ -130,6 +139,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     self.repair_when_alone(pid, address)?;
                 }
             }
+
             NewTask::Started {
                 entries,
                 statements,
@@ -142,6 +152,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             _ => return Ok(false),
         }
+
         Ok(true)
     }
 
@@ -186,6 +197,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 stack: registers.rsp.wrapping_add(8),
             });
         }
+
         self.repair_when_alone(pid, address)
     }
 
@@ -242,13 +254,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             (None, Some(coroutine)) => (self.new_task_statements(coroutine)?, true),
             (None, None) => (BTreeSet::new(), false),
         };
+
         if entries.is_empty() {
             return self.lose_new_task(pid, "the task started begins nowhere".into());
         }
+
         let task = TaskId {
             runtime,
             number: started.task.number,
         };
+
         record!("the step goes on in task {task}, which begins at {entries:?}");
         let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
@@ -256,6 +271,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for entry in &entries {
             install_plan_breakpoint(&self.ptrace, inferior, *entry, execution)?;
         }
+
         if let Some(ActiveKind::Step { owner, start, .. }) =
             inferior.active.as_mut().map(|active| &mut active.kind)
         {
@@ -272,6 +288,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ..StepStart::default()
             };
         }
+
         self.go_on_without_plan(pid, address, None)
     }
 
@@ -283,6 +300,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if coroutine.image != inferior.loaded_module.image {
             return Ok(statements);
         }
+
         for function in self.module_image.coroutine_functions(coroutine.id) {
             for instance in self.module_image.instances_for_function(function.id()) {
                 if matches!(instance.kind(), CodeInstanceKind::Inline { .. }) {
@@ -290,6 +308,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         Ok(self.without_resume_code(statements))
     }
 
@@ -310,6 +329,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(start) = self.active_step_mut() {
             start.new_task = Some(NewTask::Entered);
         }
+
         self.begin_visible_stop(pid, StopReason::Step { kind })
     }
 
@@ -331,6 +351,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ..StepStart::default()
             };
         }
+
         let kind = self
             .inferior
             .as_ref()
@@ -360,6 +381,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return reason;
         };
+
         match reason {
             StopReason::Step { kind } if kind == running => StopReason::Step { kind: requested },
             StopReason::StepIncomplete { kind, description } if kind == running => {

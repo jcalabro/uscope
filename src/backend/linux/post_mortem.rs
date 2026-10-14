@@ -20,6 +20,7 @@ use super::core_dump::{
     FileBacking, ImageEvidence, ImageMappings, ImageVerification, SavedHeader, elf_build_id,
     image_mappings, is_elf, recorded_build_id, saved_header, verify_image,
 };
+
 use super::core_files::{ModuleFile, ModuleLocator, hex, open_explicit};
 use super::tls::{self, ProcessServices, TlsModule};
 use super::vdso::{AT_SYSINFO_EHDR, VDSO_NAME, read_memory_image};
@@ -28,11 +29,13 @@ use super::{
     InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop, Reply,
     RuntimeModule, SessionLease, TraceThread, allocate_stop_id, backend_error, loader_link_maps,
 };
+
 use crate::backend::ControllerMessage;
 use crate::protocol::{
     CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, ExceptionInfo, ModuleIdentity,
     ProcessId, Request, StopReason,
 };
+
 use crate::{
     Error, ImageAddress, LoadBias, LoadedModule, LoadedModuleRecord, ModuleId, ModuleImage,
     ModuleImageId, Result, VirtualAddress,
@@ -43,6 +46,7 @@ const POST_MORTEM_THREAD_NAME: &str = "uscope-core";
 /// Registers and memory recorded by a core dump.
 pub(super) struct CoreTarget {
     memory: CoreMemory,
+
     /// Loaded images whose symbols locate the C library's thread structures.
     symbol_modules: Vec<SymbolModule>,
 }
@@ -72,6 +76,7 @@ impl ProcessServices for CoreTarget {
             else {
                 continue;
             };
+
             let Some(address) = module
                 .load_bias
                 .load(found.address())
@@ -79,6 +84,7 @@ impl ProcessServices for CoreTarget {
             else {
                 continue;
             };
+
             let preferred = object.is_some_and(|object| {
                 module
                     .recorded_path
@@ -88,8 +94,10 @@ impl ProcessServices for CoreTarget {
             if preferred {
                 return Some(address);
             }
+
             fallback.get_or_insert(address);
         }
+
         fallback
     }
 }
@@ -132,6 +140,7 @@ impl InspectionOps for CoreTarget {
                     let Some(current) = address.checked_add(readable as u64) else {
                         break;
                     };
+
                     match self.memory.read(current, &mut bytes[readable..=readable]) {
                         Ok(()) => readable += 1,
                         Err(CoreMemoryError::Unavailable) => break,
@@ -140,6 +149,7 @@ impl InspectionOps for CoreTarget {
                         }
                     }
                 }
+
                 bytes[readable..].fill(0);
                 if readable == 0 {
                     Err(MemoryAccessError::Inaccessible)
@@ -196,9 +206,11 @@ struct PlacedFile {
     path: PathBuf,
     data: Arc<[u8]>,
     inode: u64,
+
     /// The recorded image grown to the file's extent.
     image: ImageMappings,
     load_bias: LoadBias,
+
     /// Dump-time addresses whose file bytes are the process's memory.
     read_only: Vec<Range<u64>>,
 }
@@ -234,8 +246,10 @@ impl PlacedFile {
 enum Rejection<T> {
     /// No load bias places the file at the image, which proves it differs.
     Unplaced(String),
+
     /// The file is placed but provably differs from the image.
     Mismatch(T, String),
+
     /// The dump saved nothing that confirms or refutes the file.
     Unverifiable(T),
 }
@@ -272,6 +286,7 @@ fn choose_unproven<T>(
     else {
         return Ok(None);
     };
+
     let path = best.path;
     match (best.rejection, allow) {
         (Rejection::Unverifiable(file), true) => Ok(Some((file, ModuleIdentity::Unverified))),
@@ -285,6 +300,7 @@ fn choose_unproven<T>(
         (Rejection::Mismatch(_, detail) | Rejection::Unplaced(detail), false) => {
             Err(Error::CoreModuleMismatch { path, detail })
         }
+
         // Allowing a mismatch permits using a file's metadata, not
         // relocating it to a guessed address.
         (Rejection::Unplaced(detail), true) => Err(Error::CoreModuleUnplaceable { path, detail }),
@@ -321,6 +337,7 @@ fn examine(
             }));
         }
     };
+
     // The kernel records where execution began; a different entry point is
     // proof of a different executable even when no other evidence survives.
     if let Some(recorded) = entry
@@ -338,6 +355,7 @@ fn examine(
             ));
         }
     }
+
     let placed = PlacedFile {
         path: path.clone(),
         data,
@@ -346,6 +364,7 @@ fn examine(
         load_bias,
         read_only,
     };
+
     let rejected = |rejection| Ok(Examined::Rejected(Rejected { path, rejection }));
     match evidence {
         ImageEvidence::BuildId => Ok(Examined::Proven(
@@ -382,10 +401,12 @@ fn resolve_image(
     let mut rejected = Vec::new();
     for candidate in candidates {
         let candidate = candidate?;
+
         // One file can be reached by name and by build-id.
         if (elf_only && !is_elf(&candidate.data)) || !examined.insert(candidate.path.clone()) {
             continue;
         }
+
         let searched = candidate.searched;
         match examine(core, image, candidate, entry)? {
             Examined::Proven(file) => return Ok(Some(file)),
@@ -393,6 +414,7 @@ fn resolve_image(
             Examined::Rejected(_) => {}
         }
     }
+
     Ok(choose_unproven(rejected, allow)?.map(|(file, identity)| file.with_identity(identity)))
 }
 
@@ -445,6 +467,7 @@ impl ResolvedModules {
                 &self.main_file.read_only,
             ));
         }
+
         for library in self
             .libraries
             .iter()
@@ -456,6 +479,7 @@ impl ResolvedModules {
                 &library.file.read_only,
             ));
         }
+
         backings
     }
 }
@@ -561,11 +585,13 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         build_id: main_build_id,
         file: main_file,
     } = resolve_executable(core, &images, &locator, options)?;
+
     // A dump written elsewhere has its machine's debug files in its sysroot.
     let mut debug_files = options.debug_files.clone();
     if let Some(sysroot) = &options.sysroot {
         debug_files.directories.push(sysroot.join("usr/lib/debug"));
     }
+
     let search = crate::debug_info::DebugFileSearch::new(&debug_files);
     let main_debug = crate::debug_info::load_program(&main_file.path, &main_file.data, &search)?;
     let main_loaded = LoadedModule::main(main_debug.image.id(), main_file.load_bias);
@@ -588,6 +614,7 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         if placed {
             continue;
         }
+
         // Without a saved header, only an ELF file can say that the image
         // is a module, and finding none leaves nothing to report.
         let elf_only = match saved_header(core, image)? {
@@ -595,6 +622,7 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
             SavedHeader::Data => continue,
             SavedHeader::Unsaved => true,
         };
+
         let build_id = recorded_build_id(core, image)?;
         let found = resolve_image(
             core,
@@ -608,8 +636,10 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
             if !elf_only {
                 modules.push(core_module(image, build_id, CoreModuleState::Missing));
             }
+
             continue;
         };
+
         let number = u32::try_from(libraries.len() + 1)
             .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
         let image_id = ModuleImageId::new(number);
@@ -620,6 +650,7 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
             image: image_id,
             load_bias: file.load_bias,
         };
+
         modules.push(core_module(image, build_id, loaded_state(loaded, &file)));
         libraries.push(LibraryImage {
             image: file.image.clone(),
@@ -628,6 +659,7 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
             debug,
         });
     }
+
     let number = u32::try_from(libraries.len() + 1)
         .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
     let vdso = resolve_vdso(core, number)?.and_then(|(module, vdso)| {
@@ -654,6 +686,7 @@ fn resolve_vdso(
     let Some(start) = core.auxv_value(AT_SYSINFO_EHDR).filter(|&start| start != 0) else {
         return Ok(None);
     };
+
     let mut failure = None;
     let read = read_memory_image(start, u64::MAX, |address, buffer| {
         match core.read_saved(address, buffer) {
@@ -668,6 +701,7 @@ fn resolve_vdso(
     if let Some(error) = failure {
         return Err(error.into());
     }
+
     let path = Arc::new(PathBuf::from(VDSO_NAME));
     let recorded = |build_id: Option<&[u8]>, state| CoreModule {
         recorded_path: Arc::clone(&path),
@@ -675,13 +709,16 @@ fn resolve_vdso(
         build_id: build_id.map(Into::into),
         state,
     };
+
     #[cfg(debug_assertions)]
     if let Err(error) = &read {
         record!("the dumped vDSO at {start:#x} is unusable: {error}");
     }
+
     let Ok(image) = read else {
         return Ok(Some((recorded(None, CoreModuleState::Missing), None)));
     };
+
     let build_id = elf_build_id(image.data.as_slice());
     let image_id = ModuleImageId::new(number);
     let Ok(debug) = crate::debug_info::load_module_bytes(
@@ -692,11 +729,13 @@ fn resolve_vdso(
     ) else {
         return Ok(Some((recorded(build_id, CoreModuleState::Missing), None)));
     };
+
     let loaded = LoadedModule {
         id: ModuleId::new(number),
         image: image_id,
         load_bias: image.load_bias,
     };
+
     let state = CoreModuleState::Loaded {
         module: LoadedModuleRecord {
             module: loaded,
@@ -704,6 +743,7 @@ fn resolve_vdso(
         },
         identity: ModuleIdentity::DumpedMemory,
     };
+
     Ok(Some((
         recorded(build_id, state),
         Some(MemoryModule { loaded, debug }),
@@ -760,6 +800,7 @@ pub fn open_core(
         memory: CoreMemory::new(Arc::new(core), backings),
         symbol_modules,
     };
+
     let image = Arc::clone(&main_debug.image);
     let main_loaded = LoadedModule::main(image.id(), main_file.load_bias);
     let executable = crate::backend::ExecutableSource {
@@ -795,11 +836,13 @@ pub fn open_core(
             if let Err(error) = &initialized {
                 record!("cannot open the core dump: {error}");
             }
+
             let failed = initialized.is_err();
             let _ = ready_sender.send(initialized);
             if !failed {
                 controller.run_post_mortem();
             }
+
             record!("exited");
         })?;
     match ready.recv() {
@@ -843,6 +886,7 @@ impl Controller<CoreTarget> {
             })
             .collect::<Result<Vec<_>>>()?;
         let selected = threads[0];
+
         // Loader link maps locate each module's TLS block. A dump that lost the
         // loader's state leaves the TLS they name explicitly unavailable instead
         // of failing.
@@ -866,6 +910,7 @@ impl Controller<CoreTarget> {
                 },
             );
         }
+
         self.locate_tls_modules(&link_maps);
         self.next_module_id = u32::try_from(self.modules.len())
             .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
@@ -879,6 +924,7 @@ impl Controller<CoreTarget> {
                 if pid == selected {
                     thread.reason = Some(reason.clone());
                 }
+
                 (pid, thread)
             })
             .collect();
@@ -907,12 +953,14 @@ impl Controller<CoreTarget> {
             let ControllerMessage::Request(request) = message else {
                 continue;
             };
+
             record!("request {}", request.describe());
             match request {
                 Request::Shutdown { reply } => {
                     let _ = reply.send(Ok(()));
                     return;
                 }
+
                 Request::AddBreakpoint { reply, .. }
                 | Request::RemoveBreakpoint { reply, .. }
                 | Request::SetBreakpointEnabled { reply, .. }
@@ -930,6 +978,7 @@ impl Controller<CoreTarget> {
                 Request::AddCatchpoint { reply, .. } | Request::RemoveCatchpoint { reply, .. } => {
                     reject(reply);
                 }
+
                 Request::Launch { reply, .. }
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }
@@ -973,6 +1022,7 @@ fn core_exception(thread: &CoreThread) -> Option<ExceptionInfo> {
     if thread.signal.is_none() {
         return Some(ExceptionInfo::new(number, name));
     }
+
     Some(ExceptionInfo::new(
         number,
         super::signals::describe(
@@ -995,6 +1045,7 @@ mod tests {
             path: PathBuf::from(path),
             rejection,
         };
+
         let unplaced = || Rejection::Unplaced("unplaced".to_owned());
         let mismatch = |file| Rejection::Mismatch(file, format!("{file} differs"));
         let mixed = || {
@@ -1005,6 +1056,7 @@ mod tests {
                 candidate("/d", Rejection::Unverifiable("d")),
             ]
         };
+
         let mismatched = || {
             vec![
                 candidate("/a", unplaced()),
@@ -1012,6 +1064,7 @@ mod tests {
                 candidate("/c", mismatch("c")),
             ]
         };
+
         let only_unplaced = || vec![candidate("/a", unplaced())];
 
         // Nothing found is a missing file in either mode.

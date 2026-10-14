@@ -15,6 +15,7 @@ use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures, st
 use crate::type_identity::{
     ANONYMOUS_NAMESPACE, NameIndex as _, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
+
 use crate::{
     ArgumentOrigin, ArrayBound, ArrayExtent, GoKind, GoTypeAttributes, ModuleImageId,
     RuntimeDimension, SourceLanguage, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
@@ -42,6 +43,7 @@ const INLINE_NAMESPACES: [&str; 6] = ["__1", "__Cr", "__ndk1", "__cxx11", "__8",
 pub(super) struct ScopePath {
     /// The named scopes.
     pub(super) path: Arc<[Arc<str>]>,
+
     /// The inline namespaces among them, which names may spell or omit.
     pub(super) inline: Arc<[Arc<str>]>,
 }
@@ -57,8 +59,10 @@ impl ScopePath {
 pub(super) struct IdentityParts {
     /// The DIE the type was built from.
     pub(super) die: DieKey,
+
     /// Arguments from template parameter DIEs, by position.
     pub(super) template: Vec<TypeArgument>,
+
     /// Where a template parameter pack's arguments begin.
     pub(super) pack: Option<usize>,
 }
@@ -84,15 +88,19 @@ impl GoParts {
 pub(super) enum ScopeSegment {
     /// A named type, whose nested types it scopes.
     Named(Arc<str>),
+
     /// A namespace not marked inline here, which may still be inline: GCC
     /// copies namespaces into type units without their marks. `listed`
     /// when its unit predates the mark and its name is in
     /// [`INLINE_NAMESPACES`].
     Namespace { name: Arc<str>, listed: bool },
+
     /// A function, whose name may live on its declaration.
     Function(DieKey),
+
     /// An inline namespace, which names need not spell.
     Inline(Arc<str>),
+
     /// A scope that names nothing, such as an anonymous type.
     Transparent,
 }
@@ -130,6 +138,7 @@ pub(in crate::debug_info) fn produced_language(
     if name.is_some_and(|name| name.ends_with(".nim.c")) {
         return Some(SourceLanguage::Nim);
     }
+
     let producer = producer?;
     if producer.starts_with("zig ") {
         Some(SourceLanguage::Zig)
@@ -149,9 +158,11 @@ pub(in crate::debug_info) const fn source_language(
     if let Some(produced) = produced {
         return produced;
     }
+
     let Some(language) = language else {
         return SourceLanguage::Unknown;
     };
+
     match language {
         gimli::DW_LANG_C89
         | gimli::DW_LANG_C
@@ -217,6 +228,7 @@ pub(super) fn scope_segment(
             .ok()
             .flatten()
     };
+
     match entry.tag() {
         gimli::DW_TAG_namespace => {
             let exported = entry.attr_value(gimli::DW_AT_export_symbols);
@@ -239,6 +251,7 @@ pub(super) fn scope_segment(
                 },
             })
         }
+
         gimli::DW_TAG_structure_type
         | gimli::DW_TAG_class_type
         | gimli::DW_TAG_union_type
@@ -281,6 +294,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             if entry.attr_value(gimli::DW_AT_name).is_some() {
                 return string_attribute(self.dwarf, unit, &entry, gimli::DW_AT_name).ok()?;
             }
+
             let reference = entry
                 .attr_value(gimli::DW_AT_specification)
                 .or_else(|| entry.attr_value(gimli::DW_AT_abstract_origin));
@@ -292,6 +306,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             )
             .ok()??;
         }
+
         None
     }
 
@@ -333,6 +348,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 ScopeSegment::Transparent => {}
             }
         }
+
         ScopePath {
             path: path.into(),
             inline: inline.into(),
@@ -365,14 +381,17 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             | gimli::DW_TAG_template_alias => self.template_arguments(entry, die.unit),
             _ => (Vec::new(), None),
         };
+
         if self.language(die.unit) == SourceLanguage::Go
             && let Some(go) = self.go_parts(entry, die.unit)
         {
             self.go_identity_parts.insert(id, go);
         }
+
         if self.identity_parts.len() <= id.index() {
             self.identity_parts.resize_with(id.index() + 1, || None);
         }
+
         self.identity_parts[id.index()] = Some(IdentityParts {
             die,
             template,
@@ -390,12 +409,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     ) -> (Vec<TypeArgument>, Option<usize>) {
         let mut arguments = Vec::new();
         let mut pack = None;
+
         // Every named aggregate comes here, so its children, mostly its
         // members, are read in place rather than cloned to find the few
         // that are parameters.
         let Ok(mut children) = self.children(unit_index, entry.offset()) else {
             return (arguments, pack);
         };
+
         // LDC describes an associative array as a record holding typedefs
         // of its key and value types.
         let d = self.language(unit_index) == SourceLanguage::D;
@@ -405,6 +426,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             if read == MAX_RECORD_CHILDREN {
                 break;
             }
+
             read += 1;
             if d && child.tag() == gimli::DW_TAG_typedef {
                 let name = self.units.get(unit_index).and_then(|unit| {
@@ -417,17 +439,20 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     Some(D_VALUE) => 1,
                     _ => continue,
                 };
+
                 associative[slot] = self.target(child, unit_index).ok().flatten();
             } else if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
                 pack = pack.or(Some(arguments.len()));
                 let Ok(mut parameters) = self.children(unit_index, child.offset()) else {
                     continue;
                 };
+
                 let mut read = 0;
                 while let Ok(Some(parameter)) = parameters.next_child() {
                     if read == MAX_RECORD_CHILDREN {
                         break;
                     }
+
                     read += 1;
                     if let Some(argument) = self.parameter_argument(parameter, unit_index) {
                         arguments.push(argument);
@@ -437,9 +462,11 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 arguments.push(argument);
             }
         }
+
         if let ([Some(key), Some(value)], true) = (associative, arguments.is_empty()) {
             arguments = vec![TypeArgument::Type(key), TypeArgument::Type(value)];
         }
+
         (arguments, pack)
     }
 
@@ -453,22 +480,27 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             let Some(unit) = self.units.get(current.unit) else {
                 break;
             };
+
             let Ok(entry) = unit.entry(gimli::UnitOffset(current.offset)) else {
                 break;
             };
+
             let mut generics = Vec::new();
             let Ok(mut children) = self.children(current.unit, entry.offset()) else {
                 break;
             };
+
             let mut read = 0;
             while let Ok(Some(child)) = children.next_child() {
                 if read == MAX_RECORD_CHILDREN {
                     break;
                 }
+
                 read += 1;
                 if child.tag() != gimli::DW_TAG_template_type_parameter {
                     continue;
                 }
+
                 let name = string_attribute(self.dwarf, unit, child, gimli::DW_AT_name)
                     .ok()
                     .flatten();
@@ -476,9 +508,11 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     generics.push((name, target.id));
                 }
             }
+
             if !generics.is_empty() {
                 return generics;
             }
+
             let reference = entry
                 .attr_value(gimli::DW_AT_specification)
                 .or_else(|| entry.attr_value(gimli::DW_AT_abstract_origin));
@@ -492,6 +526,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 _ => break,
             }
         }
+
         Vec::new()
     }
 
@@ -545,6 +580,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         ) else {
             return false;
         };
+
         self.units
             .get(target.unit)
             .and_then(|unit| unit.entry(gimli::UnitOffset(target.offset)).ok())
@@ -605,6 +641,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 id: self.resolve(key),
             })
         };
+
         let (key, element) = match kind {
             GoKind::Map => (reference(DW_AT_GO_KEY), reference(DW_AT_GO_ELEM)),
             GoKind::Chan | GoKind::Slice | GoKind::Array | GoKind::Pointer => {
@@ -612,6 +649,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
             _ => (None, None),
         };
+
         Some(GoParts {
             attributes: GoTypeAttributes {
                 kind,
@@ -630,6 +668,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             gimli::AttributeValue::Data1(kind) => kind,
             value => u8::try_from(value.udata_value()?).ok()?,
         };
+
         Some(GoKind::from_abi(kind))
     }
 
@@ -652,12 +691,15 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 if !self.explicit_names.contains(id.index()) {
                     return None;
                 }
+
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(index) else {
                     return None;
                 };
+
                 let parts = self.identity_parts.get(index)?.as_ref()?;
                 let go = self.go_identity_parts.get(&id);
                 let language = self.language(parts.die.unit);
+
                 // Nim's C names each seq type for a hash of its element
                 // type; it is that type's `seq`.
                 if language == SourceLanguage::Nim
@@ -673,8 +715,10 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                         origin: ArgumentOrigin::Dwarf,
                         go: None,
                     };
+
                     return Some((index, language, Arc::new(identity), Vec::new()));
                 }
+
                 // D's associative arrays are each `AssociativeArray` of
                 // their key and value types, as druntime once named them.
                 if language == SourceLanguage::D && d_associative_array(info, parts) {
@@ -688,10 +732,13 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                         origin: ArgumentOrigin::Dwarf,
                         go: None,
                     };
+
                     return Some((index, language, Arc::new(identity), Vec::new()));
                 }
+
                 let parsed = TypeName::parse(&info.name, NameSyntax::of(language));
                 let scopes = self.type_path(parts.die);
+
                 // Only Go, Zig, and Odin names spell their packages and
                 // modules.
                 let path = if parsed.path.is_empty() {
@@ -704,11 +751,13 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                         .chain(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)))
                         .collect()
                 };
+
                 let base = if parsed.base == &*info.name {
                     Arc::clone(&info.name)
                 } else {
                     Arc::from(parsed.base)
                 };
+
                 let (arguments, origin, pending) =
                     merge_arguments(parts, go, parsed.arguments.as_deref());
                 let pack = parts.pack.filter(|start| *start <= arguments.len());
@@ -717,6 +766,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 } else {
                     arguments.into()
                 };
+
                 let identity = TypeIdentity {
                     language,
                     path,
@@ -727,6 +777,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     origin,
                     go: go.map(|go| go.attributes),
                 };
+
                 Some((index, language, Arc::new(identity), pending))
             })
             .collect::<Vec<_>>();
@@ -738,6 +789,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     positions,
                 });
             }
+
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
                 info.identity = Some(identity);
             }
@@ -763,12 +815,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             }
             _ => None,
         };
+
         let resolved = |reference: TypeReference| {
             let mut id = reference.id;
             for _ in 0..MAX_TYPE_RESOLUTION_DEPTH {
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(id.index()) else {
                     return None;
                 };
+
                 match &info.kind {
                     TypeKind::Named {
                         target: Some(target),
@@ -778,11 +832,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     _ => return Some(info),
                 }
             }
+
             None
         };
+
         if !info.name.starts_with("tySequence__") {
             return None;
         }
+
         let seq = members(info, ["len", "p"])?;
         let TypeKind::Pointer {
             target: Some(content),
@@ -791,6 +848,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         else {
             return None;
         };
+
         let content = members(resolved(content)?, ["cap", "data"])?;
         match &resolved(content[1].type_ref)?.kind {
             TypeKind::RuntimeArray {
@@ -846,6 +904,7 @@ fn d_associative_array(info: &TypeInfo, parts: &IdentityParts) -> bool {
     else {
         return false;
     };
+
     info.name.ends_with(']')
         && matches!(
             parts.template.as_slice(),
@@ -881,6 +940,7 @@ pub(super) fn resolve_parsed_arguments(
     if pending.is_empty() {
         return;
     }
+
     let alike = Alike::new(classes);
     let lookup = EntryLookup(entries);
     let index_phase = crate::span!("types.identities.index");
@@ -895,6 +955,7 @@ pub(super) fn resolve_parsed_arguments(
     );
     drop(index_phase);
     let _resolve_phase = crate::span!("types.identities.resolve");
+
     // The first pointer type to each type, by the target's identity, for
     // arguments spelled as pointers.
     let mut pointers = HashMap::new();
@@ -925,12 +986,14 @@ pub(super) fn resolve_parsed_arguments(
             }
         }
     }
+
     // Many names spell the same argument, which resolves alike each time,
     // so each spelling resolves once. A spelling's answer depends on nothing
     // but the spelling, and finding it searches every type its base names,
     // thousands in a large program, so the spellings resolve in parallel.
     let (spellings, ordered) = spellings(entries, pending);
     crate::count!("type_arguments_spelled", ordered.len());
+
     // An indexed collect splits alike however the work is stolen.
     let answers = ordered
         .par_iter()
@@ -944,20 +1007,25 @@ pub(super) fn resolve_parsed_arguments(
         let Some(TypeEntry::Resolved(info)) = entries.get(pending.entry) else {
             continue;
         };
+
         let Some(identity) = &info.identity else {
             continue;
         };
+
         let mut arguments = identity.arguments.to_vec();
         for position in &pending.positions {
             let TypeArgument::Unknown(text) = &arguments[*position] else {
                 continue;
             };
+
             if let Some(found) = &answers[spellings[&(Arc::clone(text), pending.language)]] {
                 arguments[*position] = found.clone();
             }
         }
+
         resolved.push((pending.entry, arguments));
     }
+
     for (entry, arguments) in resolved {
         if let Some(TypeEntry::Resolved(info)) = entries.get_mut(entry)
             && let Some(identity) = &mut info.identity
@@ -986,6 +1054,7 @@ fn spellings(
         else {
             continue;
         };
+
         for position in &pending.positions {
             if let Some(TypeArgument::Unknown(text)) = identity.arguments.get(*position) {
                 spellings
@@ -997,6 +1066,7 @@ fn spellings(
             }
         }
     }
+
     (spellings, ordered)
 }
 
@@ -1015,8 +1085,10 @@ impl<'a> Alike<'a> {
             if class >= members.len() {
                 members.resize_with(class + 1, Vec::new);
             }
+
             members[class].push(TypeId::new(super::row(index)));
         }
+
         Self { classes, members }
     }
 
@@ -1070,6 +1142,7 @@ fn merge_arguments(
             (None, Some(element)) => vec![element],
             _ => Vec::new(),
         };
+
         if !described.is_empty() {
             return (
                 described.into_iter().map(TypeArgument::Type).collect(),
@@ -1078,12 +1151,14 @@ fn merge_arguments(
             );
         }
     }
+
     let unknown = |text: &str| TypeArgument::Unknown(Arc::from(text));
     let parsed = |texts: &[&str]| {
         let arguments = texts.iter().map(|text| unknown(text)).collect::<Vec<_>>();
         let pending = (0..arguments.len()).collect();
         (arguments, ArgumentOrigin::ParsedName, pending)
     };
+
     let template = &parts.template;
     match named {
         _ if template.is_empty() => match named {
@@ -1108,6 +1183,7 @@ fn merge_arguments(
                 .collect();
             (arguments, ArgumentOrigin::Dwarf, pending)
         }
+
         // rustc omits const parameters: the name's integers fill the
         // positions the parameters skip, if that accounts for every one.
         Some(texts) if texts.len() > template.len() => {
@@ -1124,6 +1200,7 @@ fn merge_arguments(
                 Some(arguments) if described.next().is_none() => {
                     (arguments, ArgumentOrigin::Dwarf, Vec::new())
                 }
+
                 // Positions the parameters cannot be placed in come from
                 // the name alone, rather than out of place.
                 _ => parsed(texts),
@@ -1147,6 +1224,7 @@ fn resolve_argument(
     if let Some(value) = parse_integer(text) {
         return Some(TypeArgument::Value(value));
     }
+
     // A pointer, as GCC spells `int*` in a pack it leaves out: the pointer
     // type whose target is the type its spelling resolves to.
     if let Some(target) = text.trim_end().strip_suffix('*') {
@@ -1155,11 +1233,13 @@ fn resolve_argument(
         else {
             return None;
         };
+
         return pointers
             .get(index.key(target)?)
             .copied()
             .map(TypeArgument::Type);
     }
+
     let mut named = index
         .named(text, true, lookup)
         .into_iter()

@@ -106,6 +106,7 @@ async fn check_parsed(scenario: &Scenario, fixture: &str) {
         Some(4),
         "{fixture}"
     );
+
     // Each declaration is an interface, shown as what it holds. A
     // position is one past the offset of the keyword that begins it.
     let source = std::fs::read_to_string(INPUT).expect("read the input");
@@ -115,6 +116,7 @@ async fn check_parsed(scenario: &Scenario, fixture: &str) {
             .expect("a declaration")
             + 2
     };
+
     for (index, keyword) in ["import", "type", "var"].into_iter().enumerate() {
         let declaration = written(&evaluate(scenario, &format!("src.Decls[{index}]")).await);
         let shown = format!(
@@ -124,6 +126,7 @@ async fn check_parsed(scenario: &Scenario, fixture: &str) {
         );
         assert!(declaration.starts_with(&shown), "{fixture}: {declaration}");
     }
+
     let function = written(&evaluate(scenario, "src.Decls[3]").await);
     assert!(
         function.starts_with("*go/ast.FuncDecl *{Doc: nil, Recv: nil,"),
@@ -142,6 +145,7 @@ async fn check_keywords(scenario: &Scenario, fixture: &str) {
     else {
         panic!("{fixture}: {map:?}");
     };
+
     assert_eq!(
         presentation.count,
         Some(PresentedCount::Exact(KEYWORDS.len() as u64)),
@@ -150,6 +154,7 @@ async fn check_keywords(scenario: &Scenario, fixture: &str) {
     let ValueChildren::Available(reference) = &presentation.children else {
         panic!("{fixture}: {presentation:?}");
     };
+
     let page = scenario
         .operation(
             "keywords",
@@ -222,8 +227,10 @@ async fn walk_the_printer(scenario: &mut Scenario, fixture: &str) -> Vec<u64> {
             assert_eq!(function, "go/printer.(*printer).printNode", "{fixture}");
             return lines;
         }
+
         lines.push(line);
     }
+
     panic!("{fixture}: the walk never left the printer: {lines:?}");
 }
 
@@ -240,6 +247,7 @@ async fn gofmt_formats_under_the_debugger_as_it_does_alone() {
         let scratch = ScratchDir::new("gofmt");
         let output = scratch.path().join("stdout");
         let mut scenario = checked(fixture);
+
         // One by its package's path, one by its package's name.
         let printer = scenario.add_breakpoint("go/printer.(*printer).file").await;
         let parser = scenario.add_breakpoint("parser.ParseFile").await;
@@ -289,8 +297,10 @@ async fn gofmt_formats_under_the_debugger_as_it_does_alone() {
                 "{fixture}: {function} in {printing:?}"
             );
         }
+
         check_parsed(&scenario, fixture).await;
         check_keywords(&scenario, fixture).await;
+
         // Unoptimized, the walk is the body's lines in order; optimized,
         // it may go back to a line whose work was interleaved with
         // another's, but it stops at every line of the body and no other.
@@ -299,6 +309,7 @@ async fn gofmt_formats_under_the_debugger_as_it_does_alone() {
         if fixture.ends_with("o0") {
             assert_eq!(walked, body.clone().collect::<Vec<_>>(), "{fixture}");
         }
+
         assert!(
             walked.iter().all(|line| body.contains(line)),
             "{fixture}: {walked:?}"

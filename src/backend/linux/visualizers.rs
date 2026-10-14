@@ -48,6 +48,7 @@ impl<P: InspectionOps> Controller<P> {
                 return Err(Error::ViewFailed(problem.to_string().into()));
             }
         };
+
         let mut read = 0_u64;
         let inputs = inputs
             .into_iter()
@@ -62,6 +63,7 @@ impl<P: InspectionOps> Controller<P> {
                         }
                     }
                 };
+
                 VisualizerInput { name, value, path }
             })
             .collect();
@@ -90,6 +92,7 @@ impl<P: InspectionOps> Controller<P> {
         if address == 0 && length > 0 {
             return Err("`bytes` reads at a null pointer".into());
         }
+
         self.read_block(address, length)
             .map_err(|error| Arc::from(error.to_string()))
     }
@@ -132,20 +135,25 @@ impl<P: InspectionOps> Controller<P> {
         let Some((address, count, element, stride)) = self.contiguous(reference)? else {
             return Ok(None);
         };
+
         let Some(kind) = self.number_kind(element) else {
             return Ok(None);
         };
+
         let Some(size) = count.checked_mul(kind.size()) else {
             return Ok(None);
         };
+
         if stride != kind.size() || size > most_bytes {
             return Ok(None);
         }
+
         let bytes = if size == 0 {
             Arc::from([])
         } else {
             self.read_block(address, size)?
         };
+
         Ok(Some(Numbers {
             stop_id: reference.stop_id,
             kind,
@@ -165,6 +173,7 @@ impl<P: InspectionOps> Controller<P> {
             if view.picked.is_some() {
                 return Ok(None);
             }
+
             // A view that presents the value as another lends that one's
             // elements.
             if let Some(inner) = &view.inner {
@@ -172,6 +181,7 @@ impl<P: InspectionOps> Controller<P> {
                     .contiguous(inner)?
                     .filter(|(_, count, ..)| *count == view.elements));
             }
+
             let bound = Self::view_bound(reference)?;
             let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
             let root = self.stack_root(reference.stop_id, reference.context)?;
@@ -189,20 +199,25 @@ impl<P: InspectionOps> Controller<P> {
                 Err(Failure::Problem(_)) => Ok(None),
             };
         }
+
         let Some(types) = self.types(reference.image) else {
             return Ok(None);
         };
+
         let types: &dyn TypeSource = &types;
         let ValueStorage::Memory(address) = reference.storage else {
             return Ok(None);
         };
+
         if reference.placement.is_some() {
             return Ok(None);
         }
+
         let ty = TypeReference {
             image: reference.image,
             id: reference.target_type,
         };
+
         let element = match representation(types, ty).map(|(_, info)| &info.kind) {
             Ok(TypeKind::Array {
                 element,
@@ -216,9 +231,11 @@ impl<P: InspectionOps> Controller<P> {
             }) => *element,
             _ => return Ok(None),
         };
+
         let Some(stride) = types.type_info(element).and_then(|info| info.byte_size) else {
             return Ok(None);
         };
+
         Ok(Some((address.get(), reference.total, element, stride)))
     }
 
@@ -230,9 +247,11 @@ impl<P: InspectionOps> Controller<P> {
         let TypeKind::Base(base) = &info.kind else {
             return None;
         };
+
         if base.bit_size.is_some_and(|bits| bits != base.byte_size * 8) {
             return None;
         }
+
         Some(match (base.encoding, base.byte_size) {
             (BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter, 1) => NumberKind::I8,
             (BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter, 1) => NumberKind::U8,

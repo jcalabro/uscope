@@ -15,9 +15,11 @@ pub enum Incoming {
         command: String,
         arguments: Value,
     },
+
     /// The client's answer to a reverse request.
     Response {
         request_seq: Option<u64>,
+
         /// The response's body, or its error message.
         result: Result<Value, String>,
     },
@@ -28,12 +30,16 @@ pub enum Incoming {
 pub enum MessageError {
     #[error("the message is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
+
     #[error("the message is not a JSON object")]
     NotAnObject,
+
     #[error("the message has no `type`")]
     MissingType,
+
     #[error("the request has no `command`")]
     MissingCommand,
+
     #[error("unsupported message type {0:?}")]
     UnsupportedType(String),
 }
@@ -59,6 +65,7 @@ pub fn parse(body: &[u8]) -> Result<Incoming, MessageError> {
     let Value::Object(mut object) = value else {
         return Err(MessageError::NotAnObject);
     };
+
     let kind = object
         .get("type")
         .and_then(Value::as_str)
@@ -104,6 +111,7 @@ pub enum Outgoing {
         event: &'static str,
         body: Value,
     },
+
     /// A reverse request, whose response settles `ticket`.
     Request {
         command: &'static str,
@@ -178,6 +186,7 @@ pub struct ErrorBody {
     /// The raw error in short form: `notStopped`, `cancelled`, or the
     /// message itself.
     pub short: String,
+
     /// The message shown to the user.
     pub format: String,
     pub show_user: bool,
@@ -237,6 +246,7 @@ pub struct InitializeArguments {
     pub supports_progress_reporting: Option<bool>,
     pub supports_invalidated_event: Option<bool>,
     pub supports_memory_event: Option<bool>,
+
     #[serde(rename = "supportsANSIStyling")]
     pub supports_ansi_styling: Option<bool>,
 }
@@ -263,6 +273,7 @@ pub struct SourceBreakpoint {
 pub struct SetBreakpointsArguments {
     pub source: Source,
     pub breakpoints: Option<Vec<SourceBreakpoint>>,
+
     /// The deprecated form of `breakpoints`: lines only.
     pub lines: Option<Vec<i64>>,
 }
@@ -335,6 +346,7 @@ pub struct DataBreakpointInfoArguments {
 pub struct DataBreakpoint {
     pub data_id: String,
     pub access_type: Option<String>,
+
     /// One of the adapter's `breakpointModes`.
     pub mode: Option<String>,
     pub condition: Option<String>,
@@ -439,6 +451,7 @@ pub struct ThreadArguments {
     pub thread_id: i64,
     pub single_thread: Option<bool>,
     pub granularity: Option<String>,
+
     /// For `stepIn`, the `stepInTargets` target to go into.
     pub target_id: Option<i64>,
 }
@@ -552,11 +565,13 @@ mod tests {
             else {
                 panic!("not a request");
             };
+
             assert_eq!(
                 (parsed, command.as_str(), arguments),
                 (seq, "threads", json!({}))
             );
         }
+
         assert!(matches!(
             parse(br#"{"seq":1,"type":"event","event":"x"}"#),
             Err(MessageError::UnsupportedType(kind)) if kind == "event"

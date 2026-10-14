@@ -9,6 +9,7 @@ use crate::debug_info::dwarf::DwarfError;
 use crate::debug_info::{
     ObjectStorage, PlannedStep, Step, StorageClass, VariableContext, VariableRuntime,
 };
+
 use crate::inspection::InspectionBudget;
 use crate::model::{ArrayDimension, ArrayOrdering, ValueStorage};
 use crate::{
@@ -25,10 +26,12 @@ use super::codec::{
     complex_part, decode_address, decode_integer_value, decode_scalar, significant_bytes,
     unsigned_value,
 };
+
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate,
     evaluate_dynamic_aggregate_address, materialize_constant,
 };
+
 use super::generic::Generic;
 use super::location::{Expression, ExpressionUse, LocationSelectionError, select};
 use super::pieces::storage_from_pieces;
@@ -37,15 +40,18 @@ use super::shape::tagless_variant;
 use super::shape::{
     ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
 };
+
 use super::storage;
 use super::types::{
     DynamicAggregateChild, DynamicAggregateLayoutKey, TypeResolution, type_info_from,
 };
+
 use super::variant::selected_variant_index;
 use super::{
     ConstantValue, DwarfVariableInfo, MAX_AGGREGATE_DEPTH, MAX_EVALUATION_MEMORY_BYTES, Metadata,
     MetadataAbsence, ValueDescription, malformed_reason,
 };
+
 use crate::image::variables::{Capture, Object, VariableFunction};
 
 /// One transition between storages, planned from types alone. Index steps
@@ -62,6 +68,7 @@ pub(in crate::debug_info) enum PathStep {
         ordering: ArrayOrdering,
         element_size: u64,
     },
+
     /// An index into the array bounded at run time `array`, whose value
     /// finds its bounds.
     RuntimeArrayIndex {
@@ -90,11 +97,14 @@ pub(in crate::debug_info) struct PlannedMemberStep {
 struct MemberHop {
     aggregate: TypeId,
     child: DynamicAggregateChild,
+
     /// The member, or a base class as the member it amounts to.
     member: RecordMember,
+
     /// Whether the hop enters a virtual base, which every path through it
     /// shares.
     virtual_base: bool,
+
     /// The dereference that follows the member, when it is an embedded
     /// pointer whose members Go promotes.
     then: Option<PathStep>,
@@ -124,6 +134,7 @@ fn one_subobject(paths: &[Vec<MemberHop>]) -> Option<&[MemberHop]> {
                 .collect::<Vec<_>>(),
         )
     };
+
     let (first, rest) = paths.split_first()?;
     let expected = key(first);
     rest.iter()
@@ -245,6 +256,7 @@ pub(in crate::debug_info) fn array_byte_offset(
     else {
         return Ok(None);
     };
+
     element_byte_offset(dimensions, *ordering, indices, *element_size).map(Some)
 }
 
@@ -263,6 +275,7 @@ fn element_byte_offset(
             indices.len()
         )));
     }
+
     let mut position = Vec::with_capacity(indices.len());
     for (index, dimension) in indices.iter().copied().zip(dimensions.iter()) {
         let relative = index
@@ -276,10 +289,12 @@ fn element_byte_offset(
             })?;
         position.push((relative, dimension.count));
     }
+
     // The dimension whose elements are adjacent comes last.
     if ordering == ArrayOrdering::ColumnMajor {
         position.reverse();
     }
+
     let mut linear = 0_u64;
     for (relative, count) in position {
         linear = linear
@@ -289,6 +304,7 @@ fn element_byte_offset(
                 Error::InvalidValueExpression("array element index overflows".to_owned())
             })?;
     }
+
     linear
         .checked_mul(element_size)
         .and_then(|offset| i64::try_from(offset).ok())
@@ -305,6 +321,7 @@ fn array_source_indices(dimensions: &[ArrayDimension], index: u64) -> Result<Vec
                 "a non-empty array page has a zero-sized dimension".into(),
             )));
         }
+
         let relative = remaining % dimension.count;
         remaining /= dimension.count;
         indices[dimension_index] = dimension
@@ -316,6 +333,7 @@ fn array_source_indices(dimensions: &[ArrayDimension], index: u64) -> Result<Vec
                 ))
             })?;
     }
+
     Ok(indices)
 }
 
@@ -329,6 +347,7 @@ pub(super) fn static_member_layout_is_valid(
             let Some(record_size) = record_size else {
                 return false;
             };
+
             offset <= record_size
                 && member_size.is_none_or(|size| {
                     offset
@@ -336,6 +355,7 @@ pub(super) fn static_member_layout_is_valid(
                         .is_some_and(|end| end <= record_size)
                 })
         }
+
         RecordMemberLayout::BitRange {
             bit_offset,
             bit_size,
@@ -374,6 +394,7 @@ fn symbolic(
             matches: exact.into(),
         };
     }
+
     // Bit patterns in the type's width, where a signed type's lowest
     // value is one bit.
     let mask = u32::try_from(byte_size.saturating_mul(8))
@@ -384,6 +405,7 @@ fn symbolic(
         IntegerValue::Signed(value) => value.cast_unsigned() & mask,
         IntegerValue::Unsigned(value) => value & mask,
     };
+
     let mut remaining = bits(value);
     let mut flags = Vec::new();
     for enumerator in enumerators {
@@ -393,18 +415,21 @@ fn symbolic(
             flags.push(enumerator.clone());
         }
     }
+
     if remaining == 0 && !flags.is_empty() {
         return VariableValue::Enumeration {
             value,
             matches: flags.into(),
         };
     }
+
     if language {
         return VariableValue::Enumeration {
             value,
             matches: Arc::from([]),
         };
     }
+
     VariableValue::Scalar(match value {
         IntegerValue::Signed(value) => ScalarValue::Signed(value),
         IntegerValue::Unsigned(value) => ScalarValue::Unsigned(value),
@@ -419,6 +444,7 @@ fn are_flags(enumerators: &[crate::Enumerator]) -> bool {
         IntegerValue::Signed(value) => u128::try_from(value).ok(),
         IntegerValue::Unsigned(value) => Some(value),
     };
+
     let mut bits = 0_u128;
     let mut zero = false;
     for enumerator in enumerators {
@@ -428,6 +454,7 @@ fn are_flags(enumerators: &[crate::Enumerator]) -> bool {
             _ => return false,
         }
     }
+
     bits.count_ones() >= 2 && !(zero && bits == 0b11)
 }
 
@@ -443,6 +470,7 @@ impl DwarfVariableInfo {
                 ranges,
             };
         };
+
         let tables = self.locations();
         let location = tables.list(location);
         let mut uses = BTreeSet::new();
@@ -454,6 +482,7 @@ impl DwarfVariableInfo {
                 };
             }
         }
+
         let class = if uses.contains(&ExpressionUse::ThreadLocal) {
             StorageClass::ThreadLocal
         } else if uses.contains(&ExpressionUse::Dereference) || object.escaped().is_some() {
@@ -470,11 +499,13 @@ impl DwarfVariableInfo {
                     .next()
                     .is_none_or(|first| entries.all(|bytes| bytes == first))
             };
+
             let single_frame_base = match object.frame_base() {
                 Metadata::Value(frame_base) => one_place(tables.list(frame_base)),
                 Metadata::Absent(_) => true,
                 Metadata::Malformed(_) => false,
             };
+
             StorageClass::Frame {
                 stable: one_place(location) && single_frame_base,
                 moving_stack: location.entries().any(|(_, expression)| {
@@ -484,6 +515,7 @@ impl DwarfVariableInfo {
         } else {
             StorageClass::Static
         };
+
         ObjectStorage { class, ranges }
     }
 
@@ -510,6 +542,7 @@ impl DwarfVariableInfo {
                 _ => None,
             });
         }
+
         Ok(())
     }
 
@@ -552,6 +585,7 @@ impl DwarfVariableInfo {
                 "record member extends beyond its containing object".into(),
             )));
         }
+
         Ok(())
     }
 
@@ -577,6 +611,7 @@ impl DwarfVariableInfo {
                     .to_owned(),
             ));
         }
+
         let malformed = |description| Error::debug_info(DwarfError::MalformedVariable(description));
         let info = self.type_info(aggregate).map_err(malformed)?;
         let (members, bases): (&[RecordMember], &[crate::BaseClass]) = match &info.kind {
@@ -584,6 +619,7 @@ impl DwarfVariableInfo {
             TypeKind::Union { members, .. } => (members, &[]),
             _ => return Ok(Vec::new()),
         };
+
         let hop = |index, member: &RecordMember| MemberHop {
             aggregate,
             child: DynamicAggregateChild::Member(index),
@@ -591,6 +627,7 @@ impl DwarfVariableInfo {
             virtual_base: false,
             then: None,
         };
+
         let mut found = members
             .iter()
             .enumerate()
@@ -601,18 +638,22 @@ impl DwarfVariableInfo {
             if member.name.is_some() || member.artificial || !found.is_empty() {
                 continue;
             }
+
             let Ok((inner, _)) = self.transparent_type(member.type_ref.id) else {
                 continue;
             };
+
             for path in self.member_paths(inner, name, work, depth + 1, enclosing)? {
                 let mut whole = vec![hop(index, member)];
                 whole.extend(path);
                 found.push(whole);
             }
         }
+
         if !found.is_empty() {
             return Ok(found);
         }
+
         enclosing.push(aggregate);
         let promoted = self.promoted_paths(aggregate, members, name, work, depth, enclosing);
         enclosing.pop();
@@ -620,16 +661,19 @@ impl DwarfVariableInfo {
         if !promoted.is_empty() {
             return Ok(promoted);
         }
+
         for (index, base) in bases.iter().enumerate() {
             let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
                 continue;
             };
+
             for path in self.member_paths(inner, name, work, depth + 1, enclosing)? {
                 let mut whole = vec![base_hop(aggregate, index, base)];
                 whole.extend(path);
                 found.push(whole);
             }
         }
+
         Ok(found)
     }
 
@@ -650,9 +694,11 @@ impl DwarfVariableInfo {
             if !member.embedded || member.artificial {
                 continue;
             }
+
             let Ok((inner, info)) = self.transparent_type(member.type_ref.id) else {
                 continue;
             };
+
             let (record, then) = match &info.kind {
                 TypeKind::Pointer {
                     target: Some(target),
@@ -661,6 +707,7 @@ impl DwarfVariableInfo {
                     let Ok((record, _)) = self.transparent_type(target.id) else {
                         continue;
                     };
+
                     let Some(byte_size) = supported_shape(indirection_byte_size(
                         info.byte_size,
                         *address_class,
@@ -669,18 +716,22 @@ impl DwarfVariableInfo {
                     else {
                         continue;
                     };
+
                     let step = PathStep::Dereference {
                         target: target.id,
                         byte_size,
                         address_class: *address_class,
                     };
+
                     (record, Some(step))
                 }
                 _ => (inner, None),
             };
+
             if enclosing.contains(&record) {
                 continue;
             }
+
             for path in self.member_paths(record, name, work, depth + 1, enclosing)? {
                 let mut whole = vec![MemberHop {
                     aggregate,
@@ -693,9 +744,11 @@ impl DwarfVariableInfo {
                 found.push(whole);
             }
         }
+
         if let Some(shallowest) = found.iter().map(Vec::len).min() {
             found.retain(|path| path.len() == shallowest);
         }
+
         Ok(found)
     }
 
@@ -714,27 +767,32 @@ impl DwarfVariableInfo {
                 "looking up a base class exceeds its limit".to_owned(),
             ));
         }
+
         let malformed = |description| Error::debug_info(DwarfError::MalformedVariable(description));
         let info = self.type_info(aggregate).map_err(malformed)?;
         let TypeKind::Record { bases, .. } = &info.kind else {
             return Ok(Vec::new());
         };
+
         let mut found = Vec::new();
         for (index, base) in bases.iter().enumerate() {
             let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
                 continue;
             };
+
             let hop = base_hop(aggregate, index, base);
             if is_target(base.type_ref.id) || is_target(inner) {
                 found.push(vec![hop]);
                 continue;
             }
+
             for path in self.base_paths(inner, is_target, work, depth + 1)? {
                 let mut whole = vec![hop.clone()];
                 whole.extend(path);
                 found.push(whole);
             }
         }
+
         Ok(found)
     }
 
@@ -764,6 +822,7 @@ impl DwarfVariableInfo {
             consumed,
             result,
         };
+
         let unsupported =
             || PathStep::Unavailable(crate::UnsupportedVariableFeature::TypeRepresentation.into());
         let mut steps = Vec::new();
@@ -780,6 +839,7 @@ impl DwarfVariableInfo {
                 let Some((_canonical, info)) = supported_shape(self.transparent_type(from))? else {
                     return Ok(planned(vec![unsupported()], 0, None));
                 };
+
                 let (target, address_class) = match &info.kind {
                     TypeKind::Pointer {
                         target: Some(target),
@@ -803,6 +863,7 @@ impl DwarfVariableInfo {
                         return Ok(planned(vec![PathStep::Unavailable(reason)], 0, None));
                     }
                 };
+
                 match supported_shape(indirection_byte_size(
                     info.byte_size,
                     address_class,
@@ -815,6 +876,7 @@ impl DwarfVariableInfo {
                     }),
                     None => steps.push(unsupported()),
                 }
+
                 Ok(planned(steps, 0, Some(target)))
             }
             Step::Base(target) => {
@@ -823,9 +885,11 @@ impl DwarfVariableInfo {
                         .map(|info| Arc::clone(&info.name))
                         .map_err(malformed)
                 };
+
                 let Some((aggregate, _)) = supported_shape(self.transparent_type(from))? else {
                     return Ok(planned(vec![unsupported()], 0, None));
                 };
+
                 let paths = self.base_paths(aggregate, target.is_target, &mut 0, 0)?;
                 let Some(path) = one_subobject(&paths) else {
                     let base = Arc::from(target.name);
@@ -836,6 +900,7 @@ impl DwarfVariableInfo {
                         Error::AmbiguousBase { base, type_name }
                     });
                 };
+
                 let result = self.plan_hops(path, &mut steps)?;
                 Ok(planned(steps, 0, result))
             }
@@ -844,6 +909,7 @@ impl DwarfVariableInfo {
                 let Some((canonical, info)) = supported_shape(self.transparent_type(from))? else {
                     return Ok(planned(vec![unsupported()], 1, None));
                 };
+
                 let (element, consumed) = match &info.kind {
                     TypeKind::RuntimeArray {
                         element,
@@ -857,9 +923,11 @@ impl DwarfVariableInfo {
                                 supplied: available,
                             });
                         }
+
                         steps.push(PathStep::RuntimeArrayIndex { array: canonical });
                         return Ok(planned(steps, dimensions.len(), Some(element.id)));
                     }
+
                     TypeKind::Array {
                         element,
                         dimensions,
@@ -872,6 +940,7 @@ impl DwarfVariableInfo {
                                 supplied: available,
                             });
                         }
+
                         (element.id, dimensions.len())
                     }
                     TypeKind::Slice { element, .. } => (element.id, 1),
@@ -881,9 +950,11 @@ impl DwarfVariableInfo {
                         });
                     }
                 };
+
                 let Some(element_shape) = supported_shape(self.value_shape(element))? else {
                     return Ok(planned(vec![unsupported()], consumed, Some(element)));
                 };
+
                 let element_size = element_shape.byte_size();
                 match &info.kind {
                     TypeKind::Array {
@@ -911,6 +982,7 @@ impl DwarfVariableInfo {
                         ));
                     }
                 }
+
                 Ok(planned(steps, consumed, Some(element)))
             }
             Step::Member(member_name) => {
@@ -923,6 +995,7 @@ impl DwarfVariableInfo {
                         steps.push(unsupported());
                         return Ok(planned(steps, 0, None));
                     };
+
                     match &info.kind {
                         TypeKind::Pointer {
                             target: Some(target),
@@ -940,6 +1013,7 @@ impl DwarfVariableInfo {
                                         .to_owned(),
                                 ));
                             }
+
                             match supported_shape(indirection_byte_size(
                                 info.byte_size,
                                 *address_class,
@@ -952,11 +1026,13 @@ impl DwarfVariableInfo {
                                 }),
                                 None => steps.push(unsupported()),
                             }
+
                             current = target.id;
                         }
                         TypeKind::Record { .. } | TypeKind::Union { .. } => {
                             break (canonical, AggregateMembers::Direct);
                         }
+
                         TypeKind::Variant {
                             common_members,
                             discriminant,
@@ -980,11 +1056,13 @@ impl DwarfVariableInfo {
                         }
                     }
                 };
+
                 let lookup_failure = |found: usize| {
                     let type_name = match self.type_info(aggregate) {
                         Ok(info) => Arc::clone(&info.name),
                         Err(description) => return malformed(description),
                     };
+
                     let member = member_name.to_owned();
                     if found == 0 {
                         Error::MemberNotFound { member, type_name }
@@ -996,6 +1074,7 @@ impl DwarfVariableInfo {
                         }
                     }
                 };
+
                 let AggregateMembers::Variant {
                     common_members,
                     discriminant,
@@ -1015,14 +1094,18 @@ impl DwarfVariableInfo {
                                 candidates: paths.iter().map(|path| self.path_text(path)).collect(),
                             });
                         }
+
                         return Err(lookup_failure(paths.len()));
                     };
+
                     let result = self.plan_hops(path, &mut steps)?;
                     return Ok(planned(steps, 0, result));
                 };
+
                 let named = |member: &&RecordMember| {
                     !member.artificial && member.name.as_deref() == Some(member_name)
                 };
+
                 let mut matching = common_members
                     .iter()
                     .enumerate()
@@ -1052,9 +1135,11 @@ impl DwarfVariableInfo {
                             }),
                     );
                 }
+
                 let [(child, required_variant, member)] = matching.as_slice() else {
                     return Err(lookup_failure(matching.len()));
                 };
+
                 self.validate_static_member_layout(aggregate, member)?;
                 steps.push(PathStep::Member(Box::new(PlannedMemberStep {
                     aggregate,
@@ -1080,6 +1165,7 @@ impl DwarfVariableInfo {
             })));
             steps.extend(hop.then.clone());
         }
+
         Ok(path.last().map(|hop| hop.member.type_ref.id))
     }
 
@@ -1128,6 +1214,7 @@ impl DwarfVariableInfo {
         let [object] = named.as_slice() else {
             return Err(Error::AmbiguousVariable(name.to_owned()));
         };
+
         Ok(*object)
     }
 
@@ -1143,6 +1230,7 @@ impl DwarfVariableInfo {
         let Some(pointer) = variable.escaped() else {
             return Ok(storage);
         };
+
         // A variable moved to the heap is where its slot points.
         let byte_size = self
             .value_shape(pointer)
@@ -1158,6 +1246,7 @@ impl DwarfVariableInfo {
             )
             .into());
         }
+
         Ok(ValueStorage::Memory(address))
     }
 
@@ -1174,12 +1263,14 @@ impl DwarfVariableInfo {
         if let Some(description) = variable.malformed() {
             return Err(EvaluateError::Malformed(description));
         }
+
         let type_id = match variable.type_info() {
             TypeResolution::Resolved(id) => id,
             TypeResolution::Malformed(description) => {
                 return Err(EvaluateError::Malformed(description));
             }
         };
+
         let shape = self
             .value_shape(variable.escaped().unwrap_or(type_id))
             .map_err(EvaluateError::from)?;
@@ -1199,8 +1290,10 @@ impl DwarfVariableInfo {
                 return Err(EvaluateError::Malformed(description));
             }
         };
+
         if let ValueDescription::Constant(constant) = &description {
             let constant = &**constant;
+
             // An integer form holds at most 64 bits. Clang writes a wider
             // complex constant's real part alone that way, and the imaginary
             // part it leaves out is not zero.
@@ -1212,6 +1305,7 @@ impl DwarfVariableInfo {
                     "a complex constant wider than 64 bits is not a block".into(),
                 ));
             }
+
             let raw = materialize_constant(
                 constant,
                 usize::try_from(shape.byte_size())
@@ -1227,11 +1321,13 @@ impl DwarfVariableInfo {
                 address: None,
             });
         }
+
         let ValueDescription::Location(location) = description else {
             return Err(EvaluateError::Malformed(
                 "constant value reached location lookup".into(),
             ));
         };
+
         let expression = select(self.locations().list(location), address)
             .map_err(|error| match error {
                 LocationSelectionError::Unavailable(reason) => EvaluateError::Unavailable(reason),
@@ -1286,15 +1382,18 @@ impl DwarfVariableInfo {
         let Err(error) = whole else {
             return whole.map(|(source, raw)| (source, raw, false));
         };
+
         if significant == base.byte_size {
             return Err(error);
         }
+
         let narrowed = storage::narrow(storage.clone(), significant);
         let significant =
             usize::try_from(significant).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let Ok((source, raw)) = storage::read(&narrowed, significant, runtime, budget) else {
             return Err(error);
         };
+
         let mut padded = raw.to_vec();
         padded.resize(size, 0);
         Ok((source, padded.into(), true))
@@ -1309,6 +1408,7 @@ impl DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> std::result::Result<DecodedSlice, EvaluateError> {
         let pointer_bytes = self.pointer_bytes();
+
         // Validate the metadata's size before reading, so a bogus size cannot
         // spend the request's memory budget: a descriptor is a few words.
         let word_count = byte_size / pointer_bytes as u64;
@@ -1319,6 +1419,7 @@ impl DwarfVariableInfo {
                 "slice descriptor size does not match its target layout".into(),
             ));
         }
+
         let size =
             usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let (source, raw) = storage::read(storage, size, runtime, budget)?;
@@ -1334,6 +1435,7 @@ impl DwarfVariableInfo {
                     .map_err(|_| Arc::<str>::from("slice word exceeds target address width"))
             })
         };
+
         let address = word(words.data)
             .map(VirtualAddress::new)
             .map_err(EvaluateError::Malformed)?;
@@ -1345,15 +1447,18 @@ impl DwarfVariableInfo {
                     "slice length exceeds its capacity".into(),
                 ));
             }
+
             Some(capacity)
         } else {
             None
         };
+
         if address.get() == 0 && length != 0 {
             return Err(EvaluateError::Malformed(
                 "non-empty slice has a null data pointer".into(),
             ));
         }
+
         Ok(DecodedSlice {
             source,
             raw,
@@ -1380,8 +1485,10 @@ impl DwarfVariableInfo {
                 code: None,
                 function: None,
             };
+
             return Ok((value, ValueChildren::NotApplicable));
         }
+
         let size =
             usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let (_, word) = storage::read(&ValueStorage::Memory(closure), size, runtime, budget)?;
@@ -1404,10 +1511,12 @@ impl DwarfVariableInfo {
                 ))
             }
         };
+
         let value = VariableValue::Function {
             code: Some(code),
             function: function.and_then(VariableFunction::name).map(Arc::from),
         };
+
         Ok((value, children))
     }
 
@@ -1422,6 +1531,7 @@ impl DwarfVariableInfo {
         let malformed = |description: &str| {
             Error::debug_info(DwarfError::MalformedVariable(description.into()))
         };
+
         let size =
             usize::try_from(byte_size).map_err(|_| malformed("function value is too wide"))?;
         let captures = storage::read(closure, size, runtime, budget)
@@ -1449,11 +1559,13 @@ impl DwarfVariableInfo {
         let malformed = |description: &str| {
             Error::debug_info(DwarfError::MalformedVariable(description.into()))
         };
+
         let TypeResolution::Resolved(type_id) = &capture.type_info else {
             return Err(malformed(
                 "a closure's captured variable has a malformed type",
             ));
         };
+
         let (name, type_id, by_reference) = match capture.name.strip_prefix('&') {
             None => (Arc::clone(&capture.name), *type_id, false),
             Some(name) => {
@@ -1469,9 +1581,11 @@ impl DwarfVariableInfo {
                         "a variable a closure captured by reference is not a pointer",
                     ));
                 };
+
                 (Arc::from(name), target.id, true)
             }
         };
+
         let member = RecordMember {
             name: Some(name),
             type_ref: TypeReference { image, id: type_id },
@@ -1481,6 +1595,7 @@ impl DwarfVariableInfo {
             embedded: false,
             declaration: None,
         };
+
         Ok((member, by_reference))
     }
 
@@ -1489,6 +1604,7 @@ impl DwarfVariableInfo {
         if base.encoding != BaseTypeEncoding::ComplexFloating {
             return None;
         }
+
         let part = complex_part(base);
         self.type_facts()
             .complex_part(&part.base_name, part.byte_size)
@@ -1538,6 +1654,7 @@ impl DwarfVariableInfo {
                 ));
             }
         };
+
         let storage_bits = base
             .byte_size
             .checked_mul(8)
@@ -1547,6 +1664,7 @@ impl DwarfVariableInfo {
                 "bit-field width exceeds its declared scalar storage".into(),
             ));
         }
+
         let mut value = storage::read_bits(
             storage,
             bit_offset,
@@ -1563,6 +1681,7 @@ impl DwarfVariableInfo {
         {
             value |= u128::MAX << bit_size;
         }
+
         let byte_size = usize::try_from(base.byte_size)
             .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let full = value.to_le_bytes();
@@ -1570,6 +1689,7 @@ impl DwarfVariableInfo {
         if self.target.byte_order == ByteOrder::Big {
             raw.reverse();
         }
+
         let raw: Arc<[u8]> = raw.into();
         let end = raw.len();
         Ok(ValueStorage::Bytes {
@@ -1647,6 +1767,7 @@ impl DwarfVariableInfo {
                     )
                 });
         };
+
         let shape = self.value_shape(member.type_ref.id)?;
         let representation = match &shape {
             ValueShape::Scalar(base)
@@ -1664,6 +1785,7 @@ impl DwarfVariableInfo {
                 ));
             }
         };
+
         let selected = self.aggregate_child_storage(
             storage,
             aggregate,
@@ -1706,12 +1828,14 @@ impl DwarfVariableInfo {
                 budget,
             );
         };
+
         let referenced_type = match object.type_info() {
             TypeResolution::Resolved(id) => id,
             TypeResolution::Malformed(description) => {
                 return Err(EvaluateError::Malformed(description));
             }
         };
+
         let referenced_size = self.value_shape(referenced_type)?.byte_size();
         let target_size = self.value_shape(target)?.byte_size();
         implicit_pointer_range(byte_offset, target_size, referenced_size)
@@ -1723,6 +1847,7 @@ impl DwarfVariableInfo {
                 crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
             ));
         }
+
         storage::offset(referenced, byte_offset)
     }
 
@@ -1753,6 +1878,7 @@ impl DwarfVariableInfo {
                 return Err(EvaluateError::Malformed(description));
             }
         };
+
         let expression = select(self.locations().list(location), address)
             .map_err(|error| match error {
                 LocationSelectionError::Unavailable(reason) => EvaluateError::Unavailable(reason),
@@ -1763,6 +1889,7 @@ impl DwarfVariableInfo {
             .ok_or(EvaluateError::Unavailable(
                 VariableUnavailableReason::UnavailableAtInstruction,
             ))?;
+
         // A procedure belongs to no function, so it has no frame base.
         let pieces = evaluate(
             expression,
@@ -1782,10 +1909,12 @@ impl DwarfVariableInfo {
         else {
             return Err(crate::UnsupportedVariableFeature::ImplicitPointer.into());
         };
+
         let raw: Arc<[u8]> = Arc::from(value.slice());
         let target_size = self.value_shape(target)?.byte_size();
         let (start, _) = implicit_pointer_range(byte_offset, target_size, raw.len() as u64)
             .map_err(EvaluateError::Unavailable)?;
+
         // What follows the referent, such as the rest of a string, is the
         // procedure's too.
         let end = raw.len();
@@ -1829,6 +1958,7 @@ impl DwarfVariableInfo {
                 }
             };
         }
+
         for step in steps {
             storage = match step {
                 PathStep::Dereference {
@@ -1861,6 +1991,7 @@ impl DwarfVariableInfo {
                                 ),
                             )));
                         }
+
                         let size =
                             attempt!(usize::try_from(*byte_size).map_err(|_| {
                                 VariableUnavailableReason::EvaluationLimit.into()
@@ -1874,6 +2005,7 @@ impl DwarfVariableInfo {
                                 ),
                             )));
                         }
+
                         ValueStorage::Memory(pointer)
                     }
                 }
@@ -1898,6 +2030,7 @@ impl DwarfVariableInfo {
                                     indices.len()
                                 )));
                             }
+
                             let at = attempt!(element_offset(&dimensions, &strides, indices));
                             attempt!(storage::offset(data, at))
                         }
@@ -1910,6 +2043,7 @@ impl DwarfVariableInfo {
                         }
                     }
                 }
+
                 PathStep::SliceIndex {
                     element_size,
                     descriptor_size,
@@ -1921,6 +2055,7 @@ impl DwarfVariableInfo {
                             indices.len()
                         )));
                     };
+
                     let index =
                         u64::try_from(*index).map_err(|_| Error::ValueIndexOutOfBounds {
                             index: *index,
@@ -1943,6 +2078,7 @@ impl DwarfVariableInfo {
                             },
                         )));
                     }
+
                     let byte_offset = attempt!(
                         index
                             .checked_mul(*element_size)
@@ -1984,6 +2120,7 @@ impl DwarfVariableInfo {
                             )));
                         }
                     }
+
                     attempt!(self.aggregate_child_storage(
                         &storage,
                         *aggregate,
@@ -1999,6 +2136,7 @@ impl DwarfVariableInfo {
                 }
             };
         }
+
         Ok(Ok(storage))
     }
 
@@ -2021,6 +2159,7 @@ impl DwarfVariableInfo {
                 ));
             }
         };
+
         let state =
             self.materialize_value_state(type_id, &shape, storage, context, runtime, budget)?;
         Ok(inspected_value(Some(type_info), state, budget))
@@ -2056,6 +2195,7 @@ impl DwarfVariableInfo {
     ) -> Result<VariableState> {
         let mut state =
             self.materialize_shape_state(type_id, shape, storage, context, runtime, budget)?;
+
         // An array bounded at run time found its text where its elements are.
         if let VariableState::Available { value, text, .. } = &mut state
             && !matches!(shape, ValueShape::RuntimeArray { .. })
@@ -2072,6 +2212,7 @@ impl DwarfVariableInfo {
                 )
                 .map(Arc::new);
         }
+
         self.constrain_dereference(&mut state, shape);
         Ok(state)
     }
@@ -2099,6 +2240,7 @@ impl DwarfVariableInfo {
             text: None,
             presentation: None,
         };
+
         let with_children = |value, total, active| VariableState::Available {
             source: storage::source(storage),
             raw: None,
@@ -2110,6 +2252,7 @@ impl DwarfVariableInfo {
             text: None,
             presentation: None,
         };
+
         let read =
             |size: u64,
              runtime: &mut dyn VariableRuntime,
@@ -2134,6 +2277,7 @@ impl DwarfVariableInfo {
                                 "a scalar's significant bytes exceed its storage",
                             ));
                         };
+
                         leaf(
                             source,
                             Arc::from(significant),
@@ -2141,6 +2285,7 @@ impl DwarfVariableInfo {
                             DereferenceState::NotApplicable,
                         )
                     }
+
                     // A complex number's parts are its children.
                     Ok(value @ ScalarValue::Complex { .. })
                         if self.complex_part_type(base).is_some() =>
@@ -2263,6 +2408,7 @@ impl DwarfVariableInfo {
                                     reason: DereferenceUnavailableReason::UnspecifiedPointee,
                                 }
                             };
+
                             // A pointer to code names the function it enters.
                             let function = target
                                 .filter(|target| self.is_code(*target) && address.get() != 0)
@@ -2313,6 +2459,7 @@ impl DwarfVariableInfo {
                         VariableUnavailableReason::EvaluationLimit,
                     ));
                 };
+
                 with_children(
                     VariableValue::Array {
                         dimensions: Arc::clone(dimensions),
@@ -2337,6 +2484,7 @@ impl DwarfVariableInfo {
                         );
                     }
                 };
+
                 let (data, bounds, strides) = match resolved {
                     Resolved::Elements {
                         data,
@@ -2359,6 +2507,7 @@ impl DwarfVariableInfo {
                         });
                     }
                 };
+
                 let Some(placement) = Resolved::placement(&bounds, &strides) else {
                     return Ok(VariableState::Unavailable(
                         VariableUnavailableReason::ValueAccess(
@@ -2366,6 +2515,7 @@ impl DwarfVariableInfo {
                         ),
                     ));
                 };
+
                 let Some(total) = placement
                     .dimensions
                     .iter()
@@ -2375,9 +2525,11 @@ impl DwarfVariableInfo {
                         VariableUnavailableReason::EvaluationLimit,
                     ));
                 };
+
                 let value = VariableValue::Array {
                     dimensions: Arc::clone(&placement.dimensions),
                 };
+
                 let text = self
                     .resolved_text(type_id, shape, &data, &placement, runtime, budget)
                     .map(Arc::new);
@@ -2393,6 +2545,7 @@ impl DwarfVariableInfo {
                     presentation: None,
                 }
             }
+
             ValueShape::Slice {
                 element: _,
                 byte_size,
@@ -2409,6 +2562,7 @@ impl DwarfVariableInfo {
                         );
                     }
                 };
+
                 let backing = ValueStorage::Memory(decoded.address);
                 VariableState::Available {
                     source: decoded.source,
@@ -2438,6 +2592,7 @@ impl DwarfVariableInfo {
                 let total = u64::try_from(members.len()).unwrap_or(u64::MAX);
                 with_children(VariableValue::Union, total, None)
             }
+
             ValueShape::Variant {
                 aggregate,
                 common_members,
@@ -2462,6 +2617,7 @@ impl DwarfVariableInfo {
                         );
                     }
                 };
+
                 let total = bases
                     .len()
                     .saturating_add(common_members.len())
@@ -2535,6 +2691,7 @@ impl DwarfVariableInfo {
                     .materialize_value_state(type_id, &shape, &storage, context, runtime, budget)?,
             },
         };
+
         Ok(ValueChild {
             relationship,
             type_info,
@@ -2562,6 +2719,7 @@ impl DwarfVariableInfo {
             image: reference.image,
             address: reference.context_address,
         };
+
         let mut storage = reference.storage.clone();
         let mut storage_failure = None;
         if let ValueStorage::ImplicitPointer {
@@ -2583,9 +2741,11 @@ impl DwarfVariableInfo {
                 Err(error) => storage_failure = Some(error),
             }
         }
+
         let shape = self
             .value_shape(reference.target_type)
             .map_err(shape_error)?;
+
         // An array bounded at run time is the array its value found.
         let shape = match (shape, &reference.placement) {
             (
@@ -2606,6 +2766,7 @@ impl DwarfVariableInfo {
             }
             (shape, _) => shape,
         };
+
         // A closure's children are what it captured.
         let captures = match &shape {
             ValueShape::Function { byte_size } => Some(
@@ -2616,6 +2777,7 @@ impl DwarfVariableInfo {
             ),
             _ => None,
         };
+
         let expected_total = match &shape {
             ValueShape::Function { .. } => captures
                 .as_ref()
@@ -2631,6 +2793,7 @@ impl DwarfVariableInfo {
             ValueShape::Scalar(base) if base.encoding == BaseTypeEncoding::ComplexFloating => {
                 Some(2)
             }
+
             ValueShape::Variant {
                 common_members,
                 bases,
@@ -2652,11 +2815,13 @@ impl DwarfVariableInfo {
             }
             _ => None,
         };
+
         if expected_total != Some(reference.total) {
             return Err(Error::debug_info(DwarfError::MalformedVariable(
                 "value child capability does not match its aggregate metadata".into(),
             )));
         }
+
         let full_requested_end = reference.total.min(offset.saturating_add(u64::from(limit)));
         if offset >= full_requested_end {
             return Ok(ValueChildPage {
@@ -2668,6 +2833,7 @@ impl DwarfVariableInfo {
                 usage: budget.usage(),
             });
         }
+
         let requested_end =
             full_requested_end.min(offset.saturating_add(budget.remaining_value_nodes()));
         if requested_end == offset {
@@ -2681,9 +2847,11 @@ impl DwarfVariableInfo {
                 usage: budget.usage(),
             });
         }
+
         let page_len = usize::try_from(requested_end - offset)
             .map_err(|_| Error::internal("child page length exceeds usize"))?;
         let mut children = Vec::with_capacity(page_len);
+
         // Linear pages are the common high-volume path. Capture one bounded
         // contiguous interval so scalar children do not turn a 256-element
         // page into 256 ptrace reads. If the coalesced read crosses an
@@ -2757,6 +2925,7 @@ impl DwarfVariableInfo {
                 _ => None,
             }
         };
+
         // A complex number's children are its real and imaginary parts.
         let complex_parts = match &shape {
             ValueShape::Scalar(base) => self.complex_part_type(base).map(|part| {
@@ -2777,6 +2946,7 @@ impl DwarfVariableInfo {
             }),
             _ => None,
         };
+
         // An aggregate's children are its bases, then its members, then the
         // members of its active variant.
         let aggregate = match &shape {
@@ -2805,10 +2975,12 @@ impl DwarfVariableInfo {
                 .as_ref()
                 .map(|parts| (reference.target_type, &[][..], &parts[..], None)),
         };
+
         for index in offset..requested_end {
             if budget.consume_value_nodes(1).is_err() {
                 break;
             }
+
             let (relationship, type_id, child_storage) = if let Some(captures) = &captures {
                 let Some((member, by_reference)) = usize::try_from(index)
                     .ok()
@@ -2816,9 +2988,11 @@ impl DwarfVariableInfo {
                 else {
                     return Err(Error::internal("child index is past its captures"));
                 };
+
                 let RecordMemberLayout::ByteOffset(capture_offset) = member.layout else {
                     return Err(Error::internal("captures are not located by their offset"));
                 };
+
                 let mut child_storage = i64::try_from(capture_offset)
                     .map_err(|_| VariableUnavailableReason::EvaluationLimit.into())
                     .and_then(|capture_offset| storage::offset(storage.clone(), capture_offset));
@@ -2835,9 +3009,11 @@ impl DwarfVariableInfo {
                             )
                             .into());
                         }
+
                         Ok(ValueStorage::Memory(address))
                     });
                 }
+
                 (
                     ValueChildRelationship::Member(member.clone()),
                     member.type_ref.id,
@@ -2863,12 +3039,14 @@ impl DwarfVariableInfo {
                                 "variant child capability has no active arm".into(),
                             )));
                         };
+
                         let member = index - members.len();
                         (
                             DynamicAggregateChild::VariantMember { variant, member },
                             &variant_members[member],
                         )
                     };
+
                     (
                         child,
                         ValueChildRelationship::Member(member.clone()),
@@ -2876,6 +3054,7 @@ impl DwarfVariableInfo {
                         member.layout,
                     )
                 };
+
                 let child_storage = self.aggregate_child_storage(
                     &storage, aggregate, child, type_id, layout, runtime, budget,
                 );
@@ -2888,12 +3067,14 @@ impl DwarfVariableInfo {
                         "a non-aggregate value produced a child capability".into(),
                     )));
                 };
+
                 let stride = self.value_shape(*element).map_err(shape_error)?.byte_size();
                 let storage_index = if linear_storage.is_some() {
                     index - offset
                 } else {
                     index
                 };
+
                 let mut child_storage = storage_index
                     .checked_mul(stride)
                     .and_then(|offset| i64::try_from(offset).ok())
@@ -2911,6 +3092,7 @@ impl DwarfVariableInfo {
                         ..
                     } => {
                         let indices = array_source_indices(dimensions, index)?;
+
                         // Elements are listed row by row wherever they are.
                         if let Some(placement) = &reference.placement {
                             let bounds = placement
@@ -2924,6 +3106,7 @@ impl DwarfVariableInfo {
                             let at = element_byte_offset(dimensions, *ordering, &indices, stride)?;
                             child_storage = storage::offset(storage.clone(), at);
                         }
+
                         ValueChildRelationship::ArrayElement {
                             index,
                             indices: indices.into(),
@@ -2931,8 +3114,10 @@ impl DwarfVariableInfo {
                     }
                     _ => ValueChildRelationship::SliceElement { index },
                 };
+
                 (relationship, *element, child_storage)
             };
+
             let child_storage = storage_failure
                 .clone()
                 .map_or(child_storage, std::result::Result::Err);
@@ -2949,9 +3134,11 @@ impl DwarfVariableInfo {
                 break;
             }
         }
+
         if requested_end < full_requested_end && budget.exhaustion().is_none() {
             let _ = budget.consume_value_nodes(1);
         }
+
         Ok(ValueChildPage {
             stop_id: reference.stop_id,
             offset,
@@ -2977,12 +3164,14 @@ impl DwarfVariableInfo {
                 description,
             ))
         };
+
         let type_id = match (variable.malformed(), variable.type_info()) {
             (Some(description), _) | (None, TypeResolution::Malformed(description)) => {
                 return Ok(data_object(variable, None, invalid(description)));
             }
             (None, TypeResolution::Resolved(id)) => id,
         };
+
         // A generic value has its type argument, or else its shape.
         let (type_id, unresolved_shape) =
             match self.generic_type(type_id, variable.instance(), address, runtime, budget)? {
@@ -2994,6 +3183,7 @@ impl DwarfVariableInfo {
             Ok(info) => info.clone(),
             Err(description) => return Ok(data_object(variable, None, invalid(description))),
         };
+
         let state = match self.value_shape(type_id) {
             Ok(shape) => {
                 match self.located_data_object(variable, address, runtime, frame_base_cache, budget)
@@ -3008,7 +3198,9 @@ impl DwarfVariableInfo {
             }
             Err(error) => shape_error_state(error),
         };
+
         let mut state = state;
+
         // A shape's pointer points to whatever its unknown type argument
         // does, not to the shape's pointee.
         if unresolved_shape.is_some()
@@ -3020,6 +3212,7 @@ impl DwarfVariableInfo {
                 reason: DereferenceUnavailableReason::UnspecifiedPointee,
             };
         }
+
         let mut variable = data_object(variable, Some(type_info), state);
         variable.unresolved_shape = unresolved_shape;
         Ok(variable)
@@ -3033,9 +3226,11 @@ impl DwarfVariableInfo {
         else {
             return;
         };
+
         let VariableState::Available { dereference, .. } = state else {
             return;
         };
+
         // The pointee type describes the dereferenced expression, so it is
         // rendered against `*expr`. Resolve it once for both the downgrade of an
         // available dereference and the backfill of an already-unavailable one.
@@ -3063,6 +3258,7 @@ impl DwarfVariableInfo {
                         ),
                     },
                 };
+
                 if let Some(reason) = reason {
                     *dereference = DereferenceState::Unavailable { pointee, reason };
                 }
@@ -3093,6 +3289,7 @@ impl DwarfVariableInfo {
             Ok(()) => self.dereferenced_state(reference, runtime, budget)?,
             Err(exhaustion) => VariableState::Unavailable(exhaustion.into()),
         };
+
         Ok(DereferencedValue {
             type_info,
             state,
@@ -3111,6 +3308,7 @@ impl DwarfVariableInfo {
             Ok(shape) => shape,
             Err(error) => return Ok(shape_error_state(error)),
         };
+
         let storage = match reference.target {
             crate::model::DereferenceTarget::Address(address) => ValueStorage::Memory(address),
             crate::model::DereferenceTarget::ImplicitPointer {
@@ -3131,6 +3329,7 @@ impl DwarfVariableInfo {
                 }
             },
         };
+
         let context = VariableContext {
             stop_id: reference.stop_id,
             context: reference.context,
@@ -3139,6 +3338,7 @@ impl DwarfVariableInfo {
             image: reference.image,
             address: reference.context_address,
         };
+
         self.materialize_value_state(
             reference.target_type,
             &shape,
@@ -3164,6 +3364,7 @@ pub(super) fn implicit_pointer_range(
             },
         )
     };
+
     let start = u64::try_from(byte_offset).map_err(|_| unavailable())?;
     let end = start
         .checked_add(size)
@@ -3171,6 +3372,7 @@ pub(super) fn implicit_pointer_range(
     if end > containing_size {
         return Err(unavailable());
     }
+
     Ok((start, end))
 }
 

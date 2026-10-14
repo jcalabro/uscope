@@ -29,6 +29,7 @@ pub fn warnings(image: &ModuleImage, program: bool) -> Vec<String> {
             path.display()
         ));
     }
+
     problems.extend(dwarf_problem(image));
     if program
         && problems.is_empty()
@@ -41,6 +42,7 @@ pub fn warnings(image: &ModuleImage, program: bool) -> Vec<String> {
                 .to_owned(),
         );
     }
+
     problems
         .into_iter()
         .map(|problem| format!("{}: {problem}", image.path().display()))

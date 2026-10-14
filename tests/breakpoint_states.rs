@@ -109,6 +109,7 @@ async fn wait_for(
         if reached >= count {
             return;
         }
+
         assert!(
             Instant::now() < deadline,
             "reached {reached} of {count} hits"
@@ -162,6 +163,7 @@ async fn a_breakpoint_disabled_while_running_keeps_its_count_until_enabled() {
     assert!(!disabled.enabled);
     assert_eq!(disabled.hit_condition, spun.hit_condition);
     let frozen = disabled.hit_count;
+
     // A breakpoint that stops 50 hits later shows the program ran on.
     let probe = counting(&scenario, "spun", "==50").await;
     let stop = running.await.expect("run task").expect("run");
@@ -215,6 +217,7 @@ async fn enabling_a_breakpoint_resolves_it_where_its_code_moved() {
             .load_bias
             .get()
     };
+
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
         .await;
@@ -275,6 +278,7 @@ async fn a_watchpoint_enabled_again_reports_no_change_made_while_disabled() {
         let handle = handle.clone();
         async move { handle.watch_with(&expression, access, options).await }
     };
+
     // Counts every store without stopping, to show the program ran on.
     let stores = scenario
         .operation(
@@ -299,6 +303,7 @@ async fn a_watchpoint_enabled_again_reports_no_change_made_while_disabled() {
         let handle = handle.clone();
         async move { handle.set_watchpoint_enabled(changes.id, enabled).await }
     };
+
     assert!(
         !scenario
             .operation("disable", set_enabled(false))
@@ -415,6 +420,7 @@ async fn threads_reaching_a_temporary_breakpoint_together_share_its_stop() {
             assert_eq!(hits(reason)[0].breakpoint, temporary.id);
         }
     }
+
     // The program checks every call ran exactly once.
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -454,6 +460,7 @@ async fn advance_runs_to_a_location_or_the_frames_return() {
         }
     );
     assert_eq!(global(&scenario, "last_call").await, 1);
+
     // `main` is never reached again, so `counted` returns first.
     assert_eq!(
         scenario.advance_to_stop(function("main")).await,
@@ -485,6 +492,7 @@ async fn advance_from_a_new_breakpoint_counts_the_arrival_it_stands_at() {
     while pc(&scenario).await != at {
         scenario.step_to_stop(StepKind::OverInstruction).await;
     }
+
     let declining = add(
         &scenario,
         source(HIT_COUNTS, "caller(call);"),

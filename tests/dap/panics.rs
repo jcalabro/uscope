@@ -23,6 +23,7 @@ fn the_default_filters_stop_on_a_task_panic_at_its_caller() {
         "{info}"
     );
     assert_eq!(info["breakMode"], "always", "{info}");
+
     // Clients focus the first frame whose source is not deemphasized.
     let frames = dap.inspect_as(Profile::VsCode, &stop);
     let panicked = frames

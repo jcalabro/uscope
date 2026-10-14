@@ -55,6 +55,7 @@ fn set_variable_changes_values_the_program_then_uses() {
     let (thread, frames) = stopped(&mut dap, "return **pointer_pointer");
     let locals = scope(&mut dap, &frames[0], "Locals");
     let pointee = row(&mut dap, &locals, "pointee");
+
     // Values with storage are editable; aggregates are not.
     assert_eq!(pointee["presentationHint"]["attributes"], json!([]));
     let pair = row(&mut dap, &locals, "pair");
@@ -69,6 +70,7 @@ fn set_variable_changes_values_the_program_then_uses() {
         (&set["value"], &set["type"]),
         (&json!("100"), &json!("int"))
     );
+
     // The client is told to read values again.
     dap.event(mark, "invalidated", |body| {
         body["areas"] == json!(["variables"])
@@ -78,6 +80,7 @@ fn set_variable_changes_values_the_program_then_uses() {
         json!({"expression": "*pointer", "frameId": frames[0]["id"], "context": "watch"}),
     );
     assert_eq!(through["result"], "100");
+
     // Expressions can be set too, here in the caller's frame.
     let caller = dap.request(
         "setExpression",
@@ -98,6 +101,7 @@ fn set_variable_changes_values_the_program_then_uses() {
         record,
         "`pair` cannot be assigned; only numbers, truth values, and pointers can; its type is `pointer_pair`"
     );
+
     // main checks the values it set, and now finds them changed.
     let resumed = dap.send("continue", json!({"threadId": thread}));
     dap.success(resumed);
@@ -116,6 +120,7 @@ fn write_memory_writes_bytes_and_reports_the_change() {
     let pointee = row(&mut dap, &locals, "pointee");
     let reference = pointee["memoryReference"].clone();
     let mark = dap.mark();
+
     // 7, little-endian.
     let written = dap.request(
         "writeMemory",
@@ -198,12 +203,14 @@ fn goto_moves_a_thread_to_a_line_of_its_function() {
     let stop = dap.stopped(mark);
     assert_eq!(stop.reason, "goto");
     assert_eq!(top_line(&mut dap, thread), json!(target));
+
     // A target belongs to the stop that named it.
     let stale = dap.request_error(
         "goto",
         json!({"threadId": thread, "targetId": targets[0]["id"]}),
     );
     assert_eq!(stale, "the goto target belongs to an earlier stop");
+
     // A line of another function is a target, but not for this thread.
     let call = line_of(&path, "jump: call");
     let elsewhere = dap.request(
@@ -218,6 +225,7 @@ fn goto_moves_a_thread_to_a_line_of_its_function() {
         refused.contains("has no code in the function the thread is stopped in"),
         "{refused}"
     );
+
     // `status = value` and `status += 10` never ran.
     let resumed = dap.send("continue", json!({"threadId": thread}));
     dap.success(resumed);
@@ -253,6 +261,7 @@ fn registers_of_the_innermost_frame_can_be_set() {
         json!({"variablesReference": registers, "name": "rax", "value": "0x2a"}),
     );
     assert_eq!(set["value"], "0x000000000000002a");
+
     // Setting the program counter publishes the stop again, even where
     // the thread already is.
     let rip = row(&mut dap, &registers, "rip");
@@ -262,6 +271,7 @@ fn registers_of_the_innermost_frame_can_be_set() {
         json!({"variablesReference": registers, "name": "rip", "value": rip["value"]}),
     );
     assert_eq!(dap.stopped(mark).reason, "goto");
+
     // The thread runs on from where it was; checked computes its own rax.
     let resumed = dap.send("continue", json!({"threadId": thread}));
     dap.success(resumed);

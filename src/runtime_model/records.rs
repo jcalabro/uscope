@@ -67,6 +67,7 @@ fn representation(image: &dyn RuntimeImage, mut ty: TypeReference) -> Option<&Ty
             _ => return Some(info),
         }
     }
+
     None
 }
 
@@ -84,11 +85,13 @@ pub fn field(image: &dyn RuntimeImage, ty: TypeReference, path: &[&str]) -> Resu
         let RecordMemberLayout::ByteOffset(offset) = member.layout else {
             return Err(format!("{}.{name} is not at a byte offset", container.name).into());
         };
+
         found = Field {
             offset: within(found.offset, offset)?,
             ty: member.type_ref,
         };
     }
+
     Ok(found)
 }
 
@@ -98,6 +101,7 @@ fn members(kind: &TypeKind) -> Box<dyn Iterator<Item = &RecordMember> + '_> {
         TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => {
             Box::new(members.iter())
         }
+
         TypeKind::Variant {
             common_members,
             variants,
@@ -142,6 +146,7 @@ pub fn sized(
         )
         .into());
     }
+
     Ok(found.offset)
 }
 
@@ -178,6 +183,7 @@ pub fn enumerator(image: &dyn RuntimeImage, ty: TypeReference, name: &str) -> Re
     else {
         return Err(format!("{} is no enumeration", name_of(image, ty)).into());
     };
+
     enumerators
         .iter()
         .find(|enumerator| &*enumerator.name == name)
@@ -196,6 +202,7 @@ fn unsigned(value: IntegerValue) -> Option<u64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sum {
     name: Arc<str>,
+
     /// Where the tag is, and its size.
     tag: (u64, usize),
     variants: Vec<SumVariant>,
@@ -227,12 +234,15 @@ pub fn sum(image: &dyn RuntimeImage, ty: TypeReference) -> Result<Sum, Missing> 
     else {
         return Err(format!("{} is no sum type", info.name).into());
     };
+
     let VariantDiscriminant::Stored(tag) = discriminant.as_ref() else {
         return Err(format!("{} stores no tag", info.name).into());
     };
+
     let RecordMemberLayout::ByteOffset(tag_offset) = tag.layout else {
         return Err(format!("{}'s tag is not at a byte offset", info.name).into());
     };
+
     let tag_size = size(image, tag.type_ref)?;
     let tag_size = usize::try_from(tag_size)
         .ok()
@@ -244,9 +254,11 @@ pub fn sum(image: &dyn RuntimeImage, ty: TypeReference) -> Result<Sum, Missing> 
             let [member] = variant.members.as_ref() else {
                 return Err(format!("a variant of {} is not one member", info.name).into());
             };
+
             let RecordMemberLayout::ByteOffset(offset) = member.layout else {
                 return Err(format!("a variant of {} is not at a byte offset", info.name).into());
             };
+
             Ok(SumVariant {
                 name: member
                     .name
@@ -292,6 +304,7 @@ impl Sum {
                     && unsigned(high).is_some_and(|high| tag <= high)
             }
         };
+
         self.variants
             .iter()
             .find(|variant| {
@@ -342,6 +355,7 @@ impl Sum {
                     }))
             })
         };
+
         let variant = self.variant(name).expect("the variant");
         let value = match &variant.selection {
             VariantSelection::Selectors(selectors) => match selectors.first() {
@@ -352,6 +366,7 @@ impl Sum {
                 .find(|tag| !claimed(*tag))
                 .expect("a free tag"),
         };
+
         (offset, size, value)
     }
 }

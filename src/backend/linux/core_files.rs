@@ -37,6 +37,7 @@ pub(super) struct ModuleFile {
     pub(super) path: PathBuf,
     pub(super) data: Vec<u8>,
     pub(super) inode: u64,
+
     /// Whether a module directory supplied the file rather than the
     /// recorded path. Such a file is a guess until proven.
     pub(super) searched: bool,
@@ -55,6 +56,7 @@ struct Sysroot {
 
 struct ModuleDirectory {
     path: PathBuf,
+
     /// Every ELF file's build-id, read the first time a build-id is sought.
     build_ids: OnceCell<BTreeMap<Vec<u8>, Vec<PathBuf>>>,
 }
@@ -67,6 +69,7 @@ impl ModuleLocator {
             path: path.to_owned(),
             error,
         };
+
         let sysroot = sysroot
             .map(|path| {
                 OpenOptions::new()
@@ -154,6 +157,7 @@ impl ModuleLocator {
         if !self.directories.is_empty() {
             text.push_str(", and no module path holds a file matching it");
         }
+
         text
     }
 }
@@ -171,6 +175,7 @@ impl Sysroot {
                 result => break result.map(File::from).map_err(io::Error::from),
             }
         };
+
         let display = self
             .path
             .join(recorded.strip_prefix("/").unwrap_or(recorded));
@@ -195,6 +200,7 @@ impl ModuleDirectory {
                     build_ids.entry(build_id).or_default().push(path);
                 }
             }
+
             build_ids
         })
     }
@@ -207,6 +213,7 @@ fn file_build_id(path: &Path) -> Option<Vec<u8>> {
     if !file.metadata().ok()?.is_file() {
         return None;
     }
+
     let cache = ReadCache::new(File::open(fd_path(&file)).ok()?);
     elf_build_id(&cache).map(<[u8]>::to_vec)
 }
@@ -249,6 +256,7 @@ fn read_opened(
         path: display.to_owned(),
         error,
     };
+
     let file = match opened {
         Ok(file) => file,
         Err(error)
@@ -261,16 +269,19 @@ fn read_opened(
         }
         Err(error) => return Err(unreadable(error)),
     };
+
     let metadata = file.metadata().map_err(unreadable)?;
     if !metadata.is_file() && searched {
         return Ok(None);
     }
+
     if !metadata.is_file() {
         return Err(unreadable(io::Error::new(
             io::ErrorKind::InvalidInput,
             "not a regular file",
         )));
     }
+
     // Reopening through the descriptor reads exactly the file that was
     // resolved, however its path has changed since.
     let link = fd_path(&file);

@@ -58,6 +58,7 @@ impl Section {
 #[derive(Debug, Clone)]
 pub struct Options {
     pub sections: BTreeSet<Section>,
+
     /// How many addresses within each code instance to inspect variables
     /// at, besides its entry and its last instruction.
     pub variable_addresses: usize,
@@ -95,6 +96,7 @@ pub(crate) fn dump_info(
         names: &names,
         out,
     };
+
     for section in &options.sections {
         match section {
             Section::Image => dump.image()?,
@@ -110,6 +112,7 @@ pub(crate) fn dump_info(
             Section::Unwind => dump.unwind()?,
         }
     }
+
     Ok(())
 }
 
@@ -122,6 +125,7 @@ struct Names {
     files: Vec<String>,
     globals: Vec<String>,
     sections: Vec<String>,
+
     /// Line sequences, numbered by their first row.
     sequences: BTreeMap<u64, usize>,
     pattern: Regex,
@@ -147,6 +151,7 @@ impl Names {
                 },
             )
         };
+
         let functions = image
             .functions()
             .map(|function| {
@@ -233,6 +238,7 @@ impl Names {
                 .entry(u64::from(row.sequence.get()))
                 .or_insert(next);
         }
+
         Ok(Self {
             types,
             functions,
@@ -257,15 +263,18 @@ impl Names {
                 .and_then(|index| table.get(index))
                 .map_or_else(|| format!("<bad {index}>"), Clone::clone)
         };
+
         self.pattern
             .replace_all(text, |captures: &Captures<'_>| {
                 if let Some(id) = captures.get(1) {
                     return format!("T[{}]", name(&self.types, id.as_str()));
                 }
+
                 if captures.get(4).is_some() {
                     // An entity's own number, which its name replaces.
                     return String::new();
                 }
+
                 let index = &captures[3];
                 match &captures[2] {
                     "TypeId" => format!("T[{}]", name(&self.types, index)),
@@ -356,6 +365,7 @@ impl<'a> Dumper<'a> {
         for line in lines {
             writeln!(self.out, "{line}")?;
         }
+
         Ok(())
     }
 
@@ -385,21 +395,26 @@ impl<'a> Dumper<'a> {
         for producer in image.producers() {
             self.line(&format!("producer {producer}"))?;
         }
+
         for error in image.view_errors() {
             self.line(&format!("view error {error:?}"))?;
         }
+
         self.heading("sections")?;
         for section in image.sections() {
             self.line(&names.debug(section))?;
         }
+
         self.heading("constants")?;
         for (name, value) in image.constants_for_dump() {
             self.line(&format!("{name} = {value:?}"))?;
         }
+
         self.heading("thread locals")?;
         for (name, place) in image.thread_locals_for_dump() {
             self.line(&format!("{name} = {place:?}"))?;
         }
+
         self.heading("vtables")?;
         for (address, ty) in image.vtables_for_dump() {
             self.line(&format!(
@@ -409,6 +424,7 @@ impl<'a> Dumper<'a> {
                 image.vtable_class(address)
             ))?;
         }
+
         self.heading("go runtime types")?;
         for offset in image.go_runtime_type_offsets_for_dump() {
             let ty = image.go_runtime_type(offset);
@@ -417,6 +433,7 @@ impl<'a> Dumper<'a> {
                 ty.map_or("none", |ty| names.ty(ty))
             ))?;
         }
+
         Ok(())
     }
 
@@ -427,10 +444,12 @@ impl<'a> Dumper<'a> {
         for symbol in image.symbols() {
             self.line(&names.debug(&symbol))?;
         }
+
         self.heading("got slots")?;
         for slot in image.got_slots() {
             self.line(&names.debug(slot))?;
         }
+
         Ok(())
     }
 
@@ -443,10 +462,12 @@ impl<'a> Dumper<'a> {
         for row in image.statement_rows() {
             self.line(&names.debug(&row))?;
         }
+
         self.heading("line entries")?;
         for entry in image.line_entries() {
             self.line(&names.debug(&entry))?;
         }
+
         Ok(())
     }
 
@@ -466,8 +487,10 @@ impl<'a> Dumper<'a> {
             for instance in instances {
                 let _ = write!(text, "\n    {instance}");
             }
+
             lines.push(text);
         }
+
         self.sorted(lines)?;
         self.heading("code instances")?;
         let lines = image
@@ -492,6 +515,7 @@ impl<'a> Dumper<'a> {
         if let Some(points) = self.image.resume_points(instance.id()) {
             let _ = write!(text, " resume {}", names.debug(&points));
         }
+
         text
     }
 
@@ -502,6 +526,7 @@ impl<'a> Dumper<'a> {
         for global in image.globals() {
             self.line(&names.debug(&global))?;
         }
+
         Ok(())
     }
 
@@ -531,8 +556,10 @@ impl<'a> Dumper<'a> {
                 ),
                 TypeNode::Malformed { reference, .. } => names.ty(*reference).to_owned(),
             };
+
             lines.insert(text);
         }
+
         for line in lines {
             self.line(&line)?;
         }
@@ -558,20 +585,24 @@ impl<'a> Dumper<'a> {
                 }
             }
         }
+
         let set = |references: Vec<TypeReference>| {
             references
                 .into_iter()
                 .map(|reference| names.ty(reference).to_owned())
                 .collect::<BTreeSet<_>>()
         };
+
         for name in queries {
             let matched = set(image.types_named(&name));
             self.line(&format!("named {name:?}: {matched:?}"))?;
         }
+
         for base in bases {
             let with = set(image.types_with_base(&base));
             self.line(&format!("base {base:?}: {with:?}"))?;
         }
+
         for (language, path, base) in instances {
             let path = path.iter().map(String::as_str).collect::<Vec<_>>();
             let found = set(image.type_instances(language, &path, &base));
@@ -579,6 +610,7 @@ impl<'a> Dumper<'a> {
                 "instances {language:?} {path:?} {base:?}: {found:?}"
             ))?;
         }
+
         Ok(())
     }
 
@@ -596,31 +628,38 @@ impl<'a> Dumper<'a> {
                 addresses.insert(start + (end - start) / 2);
             }
         };
+
         for row in image.statement_rows() {
             range(AddressRange {
                 start: row.address,
                 end: row.address,
             });
         }
+
         for entry in image.line_entries() {
             range(entry.range);
         }
+
         for instance in image.code_instances() {
             for each in instance.ranges() {
                 range(each);
             }
         }
+
         for symbol in image.symbols() {
             if let Some(extent) = symbol.extent() {
                 range(extent.range);
             }
+
             if let Some(storage) = symbol.storage() {
                 range(storage);
             }
         }
+
         for section in image.sections() {
             range(section.range);
         }
+
         addresses
     }
 
@@ -631,11 +670,13 @@ impl<'a> Dumper<'a> {
         for (address, evidence) in image.instruction_starts(image.address_range()) {
             self.line(&format!("{:#x} {evidence:?}", address.get()))?;
         }
+
         self.heading("addresses")?;
         let mut previous = String::new();
         let mut runtime = Synthetic;
         for address in self.addresses_of_interest() {
             let at = ImageAddress::new(address);
+
             // A synthetic image, which only tests dump, has no call sites.
             let call_site = self.info.map_or_else(
                 || "-".to_owned(),
@@ -663,6 +704,7 @@ impl<'a> Dumper<'a> {
                     },
                 )
             };
+
             let chain = |chain: &crate::InlineChain| {
                 chain
                     .instances
@@ -671,6 +713,7 @@ impl<'a> Dumper<'a> {
                     .collect::<Vec<_>>()
                     .join(" > ")
             };
+
             // Offsets follow from the address and what contains it, so the
             // answer stays the same from one address to the next until what
             // contains it changes.
@@ -718,6 +761,7 @@ impl<'a> Dumper<'a> {
                 previous = text;
             }
         }
+
         Ok(())
     }
 
@@ -733,6 +777,7 @@ impl<'a> Dumper<'a> {
                 lines.extend([line.saturating_sub(1).max(1), line, line + 1]);
             }
         }
+
         let mut output = Vec::new();
         for file in image.source_files() {
             let path = &names.files[file.id.index()];
@@ -748,6 +793,7 @@ impl<'a> Dumper<'a> {
                 let Some(line) = LineNumber::new(*line) else {
                     return Err(std::io::Error::other("a breakpoint line is zero"));
                 };
+
                 let mut addresses = image
                     .statement_addresses(file.id, line)
                     .map(ImageAddress::get)
@@ -761,8 +807,10 @@ impl<'a> Dumper<'a> {
                     image.nearest_statement_lines(file.id, line),
                 );
             }
+
             output.push(text);
         }
+
         self.sorted(output)
     }
 
@@ -780,15 +828,18 @@ impl<'a> Dumper<'a> {
             if let Some(linkage) = &function.linkage_name() {
                 function_names.insert(linkage.to_string());
             }
+
             if let Some(package) = image.function_package(function.id()) {
                 if let Some(local) = function.name().strip_prefix(&format!("{package}.")) {
                     function_names.insert(local.to_owned());
                 }
+
                 if let Some((_, last)) = function.name().rsplit_once('.') {
                     function_names.insert(last.to_owned());
                 }
             }
         }
+
         let mut lines = Vec::new();
         for name in &function_names {
             let single = image
@@ -815,6 +866,7 @@ impl<'a> Dumper<'a> {
                 "{name:?}: {single:?} all {all:?} located {located:?}"
             ));
         }
+
         self.sorted(lines)?;
 
         self.heading("symbol names")?;
@@ -826,11 +878,13 @@ impl<'a> Dumper<'a> {
                 symbol_names.insert(crate::demangle::last_part(&demangled).to_owned());
             }
         }
+
         for slot in image.got_slots() {
             if let crate::GotTarget::Import(name) = &slot.target {
                 symbol_names.insert(name.to_string());
             }
         }
+
         let mut lines = Vec::new();
         for name in &symbol_names {
             let single = image
@@ -852,6 +906,7 @@ impl<'a> Dumper<'a> {
                 image.imports_function(name)
             ));
         }
+
         self.sorted(lines)?;
 
         self.heading("global names")?;
@@ -863,6 +918,7 @@ impl<'a> Dumper<'a> {
                 selectors.insert(linkage.to_string());
             }
         }
+
         for selector in selectors {
             let found = image
                 .global_named(&selector)
@@ -888,6 +944,7 @@ impl<'a> Dumper<'a> {
                 lines.push(format!("{}: {found:?}", query.display()));
             }
         }
+
         lines.dedup();
         self.sorted(lines)
     }
@@ -905,6 +962,7 @@ impl<'a> Dumper<'a> {
             image: crate::ModuleImageId::new(0),
             address: Some(address),
         };
+
         let mut lines = Vec::new();
         let statements = image.statement_rows().collect::<Vec<_>>();
         for instance in image.code_instances() {
@@ -912,16 +970,19 @@ impl<'a> Dumper<'a> {
                 CodeInstanceKind::OutOfLine => None,
                 CodeInstanceKind::Inline { .. } => Some(instance.id()),
             };
+
             let mut addresses = BTreeSet::new();
             if let Some(entry) = instance.breakpoint_entry() {
                 addresses.insert(entry.address.get());
             }
+
             for range in instance.ranges() {
                 if range.start < range.end {
                     addresses.insert(range.start.get());
                     addresses.insert(range.end.get() - 1);
                 }
             }
+
             let rows = instance.ranges().next().map_or(&[][..], |range| {
                 let rows = statements.as_slice();
                 let first = rows.partition_point(|row| row.address < range.start);
@@ -957,8 +1018,10 @@ impl<'a> Dumper<'a> {
                     previous = found;
                 }
             }
+
             lines.push(text);
         }
+
         self.sorted(lines)?;
 
         self.heading("global values")?;
@@ -982,6 +1045,7 @@ impl<'a> Dumper<'a> {
                 names.debug(&found)
             ))?;
         }
+
         Ok(())
     }
 
@@ -1002,11 +1066,13 @@ impl<'a> Dumper<'a> {
                 }
             }
         }
+
         for symbol in image.symbols() {
             if let Some(extent) = symbol.extent() {
                 addresses.extend([extent.range.start.get(), extent.range.end.get() - 1]);
             }
         }
+
         let registers = RegisterFile::new((0..17).map(|register| {
             (
                 DwarfRegister::new(register),
@@ -1029,6 +1095,7 @@ impl<'a> Dumper<'a> {
                 previous = text;
             }
         }
+
         Ok(())
     }
 }
@@ -1060,6 +1127,7 @@ impl MemoryReader for Synthetic {
         for (offset, byte) in bytes.iter_mut().enumerate() {
             *byte = pattern(address.get().wrapping_add(offset as u64));
         }
+
         Some(u64::from_le_bytes(bytes))
     }
 }
@@ -1070,6 +1138,7 @@ impl VariableRuntime for Synthetic {
         register: DwarfRegister,
     ) -> Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
         let register = register.number();
+
         // General registers are words; the rest, vector registers.
         let bits: u16 = if register < 17 { 64 } else { 128 };
         let value = 0x7fff_0000_u64 + u64::from(register) * 0x100;
@@ -1148,9 +1217,11 @@ mod tests {
                     start: ImageAddress::new(row.address),
                     end: ImageAddress::new(next.address),
                 };
+
                 lines.push_range(range, at, row.statement).unwrap();
             }
         }
+
         let image = ModuleImage::new(
             PathBuf::from("/a"),
             crate::TargetDescription::X86_64,
@@ -1172,6 +1243,7 @@ mod tests {
             names: &names,
             out: &mut out,
         };
+
         dump.lines().unwrap();
         dump.addresses().unwrap();
         dump.breakpoints().unwrap();
@@ -1192,6 +1264,7 @@ mod tests {
             statement: true,
             ..Row::default()
         };
+
         let rows = [
             row(0x10, 3),
             row(0x14, 4),

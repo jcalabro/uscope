@@ -6,15 +6,18 @@ use super::functions::{
     EntryRecord, FunctionRecord, FunctionView, GenericRecord, InstanceRecord, Member, RangeRecord,
     StartRecord,
 };
+
 use super::index::{Interval, NameEntry};
 use super::lines::{
     self, ControlBoundary, FileRecord, LineExtra, LineRange, LineRow, LineSequence, LineTables,
     RowAddress, StatementKey, row_flags,
 };
+
 use super::locations::{
     BaseTypeRecord, EvaluationUnitRecord, ExpressionRecord, IndexedAddressRecord,
     LocationEntryRecord, LocationListRecord, ProcedureRecord,
 };
+
 use super::packages::{PackageRecord, PackageView, PackagedRecord};
 use super::resumes::{HeldRecord, ResumePointRecord, ResumeRecord};
 use super::sample::{
@@ -23,6 +26,7 @@ use super::sample::{
     sample_packaged, sample_rows, sample_sections, sample_sources, sample_symbols,
     sample_thread_locals, sample_types, sample_unwind, seal,
 };
+
 use super::symbols::{GotRecord, SectionRecord, SymbolRecord, SymbolView};
 use super::type_facts::{ComplexPartRecord, DynamicLayoutRecord, TypeFactRecord};
 use super::types::{
@@ -30,11 +34,13 @@ use super::types::{
     MemberRecord, RuntimeDimensionRecord, RuntimeTypeRecord, SelectorRecord, TypeRecord, TypeTable,
     TypeView, VariantRecord,
 };
+
 use super::unwind::{FdeMiss, FrameSaveRecord, UnwindRecord, UnwindView, unwind_flags};
 use super::variables::{
     CaptureRecord, CodeRange, ConstantRecord, DwarfProcedureRecord, FunctionStartRecord,
     GlobalRecord, Keyed, ObjectRecord, ScopeRecord, VariableFunctionRecord,
 };
+
 use super::*;
 use crate::{
     AddressRange, BreakpointEntry, CodeInstanceId, EntryProvenance, FunctionId, ImageAddress,
@@ -65,6 +71,7 @@ fn the_schema_is_the_records_layout() {
             }
         }};
     }
+
     check!(TableKind::Files, FileRecord, [path]);
     check!(TableKind::LineAddresses, RowAddress, [address]);
     check!(
@@ -479,6 +486,7 @@ fn the_schema_is_the_records_layout() {
         assert_eq!(schema::record(kind), "TypeFactRecord");
         check!(kind, TypeFactRecord, [ty, value]);
     }
+
     check!(TableKind::ComplexParts, ComplexPartRecord, [name, size, ty]);
     check!(
         TableKind::DynamicLayouts,
@@ -527,6 +535,7 @@ fn the_schema_is_the_records_layout() {
         assert_eq!(schema::record(kind), "Keyed");
         check!(kind, Keyed, [key, value]);
     }
+
     for kind in [
         TableKind::TypeParameters,
         TableKind::IdentityStrings,
@@ -538,6 +547,7 @@ fn the_schema_is_the_records_layout() {
         assert_eq!(schema::record(kind), "Item");
         check!(kind, Item, [value]);
     }
+
     for kind in [
         TableKind::TypeNames,
         TableKind::TypeBaseNames,
@@ -545,6 +555,7 @@ fn the_schema_is_the_records_layout() {
     ] {
         assert_eq!(schema::record(kind), "NameEntry");
     }
+
     check!(TableKind::PackagedNames, PackagedRecord, [package, local]);
     assert_eq!(schema::record(TableKind::FunctionNames), "NameEntry");
     assert_eq!(schema::record(TableKind::LocalNames), "NameEntry");
@@ -560,6 +571,7 @@ fn the_schema_is_the_records_layout() {
     ] {
         assert_eq!(schema::record(kind), "Interval");
     }
+
     let kinds = schema::SCHEMA
         .iter()
         .map(|table| table.kind)
@@ -627,12 +639,14 @@ fn symbols_read_back_with_their_preferences() {
 
     let id = |symbol: Option<symbols::Symbol<'_>>| symbol.map(|symbol| symbol.id().get());
     let at = ImageAddress::new;
+
     // A declared extent outranks an inferred one where they overlap.
     assert_eq!(id(view.code_at(at(0x1008))), Some(0));
     assert_eq!(id(view.code_at(at(0x1010))), Some(1));
     assert_eq!(id(view.code_at(at(0x1020))), None);
     assert_eq!(id(view.data_at(at(0x3007))), Some(2));
     assert_eq!(id(view.data_at(at(0x3008))), None);
+
     // An unsized symbol names only its own address.
     assert_eq!(id(view.data_at(at(0x3010))), Some(3));
     assert_eq!(id(view.data_at(at(0x3011))), None);
@@ -641,6 +655,7 @@ fn symbols_read_back_with_their_preferences() {
             .map(|symbol| symbol.id().get())
             .collect::<Vec<_>>()
     };
+
     assert_eq!(named("counter"), [2, 3]);
     assert_eq!(named("memcpy"), [] as [u32; 0]);
     let unversioned = view.get(SymbolId::new(4)).unwrap();
@@ -669,16 +684,19 @@ fn functions_read_back_with_their_indexes() {
             .map(|instance| instance.id().get())
             .collect::<Vec<_>>()
     };
+
     let function = |id| view.function(FunctionId::new(id)).unwrap();
     assert_eq!(ids(&mut function(0).instances()), [0, 3]);
     assert_eq!(ids(&mut function(2).instances()), [] as [u32; 0]);
     assert_eq!(ids(&mut function(3).instances()), [2]);
     let named = |name| view.named(name).map(|f| f.id().get()).collect::<Vec<_>>();
+
     // The main subprogram answers to `main` as well as its own name, and
     // in place of what is named `main`.
     assert_eq!(named("main"), [2]);
     assert_eq!(named("declared"), [2]);
     assert_eq!(named("missing"), [] as [u32; 0]);
+
     // Latest start first, each instance once though it names a range twice.
     let at = ImageAddress::new;
     assert_eq!(ids(&mut view.instances_containing(at(0x1006))), [1, 0]);
@@ -695,10 +713,12 @@ fn functions_read_back_with_their_indexes() {
             .recommended_entries()
             .collect::<Vec<_>>()
     };
+
     let entry = |address, provenance| BreakpointEntry {
         address: at(address),
         provenance,
     };
+
     assert_eq!(entries(0), [entry(0x1004, EntryProvenance::Statement)]);
     assert_eq!(entries(1), [entry(0x1004, EntryProvenance::RangeStart)]);
     assert_eq!(entries(2), []);
@@ -719,6 +739,7 @@ fn every_table_size_lays_out() {
         if let Some(last) = pool.last_mut() {
             *last = 0;
         }
+
         let mut builder = Builder::new(TARGET);
         builder.bytes(TableKind::Paths, pool.clone());
         let image = builder.seal(Limits::default()).unwrap();
@@ -740,6 +761,7 @@ fn damage_is_caught_by_the_checksum_or_by_validation() {
     for length in 0..bytes.len() {
         assert!(reopen(&bytes[..length]).is_err(), "truncated to {length}");
     }
+
     let mut accepted = 0;
     for at in 0..bytes.len() {
         for flip in [0x01, 0x80, 0xff] {
@@ -749,6 +771,7 @@ fn damage_is_caught_by_the_checksum_or_by_validation() {
                 reopen(&damaged).is_err(),
                 "byte {at} ^ {flip:#x} passed the checksum"
             );
+
             // Past the checksum, an image validation accepts must read
             // without a panic.
             reseal(&mut damaged);
@@ -758,6 +781,7 @@ fn damage_is_caught_by_the_checksum_or_by_validation() {
             }
         }
     }
+
     // Some changes are still valid images, such as another address.
     assert!(accepted > 0);
 }
@@ -773,6 +797,7 @@ fn the_header_is_checked() {
         reseal(&mut bytes);
         reopen(&bytes).unwrap_err()
     };
+
     assert_eq!(
         header(|header| header.magic[0] = b'X'),
         ImageError::NotAnImage
@@ -862,6 +887,7 @@ fn sabotaged(change: impl FnOnce(&mut Parts)) -> ImageError {
         files: records,
         paths: paths.into_bytes(),
     };
+
     change(&mut parts);
     let mut builder = Builder::new(TARGET);
     builder
@@ -1360,6 +1386,7 @@ fn unwinding_tables_read_back_as_their_lookups() {
     ] {
         assert_eq!(kept.lookup(address), before, "{address:#x}");
     }
+
     assert_eq!(eh_frame.entries, sample.eh_frame_index.entries);
     for (address, go) in [
         (0x2fff, false),
@@ -1373,6 +1400,7 @@ fn unwinding_tables_read_back_as_their_lookups() {
             "{address:#x}"
         );
     }
+
     for (address, pushed) in [
         (0x33ff, None),
         (0x3400, Some(0)),
@@ -1386,6 +1414,7 @@ fn unwinding_tables_read_back_as_their_lookups() {
             "{address:#x}"
         );
     }
+
     let go = sample.go.unwrap();
     let (bytes, facts) = view.go().unwrap();
     assert_eq!((bytes, facts), (&*go.bytes, go.facts));
@@ -1547,9 +1576,11 @@ fn types_read_back_with_their_indexes() {
             .map(crate::TypeId::get)
             .collect::<Vec<_>>()
     };
+
     assert_eq!(ids(view.named("int *").collect()), [1, 20]);
     assert!(view.named("the type's size is negative").next().is_none());
     assert_eq!(ids(view.with_base("Point").collect()), [2]);
+
     // C's own spelling of a base type finds it too.
     assert_eq!(ids(view.with_base("short").collect()), [18]);
     assert_eq!(ids(view.with_enumerator("Red").collect()), [4]);
@@ -1562,6 +1593,7 @@ fn types_read_back_with_their_indexes() {
             Some(*class)
         );
     }
+
     // A type decodes once, and only when asked for.
     let other = TypeTable::new(image, crate::ModuleImageId::new(7));
     let first = other.node(crate::TypeId::new(2)).unwrap();
@@ -1858,6 +1890,7 @@ fn packages_read_back_with_functions_by_local_name() {
                 .map(|(package, local)| (*package, local.as_str())),
         );
     }
+
     assert_eq!(view.packaged_name(FunctionId::new(4)), None);
     assert_eq!(
         view.with_local_name("Push").collect::<Vec<_>>(),
@@ -1933,9 +1966,11 @@ fn facts_read_back_with_thread_locals_by_name() {
     for (name, place) in &expected {
         assert_eq!(view.thread_local(name).as_ref(), Some(place), "{name}");
     }
+
     assert_eq!(view.thread_local("count"), None);
     assert_eq!(view.thread_local("zzz"), None);
     assert_eq!(view.address_range(), sample_address_range());
+
     // The debug file's path is where binding found it, and binding must
     // name one when the image was built with one.
     let path = std::sync::Arc::new(std::path::PathBuf::from("/elsewhere/a.debug"));
@@ -2131,6 +2166,7 @@ mod snapshot {
             assert_eq!(&*bytes, contents, "{length}");
             assert_eq!(stamp.length, u64::from(length));
         }
+
         assert!(matches!(
             read_snapshot(&dir.path().join("4097"), 4096),
             Err(ReadError::TooLarge { .. })
@@ -2156,6 +2192,7 @@ mod snapshot {
                     let _ = std::fs::write(path, contents);
                 })
             };
+
             let read = read_snapshot(&path, limit);
             writer.join().unwrap();
             if contents.len() as u64 <= limit {
@@ -2473,6 +2510,7 @@ fn variables_read_back_as_they_were_encoded() {
     let (tables, files) = sample();
     let image = reopen(seal(&tables, &files).unwrap().as_bytes()).unwrap();
     let view = VariableView::new(&image);
+
     // x, y, u, and n share a scope; p, g, and f each have their own, and
     // every scope but the global's shares its code with a function.
     assert_eq!(image.table::<ScopeRecord>().len(), 4);
@@ -2496,6 +2534,7 @@ fn variables_read_back_as_they_were_encoded() {
         assert_eq!(object.malformed(), expected.malformed);
         assert_eq!(object.debug_info_offset(), expected.debug_info_offset);
     }
+
     let x = view.object(ObjectId(0));
     assert!(x.in_scope(ImageAddress::new(0x100f)) && !x.in_scope(ImageAddress::new(0x1010)));
     assert_eq!(x.location(), Some(super::locations::LocationListId(0)));
@@ -2518,6 +2557,7 @@ fn variables_read_back_as_they_were_encoded() {
         assert_eq!(function.captures(), expected.captures);
         assert_eq!(function.returns(), expected.returns);
     }
+
     assert_eq!(
         view.function(VariableFunctionId(0)).returns(),
         Some(ReturnConvention::GoRegisters)
@@ -2526,6 +2566,7 @@ fn variables_read_back_as_they_were_encoded() {
         view.function_at(ImageAddress::new(address))
             .map(|f| f.id().0)
     };
+
     assert_eq!(
         [
             0xfff, 0x1000, 0x1006, 0x100c, 0x100f, 0x1010, 0x2007, 0x2008, 0x3000
@@ -2547,6 +2588,7 @@ fn variables_read_back_as_they_were_encoded() {
         view.go_function(ImageAddress::new(address))
             .map(|f| f.id().0)
     };
+
     assert_eq!([0x1000, 0x1004, 0x1008].map(go), [Some(1), Some(1), None]);
     assert!(view.globals().map(Object::name).eq(["g"]));
     assert_eq!(view.global(0).map(Object::id), Some(ObjectId(2)));
@@ -2602,6 +2644,7 @@ proptest::proptest! {
                 starts.entry(range.start.get()).or_default().push(index);
             }
         }
+
         let input = Variables { functions: functions.clone(), ..Variables::default() };
         let index = input.function_index().unwrap();
         let mut builder = Builder::new(TARGET);
@@ -2625,6 +2668,7 @@ proptest::proptest! {
                 .function_at(ImageAddress::new(address))
                 .map(|function| function.id().0 as usize);
             proptest::prop_assert_eq!(found, expected, "at {:#x}", address);
+
             // The loader finds functions as the image does, before sealing.
             let before = index.function_at(ImageAddress::new(address));
             proptest::prop_assert!(
@@ -2979,6 +3023,7 @@ fn calls_read_back_as_they_were_encoded() {
                 .eq(expected.tail_calls.iter().copied())
         );
     }
+
     for (index, expected) in (0_u32..).zip(&input.sites) {
         let site = view.site(SiteId(index)).unwrap();
         assert_eq!(site.function(), expected.function);
@@ -2989,12 +3034,14 @@ fn calls_read_back_as_they_were_encoded() {
         assert!(site.parameters().eq(expected.parameters.iter().copied()));
         assert_eq!(site.malformed(), expected.malformed);
     }
+
     assert!(view.site(SiteId(5)).is_none());
     let returning = |address| {
         view.returning_to(ImageAddress::new(address))
             .map(|site| site.0)
             .collect::<Vec<_>>()
     };
+
     assert_eq!(returning(0x1008), [0, 3]);
     assert_eq!(returning(0x1004), [4]);
     assert_eq!(returning(0x1005), [0; 0]);
@@ -3310,6 +3357,7 @@ fn declarations_read_back_by_name_and_address() {
         view.vtable(ImageAddress::new(address))
             .map(crate::TypeId::get)
     };
+
     assert_eq!(
         [0x5000, 0x6000, 0x5001].map(vtable),
         [Some(1), Some(0), None]
@@ -3402,6 +3450,7 @@ fn resumes_read_back_by_instance_and_state() {
                 .collect::<Vec<_>>()
         })
     };
+
     assert_eq!(held(0x40, 3), Some(vec![(0x100c, 0x1010)]));
     assert_eq!(
         held(0x40, 4),
@@ -3469,6 +3518,7 @@ fn validation_rejects_resumes_that_disagree() {
             "{name}: {error:?}"
         );
     }
+
     // The ranges themselves are any addresses.
     tampered(TableKind::ResumeRanges, |r: &mut [CodeRange]| {
         r[0].end = 0.into();
@@ -3491,6 +3541,7 @@ fn a_type_table_finds_the_coroutines_the_graph_holds() {
         image,
         id: TypeId::new(id),
     };
+
     let node = |id, name: &str, kind| {
         TypeNode::Resolved(TypeInfo {
             reference: reference(id),
@@ -3500,12 +3551,14 @@ fn a_type_table_finds_the_coroutines_the_graph_holds() {
             identity: None,
         })
     };
+
     let record = TypeKind::Record {
         kind: RecordKind::Struct,
         members: [].into(),
         bases: [].into(),
         incomplete: false,
     };
+
     let nodes = vec![
         node(0, "{async_fn_env#0}", record.clone()),
         node(

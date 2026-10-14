@@ -14,14 +14,17 @@ use super::protocol::{
     ScopesArguments, SetExpressionArguments, SetVariableArguments, StackFrameFormat,
     StackTraceArguments, ValueFormat, VariablesArguments,
 };
+
 use super::session::{Session, Stop, error, parse, signal_text};
 use super::values::{self, Options};
 use crate::present::{self, Filter, Item, ListError, Listed, Presenter, Window, complete};
 
 /// The most children one `variables` request returns.
 const MAX_CHILDREN: u64 = 1024;
+
 /// The most completions one request offers.
 const MAX_COMPLETIONS: usize = 1000;
+
 /// How many tasks one debugger request lists.
 const TASK_PAGE: usize = 1024;
 
@@ -37,6 +40,7 @@ fn thread_name(
             "internal: an entry without a task is a thread",
         ));
     };
+
     let detail = stopped
         .map(|detail| format!(" — {detail}"))
         .unwrap_or_default();
@@ -58,11 +62,13 @@ impl Session {
         {
             return Ok(json!({"threads": threads}));
         }
+
         let handle = self.target_handle().ok();
         let snapshot = match &handle {
             Some(handle) => Some(handle.snapshot().await.map_err(error)?),
             None => None,
         };
+
         let mut threads = Vec::new();
         if let Some(snapshot) = &snapshot {
             for thread in snapshot.threads.iter() {
@@ -74,6 +80,7 @@ impl Session {
                     } if self.stop.is_some() => Some(self.stopped_detail(reason)),
                     _ => None,
                 };
+
                 let context = ExecutionContext::Thread(thread.id);
                 threads.push(json!({
                     "id": self.thread_ids.id(context)?,
@@ -81,9 +88,11 @@ impl Session {
                 }));
             }
         }
+
         if !threads.is_empty() {
             return Ok(json!({"threads": threads}));
         }
+
         // Clients need a thread to show, and to pause, even before the
         // program starts.
         let name = handle.map_or_else(
@@ -110,7 +119,9 @@ impl Session {
         let Some(listing) = self.thread_listing().filter(|listing| listing.tasks) else {
             return Ok(None);
         };
+
         let handle = self.target_handle()?;
+
         // The runtime's own tasks are left out before paging when they are
         // not shown, unless the stop is in one.
         let mut tasks = all_tasks(&handle, !listing.runtime_tasks).await?;
@@ -119,9 +130,11 @@ impl Session {
         {
             tasks = all_tasks(&handle, false).await?;
         }
+
         if tasks.is_empty() {
             return Ok(None);
         }
+
         // A closed client has no use for the list either.
         let _ = self.forget_tasks(&tasks).await;
         let snapshot = handle.snapshot().await.map_err(error)?;
@@ -135,6 +148,7 @@ impl Session {
                     uscope::ThreadState::Running => None,
                 })
         };
+
         let rank = |context: ExecutionContext, on_thread: bool, internal: bool| {
             if context == stop.context {
                 0
@@ -146,6 +160,7 @@ impl Session {
                 2
             }
         };
+
         let mut entries = tasks
             .iter()
             .filter(|task| {
@@ -162,6 +177,7 @@ impl Session {
                 )
             })
             .collect::<Vec<_>>();
+
         // A thread that stopped for a reason of its own but runs no task is
         // there too, so its stop can be inspected, and so is every thread
         // of the program's own; only a runtime's idle threads are not.
@@ -173,6 +189,7 @@ impl Session {
                 entries.push((rank(context, true, false), None, context));
             }
         }
+
         entries.sort_by_key(|(rank, _, _)| *rank);
         let omitted = entries.len().saturating_sub(listing.max_tasks);
         entries.truncate(listing.max_tasks);
@@ -187,8 +204,10 @@ impl Session {
                 Some(task) => self.task_name(stop, task, reason).await,
                 None => thread_name(&snapshot, context, reason)?,
             };
+
             threads.push(json!({"id": self.thread_ids.id(context)?, "name": name}));
         }
+
         if omitted > 0 {
             let noun = format!("more {}", tasks[0].noun);
             threads.push(json!({
@@ -200,6 +219,7 @@ impl Session {
                 ),
             }));
         }
+
         Ok(Some(threads))
     }
 
@@ -253,6 +273,7 @@ impl Session {
         let stop = self.current_stop()?;
         let context = self.thread_ids.context(arguments.thread_id)?;
         let trace = self.backtrace(&stop, context).await?;
+
         // Where a stack goes on on another, a label heads each run of
         // frames saying whose stack it is on, and a stack cut short says
         // so instead of looking complete.
@@ -270,6 +291,7 @@ impl Session {
                     crate::cli::format::stack_label(frame.segment).to_owned()
                 ));
             }
+
             for future in trace
                 .unfollowed
                 .iter()
@@ -280,11 +302,14 @@ impl Session {
                     future.reason
                 )));
             }
+
             entries.push(Ok((frame, iterates)));
         }
+
         if trace.termination != UnwindTermination::Complete {
             entries.push(Err(format!("<backtrace stopped: {}>", trace.termination)));
         }
+
         let total = entries.len();
         let start = usize::try_from(arguments.start_frame.unwrap_or(0)).unwrap_or(0);
         let levels = arguments
@@ -308,13 +333,16 @@ impl Session {
                     continue;
                 }
             };
+
             let mut body = self.stack_frame(stop.id, context, frame).await?;
+
             // Clients focus the first frame whose source is not
             // deemphasized, so the frames above the one the debugger
             // selected at the stop are.
             if context == stop.context && frame.id < stop.selected && body["source"].is_object() {
                 body["source"]["presentationHint"] = "deemphasize".into();
             }
+
             // An iterator recedes behind the loop whose body it runs.
             if let Some(level) = iterates {
                 body["name"] = format!(
@@ -324,6 +352,7 @@ impl Session {
                 .into();
                 body["presentationHint"] = "subtle".into();
             }
+
             self.decorate(
                 &mut body,
                 frame,
@@ -337,6 +366,7 @@ impl Session {
             .await;
             frames.push(body);
         }
+
         Ok(json!({"stackFrames": frames, "totalFrames": total}))
     }
 
@@ -356,6 +386,7 @@ impl Session {
                 Some(module) => self.image(module).await,
                 None => None,
             };
+
             crate::cli::format::awaited_frame(image.as_deref(), frame).unwrap_or_default()
         } else if frame.function.is_none() && frame.symbol.is_none() {
             // Code without a name is named by its address and module.
@@ -368,6 +399,7 @@ impl Session {
                 }),
                 None => None,
             };
+
             let module = module.unwrap_or_default();
             frame.instruction.map_or_else(
                 || format!("a suspended frame{module}"),
@@ -376,6 +408,7 @@ impl Session {
         } else {
             crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
         };
+
         match frame.kind {
             uscope::FrameKind::Inline => name.push_str(" [inlined]"),
             uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
@@ -384,6 +417,7 @@ impl Session {
             | uscope::FrameKind::Signal
             | uscope::FrameKind::Awaited { .. } => {}
         }
+
         let mut body = json!({
             "id": id,
             "name": name,
@@ -393,9 +427,11 @@ impl Session {
         if let Some(address) = frame.instruction {
             body["instructionPointerReference"] = format!("{address:#x}").into();
         }
+
         if let Some(module) = frame.module {
             body["moduleId"] = module.get().to_string().into();
         }
+
         let source = match (&frame.source, frame.module) {
             (Some(location), Some(module)) => self.image(module).await.and_then(|image| {
                 let file = image.source_file(location.file)?;
@@ -403,6 +439,7 @@ impl Session {
             }),
             _ => None,
         };
+
         match source {
             Some((path, location)) => {
                 body["source"] = super::sources::source_json(&path);
@@ -414,6 +451,7 @@ impl Session {
             }
             None => body["presentationHint"] = "subtle".into(),
         }
+
         // A runtime's machinery and the wrappers a compiler writes recede.
         if frame
             .function
@@ -422,6 +460,7 @@ impl Session {
         {
             body["presentationHint"] = "subtle".into();
         }
+
         Ok(body)
     }
 
@@ -455,19 +494,23 @@ impl Session {
                                 );
                                 text.push(' ');
                             }
+
                             if names {
                                 text.push_str(&variable.name);
                             }
+
                             if values {
                                 if names {
                                     text.push_str(" = ");
                                 }
+
                                 text.push_str(&present::text(
                                     variable.type_info.as_ref(),
                                     &variable.state,
                                     hex,
                                 ));
                             }
+
                             text.trim().to_owned()
                         })
                         .collect::<Vec<_>>()
@@ -475,9 +518,11 @@ impl Session {
             );
             name = format!("{name}({})", parameters.join(", "));
         }
+
         if format.line == Some(true) && body["line"].as_u64().is_some_and(|line| line != 0) {
             name = format!("{name} Line {}", body["line"]);
         }
+
         if format.module == Some(true)
             && let Some(module) = frame.module
             && let Some(image) = self.image(module).await
@@ -485,6 +530,7 @@ impl Session {
         {
             name = format!("{name} [{}]", file.to_string_lossy());
         }
+
         body["name"] = name.into();
     }
 
@@ -501,6 +547,7 @@ impl Session {
                         .filter(|variable| present::in_scope(kind, variable.kind))
                         .count()
                 };
+
                 let parameters = count(VariableKind::Parameter);
                 if parameters != 0 {
                     let reference = self.references.variables(Variables::Scope {
@@ -515,6 +562,7 @@ impl Session {
                         "expensive": false,
                     }));
                 }
+
                 let reference = self.references.variables(Variables::Scope {
                     context,
                     kind: VariableKind::Local,
@@ -533,6 +581,7 @@ impl Session {
                 "expensive": false,
             })),
         }
+
         let frame = self.frame_of(context).await;
         if let Some((module, file)) = frame
             .as_ref()
@@ -549,6 +598,7 @@ impl Session {
                 "expensive": true,
             }));
         }
+
         // A suspended task's frame has no registers.
         if !frame.is_some_and(|frame| frame.kind.is_suspended()) {
             let reference = self
@@ -561,6 +611,7 @@ impl Session {
                 "expensive": true,
             }));
         }
+
         Ok(json!({"scopes": scopes}))
     }
 
@@ -594,6 +645,7 @@ impl Session {
                 _ => None,
             },
         };
+
         // A client pages by the count the list was given, so a list of one
         // kind of row has none of the other to show. A view's list has both,
         // and the window chooses between them.
@@ -601,9 +653,11 @@ impl Session {
         if wanted.is_some_and(|wanted| variables.indexed() == Some(!wanted)) {
             return Ok(json!({"variables": []}));
         }
+
         let list = arguments.variables_reference;
         let context = variables.context();
         let rows = self.rows(variables, window, options).await?;
+
         // Data breakpoints name rows by their list and name.
         for row in &rows {
             if let (Some(name), Some(path)) = (
@@ -616,6 +670,7 @@ impl Session {
                     .record_path(list, name.to_owned(), context, path);
             }
         }
+
         Ok(json!({"variables": rows}))
     }
 
@@ -647,6 +702,7 @@ impl Session {
                     })
                     .collect());
             }
+
             Variables::Statics {
                 context,
                 module,
@@ -660,6 +716,7 @@ impl Session {
                     .statics(context, &image, module, file, window)
                     .await
             }
+
             Variables::Children {
                 context,
                 reference,
@@ -670,6 +727,7 @@ impl Session {
                     .children(context, reference, path.as_ref(), window)
                     .await
             }
+
             Variables::Pointee {
                 context,
                 reference,
@@ -680,6 +738,7 @@ impl Session {
                     .pointee(context, reference, &name, path, window)
                     .await
             }
+
             Variables::Range {
                 context,
                 expression,
@@ -783,6 +842,7 @@ impl Session {
             Some(frame) => Some(self.frame_context(frame)?),
             None => self.stop.as_ref().map(Stop::innermost),
         };
+
         let expression = arguments.expression.trim();
         let repl = arguments.context.as_deref() == Some("repl");
         let command = repl
@@ -793,12 +853,15 @@ impl Session {
             (Err(_), Some(_)) => return self.console_line(expression, context).await,
             (Err(failure), None) => return Err(expression_failure(expression, &failure, repl)),
         };
+
         let Some(context) = context else {
             if command.is_some() {
                 return self.console_line(expression, None).await;
             }
+
             return Err(ErrorBody::not_stopped());
         };
+
         let options = self.value_options(arguments.format.as_ref());
         let handle = self.target_handle()?;
         let mode = if repl {
@@ -806,6 +869,7 @@ impl Session {
         } else {
             uscope::EvaluationMode::Read
         };
+
         let evaluation = match handle
             .at(context)
             .evaluate_with(&parsed, mode, uscope::InspectionLimits::default())
@@ -823,10 +887,12 @@ impl Session {
             }
             Err(other) => return Err(error(other)),
         };
+
         if parsed.assignment_target().is_some() {
             self.forget_reads();
             self.invalidate_values().await;
         }
+
         let mut body = match evaluation {
             uscope::Evaluation::Value { value, .. } => self.present(
                 Item {
@@ -858,6 +924,7 @@ impl Session {
                 ));
             }
         };
+
         // An evaluation result names its value `result`.
         body.remove("name");
         body.remove("evaluateName");
@@ -882,11 +949,13 @@ impl Session {
                 .map_err(error)?;
             handle.select_frame(context.frame).await.map_err(error)?;
         }
+
         let output = console
             .console(line)
             .await
             .map_err(|error| ErrorBody::new(format!("{error:#}")))?
             .ok_or_else(|| ErrorBody::new(format!("'{line}' is not a command")))?;
+
         // `set` changes values the client shows.
         if crate::cli::commands::line_command(line)
             .is_some_and(|(spec, _)| spec.command == crate::cli::commands::Command::Set)
@@ -894,6 +963,7 @@ impl Session {
             self.forget_reads();
             self.invalidate_values().await;
         }
+
         Ok(json!({"result": output, "variablesReference": 0}))
     }
 
@@ -933,6 +1003,7 @@ impl Session {
                 location.clone(),
             ),
         };
+
         let file = image
             .source_file(location.file)
             .ok_or_else(|| ErrorBody::new("the source file is missing from its module"))?;
@@ -944,6 +1015,7 @@ impl Session {
         if let Some(column) = location.column {
             body["column"] = self.column_to_client(column.get()).into();
         }
+
         Ok(body)
     }
 
@@ -957,6 +1029,7 @@ impl Session {
                 arguments.thread_id
             )));
         }
+
         let (id, description) = match &stop.reason {
             StopReason::Exception(info)
             | StopReason::CoreDump {
@@ -999,6 +1072,7 @@ impl Session {
                 if let Some(value) = &exception.value {
                     body["details"]["evaluateName"] = value.as_ref().into();
                 }
+
                 return Ok(body);
             }
             StopReason::ProgramBreakpoint { address } => (
@@ -1007,6 +1081,7 @@ impl Session {
             ),
             _ => return Err(ErrorBody::new("the stop was not caused by an exception")),
         };
+
         Ok(json!({
             "exceptionId": id,
             "description": description,
@@ -1037,6 +1112,7 @@ impl Session {
         let mut set = self
             .assign(context, &arguments.name, path, &arguments.value, options)
             .await?;
+
         // A register's row shows its bytes, as the registers list does.
         if register
             && let Some(value) = set["value"]
@@ -1049,6 +1125,7 @@ impl Session {
                 .unwrap_or(64);
             set["value"] = format!("{value:#0width$x}", width = bits / 4 + 2).into();
         }
+
         Ok(set)
     }
 
@@ -1059,6 +1136,7 @@ impl Session {
             Some(frame) => self.frame_context(frame)?,
             None => stop.innermost(),
         };
+
         let expression = arguments.expression.trim();
         let parsed = uscope::Expression::parse(expression)
             .map_err(|failure| error(uscope::Error::Expression(failure)))?;
@@ -1094,6 +1172,7 @@ impl Session {
         else {
             return Err(ErrorBody::new("the assignment produced no value"));
         };
+
         self.forget_reads();
         let mut body = self.present(
             Item {
@@ -1110,6 +1189,7 @@ impl Session {
         for key in ["name", "evaluateName", "presentationHint"] {
             body.remove(key);
         }
+
         self.invalidate_values().await;
         Ok(Value::Object(body))
     }
@@ -1119,6 +1199,7 @@ impl Session {
     /// inside an expression.
     pub(super) async fn completions(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<CompletionsArguments>(arguments, "completions arguments")?;
+
         // Columns count characters; a column past the text completes all of it.
         let column = usize::try_from(arguments.column).unwrap_or(0);
         let offset = if self.support().columns_start_at1 {
@@ -1126,6 +1207,7 @@ impl Session {
         } else {
             column
         };
+
         let typed = arguments
             .text
             .char_indices()
@@ -1137,6 +1219,7 @@ impl Session {
             Some(frame) => self.references.frame_context(frame),
             None => self.stop.as_ref().map(Stop::innermost),
         };
+
         let (completing, partial, start) = complete::completing(typed);
         let command = typed.split_whitespace().next().unwrap_or_default();
         let variables = match (context, completing) {
@@ -1145,6 +1228,7 @@ impl Session {
             }
             _ => None,
         };
+
         let handle = self.target_handle().ok();
         let code = self.code();
         let candidates = match &handle {
@@ -1161,6 +1245,7 @@ impl Session {
             }
             None => Vec::new(),
         };
+
         let start = u64::try_from(typed[..start].chars().count()).unwrap_or(0)
             + u64::from(self.support().columns_start_at1);
         let length = partial.chars().count();

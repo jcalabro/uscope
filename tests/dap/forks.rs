@@ -60,6 +60,7 @@ fn a_child_no_session_takes_runs_on_and_the_user_is_told() {
         if refused {
             dap.refuse_children("no sessions today");
         }
+
         let started = dap.launch(
             profile,
             &fixture("fork"),
@@ -71,6 +72,7 @@ fn a_child_no_session_takes_runs_on_and_the_user_is_told() {
         } else {
             "this client cannot start child sessions"
         };
+
         dap.output_containing(started.mark, "important", explanation);
         let parent = dap.stopped(started.mark);
         let resumed = dap.send("continue", json!({"threadId": parent.thread}));

@@ -24,6 +24,7 @@ fn main() {
         collect(&root, &root, &mut files);
         files.sort();
     }
+
     let mut table = String::from("&[\n");
     for (name, path) in files {
         writeln!(
@@ -32,6 +33,7 @@ fn main() {
         )
         .expect("writing to a string");
     }
+
     table.push(']');
     std::fs::write(out.join("web_assets.rs"), table).expect("write the asset table");
 }
@@ -53,6 +55,7 @@ fn sources_digest(manifest: &Path) {
             roots.push(format!("src/{name}"));
         }
     }
+
     for root in &roots {
         println!("cargo::rerun-if-changed={root}");
         let path = manifest.join(root);
@@ -62,7 +65,9 @@ fn sources_digest(manifest: &Path) {
             files.push((root.clone(), path.to_string_lossy().into_owned()));
         }
     }
+
     files.sort();
+
     // SipHash with fixed keys: stable for one toolchain, and a toolchain
     // that changes it only empties caches.
     let mut digest = std::hash::DefaultHasher::new();
@@ -72,6 +77,7 @@ fn sources_digest(manifest: &Path) {
         digest.write_usize(contents.len());
         digest.write(&contents);
     }
+
     println!(
         "cargo::rustc-env=USCOPE_SOURCES_DIGEST={:016x}",
         digest.finish()
@@ -94,6 +100,7 @@ fn bpf_programs(manifest: &Path, out: &Path) {
             )
         })
     };
+
     let clang = variable("USCOPE_BPF_CLANG");
     let include = variable("USCOPE_BPF_INCLUDE");
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&directory)
@@ -121,6 +128,7 @@ fn bpf_programs(manifest: &Path, out: &Path) {
         for path in std::env::split_paths(&include) {
             command.arg("-I").arg(path);
         }
+
         let status = command
             .arg("-c")
             .arg(&source)
@@ -136,6 +144,7 @@ fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, String)>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

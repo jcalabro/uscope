@@ -33,12 +33,15 @@ mod musl;
 /// The prefix of the file name of musl's dynamic loader, which is also its
 /// C library: `ld-musl-x86_64.so.1` on x86-64.
 const MUSL_LOADER_PREFIX: &[u8] = b"ld-musl-";
+
 /// The musl function that lays out a new thread's TLS, which a statically
 /// linked musl program always contains.
 const MUSL_COPY_TLS: &str = "__copy_tls";
+
 /// The glibc function that lays out the TLS of a statically linked program,
 /// which such a program always contains.
 const GLIBC_SETUP_TLS: &str = "__libc_setup_tls";
+
 /// Where the thread control block keeps its DTV's address, after its own.
 const DTV_POINTER_OFFSET: u64 = 8;
 
@@ -48,6 +51,7 @@ pub(in crate::backend) enum CLibrary {
     /// Dynamically linked glibc, or any C library not recognized as another,
     /// whose lookups then fail for want of glibc's descriptors.
     Glibc,
+
     /// glibc linked into the executable.
     StaticGlibc,
     Musl,
@@ -61,6 +65,7 @@ impl CLibrary {
         let Ok(object) = object::File::parse(data) else {
             return Self::Glibc;
         };
+
         let interpreter = match &object {
             object::File::Elf64(file) => {
                 let endian = file.endian();
@@ -70,11 +75,13 @@ impl CLibrary {
             }
             _ => return Self::Glibc,
         };
+
         let musl_loader = |path: &[u8]| {
             path.rsplit(|&byte| byte == b'/')
                 .next()
                 .is_some_and(|name| name.starts_with(MUSL_LOADER_PREFIX))
         };
+
         match interpreter {
             Some(path) if musl_loader(path) => Self::Musl,
             None if object.symbol_by_name(MUSL_COPY_TLS).is_some() => Self::Musl,
@@ -119,6 +126,7 @@ impl CLibrary {
                 } else {
                     link_maps.iter().map(|&(load_bias, _)| load_bias).collect()
                 };
+
                 let mut modules = BTreeMap::new();
                 let mut id = NonZeroU64::MIN;
                 for load_bias in order {
@@ -132,10 +140,12 @@ impl CLibrary {
                             let Some(next) = id.checked_add(1) else {
                                 break;
                             };
+
                             id = next;
                         }
                     }
                 }
+
                 modules
             }
         }
@@ -147,9 +157,11 @@ impl CLibrary {
 pub(super) enum TlsModule {
     /// glibc finds a block through the module's loader `link_map`.
     Glibc { link_map: VirtualAddress },
+
     /// The executable of a statically linked glibc program, whose block is
     /// in every thread's DTV slot 1.
     StaticGlibc,
+
     /// musl indexes each thread's DTV by module number.
     Musl { id: NonZeroU64 },
 }
@@ -168,6 +180,7 @@ pub(super) fn tls_address(
         TlsModule::StaticGlibc => glibc::static_executable_tls_address(services, thread, offset),
         TlsModule::Musl { id } => musl::tls_address(services, thread, id, offset),
     };
+
     address
         .map(VirtualAddress::new)
         .map_err(|error| error.to_string().into())
@@ -189,11 +202,13 @@ fn thread_pointer(services: &dyn ProcessServices, thread: Pid) -> Result<u64, Tl
     if thread_pointer == 0 {
         return Err(TlsError::Deferred);
     }
+
     if read_word(services, Some(thread_pointer))? != thread_pointer {
         return Err(failed(format!(
             "the thread pointer {thread_pointer:#x} does not address a thread control block"
         )));
     }
+
     Ok(thread_pointer)
 }
 
@@ -220,7 +235,9 @@ fn read_word(services: &dyn ProcessServices, address: Option<u64>) -> Result<u64
 /// Read-only process state that TLS lookups query.
 pub(super) trait ProcessServices {
     fn read(&self, address: u64, output: &mut [u8]) -> bool;
+
     fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct>;
+
     /// The address of `symbol`, preferring its definition in `object`, a
     /// prefix of a module's file name, and otherwise taking it from any
     /// module.
@@ -263,17 +280,21 @@ fn lookup_symbol(pid: Pid, requested_object: Option<&str>, requested_symbol: &st
         let Some(file_name) = mapping.path.file_name() else {
             continue;
         };
+
         let file_name = file_name.to_string_lossy();
         let preferred = requested_object.is_some_and(|object| file_name.starts_with(object));
         let Ok(bias) = mapped_module_load_bias(&mapping) else {
             continue;
         };
+
         let Ok(data) = std::fs::read(&mapping.path) else {
             continue;
         };
+
         let Ok(object) = object::File::parse(data.as_slice()) else {
             continue;
         };
+
         // Undefined symbols have no address here, and a TLS symbol's value
         // is an offset rather than an address.
         let Some(symbol) = object
@@ -287,15 +308,19 @@ fn lookup_symbol(pid: Pid, requested_object: Option<&str>, requested_symbol: &st
         else {
             continue;
         };
+
         let Some(address) = bias.load(ImageAddress::new(symbol.address())) else {
             continue;
         };
+
         let address = address.get();
         if preferred {
             return Some(address);
         }
+
         fallback.get_or_insert(address);
     }
+
     fallback
 }
 
@@ -305,6 +330,7 @@ pub(super) enum TlsError {
     /// The thread has not allocated the module's block, so it cannot have
     /// observed any value in it.
     Deferred,
+
     /// The module has no TLS block.
     NoTls,
     Failed(String),
@@ -346,6 +372,7 @@ mod tests {
             LoadBias::new(0x5000),
         ]
         .map(|load_bias| (load_bias, VirtualAddress::new(load_bias.get() + 1)));
+
         // The executable and a library have TLS and the loader none; the
         // fourth module could not be loaded.
         let has_tls = BTreeMap::from([
@@ -361,6 +388,7 @@ mod tests {
                 (LoadBias::new(0x3000), musl(2))
             ])
         );
+
         // Without the loader's list, only the executable has a number.
         assert_eq!(
             CLibrary::Musl.tls_modules(&[], LoadBias::new(0x1000), &has_tls),
@@ -370,6 +398,7 @@ mod tests {
             CLibrary::Musl.tls_modules(&link_maps[1..3], LoadBias::new(0x2000), &has_tls),
             BTreeMap::from([(LoadBias::new(0x3000), musl(1))])
         );
+
         // glibc finds every listed module's block through its link map.
         assert_eq!(
             CLibrary::Glibc.tls_modules(&link_maps[..2], LoadBias::new(0x1000), &has_tls),
@@ -388,6 +417,7 @@ mod tests {
                 ),
             ])
         );
+
         // Statically linked glibc identifies only the executable, if it has TLS.
         assert_eq!(
             CLibrary::StaticGlibc.tls_modules(&link_maps[..3], LoadBias::new(0x1000), &has_tls),

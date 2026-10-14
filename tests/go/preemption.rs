@@ -13,6 +13,7 @@ use uscope::{
 use crate::support::{self, Scenario};
 
 const BUILDS: [&str; 3] = ["spin-go-o0", "spin-go-o2", STRIPPED];
+
 /// A build without debug information, whose goroutines no check can read.
 const STRIPPED: &str = "spin-go-stripped";
 
@@ -27,6 +28,7 @@ async fn spinning(fixture: &str) -> (Scenario, Receiver<DebuggerEvent>, VirtualA
     } else {
         crate::invariants::checked(fixture)
     };
+
     scenario
         .operation(
             "report SIGURG",
@@ -51,6 +53,7 @@ async fn spinning(fixture: &str) -> (Scenario, Receiver<DebuggerEvent>, VirtualA
     let StopReason::Breakpoint { address, .. } = scenario.run_to_stop().await else {
         panic!("{fixture}: no breakpoint stop");
     };
+
     (scenario, events, address)
 }
 
@@ -84,6 +87,7 @@ async fn preemption_waits_while_a_thread_steps_over_its_breakpoint() {
                 "{fixture}: {reason:?}"
             );
         }
+
         assert!(preemptions(&mut events) > 0, "{fixture}: no SIGURG arrived");
         scenario.shutdown().await;
     }
@@ -120,6 +124,7 @@ async fn preemption_waits_while_a_thread_steps_alone() {
                 );
             }
         }
+
         assert!(preemptions(&mut events) > 0, "{fixture}: no SIGURG arrived");
         scenario.shutdown().await;
     }

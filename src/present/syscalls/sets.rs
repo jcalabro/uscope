@@ -7,6 +7,7 @@ use nix::libc;
 pub enum Shape {
     /// Bits, joined by `|`, with unnamed bits in hex.
     Flags,
+
     /// One value.
     Enum,
 }
@@ -15,6 +16,7 @@ pub enum Shape {
 #[derive(Debug, Clone, Copy)]
 pub struct Set {
     pub shape: Shape,
+
     /// The value has only 32 bits, as an `int` argument does.
     pub narrow: bool,
     pub names: &'static [(u64, &'static str)],

@@ -73,6 +73,7 @@ async fn each_deadlocked_task_waits_for_the_mutex_the_other_holds() {
         let [left, right] = &listed[..] else {
             panic!("{fixture}: {listed:#?}");
         };
+
         for task in [left, right] {
             assert_eq!(task.state, TaskState::Blocked, "{fixture}: {task:#?}");
             assert!(
@@ -115,6 +116,7 @@ async fn each_deadlocked_task_waits_for_the_mutex_the_other_holds() {
                     .unwrap_or_else(|| panic!("{fixture}: no {name}: {trace:#?}"))
                     .id
             };
+
             let grab = trace
                 .frames
                 .iter()
@@ -134,6 +136,7 @@ async fn each_deadlocked_task_waits_for_the_mutex_the_other_holds() {
                 address(&scenario, stop, task.id, index_of("lock"), "_ref__self").await,
             );
         }
+
         let (a, b) = (left.id.number, right.id.number);
         assert_ne!(holds[&a], holds[&b], "{fixture}");
         assert_eq!(waits[&a], holds[&b], "{fixture}");

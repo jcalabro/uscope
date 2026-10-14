@@ -115,6 +115,7 @@ fn malformed_literals_point_at_themselves_and_suggest_fixes() {
     ] {
         assert_eq!(points_at(text), (ErrorKind::Syntax, pointed), "`{text}`");
     }
+
     assert_eq!(
         error("017").hint.as_deref(),
         Some("write 0o17 for octal or 17 for decimal")
@@ -161,14 +162,17 @@ fn every_pair_of_binary_operators_groups_by_the_table() {
                 assert_eq!(points_at(&text), (ErrorKind::Syntax, second), "`{text}`");
                 continue;
             }
+
             let grouped = if first_level >= second_level {
                 format!("((a {first} b) {second} c)")
             } else {
                 format!("(a {first} (b {second} c))")
             };
+
             assert!(tree(&text).same_shape(&tree(&grouped)), "`{text}`");
             assert_eq!(normal(&grouped), text, "`{grouped}` needs no parentheses");
         }
+
         // Prefix operators bind tighter than every binary operator, and `as`
         // tighter than every binary operator but looser than prefixes.
         for prefix in ["-", "!", "~", "*", "&"] {
@@ -178,6 +182,7 @@ fn every_pair_of_binary_operators_groups_by_the_table() {
                 "`{text}`"
             );
         }
+
         let text = format!("a {first} b as u8");
         assert!(
             tree(&text).same_shape(&tree(&format!("a {first} (b as u8)"))),
@@ -194,6 +199,7 @@ fn every_pair_of_binary_operators_groups_by_the_table() {
             "`{text}`"
         );
     }
+
     for (text, grouped) in [
         ("-a as u8", "(-a) as u8"),
         ("a as u8 as i16", "(a as u8) as i16"),
@@ -224,8 +230,10 @@ fn casts_are_read_from_their_spelling() {
         let NodeKind::Cast { ty, form, .. } = t.kind(t.root()).clone() else {
             panic!("`{text}` is a cast");
         };
+
         (super::print::type_text(&ty), form)
     };
+
     for (text, ty, form) in [
         ("(int)x", "int", CastForm::Prefix),
         ("(T)x", "T", CastForm::Prefix),
@@ -250,6 +258,7 @@ fn casts_are_read_from_their_spelling() {
     ] {
         assert_eq!(cast(text), (ty.to_owned(), form), "`{text}`");
     }
+
     // A trailing `*` after `as` multiplies; `(*p)` dereferences.
     let product = tree("x as T * 2");
     assert!(matches!(
@@ -263,6 +272,7 @@ fn casts_are_read_from_their_spelling() {
     let NodeKind::Member { base, .. } = member.kind(member.root()) else {
         panic!("a member");
     };
+
     assert!(matches!(
         member.kind(*base),
         NodeKind::Unary {
@@ -270,6 +280,7 @@ fn casts_are_read_from_their_spelling() {
             ..
         }
     ));
+
     // A parenthesized name before anything that cannot begin an operand
     // only groups.
     for text in [
@@ -293,6 +304,7 @@ fn casts_are_read_from_their_spelling() {
             "`{text}`"
         );
     }
+
     assert_eq!(points_at("(int) + 1"), (ErrorKind::Syntax, "+"));
 }
 
@@ -322,6 +334,7 @@ fn a_parenthesized_name_before_an_operator_has_both_readings() {
             "the normal form keeps the parentheses"
         );
     }
+
     let expression = parse("(a) - (b) - c");
     assert_eq!(expression.ambiguities().len(), 2);
     let names: Vec<_> = expression
@@ -360,6 +373,7 @@ fn a_parenthesized_name_before_an_operator_has_both_readings() {
     ] {
         assert!(parse(text).ambiguities().is_empty(), "`{text}`");
     }
+
     assert_eq!(points_at("(a)-(b)-(c)-(d)-(e)-f"), (ErrorKind::Limit, "("));
     assert_eq!(error("(a)-(b)-(c)-(d)-(e)-f").span.start, 16);
 }
@@ -371,6 +385,7 @@ fn only_views_call_built_in_functions() {
     let view = |text: &str| {
         Expression::parse_view(text).unwrap_or_else(|error| panic!("`{text}`: {error}"))
     };
+
     let expression = view("inner(inner(buf) . ptr) as *T");
     assert_eq!(expression.to_string(), "inner(inner(buf).ptr) as *T");
     assert_eq!(
@@ -379,6 +394,7 @@ fn only_views_call_built_in_functions() {
             .to_string(),
         expression.to_string()
     );
+
     // A parenthesized name after a built-in is its operand, not a cast.
     let expression = view("inner(x) - 1");
     assert!(expression.ambiguities().is_empty());

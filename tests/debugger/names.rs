@@ -107,6 +107,7 @@ async fn go_function_locations_stop_in_every_function_they_name() {
             );
             named.insert(breakpoint.id, entry);
         }
+
         let newstack = scenario.snapshot().await.breakpoints;
         let newstack = newstack
             .iter()
@@ -146,11 +147,14 @@ async fn go_function_locations_stop_in_every_function_they_name() {
                                     entry.location
                                 );
                             }
+
                             hit.entry(breakpoint).or_default().insert(function.clone());
                         }
                     }
+
                     reason = scenario.resume_to_stop().await;
                 }
+
                 // The runtime's preemption signal.
                 StopReason::Exception(ref exception) if exception.code == 23 => {
                     reason = scenario.resume_to_stop().await;
@@ -159,6 +163,7 @@ async fn go_function_locations_stop_in_every_function_they_name() {
                 _ => panic!("{fixture} stopped unexpectedly: {reason:?}"),
             }
         }
+
         assert!(
             matches!(reason, StopReason::Exited(_)),
             "{fixture} never exited"
@@ -176,6 +181,7 @@ async fn go_function_locations_stop_in_every_function_they_name() {
                 entry.location
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -203,6 +209,7 @@ async fn go_locations_that_name_too_much_or_nothing_say_why() {
         path: path.into(),
         function: function.into(),
     };
+
     assert!(matches!(
         scenario
             .handle()
@@ -283,11 +290,13 @@ async fn stopped_frame(scenario: &Scenario, thread: ThreadId) -> (String, String
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         panic!("the program is not stopped");
     };
+
     let at = StopContext {
         stop: stop_id,
         execution: ExecutionContext::Thread(thread),
         frame: StackFrameId::INNERMOST,
     };
+
     let backtrace = scenario
         .operation("backtrace", scenario.handle().at(at).backtrace())
         .await;

@@ -40,12 +40,14 @@ pub fn color_choice(arguments: &[OsString]) -> ColorChoice {
         if argument == "--" {
             break;
         }
+
         if argument == "--color" {
             return arguments
                 .next()
                 .and_then(|value| parse_color(value))
                 .unwrap_or(ColorChoice::Auto);
         }
+
         if let Some(value) = argument
             .to_str()
             .and_then(|argument| argument.strip_prefix("--color="))
@@ -53,6 +55,7 @@ pub fn color_choice(arguments: &[OsString]) -> ColorChoice {
             return parse_color(OsStr::new(value)).unwrap_or(ColorChoice::Auto);
         }
     }
+
     ColorChoice::Auto
 }
 

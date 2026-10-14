@@ -19,6 +19,7 @@ struct Stop {
     reason: String,
     function: String,
     line: i64,
+
     /// Every argument and local, by name, with its comparable value, and
     /// what a step out returned as `returned`.
     values: BTreeMap<String, String>,
@@ -45,6 +46,7 @@ fn walk(dap: &mut Dap, program: &str, function: &str, steps: &[&str]) -> Vec<Sto
         if kind == "exited" {
             break;
         }
+
         let thread = body["threadId"].as_i64().expect("threadId");
         recorded.push(inspect(
             dap,
@@ -64,8 +66,10 @@ fn walk(dap: &mut Dap, program: &str, function: &str, steps: &[&str]) -> Vec<Sto
             });
             break;
         }
+
         mark = sent.mark;
     }
+
     recorded
 }
 
@@ -100,6 +104,7 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
         if !returned && !matches!(scope["name"].as_str(), Some("Arguments" | "Locals")) {
             continue;
         }
+
         let variables = dap.request(
             "variables",
             json!({"variablesReference": scope["variablesReference"]}),
@@ -111,12 +116,14 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
             } else {
                 name
             };
+
             values.insert(
                 name.to_owned(),
                 comparable(variable["value"].as_str().unwrap_or_default()),
             );
         }
     }
+
     Stop {
         reason: reason.to_owned(),
         function: frame["name"].as_str().unwrap_or_default().to_owned(),
@@ -151,6 +158,7 @@ fn stepping_stops_where_gdb_stops_with_the_same_values() {
     for program in ["stepping-boundaries-gcc-o0", "stepping-boundaries-clang-o0"] {
         let (mut uscope, gdb) = compare(program, "main", &steps);
         assert_eq!(uscope.len(), steps.len() + 1, "{program}: {uscope:#?}");
+
         // gdb names every breakpoint stop "breakpoint"; the protocol has a
         // reason for a function breakpoint's.
         assert_eq!(

@@ -93,6 +93,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 }
             }
         }
+
         images.insert(fixture, image);
     }
 
@@ -168,6 +169,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
             let uscope::GlobalVariableType::Resolved(info) = &global.type_info else {
                 panic!("{fixture}: {name} has type {:?}", global.type_info);
             };
+
             assert!(
                 matches!(
                     &info.kind,
@@ -190,6 +192,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 other => panic!("{fixture}: {name} has type {other:?}"),
             }
         };
+
         for (name, count) in [("byte_bounded", 256), ("short_bounded", 65536)] {
             assert!(
                 matches!(
@@ -199,6 +202,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 "{fixture}: {name}"
             );
         }
+
         for (name, expected) in [
             ("const_void_pointer", "const void *"),
             ("typedef_void_pointer", "opaque_handle *"),
@@ -209,6 +213,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 "{fixture}: {name}"
             );
         }
+
         let modifiers = image
             .types()
             .filter_map(|node| match node {
@@ -260,6 +265,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     }
 
     let go = &images["variables-go-o0"];
+
     // Untyped and typed constants alike keep their names and values, which
     // the runtime model binds to.
     assert_eq!(
@@ -380,6 +386,7 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
             }
         }
     }
+
     assert!(attributed > 0, "function body lost source attribution");
     assert!(
         unattributed > 0,
@@ -398,6 +405,7 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
         .find(|symbol| symbol.name() == "bare")
         .expect("the fixture defines bare");
     let extent = bare.extent().expect("bare has a size").range;
+
     // The fixture's layout: no row begins in bare, and the row before it
     // runs on past it.
     let rows = image.statement_rows().collect::<Vec<_>>();
@@ -417,6 +425,7 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let located = image.locate(extent.start);
     assert_eq!(located.source, None, "{located:?}");
     assert!(located.function.is_none());
+
     // The row before still describes the function it belongs to.
     let before = uscope::ImageAddress::new(extent.start.get() - 1);
     assert!(image.locate(before).source.is_some());
@@ -444,6 +453,7 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
         uscope::TypeKind::Union { members, .. } => {
             edges.extend(members.iter().map(|member| member.type_ref));
         }
+
         uscope::TypeKind::Variant {
             common_members,
             bases,
@@ -458,6 +468,7 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
                 uscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
                 _ => {}
             }
+
             edges.extend(
                 variants
                     .iter()
@@ -467,6 +478,7 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
         }
         _ => {}
     }
+
     edges
 }
 
@@ -514,6 +526,7 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
                 .insert(column.get());
         }
     }
+
     assert!(
         columns_by_line.values().any(|columns| columns.len() >= 2),
         "{fixture} did not preserve same-line call columns"
@@ -533,6 +546,7 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     let InlineFrameLookup::Unique(chain) = location.inline_frames else {
         panic!("{fixture} did not resolve one inline chain: {location:?}")
     };
+
     let chain_names: Vec<_> = chain
         .instances
         .iter()
@@ -563,11 +577,13 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
             "{fixture} lost equal-address line rows"
         );
     }
+
     let expected_provenance = if fixture.starts_with("inline-gcc") {
         EntryProvenance::Explicit
     } else {
         EntryProvenance::RangeStart
     };
+
     assert!(leaf_instances.iter().all(|instance| {
         instance
             .breakpoint_entry()
@@ -584,6 +600,7 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
         Ordinary, Outermost, Panic, RuntimeInternal, SignalTrampoline, StackSwitch, TrapEntry,
         Wrapper,
     };
+
     for fixture in ["callers-go", "callers-go-stripped"] {
         let image = load_fixture_image(fixture).await;
         let roles = |name: &str| {
@@ -601,6 +618,7 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
             roles.sort();
             roles
         };
+
         for (name, expected) in [
             ("runtime.newproc", &[RuntimeInternal, Wrapper][..]),
             ("runtime.asmcgocall", &[StackSwitch, Wrapper]),
@@ -642,6 +660,7 @@ async fn go_code_roles_follow_the_runtimes_traceback() {
             expected.sort();
             assert_eq!(roles(name), expected, "{fixture}: {name}");
         }
+
         // Symbols carry the same roles, the ABI0 one by its suffixed name.
         if fixture == "callers-go" {
             for (name, role) in [

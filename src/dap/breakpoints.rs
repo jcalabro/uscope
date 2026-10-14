@@ -18,6 +18,7 @@ pub enum Group {
     Source(PathBuf),
     Functions,
     Instructions,
+
     /// Breakpoints made with console commands, which the client only hears
     /// about through events.
     Console,
@@ -28,12 +29,16 @@ pub enum Group {
 pub enum Key {
     /// A one-based source line.
     Line(u64),
+
     /// A function, or anything else the console's `break` accepts.
     Function(String),
+
     /// An address: a memory reference and a byte offset from it.
     Instruction(u64),
+
     /// A debugger breakpoint made from the console.
     Console(BreakpointId),
+
     /// A location the client named that names nothing, with the reason.
     Invalid(String),
 }
@@ -79,6 +84,7 @@ impl Want {
 pub struct Placement {
     /// The local source file and one-based line of its first location.
     pub source: Option<(PathBuf, u64)>,
+
     /// The address of its first location.
     pub address: Option<u64>,
 }
@@ -90,18 +96,21 @@ pub enum State {
         breakpoint: BreakpointId,
         placement: Placement,
     },
+
     /// Installed in the debugger, with no locations until a module that has
     /// code for it loads.
     Pending {
         breakpoint: BreakpointId,
         message: String,
     },
+
     /// Installed in the debugger but disabled there, from the console,
     /// whose `enable` is the only way back: the protocol has no enabled
     /// flag.
     Disabled { breakpoint: BreakpointId },
     Unresolved {
         message: String,
+
         /// Whether it may still resolve later, such as once the program
         /// is loaded, rather than having failed.
         pending: bool,
@@ -204,6 +213,7 @@ impl Breakpoints {
                 },
             });
         }
+
         release.extend(current.into_iter().flatten());
         Plan { release, slots }
     }
@@ -321,11 +331,13 @@ impl Breakpoints {
                 });
             }
         }
+
         ids.sort_unstable();
         let reason = match groups.len() {
             1 => groups.pop_first().unwrap_or("breakpoint"),
             _ => "breakpoint",
         };
+
         (ids, reason)
     }
 
@@ -347,6 +359,7 @@ impl Breakpoints {
                 _ => true,
             });
         }
+
         for change in &changes {
             if let Change::Removed(entry) = change
                 && let Some(breakpoint) = entry.breakpoint()
@@ -354,11 +367,13 @@ impl Breakpoints {
                 self.owners.remove(&breakpoint);
             }
         }
+
         self.groups.retain(|_, entries| !entries.is_empty());
         for breakpoint in current {
             if self.owners.contains_key(&breakpoint.id) {
                 continue;
             }
+
             let entry = Entry {
                 id: self.allocate_id(),
                 want: Want::at(Key::Console(breakpoint.id)),
@@ -367,6 +382,7 @@ impl Breakpoints {
                     placement: Placement::default(),
                 },
             };
+
             self.acquire(breakpoint.id);
             self.groups
                 .entry(Group::Console)
@@ -374,6 +390,7 @@ impl Breakpoints {
                 .push(entry.clone());
             changes.push(Change::New(entry));
         }
+
         changes
     }
 }
@@ -406,6 +423,7 @@ mod tests {
                 breakpoints.release(breakpoint);
             }
         }
+
         let entries = plan
             .slots
             .into_iter()
@@ -415,6 +433,7 @@ mod tests {
                     let Key::Line(number) = want.key else {
                         panic!("lines only")
                     };
+
                     breakpoints.acquire(BreakpointId::new(number));
                     resolved(id, want, number)
                 }
@@ -439,6 +458,7 @@ mod tests {
             hit_condition: Some(">=2".to_owned()),
             ..line(10)
         };
+
         let plan = breakpoints.plan(&file, vec![line(20), amended.clone(), line(30)]);
         assert_eq!(plan.release, [first[0].clone()]);
         assert_eq!(
@@ -488,6 +508,7 @@ mod tests {
                 pending: true,
             },
         };
+
         breakpoints.install(file.clone(), vec![unresolved.clone()]);
         assert_eq!(breakpoints.unresolved(), [(file.clone(), unresolved)]);
         let plan = breakpoints.plan(&file, vec![line(7)]);
@@ -519,6 +540,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(breakpoints.hit(&hit(&[7])), (vec![1, 2], "breakpoint"));
         assert_eq!(breakpoints.hit(&hit(&[8])), (vec![3], "breakpoint"));
         breakpoints.install(Group::Source("/a.c".into()), Vec::new());
@@ -545,6 +567,7 @@ mod tests {
             enabled: true,
             temporary: false,
         };
+
         let changes = breakpoints.sync(&[core(4), core(9)]);
         assert_eq!(
             changes,
@@ -571,6 +594,7 @@ mod tests {
         let mut breakpoints = Breakpoints::default();
         let file = Group::Source("/a.c".into());
         let first = apply(&mut breakpoints, &file, vec![line(10), line(20), line(30)]);
+
         // Keeps 10 and releases 20 and 30, but the debugger fails to remove
         // 20, whose owner the session takes back.
         let plan = breakpoints.plan(&file, vec![line(10)]);
@@ -590,6 +614,7 @@ mod tests {
             breakpoint: BreakpointId::new(20),
             hit_count: 1,
         };
+
         assert_eq!(breakpoints.hit(&[hit]), (vec![2], "breakpoint"));
         let core = |id: u64| uscope::Breakpoint {
             id: BreakpointId::new(id),
@@ -602,6 +627,7 @@ mod tests {
             enabled: true,
             temporary: false,
         };
+
         assert!(breakpoints.sync(&[core(10), core(20), core(30)]).is_empty());
     }
 }

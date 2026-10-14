@@ -14,6 +14,7 @@ fn modules_and_sources_describe_the_loaded_program() {
         json!({"stopOnEntry": true}),
         &Configuration::default(),
     );
+
     // Loading reports progress to a client that shows it.
     dap.event(started.mark, "progressStart", |body| {
         body["title"]
@@ -22,6 +23,7 @@ fn modules_and_sources_describe_the_loaded_program() {
     });
     dap.event(started.mark, "progressEnd", |_| true);
     dap.stopped(started.mark);
+
     // The program itself is announced, though no load event reports it.
     let program = dap.event(started.mark, "module", |body| {
         body["module"]["name"] == "basic"
@@ -78,6 +80,7 @@ fn modules_name_their_separate_debug_files() {
             .cloned()
             .unwrap_or_else(|| panic!("no {name} in {modules}"))
     };
+
     let program = fixture("split/basic-build-id");
     let root = |name: &str| fixture(&format!("split/{name}")).display().to_string();
     let mut dap = Dap::start("separate debug files");
@@ -329,12 +332,14 @@ fn completions_offer_commands_members_registers_and_names() {
             })
             .collect::<Vec<_>>()
     };
+
     let labels = |targets: &[(String, String, u64, u64)]| {
         targets
             .iter()
             .map(|(label, ..)| label.clone())
             .collect::<Vec<_>>()
     };
+
     // Members, through a pointer or not, after the operator that selects
     // them, replacing only the member's part.
     for text in ["origin.", "where->", "where.", "1 + origin.", "(*where)."] {
@@ -348,19 +353,25 @@ fn completions_offer_commands_members_registers_and_names() {
             "{text}: {targets:?}"
         );
     }
+
     assert_eq!(complete(&mut dap, "where->z"), []);
     assert_eq!(labels(&complete(&mut dap, "origin.y + where->x")), ["x"]);
+
     // A comparison is no member access.
     assert_eq!(complete(&mut dap, "x >"), []);
+
     // Values without members offer none.
     assert_eq!(complete(&mut dap, "x."), []);
     assert_eq!(complete(&mut dap, "missing."), []);
+
     // Registers after `$`.
     let registers = labels(&complete(&mut dap, "$r"));
     for register in ["rax", "rip", "rsp"] {
         assert!(registers.contains(&register.to_owned()), "{registers:?}");
     }
+
     assert!(registers.iter().all(|register| register.starts_with('r')));
+
     // Commands as a line's first word, and their subcommands.
     let commands = complete(&mut dap, "wat");
     for command in ["watch", "watchpoints"] {
@@ -369,6 +380,7 @@ fn completions_offer_commands_members_registers_and_names() {
             "{commands:?}"
         );
     }
+
     assert_eq!(
         complete(&mut dap, "info sig"),
         [("signals".to_owned(), "value".to_owned(), 6, 3)]
@@ -377,6 +389,7 @@ fn completions_offer_commands_members_registers_and_names() {
         complete(&mut dap, "info vi"),
         [("view".to_owned(), "value".to_owned(), 6, 2)]
     );
+
     // Names: the frame's variables and the program's globals.
     let names = complete(&mut dap, "x + cou");
     assert_eq!(names, [("counter".to_owned(), "variable".to_owned(), 5, 3)]);
@@ -400,6 +413,7 @@ fn library_sources_come_and_go_with_their_library() {
             ..Configuration::default()
         },
     );
+
     // The library is not loaded yet, so its line waits for it.
     assert_eq!(started.source_breakpoints[0][0]["reason"], "pending");
     let is_library = |body: &Value| {
@@ -407,6 +421,7 @@ fn library_sources_come_and_go_with_their_library() {
             .as_str()
             .is_some_and(|path| path.ends_with("shared/library.c"))
     };
+
     // Asking for the loaded sources has the client told as they change.
     let entry = dap.stopped(started.mark);
     let sources = dap.request("loadedSources", Value::Null);
@@ -428,6 +443,7 @@ fn library_sources_come_and_go_with_their_library() {
         )["breakpoints"]
             .clone()
     };
+
     let mut mark = resumed.mark;
     for round in 0..2 {
         let stop = dap.stopped(mark);
@@ -480,6 +496,7 @@ fn library_sources_come_and_go_with_their_library() {
             );
         }
     }
+
     dap.finish();
 }
 
@@ -541,6 +558,7 @@ fn vdso_frames_belong_to_a_module_named_as_the_kernel_names_it() {
                 "{name}"
             );
         }
+
         assert!(
             frames.iter().any(|frame| frame["name"] == caller
                 && frame["source"]["path"]

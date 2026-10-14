@@ -37,6 +37,7 @@ impl VariantMetadataBudget {
         if self.items >= MAX_VARIANT_METADATA {
             return Err(VariantMetadataError::Limit);
         }
+
         self.items += 1;
         Ok(())
     }
@@ -55,6 +56,7 @@ fn read_discriminant_leb128(
     } else {
         IntegerValue::Unsigned(read_uleb128_u128(bytes, cursor)?)
     };
+
     checked_integer_value(value, base)
 }
 
@@ -71,20 +73,24 @@ pub(super) fn copy_variant_selection(
             "variant has both DW_AT_discr_value and DW_AT_discr_list".into(),
         ));
     }
+
     if let Some(value) = exact {
         budget.consume()?;
         return enumeration_constant(value, representation, byte_order)
             .map(|value| VariantSelection::Selectors(Arc::from([VariantSelector::Value(value)])))
             .map_err(VariantMetadataError::Malformed);
     }
+
     let Some(list) = list else {
         return Ok(VariantSelection::Default);
     };
+
     let gimli::AttributeValue::Block(list) = list else {
         return Err(VariantMetadataError::Malformed(
             "DW_AT_discr_list does not use a block form".into(),
         ));
     };
+
     let bytes = list
         .to_slice()
         .map_err(|error| VariantMetadataError::Malformed(error.to_string().into()))?;
@@ -101,6 +107,7 @@ pub(super) fn parse_discriminant_list(
             "DW_AT_discr_list is empty".into(),
         ));
     }
+
     let mut cursor = 0_usize;
     let mut selectors = Vec::new();
     while cursor < bytes.len() {
@@ -120,8 +127,10 @@ pub(super) fn parse_discriminant_list(
                 ));
             }
         };
+
         selectors.push(selector);
     }
+
     Ok(VariantSelection::Selectors(selectors.into()))
 }
 
@@ -132,6 +141,7 @@ fn variant_selection_matches(
     let VariantSelection::Selectors(selectors) = selection else {
         return Ok(false);
     };
+
     for selector in selectors.iter() {
         let matches = match *selector {
             VariantSelector::Value(expected) => expected == value,
@@ -140,10 +150,12 @@ fn variant_selection_matches(
                     && !compare_integer_values(value, high)?.is_gt()
             }
         };
+
         if matches {
             return Ok(true);
         }
     }
+
     Ok(false)
 }
 
@@ -163,6 +175,7 @@ pub(super) fn selected_variant_index(
             }
         }
     }
+
     Ok(selected.or(default))
 }
 
@@ -178,22 +191,27 @@ pub(super) fn validate_variant_selections(
                 if selectors.is_empty() {
                     return Err("explicit variant selector list is empty".into());
                 }
+
                 for selector in selectors.iter() {
                     let (low, high) = match *selector {
                         VariantSelector::Value(value) => (value, value),
                         VariantSelector::Range { low, high } => (low, high),
                     };
+
                     if compare_integer_values(low, high)?.is_gt() {
                         return Err("variant discriminator range is reversed".into());
                     }
+
                     ranges.push((low, high, variant_index));
                 }
             }
         }
     }
+
     if default_count > 1 {
         return Err("variant part has multiple default variants".into());
     }
+
     ranges.sort_by(|left, right| {
         compare_integer_values(left.0, right.0).unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -202,6 +220,7 @@ pub(super) fn validate_variant_selections(
             return Err("variant discriminator selectors overlap".into());
         }
     }
+
     Ok(())
 }
 

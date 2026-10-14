@@ -23,11 +23,13 @@ fn readelf_record(fixture: &str) -> BTreeSet<StateLine> {
             let [name, offset, state, record, declared, awaited] = fields[..] else {
                 panic!("{}: malformed line {line:?}", path.display());
             };
+
             let number = |field: &str| {
                 field
                     .parse()
                     .unwrap_or_else(|_| panic!("{}: {field:?} in {line:?}", path.display()))
             };
+
             (
                 name.to_owned(),
                 number(offset),
@@ -47,14 +49,17 @@ fn normalized(image: &ModuleImage) -> BTreeSet<StateLine> {
         let TypeNode::Resolved(info) = node else {
             continue;
         };
+
         let Some(coroutine) = image.coroutine(info.reference.id) else {
             continue;
         };
+
         let identity = info.identity.as_ref().expect("a coroutine has a path");
         let mut name = identity.path.join("::");
         if !name.is_empty() {
             name.push_str("::");
         }
+
         name.push_str(&info.name);
         let coroutine = coroutine.unwrap_or_else(|reason| panic!("{name}: {reason}"));
         for state in coroutine.states.iter() {
@@ -64,6 +69,7 @@ fn normalized(image: &ModuleImage) -> BTreeSet<StateLine> {
                 CoroutineStateKind::Panicked => "Panicked".to_owned(),
                 CoroutineStateKind::Suspended { index } => format!("Suspend{index}"),
             };
+
             let awaited = state
                 .saved
                 .iter()
@@ -82,6 +88,7 @@ fn normalized(image: &ModuleImage) -> BTreeSet<StateLine> {
                 awaited,
             ));
         }
+
         // Every state's members are laid out within the coroutine.
         for member in coroutine.states.iter().flat_map(|state| state.saved.iter()) {
             assert!(
@@ -91,6 +98,7 @@ fn normalized(image: &ModuleImage) -> BTreeSet<StateLine> {
             );
         }
     }
+
     lines
 }
 

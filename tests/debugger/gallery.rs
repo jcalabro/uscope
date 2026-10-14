@@ -42,17 +42,22 @@ fn truths(output: &str) -> Vec<Truth> {
 /// How one gallery build runs and what it must show.
 struct Gallery<'a> {
     fixture: &'a str,
+
     /// The functions to stop in: `reached`, whose caller is inspected, and
     /// others inspected where they stop.
     breakpoints: &'a [&'a str],
+
     /// Checkpoints the run must reach, in order.
     checkpoints: &'a [&'a str],
     optimized: bool,
+
     /// `checkpoint:path` values an optimized build must show all the same.
     required: &'a [&'a str],
+
     /// What only the names of the compiler's own variables begin with,
     /// none of which may be listed.
     reserved: &'a [&'a str],
+
     /// `checkpoint:path` values a function returned that this build's
     /// calling convention does not say where to find, which must be shown
     /// as unknown for that reason.
@@ -70,6 +75,7 @@ async fn check_gallery(gallery: &Gallery<'_>) {
     for breakpoint in gallery.breakpoints {
         scenario.add_breakpoint(breakpoint).await;
     }
+
     let mut reason = scenario
         .run_with_to_stop(LaunchOptions {
             stdout: Some(Stdio::from(output)),
@@ -81,6 +87,7 @@ async fn check_gallery(gallery: &Gallery<'_>) {
     loop {
         match reason {
             StopReason::Breakpoint { .. } => {}
+
             // Go preempts its threads with SIGURG, which never stops a
             // program on its own.
             StopReason::Exception(ref exception) if exception.code == 23 => {
@@ -90,6 +97,7 @@ async fn check_gallery(gallery: &Gallery<'_>) {
             StopReason::Exited(ExitStatus::Code(0)) => break,
             other => panic!("{fixture} stopped unexpectedly: {other:?}"),
         }
+
         let printed = std::fs::read_to_string(&output_path).expect("read the gallery's output");
         let truths = truths(&printed);
         let checkpoint = truths
@@ -111,6 +119,7 @@ async fn check_gallery(gallery: &Gallery<'_>) {
                 ));
             }
         }
+
         for truth in truths.iter().filter(|truth| truth.checkpoint == checkpoint) {
             if gallery
                 .unknown
@@ -119,8 +128,10 @@ async fn check_gallery(gallery: &Gallery<'_>) {
                 if let Err(failure) = check_unknown(&variables, truth) {
                     failures.push(format!("{checkpoint}: {}: {failure}", truth.path));
                 }
+
                 continue;
             }
+
             // The calling convention says where every returned value is.
             let required = returned
                 || gallery
@@ -132,9 +143,11 @@ async fn check_gallery(gallery: &Gallery<'_>) {
                 failures.push(format!("{checkpoint}: {}: {failure}", truth.path));
             }
         }
+
         visited.push(checkpoint);
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     assert_eq!(visited, gallery.checkpoints, "{fixture}");
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
@@ -159,6 +172,7 @@ async fn the_gallery_check_fails_on_values_its_program_did_not_report() {
     while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
@@ -181,6 +195,7 @@ async fn the_gallery_check_fails_on_values_its_program_did_not_report() {
         value: format!("{}1", truth.value),
         ..truth.clone()
     };
+
     assert!(
         check_truth(&scenario, &variables, &wrong, false)
             .await
@@ -191,6 +206,7 @@ async fn the_gallery_check_fails_on_values_its_program_did_not_report() {
         kind: "absent".to_owned(),
         ..truth.clone()
     };
+
     assert!(
         check_truth(&scenario, &variables, &absent, false)
             .await
@@ -221,6 +237,7 @@ async fn checkpoint_variables(
             .operation("select caller", scenario.handle().select_frame(caller))
             .await;
     }
+
     let returned = checkpoint.starts_with("returned-");
     if returned {
         let reason = scenario.step_to_stop(StepKind::Out).await;
@@ -232,6 +249,7 @@ async fn checkpoint_variables(
             "{fixture}: {checkpoint}"
         );
     }
+
     let snapshot = scenario
         .operation("variables", scenario.handle().variables())
         .await;
@@ -280,6 +298,7 @@ async fn check_hidden(
     {
         return Err(format!("is listed: {variable:?}"));
     }
+
     match scenario.handle().variable(name).await {
         Ok(_) => Ok(()),
         Err(_) if may_be_unavailable => Ok(()),
@@ -302,6 +321,7 @@ fn check_variable(
             Err(format!("is listed as a {:?}", variable.kind))
         });
     }
+
     // A generic value whose type argument is unknown keeps its shape, for
     // a typed reason.
     if truth.kind == "type"
@@ -320,6 +340,7 @@ fn check_variable(
             },
         );
     }
+
     None
 }
 
@@ -334,6 +355,7 @@ async fn check_truth(
     if truth.kind == "hidden" {
         return check_hidden(scenario, variables, &truth.path, may_be_unavailable).await;
     }
+
     let mut segments = truth.path.split('.');
     let name = segments.next().expect("a path names a variable");
     let variable = variables
@@ -343,6 +365,7 @@ async fn check_truth(
     if truth.kind == "absent" {
         return variable.map_or(Ok(()), |variable| Err(format!("is listed: {variable:?}")));
     }
+
     // Optimized code may describe no variable at all where its value is
     // gone.
     let Some(variable) = variable else {
@@ -352,6 +375,7 @@ async fn check_truth(
             Err("is not listed".to_owned())
         };
     };
+
     // A value uscope cannot show yet must say so.
     if truth.kind == "unsupported" {
         return match &variable.state {
@@ -359,9 +383,11 @@ async fn check_truth(
             state => Err(format!("is not unsupported: {state:?}")),
         };
     }
+
     if let Some(checked) = check_variable(variable, truth, may_be_unavailable) {
         return checked;
     }
+
     let mut type_info = variable.type_info.clone();
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
     let mut state = variable.state.clone();
@@ -369,7 +395,9 @@ async fn check_truth(
         let VariableState::Available { .. } = &state else {
             break;
         };
+
         let child = child_named(scenario, &state, segment).await;
+
         // Optimized code may leave out what nothing reads, such as a
         // variable a closure captured.
         let child = match child {
@@ -377,10 +405,12 @@ async fn check_truth(
             Err(_) if may_be_unavailable => return Ok(()),
             Err(failure) => return Err(failure),
         };
+
         type_name = Some(child.type_info.name.clone());
         type_info = Some(child.type_info.clone());
         state = child.state.clone();
     }
+
     let VariableState::Available { .. } = &state else {
         return if may_be_unavailable
             && matches!(
@@ -392,6 +422,7 @@ async fn check_truth(
             Err(format!("is not available: {state:?}"))
         };
     };
+
     let shown = shown(&truth.kind, &state, type_info.as_ref());
     if shown == truth.value {
         Ok(())
@@ -420,6 +451,7 @@ async fn child_named(
     else {
         return Err("is not available".to_owned());
     };
+
     let presented = presentation
         .as_deref()
         .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
@@ -429,6 +461,7 @@ async fn child_named(
         let uscope::ValueChildren::Available(reference) = children else {
             continue;
         };
+
         let page = scenario
             .operation(
                 "value children",
@@ -444,11 +477,13 @@ async fn child_named(
         if let Some(found) = page.children.iter().find(|child| named(child, segment)) {
             return Ok(found.clone());
         }
+
         child = Err(format!(
             "has no child {segment} among {} children",
             reference.total()
         ));
     }
+
     child
 }
 
@@ -483,11 +518,13 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
     let VariableState::Available { value, text, .. } = state else {
         unreachable!("only available values are shown");
     };
+
     let integer = |value: &IntegerValue| match value {
         IntegerValue::Signed(value) => value.to_string(),
         IntegerValue::Unsigned(value) => value.to_string(),
         _ => unreachable!("integers are signed or unsigned"),
     };
+
     match (kind, value) {
         ("int" | "uint" | "number", VariableValue::Scalar(ScalarValue::Signed(value))) => {
             value.to_string()
@@ -502,6 +539,7 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
         ("f64", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary64(bits)))) => {
             format!("{bits:#x}")
         }
+
         (
             "c64",
             VariableValue::Scalar(ScalarValue::Complex {

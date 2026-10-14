@@ -53,6 +53,7 @@ fn sample_capture(offset: i64) -> Capture {
             reserved: 0.into(),
         },
     );
+
     // A read that returned three bytes, behind a signal.
     let mut captured = vec![1, 1, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0];
     captured.extend_from_slice(b"abc");
@@ -99,6 +100,7 @@ fn sample_capture(offset: i64) -> Capture {
 fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
     let capture = sample_capture(0);
     assert_eq!(capture.validate(), Ok(()));
+
     // Samples come out per thread, in time order.
     let first = capture.thread_samples(&capture.sample_ranges[0]);
     assert_eq!(
@@ -124,16 +126,20 @@ fn a_capture_seals_reads_back_and_files_merge_chunks_by_identity() {
         for sample in &mut capture.samples {
             sample.time = (sample.time.get() + 50).into();
         }
+
         for zone in &mut capture.zones {
             zone.start = (zone.start.get() + 50).into();
             zone.end = (zone.end.get() + 50).into();
         }
+
         for gap in &mut capture.gaps {
             gap.start = (gap.start.get() + 50).into();
             gap.end = (gap.end.get() + 50).into();
         }
+
         capture
     };
+
     writer.chunk(&later.seal().expect("seal")).expect("chunk");
     writer.finish().expect("index");
     let read = file::read(&bytes).expect("read the file");
@@ -182,6 +188,7 @@ fn zones_of_one_span_keep_their_nesting_when_a_capture_is_rebuilt() {
             },
         );
     }
+
     let depths = |capture: &Capture| {
         capture
             .zone_ranges
@@ -194,6 +201,7 @@ fn zones_of_one_span_keep_their_nesting_when_a_capture_is_rebuilt() {
             })
             .collect::<Vec<_>>()
     };
+
     let recorded = builder.finish();
     assert_eq!(depths(&recorded), [(outer, 0), (inner, 1)]);
 
@@ -236,6 +244,7 @@ fn a_builder_forgets_rows_before_a_moment() {
     for time in [1, 5, 9] {
         builder.sample(thread, time, 1, stack, NONE);
     }
+
     builder.off_cpu(thread, 2, 2, false);
     builder.off_cpu(thread, 4, 4, true);
     builder.gap(1, 2, GapReason::Budget);
@@ -322,6 +331,7 @@ fn the_fuzzers_seed_is_a_capture_of_this_revision() {
     if std::env::var_os("USCOPE_UPDATE_SEED").is_some() {
         std::fs::write(&path, &expected).expect("write the seed");
     }
+
     let seed = std::fs::read(&path).expect("read the seed");
     assert!(
         seed == expected,

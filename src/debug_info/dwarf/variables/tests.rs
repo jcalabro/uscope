@@ -4,6 +4,7 @@ use gimli::write::{
     AttributeValue as WriteAttributeValue, Dwarf as WriteDwarf, EndianVec, LineProgram, Sections,
     Unit,
 };
+
 use gimli::{Encoding, Format, LittleEndian};
 use gimli::{Location, Value};
 
@@ -20,16 +21,19 @@ use super::codec::{
     decode_address, decode_integer_value, decode_scalar, extract_bit_field, read_sleb128_i128,
     read_uleb128_u128,
 };
+
 use super::die::Seen;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
     materialize_constant,
 };
+
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
     PathStep, ScalarDecodeError, array_byte_offset, evaluate_error_state, implicit_pointer_range,
     static_member_layout_is_valid,
 };
+
 use super::location::{EvaluationUnit, Expression, LocationsBuilder, select};
 use super::pieces::storage_from_pieces;
 use super::shape::{ValueShape, ValueShapeError, value_shape_from};
@@ -37,10 +41,12 @@ use super::types::{
     TypeArenaBuilder, TypeEntry, TypeResolution, inline_storage_cycle_nodes,
     propagate_wrapper_sizes, zig_error_union_type_names, zig_optional_payload_name,
 };
+
 use super::variant::{
     VariantMetadataBudget, VariantMetadataError, parse_discriminant_list,
     validate_variant_selections,
 };
+
 use super::*;
 use crate::image::locations::{ExpressionId, LocationListId};
 use crate::model::{ArrayOrdering, ValueStorage};
@@ -55,11 +61,14 @@ fn array_indices_honor_lower_bounds_ordering_and_reject_overflow() {
         ordering,
         element_size,
     };
+
     let step = |dimensions: &[(i128, u64)], element_size| {
         ordered(ArrayOrdering::RowMajor, dimensions, element_size)
     };
+
     let bounded = step(&[(-2, 3), (10, 2)], 4);
     assert_eq!(array_byte_offset(&bounded, &[0, 11]).ok(), Some(Some(20)));
+
     // Column by column, the first index's elements are adjacent.
     let columns = ordered(ArrayOrdering::ColumnMajor, &[(-2, 3), (10, 2)], 4);
     assert_eq!(array_byte_offset(&columns, &[0, 11]).ok(), Some(Some(20)));
@@ -73,6 +82,7 @@ fn array_indices_honor_lower_bounds_ordering_and_reject_overflow() {
                 if (index, lower_bound, count) == (bad_index, bad_lower_bound, bad_count)
         ));
     }
+
     assert!(matches!(
         array_byte_offset(&bounded, &[0]),
         Err(Error::InvalidValueExpression(_))
@@ -94,6 +104,7 @@ fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValu
         version: 5,
         address_size: 8,
     };
+
     let mut written = WriteDwarf::new();
     let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
     let unit = written.units.get_mut(unit_id);
@@ -119,6 +130,7 @@ fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValu
         unit.get_mut(subrange)
             .set(gimli::DW_AT_lower_bound, lower_bound);
     }
+
     let variable = unit.add(root, gimli::DW_TAG_variable);
     unit.get_mut(variable)
         .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(array));
@@ -144,8 +156,10 @@ fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValu
                 value = entry.attr_value(gimli::DW_AT_type);
             }
         }
+
         value.expect("the variable's type")
     };
+
     let signatures = HashMap::new();
     let pool = std::sync::Mutex::default();
     let die_buffers = super::types::DieBuffers::default();
@@ -162,6 +176,7 @@ fn array_type_in(language: gimli::DwLang, lower_bound: Option<WriteAttributeValu
     let TypeResolution::Resolved(id) = arena.variable_type(0, Some(type_value)) else {
         panic!("the array type resolves");
     };
+
     arena.entries[id.index()].clone()
 }
 
@@ -183,6 +198,7 @@ fn an_arrays_default_lower_bound_is_its_languages() {
         ),
         _ => None,
     };
+
     for (language, expected) in [
         (gimli::DW_LANG_C99, (0, 4)),
         (gimli::DW_LANG_Rust, (0, 4)),
@@ -195,6 +211,7 @@ fn an_arrays_default_lower_bound_is_its_languages() {
             "{language}"
         );
     }
+
     assert_eq!(
         dimensions(&array_type_in(
             gimli::DW_LANG_Fortran08,
@@ -202,6 +219,7 @@ fn an_arrays_default_lower_bound_is_its_languages() {
         )),
         Some(vec![(-1, 5)])
     );
+
     // A vendor's language says nothing of where its arrays begin.
     assert_eq!(
         dimensions(&array_type_in(gimli::DwLang(0x8001), None)),
@@ -226,6 +244,7 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
         version: 5,
         address_size: 8,
     };
+
     let mut written = WriteDwarf::new();
     let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
     let unit = written.units.get_mut(unit_id);
@@ -267,8 +286,10 @@ fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
                 value = Some(candidate);
             }
         }
+
         value.expect("referencing variable")
     };
+
     let signatures = HashMap::new();
     let pool = std::sync::Mutex::default();
     let die_buffers = super::types::DieBuffers::default();
@@ -315,6 +336,7 @@ fn variant_selection_validation_rejects_overlap_and_multiple_defaults() {
         selection,
         members: Arc::from([]),
     };
+
     let overlapping = [
         variant(VariantSelection::Selectors(Arc::from([
             VariantSelector::Range {
@@ -361,6 +383,7 @@ fn explicit_discriminant_lists_are_nonempty_and_share_one_metadata_budget() {
     for _ in 0..MAX_VARIANT_METADATA - 1 {
         budget.consume().expect("budget entry");
     }
+
     let selector = [gimli::DW_DSC_label.0, 1];
     assert!(parse_discriminant_list(&selector, &representation, &mut budget).is_ok());
     assert_eq!(
@@ -397,6 +420,7 @@ fn reference_chains_stop_at_their_cycles_however_long() {
             if !seen.insert(DieKey { unit: 0, offset }) {
                 return Err(links);
             }
+
             links += 1;
             current = if offset + 1 < length {
                 Some(offset + 1)
@@ -404,8 +428,10 @@ fn reference_chains_stop_at_their_cycles_however_long() {
                 back_to
             };
         }
+
         Ok(links)
     };
+
     // The first links are compared in place and the rest kept in a set; a
     // cycle closes wherever it closes, on either side of that boundary.
     for length in [1, 2, 8, 9, 40] {
@@ -448,6 +474,7 @@ struct Runtime {
     cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
     memory: Option<Arc<[u8]>>,
     memory_reads: u32,
+
     /// What the frame's caller passed, by what an entry value asks for.
     entry_values: Vec<(EntryParameter, u64)>,
 }
@@ -559,6 +586,7 @@ impl Pool {
             version: 5,
             address_size: 8,
         };
+
         self.0
             .expression(bytes, 0, encoding, addresses, procedures)
             .expect("an expression fits")
@@ -652,6 +680,7 @@ fn target(byte_order: ByteOrder) -> TargetDescription {
 fn malformed_backward_branch_expression_fails_instead_of_hanging() {
     let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
+
     // DW_OP_skip with a -3 offset branches back onto itself forever.
     let looping = pool.add(&[gimli::DW_OP_skip.0, 0xfd, 0xff]);
     let mut budget = InspectionBudget::default();
@@ -676,6 +705,7 @@ fn malformed_backward_branch_expression_fails_instead_of_hanging() {
 fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
     let mut pool = Pool::new([(0x10, gimli::ValueType::U64)]);
     let mut runtime = Runtime::new([(6, 0x2000)]);
+
     // DW_OP_regval_type register 6, base type DIE offset 0x10.
     let typed = pool.add(&[
         gimli::DW_OP_regval_type.0,
@@ -724,6 +754,7 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
     let wider = Location::Bytes {
         value: gimli::EndianSlice::new(&[1, 2, 3, 4, 5, 6, 7, 8], RunTimeEndian::Little),
     };
+
     for pieces in [
         vec![piece(wider, 32)],
         vec![piece(wider, 16), piece(Location::Empty, 16)],
@@ -818,11 +849,13 @@ fn undefined_location_pieces_leave_the_rest_of_a_value_readable() {
                 .into()
         )
     );
+
     // Pieces describing more than the object are malformed.
     assert!(matches!(
         composite(&pieces, 3, &mut runtime),
         Err(EvaluateError::Malformed(_))
     ));
+
     // A value with no defined bits at all is optimized out.
     assert_eq!(
         composite(&[piece(Location::Empty, 32)], 8, &mut runtime).map(drop),
@@ -854,6 +887,7 @@ fn an_empty_location_expression_describes_an_optimized_out_value() {
 #[test]
 fn register_and_value_pieces_take_their_low_order_bits() {
     let mut runtime = Runtime::new([(0, 0x1122_3344_5566_7788), (1, 0xaabb)]);
+
     // The upper half of r0 by bit offset, then r1's low byte, then the low
     // twelve bits of a computed value and four bits beyond it: a
     // generic value with its sign bit clear extends with zeros.
@@ -883,6 +917,7 @@ fn register_and_value_pieces_take_their_low_order_bits() {
         read_at(&storage, 0, 7, &mut runtime),
         Ok(vec![0x44, 0x33, 0x22, 0x11, 0xbb, 0xff, 0x0f])
     );
+
     // Part of a register above its least significant bit is not the
     // register's value, though it is all one piece's.
     let upper = storage::narrow(storage::offset(storage.clone(), 0).expect("offset"), 4);
@@ -964,6 +999,7 @@ fn malformed_pieces_are_refused() {
                 .collect::<Vec<_>>()
         );
     }
+
     // Big-endian pieces are numbered differently; uscope does not model them.
     let halves = [
         piece(
@@ -1046,6 +1082,7 @@ fn consecutive_memory_pieces_are_one_place_in_memory() {
 #[test]
 fn a_bit_field_reads_only_its_own_bits() {
     let mut runtime = Runtime::new([]);
+
     // Bits 0..4 are undefined; a field in bits 4..12 is not.
     let pieces = [
         piece(Location::Empty, 4),
@@ -1088,6 +1125,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         ] => *value,
         pieces => panic!("{pieces:?}"),
     };
+
     // DW_OP_entry_value(DW_OP_reg5) DW_OP_plus_uconst 1 DW_OP_stack_value.
     let register = pool.add(&[
         gimli::DW_OP_entry_value.0,
@@ -1101,6 +1139,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         pool.run(register, &mut runtime).map(value),
         Ok(Value::Generic(42))
     );
+
     // A typed register keeps its type.
     let typed = pool.add(&[
         gimli::DW_OP_entry_value.0,
@@ -1111,6 +1150,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(pool.run(typed, &mut runtime).map(value), Ok(Value::I32(41)));
+
     // DW_OP_bregN 0; DW_OP_deref asks for what the register pointed at.
     let referent = pool.add(&[
         gimli::DW_OP_entry_value.0,
@@ -1124,6 +1164,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         pool.run(referent, &mut runtime).map(value),
         Ok(Value::Generic(0x20))
     );
+
     // A parameter reference names its entry by its unit's offset.
     let parameter = pool.add(&[
         gimli::DW_OP_GNU_parameter_ref.0,
@@ -1137,6 +1178,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         pool.run(parameter, &mut runtime).map(value),
         Ok(Value::Generic(7))
     );
+
     // What the caller cannot say, the value cannot be.
     let missing = pool.add(&[
         gimli::DW_OP_entry_value.0,
@@ -1151,6 +1193,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
                 .into()
         )
     );
+
     // Any other operand is a valid expression uscope does not evaluate.
     let other = pool.add(&[
         gimli::DW_OP_entry_value.0,
@@ -1172,6 +1215,7 @@ fn called_procedures_run_on_the_same_stack() {
     let procedure = |pool: &mut Pool, expression| {
         Some(pool.0.list(&[(None, expression)]).expect("a list fits"))
     };
+
     // A procedure resolves an indexed address from its unit's table,
     // which loading gives the expressions calling it.
     let indexed = pool.with(
@@ -1197,6 +1241,7 @@ fn called_procedures_run_on_the_same_stack() {
         0,
         gimli::DW_OP_stack_value.0,
     ];
+
     // The unit begins at 0x100, so the calls name 0x120, 0x130, and 0x140.
     // An entry without a location has no effect.
     let caller = pool.with(
@@ -1213,6 +1258,7 @@ fn called_procedures_run_on_the_same_stack() {
             ..
         }])
     ));
+
     // A procedure the expression did not bring is elsewhere.
     let alone = pool.add(&bytes);
     assert_eq!(
@@ -1257,12 +1303,14 @@ fn expression_memory_reads_are_strictly_bounded() {
         bytes.extend_from_slice(&u64::from(address).to_le_bytes());
         bytes.extend_from_slice(&[gimli::DW_OP_deref_size.0, 1, gimli::DW_OP_drop.0]);
     }
+
     bytes.extend_from_slice(&[gimli::DW_OP_lit0.0, gimli::DW_OP_stack_value.0]);
     let expression = pool.add(&bytes);
     let mut runtime = Runtime {
         memory: Some(Arc::from([0_u8; 16])),
         ..Runtime::new([])
     };
+
     assert_eq!(
         evaluate(
             pool.get(expression),
@@ -1313,6 +1361,7 @@ fn operational_memory_failures_escape_the_per_variable_result_lane() {
 #[test]
 fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
     let little = target(ByteOrder::Little);
+
     // A fixed data form supplies zero high bits: DW_FORM_data1 0xff for a
     // signed 4-byte type is 255; producers use DW_FORM_sdata for -1.
     assert_eq!(
@@ -1327,6 +1376,7 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
             .as_ref(),
         &[0xff, 0xff, 0xff, 0xff]
     );
+
     // Clang writes an unsigned short's 65535 as the 64-bit sign extension
     // of its pattern, in an unsigned form.
     assert_eq!(
@@ -1335,6 +1385,7 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
             .as_ref(),
         &[0xff, 0xff]
     );
+
     // A value that is neither the pattern nor its extension does not fit.
     assert!(materialize_constant(&ConstantValue::Unsigned(0x1_0000), 2, little).is_err());
     assert!(
@@ -1351,6 +1402,7 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
 fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
     let mut pool = Pool::new([]);
     let mut runtime = Runtime::new([]);
+
     // DW_OP_lit1 then DW_OP_bra +2 skips the DW_OP_fbreg on the executed
     // path; the frame base must not be resolved eagerly.
     let branching = pool.add(&[
@@ -1421,6 +1473,7 @@ fn specific_location_entries_override_default_entries() {
             end: ImageAddress::new(end),
         })
     };
+
     let (reg0, reg1) = (
         pool.add(&[gimli::DW_OP_reg0.0]),
         pool.add(&[gimli::DW_OP_reg1.0]),
@@ -1440,6 +1493,7 @@ fn specific_location_entries_override_default_entries() {
     assert_eq!(at(description, Some(0x150)), Ok(Some(reg1)));
     assert_eq!(at(description, Some(0x300)), Ok(Some(reg0)));
     assert_eq!(at(description, None), Ok(Some(reg0)));
+
     // A location with only range-gated entries refuses to guess when no
     // instruction context is available rather than silently resolving.
     assert!(at(ranged_only, None).is_err());
@@ -1487,6 +1541,7 @@ fn scalar_decoding_obeys_bit_width_sign_and_target_byte_order() {
         byte_size: 1,
         bit_size: Some(bit_size),
     };
+
     assert_eq!(
         decode_integer_value(
             &base(BaseTypeEncoding::Unsigned, 3),
@@ -1546,6 +1601,7 @@ fn implicit_pointer_offsets_are_bounded_and_never_return_partial_values() {
             "{offset} {size}"
         );
     }
+
     assert_eq!(
         implicit_pointer_range(i64::MAX, u64::MAX, 8),
         Err(VariableUnavailableReason::EvaluationLimit)
@@ -1558,6 +1614,7 @@ fn static_member_layouts_cannot_escape_their_containing_record() {
         bit_offset,
         bit_size,
     };
+
     for (record, member, layout, valid) in [
         (Some(8), Some(4), RecordMemberLayout::ByteOffset(4), true),
         (Some(8), Some(4), RecordMemberLayout::ByteOffset(5), false),
@@ -1593,6 +1650,7 @@ fn value_shapes_separate_malformed_from_unsupported_types() {
             },
         )
     };
+
     let representation = node(
         1,
         "representation",
@@ -1809,18 +1867,21 @@ proptest::proptest! {
                 }
             })
             .collect::<Vec<_>>();
+
         // What each type holds in place: a record's members that exist.
         let holds = |index: usize| -> Vec<usize> {
             let (shape, targets) = &shapes[index];
             if *shape < 2 {
                 return Vec::new();
             }
+
             targets
                 .iter()
                 .map(|target| *target as usize)
                 .filter(|target| *target < shapes.len())
                 .collect()
         };
+
         let holds_itself = |start: usize| {
             let mut seen = vec![false; shapes.len()];
             let mut stack = holds(start);
@@ -1828,12 +1889,15 @@ proptest::proptest! {
                 if node == start {
                     return true;
                 }
+
                 if !std::mem::replace(&mut seen[node], true) {
                     stack.extend(holds(node));
                 }
             }
+
             false
         };
+
         let mut found = inline_storage_cycle_nodes(&types);
         found.sort_unstable();
         let expected = (0..shapes.len()).filter(|index| holds_itself(*index)).collect::<Vec<_>>();
@@ -1880,6 +1944,7 @@ fn boolean_and_float_decoding_preserve_exact_representations() {
         base_name: name.into(),
         ..scalar_type(BaseTypeEncoding::Floating, 16)
     };
+
     assert_eq!(
         decode_scalar(&sixteen_bytes("long double"), &extended, little).expect("x87 extended"),
         ScalarValue::Floating(FloatValue::X87Extended {
@@ -1887,6 +1952,7 @@ fn boolean_and_float_decoding_preserve_exact_representations() {
             sign_exponent: 0x4000,
         })
     );
+
     // IEEE binary128 shares the size but not the representation, and a
     // size two formats share is not a format without a name that says.
     for name in ["__float128", "_Float128", "f128"] {
@@ -1896,6 +1962,7 @@ fn boolean_and_float_decoding_preserve_exact_representations() {
             "{name}"
         );
     }
+
     assert!(matches!(
         decode_scalar(&sixteen_bytes("float"), &extended, little),
         Err(ScalarDecodeError::Unavailable(_))
@@ -1904,6 +1971,7 @@ fn boolean_and_float_decoding_preserve_exact_representations() {
         base_name: name.into(),
         ..scalar_type(BaseTypeEncoding::Floating, 2)
     };
+
     assert_eq!(
         decode_scalar(&two_bytes("_Float16"), &[0x00, 0x3e], little).expect("binary16"),
         ScalarValue::Floating(FloatValue::Binary16(0x3e00))
@@ -1949,6 +2017,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         version: 5,
         address_size: 8,
     };
+
     let mut written = WriteDwarf::new();
     let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
     let unit = written.units.get_mut(unit_id);
@@ -1988,6 +2057,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
         image: ModuleImageId::new(0),
         address: None,
     };
+
     let variable = debug_info
         .variables
         .inspect_global(
@@ -2001,6 +2071,7 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
     let VariableState::Malformed(reason) = &variable.state else {
         panic!("{variable:?}");
     };
+
     assert_eq!(
         (reason.kind, reason.description.as_ref()),
         (
@@ -2036,6 +2107,7 @@ fn load_test_object(written: &mut WriteDwarf) -> crate::debug_info::DebugInfo {
                 );
                 elf.append_section_data(debug, section.slice(), 1);
             }
+
             Ok(())
         })
         .expect("add the DWARF sections");
@@ -2057,6 +2129,7 @@ fn a_nameless_artificial_variable_is_the_compilers_own() {
         version: 5,
         address_size: 8,
     };
+
     let mut written = WriteDwarf::new();
     let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
     let unit = written.units.get_mut(unit_id);
@@ -2096,9 +2169,11 @@ fn a_nameless_artificial_variable_is_the_compilers_own() {
                 WriteAttributeValue::String(name.as_bytes().to_vec()),
             );
         }
+
         if artificial {
             variable.set(gimli::DW_AT_artificial, WriteAttributeValue::Flag(true));
         }
+
         variable.set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(int));
         let mut location = gimli::write::Expression::new();
         location.op_addr(gimli::write::Address::Constant(0x10));
@@ -2107,6 +2182,7 @@ fn a_nameless_artificial_variable_is_the_compilers_own() {
             WriteAttributeValue::Exprloc(location),
         );
     }
+
     let debug_info = load_test_object(&mut written);
 
     let mut runtime = Runtime::new([]);
@@ -2238,6 +2314,7 @@ fn composite_and_bits(
     let bit = |bytes: &[u8], index: u64| {
         Bit::Known((bytes[usize::try_from(index / 8).expect("small")] >> (index % 8)) & 1 == 1)
     };
+
     let mut pieces = Vec::new();
     let mut bits = Vec::new();
     let mut offset = 0;
@@ -2277,6 +2354,7 @@ fn composite_and_bits(
                 vec![Bit::Undefined; index(*size)],
             ),
         };
+
         pieces.push(StoragePiece {
             offset,
             size: *size,
@@ -2285,6 +2363,7 @@ fn composite_and_bits(
         bits.extend(piece_bits);
         offset += size;
     }
+
     // Whole bytes, as an object has.
     let tail = offset.next_multiple_of(8) - offset;
     if tail != 0 {
@@ -2295,6 +2374,7 @@ fn composite_and_bits(
         });
         bits.extend(std::iter::repeat_n(Bit::Undefined, index(tail)));
     }
+
     (
         CompositeStorage {
             pieces: pieces.into(),
@@ -2317,6 +2397,7 @@ fn expected_read(bits: &[Bit]) -> std::result::Result<Vec<u8>, EvaluateError> {
         if *bit != Bit::Undefined {
             continue;
         }
+
         let index = index as u64;
         match ranges.last_mut() {
             Some(last) if last.offset + last.size == index => last.size += 1,
@@ -2326,6 +2407,7 @@ fn expected_read(bits: &[Bit]) -> std::result::Result<Vec<u8>, EvaluateError> {
             }),
         }
     }
+
     match ranges.as_slice() {
         [] => {}
         [only] if only.size == bits.len() as u64 => {
@@ -2343,15 +2425,18 @@ fn expected_read(bits: &[Bit]) -> std::result::Result<Vec<u8>, EvaluateError> {
             .into());
         }
     }
+
     if bits.contains(&Bit::Unavailable) {
         return Err(VariableUnavailableReason::RegisterNotSaved("r1".into()).into());
     }
+
     let mut bytes = vec![0_u8; bits.len().div_ceil(8)];
     for (index, bit) in bits.iter().enumerate() {
         if *bit == Bit::Known(true) {
             bytes[index / 8] |= 1 << (index % 8);
         }
     }
+
     Ok(bytes)
 }
 
@@ -2382,6 +2467,7 @@ proptest::proptest! {
         if size != 0 {
             proptest::prop_assert_eq!(&read_bytes, &expected);
         }
+
         if let Ok(bytes) = &read_bytes {
             let narrowed = storage::narrow(selected, size);
             let again = storage::read(&narrowed, index(size), &mut memory, &mut budget)

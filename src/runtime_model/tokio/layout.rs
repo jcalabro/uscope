@@ -59,6 +59,7 @@ pub struct Layout {
     pub tasks: Result<Tasks, Missing>,
     pub pool: Result<Pool, Missing>,
     pub spawns: Result<Spawns, Missing>,
+
     /// `None` for a program that never runs a `LocalSet`.
     pub locals: Result<Option<Locals>, Missing>,
 }
@@ -86,20 +87,26 @@ impl Layout {
 #[derive(Debug)]
 pub struct Locals {
     pub tls: ThreadLocal,
+
     /// std's state of the thread's storage, a byte, and the value saying
     /// the thread made it.
     pub state: u64,
     pub alive: u64,
+
     /// The `Option<Rc<Context>>` the storage holds, a pointer or null.
     pub context: u64,
+
     /// The `LocalSet`'s own `Rc<Context>` pointer.
     pub set: u64,
+
     /// The `Context` within its `Rc`'s allocation, and the `Arc<Shared>`
     /// pointer within the `Context`.
     pub value: u64,
     pub shared: u64,
+
     /// The `Shared` within its `Arc`'s allocation.
     pub data: u64,
+
     /// The list's id and head within the `Shared`.
     pub id: u64,
     pub head: u64,
@@ -110,6 +117,7 @@ impl Locals {
         let Some(tls) = image.thread_local_within(LOCAL_SCOPE, CONTEXT_STORAGE) else {
             return Ok(None);
         };
+
         let tls = tls?;
         let storage = records::named(
             image,
@@ -120,6 +128,7 @@ impl Locals {
         if records::size(image, state.ty)? != 1 {
             return Err("eager::Storage's state is not one byte".into());
         }
+
         let context = records::field(
             image,
             storage,
@@ -138,6 +147,7 @@ impl Locals {
             whole.extend_from_slice(path);
             records::sized(image, data.ty, &whole, 8)
         };
+
         Ok(Some(Self {
             tls,
             state: state.offset,
@@ -172,6 +182,7 @@ impl Spawns {
         let offset = records::sized(image, vtable, &["spawn_location_offset"], 8)
             .map_err(|_| "the program was built without tokio_unstable")?;
         let location = records::named(image, "core::panic::location::Location")?;
+
         // The file's name is a `NonNull<str>` in recent releases of Rust,
         // and was a `&str` before; either is a slice's pointer and length.
         let name = records::field(image, location, &["filename", "pointer"])
@@ -192,23 +203,29 @@ impl Spawns {
 #[derive(Debug)]
 pub struct Context {
     pub tls: ThreadLocal,
+
     /// std's state of the thread's storage, a byte, and the value saying
     /// the thread made it.
     pub state: u64,
     pub alive: u64,
+
     /// `Option<scheduler::Handle>`, and the handle within its `Some`.
     pub handle: Field,
     pub handle_option: Sum,
     pub handle_some: u64,
     pub flavors: Sum,
+
     /// What each flavor's handle reaches.
     pub runtimes: Vec<(Flavor, Arc<str>, Runtime)>,
+
     /// The scheduler's context pointer, null outside a worker.
     pub scheduler: u64,
+
     /// Whether the thread entered its runtime, as a worker or a thread
     /// blocking on it does, and a pool thread does not.
     pub entered: Field,
     pub entered_state: Sum,
+
     /// `Option<task::Id>`, and the id within its `Some`.
     pub task: Field,
     pub task_option: Sum,
@@ -223,6 +240,7 @@ pub struct Runtime {
     pub arc: u64,
     pub data: u64,
     pub owned: Owned,
+
     /// The blocking pool's `Arc<Inner>` pointer within the handle.
     pub spawner: u64,
 }
@@ -235,6 +253,7 @@ pub struct Owned {
     pub shards: u64,
     pub count: u64,
     pub mask: u64,
+
     /// Each shard's size, its lock, and its list's head.
     pub shard_size: u64,
     pub shard_lock: Lock,
@@ -277,6 +296,7 @@ fn mutex(
     } else {
         (&["__0", "inner"], &["__0", "data", "value"])
     };
+
     // The `parking_lot` crate's lock is held while its `LOCKED_BIT` is
     // set; its `PARKED_BIT` may be set while it is free.
     let (size, held, kind) = if parking_lot {
@@ -284,10 +304,12 @@ fn mutex(
     } else {
         (4, u64::from(u32::MAX), "futex word")
     };
+
     let lock = records::field(image, mutex.ty, state)?;
     if records::size(image, lock.ty)? != size as u64 {
         return Err(format!("{what}'s lock is not a {kind}").into());
     }
+
     let data = records::field(image, mutex.ty, data)?;
     Ok((
         Lock {
@@ -316,6 +338,7 @@ impl Context {
         if records::size(image, state.ty)? != 1 {
             return Err("eager::Storage's state is not one byte".into());
         }
+
         let context = records::field(image, storage, &["val", "value"])?;
         let field = |path: &[&str]| {
             records::field(image, context.ty, path).and_then(|found| {
@@ -325,6 +348,7 @@ impl Context {
                 })
             })
         };
+
         let handle = field(&["current", "handle", "value", "value"])?;
         let handle_option = records::sum(image, handle.ty)?;
         let some = handle_option.variant("Some")?.payload;
@@ -385,6 +409,7 @@ impl Runtime {
         if !image.same_type(data.ty, ty) {
             return Err(format!("the {variant} handle does not hold a {handle}").into());
         }
+
         let spawner = records::field(image, ty, &["blocking_spawner", "inner", "ptr", "pointer"])?;
         Ok(Self {
             arc: records::within(payload.offset, arc.offset)?,
@@ -459,14 +484,17 @@ impl Tasks {
 pub struct Pool {
     /// The mutex's lock within the pool's `Inner`.
     pub lock: Lock,
+
     /// The queue's head index, length, buffer, and capacity.
     pub head: u64,
     pub len: u64,
     pub buffer: u64,
     pub capacity: u64,
+
     /// Each queued task's size, and its header pointer within it.
     pub task_size: u64,
     pub task: u64,
+
     /// Where the pool's `Inner` is within its `Arc`'s allocation.
     pub data: u64,
 }
@@ -481,6 +509,7 @@ impl Pool {
             records::sized(image, queue.ty, path, 8)
                 .and_then(|offset| records::within(queue_at, offset))
         };
+
         let task = records::named(image, "tokio::runtime::blocking::pool::Task")?;
         let spawner = records::named(image, "tokio::runtime::blocking::pool::Spawner")?;
         let arc = records::field(image, spawner, &["inner", "ptr", "pointer"])?;

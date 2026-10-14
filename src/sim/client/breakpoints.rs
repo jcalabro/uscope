@@ -22,11 +22,14 @@ use crate::{
 pub(super) struct Added {
     id: BreakpointId,
     pub(super) traps: Vec<u64>,
+
     /// Whether the debugger last said it is enabled.
     enabled: bool,
     temporary: bool,
+
     /// The marker line it was set at, if any.
     marker_line: Option<u64>,
+
     /// What it was asked to do at its hits since the last stop, oldest
     /// first: a change while the program runs applies from a hit the client
     /// cannot know.
@@ -46,11 +49,13 @@ impl Client {
         if self.script.globals.is_empty() {
             return Ok(());
         }
+
         let (name, image_address, size) = self
             .choices
             .borrow_mut()
             .pick(Stream::Client, &self.script.globals)
             .clone();
+
         // Watches on changes, filtered at each trap and judged again at
         // each stop, are the most intricate.
         let accesses = [
@@ -61,6 +66,7 @@ impl Client {
             WatchAccess::Read,
         ];
         let access = *self.choices.borrow_mut().pick(Stream::Client, &accesses);
+
         // Four slots watch at most 32 bytes; a larger object is watched in
         // part, anywhere inside it.
         let whole = size <= 32;
@@ -71,6 +77,7 @@ impl Client {
             let offset = self.draw(size - width + 1);
             (format!("{name}+{offset}"), image_address + offset, width)
         };
+
         let (options, policy) = self.choose_watch_options();
         let result = if whole && self.draw(2) == 0 {
             match crate::Expression::name(&name) {
@@ -96,6 +103,7 @@ impl Client {
                 )
                 .await
         };
+
         match result {
             Ok(watchpoint) => self.armed(&watchpoint, &name, policy),
             Err(Error::UnsupportedWatchAccess(WatchAccess::Read))
@@ -110,6 +118,7 @@ impl Client {
                 self.note(format!("watching refused: {description}"));
                 self.mark(Mark::WatchRefused);
             }
+
             Err(Error::WatchpointHardwareBusy { thread })
                 if matches!(self.script.debug, DebugBehavior::Contended(_)) =>
             {
@@ -122,6 +131,7 @@ impl Client {
                 )));
             }
         }
+
         Ok(())
     }
 
@@ -160,18 +170,21 @@ impl Client {
         if self.draw(2) == 0 {
             return (WatchpointOptions::default(), UNCONDITIONAL);
         }
+
         let condition = self.choose_condition(None);
         let options = WatchpointOptions {
             hit_condition: self.choose_hit_condition(),
             condition: condition.parse(&self.script.markers, None),
             ..WatchpointOptions::default()
         };
+
         let policy = Policy {
             hit_condition: options.hit_condition,
             condition: self.known(condition, None, &[]),
             logs: false,
             enabled: true,
         };
+
         (options, policy)
     }
 
@@ -188,6 +201,7 @@ impl Client {
         if ids.is_empty() {
             return Ok(());
         }
+
         let id = *self.choices.borrow_mut().pick(Stream::Client, &ids);
         let mut policy = *self.shared.watches.borrow()[&id]
             .policies
@@ -203,10 +217,12 @@ impl Client {
             policy.condition = self.known(choice, None, &[]);
             Err(choice.parse(&self.script.markers, None))
         };
+
         // From the moment the client asks, the new policy may apply.
         if let Some(intent) = self.shared.watches.borrow_mut().get_mut(&id) {
             intent.policies.push(policy);
         }
+
         let amended = match request {
             Ok(hit_condition) => {
                 self.handle
@@ -243,6 +259,7 @@ impl Client {
             let id = *self.choices.borrow_mut().pick(Stream::Control, &disabled);
             return self.enable_watch(id).await;
         }
+
         let ids = self
             .shared
             .watches
@@ -253,7 +270,9 @@ impl Client {
         if ids.is_empty() {
             return Ok(());
         }
+
         let id = *self.choices.borrow_mut().pick(Stream::Control, &ids);
+
         // From the moment the client asks, the watchpoint may report no
         // more.
         let intent = self
@@ -276,17 +295,20 @@ impl Client {
                 )));
             }
         };
+
         if watchpoint.enabled {
             return Err(protocol(format!(
                 "disabling watchpoint {id} returned {watchpoint:?}"
             )));
         }
+
         self.disabled_watches
             .borrow_mut()
             .insert(id, (intent, watchpoint.hit_count));
         if running {
             self.released_while_running.set(true);
         }
+
         self.note(format!("disabled watchpoint {id}"));
         self.mark(Mark::WatchDisabled);
         Ok(())
@@ -312,11 +334,13 @@ impl Client {
             Err(Error::WatchpointCapacity { .. }) => {
                 self.note(format!("no slots to enable watchpoint {id}"));
             }
+
             Err(Error::HardwareWatchpointsUnavailable(description))
                 if self.script.debug == DebugBehavior::Discarding =>
             {
                 self.note(format!("enabling refused: {description}"));
             }
+
             Err(Error::WatchpointHardwareBusy { thread })
                 if matches!(self.script.debug, DebugBehavior::Contended(_)) =>
             {
@@ -328,6 +352,7 @@ impl Client {
                 )));
             }
         }
+
         Ok(())
     }
 
@@ -361,7 +386,9 @@ impl Client {
         if ids.is_empty() {
             return Ok(());
         }
+
         let id = *self.choices.borrow_mut().pick(Stream::Client, &ids);
+
         // From the moment the client asks, the watchpoint may be gone.
         self.shared.watches.borrow_mut().remove(&id);
         let id = crate::WatchpointId::new(id);
@@ -393,6 +420,7 @@ impl Client {
             } else {
                 draw(self.script.source_lines) + 1
             };
+
             BreakpointSpec::Source {
                 path: self.script.source.clone(),
                 line: LineNumber::new(line).expect("lines count from one"),
@@ -412,6 +440,7 @@ impl Client {
             }
             _ => None,
         };
+
         let (options, condition) = self.choose_options(marker_line);
         let breakpoint = match self.handle.add_breakpoint_with(spec.clone(), options).await {
             Ok(breakpoint) => breakpoint,
@@ -422,6 +451,7 @@ impl Client {
                 )));
             }
         };
+
         self.note(format!(
             "breakpoint {} at {spec}: {} locations, {:?} {:?}{}",
             breakpoint.id,
@@ -435,6 +465,7 @@ impl Client {
             }
         ));
         let traps = image_traps(&breakpoint);
+
         // A temporary breakpoint may be gone at any stop, so only the hit
         // oracle follows it.
         if !breakpoint.enabled {
@@ -448,12 +479,14 @@ impl Client {
                 .borrow_mut()
                 .insert(breakpoint.id.get(), traps.iter().copied().collect());
         }
+
         let policy = Policy {
             hit_condition: breakpoint.hit_condition,
             condition: self.known(condition, marker_line, &traps),
             logs: breakpoint.log_message.is_some(),
             enabled: breakpoint.enabled,
         };
+
         // Adding what a breakpoint already is returns it, with the hits it
         // counted under what it was asked before.
         if let Some(existing) = breakpoints
@@ -471,9 +504,11 @@ impl Client {
                 policies: vec![policy],
             });
         }
+
         if breakpoint.temporary {
             self.mark(Mark::TemporaryAdded);
         }
+
         Ok(true)
     }
 
@@ -487,6 +522,7 @@ impl Client {
                 self.note(format!("{spec} has no code"));
                 true
             }
+
             // Another variant may define a function this one inlined away.
             Error::FunctionNotFound(name) | Error::SymbolNotFound(name)
                 if matches!(spec, BreakpointSpec::Function(wanted) if wanted == name)
@@ -508,15 +544,18 @@ impl Client {
         if breakpoints.is_empty() {
             return Ok(false);
         }
+
         let index = usize::try_from(self.control(breakpoints.len() as u64)).expect("small");
         let added = &mut breakpoints[index];
         let (id, enabled) = (added.id, !added.enabled);
+
         // From the moment the client asks, either state may apply.
         if enabled {
             self.shared.disabled.borrow_mut().remove(&id.get());
         } else {
             self.shared.breakpoints.borrow_mut().remove(&id.get());
         }
+
         let mut policy = *added.policies.last().expect("a breakpoint has a policy");
         policy.enabled = enabled;
         added.policies.push(policy);
@@ -536,17 +575,20 @@ impl Client {
                         .borrow_mut()
                         .insert(id.get(), added.traps.iter().copied().collect());
                 }
+
                 return Err(protocol(format!(
                     "{} breakpoint {id} failed: {error}",
                     if enabled { "enabling" } else { "disabling" }
                 )));
             }
         };
+
         if breakpoint.enabled != enabled {
             return Err(protocol(format!(
                 "setting breakpoint {id} enabled {enabled} returned {breakpoint:?}"
             )));
         }
+
         added.enabled = enabled;
         if enabled {
             added.traps = image_traps(&breakpoint);
@@ -556,11 +598,13 @@ impl Client {
                     .borrow_mut()
                     .insert(id.get(), added.traps.iter().copied().collect());
             }
+
             self.mark(Mark::BreakpointEnabled);
         } else {
             self.shared.disabled.borrow_mut().insert(id.get());
             self.mark(Mark::BreakpointDisabled);
         }
+
         self.note(format!(
             "breakpoint {id} {}",
             if enabled { "enabled" } else { "disabled" }
@@ -573,6 +617,7 @@ impl Client {
         if self.draw(2) == 0 {
             return None;
         }
+
         let comparisons = [
             HitComparison::Equal,
             HitComparison::NotEqual,
@@ -641,13 +686,16 @@ impl Client {
                     .then(|| LogMessage::parse("hit").expect("a valid message")),
                 ..BreakpointOptions::default()
             };
+
             (options, condition)
         };
+
         let options = BreakpointOptions {
             enabled: self.control(16) != 0,
             temporary: self.control(4) == 0,
             ..options
         };
+
         (options, condition)
     }
 
@@ -657,6 +705,7 @@ impl Client {
         if breakpoints.is_empty() {
             return Ok(());
         }
+
         let index = usize::try_from(self.draw(breakpoints.len() as u64)).expect("small");
         let added = &mut breakpoints[index];
         let id = added.id;
@@ -674,6 +723,7 @@ impl Client {
                 .set_breakpoint_condition(id, choice.parse(&self.script.markers, added.marker_line))
                 .await
         };
+
         let breakpoint = match amended {
             Ok(breakpoint) => breakpoint,
             Err(error) if self.deleted_by_stop(added.temporary, &error) => return Ok(()),
@@ -683,6 +733,7 @@ impl Client {
                 )));
             }
         };
+
         self.note(format!(
             "breakpoint {id} now {:?} {:?}",
             breakpoint.hit_condition, breakpoint.condition
@@ -700,6 +751,7 @@ impl Client {
         if gone {
             self.note(format!("{error}: a stop deleted it"));
         }
+
         gone
     }
 
@@ -725,6 +777,7 @@ impl Client {
                 )
             })
             .collect();
+
         // A process ending as a whole takes its threads out of their stops
         // whatever they hit, so its hits are not judged.
         if !ending {
@@ -739,20 +792,26 @@ impl Client {
             if found.declined {
                 self.mark(Mark::HitDeclined);
             }
+
             if found.held {
                 self.mark(Mark::ConditionHeld);
             }
+
             if found.logged {
                 self.mark(Mark::HitLogged);
             }
+
             if found.temporary_stopped {
                 self.mark(Mark::TemporaryStop);
             }
+
             if found.temporary_shared {
                 self.mark(Mark::TemporaryCoHit);
             }
+
             self.judge_disabled_watches(snapshot)?;
         }
+
         // A temporary breakpoint the stop deleted is the client's no more.
         let remaining = |added: &Added| {
             snapshot
@@ -760,6 +819,7 @@ impl Client {
                 .iter()
                 .any(|breakpoint| breakpoint.id == added.id)
         };
+
         breakpoints.retain(|added| !added.temporary || remaining(added));
         *self.baseline.borrow_mut() = Some(Baseline {
             process,
@@ -774,6 +834,7 @@ impl Client {
             let current = *added.policies.last().expect("a breakpoint has a policy");
             added.policies = vec![current];
         }
+
         Ok(())
     }
 
@@ -785,9 +846,11 @@ impl Client {
         if breakpoints.is_empty() {
             return Ok(false);
         }
+
         let index = usize::try_from(self.draw(breakpoints.len() as u64)).expect("small");
         let removed = breakpoints.swap_remove(index);
         let id = removed.id;
+
         // From the moment the client asks, the breakpoint may be gone.
         self.shared.breakpoints.borrow_mut().remove(&id.get());
         self.shared.disabled.borrow_mut().remove(&id.get());
@@ -800,6 +863,7 @@ impl Client {
                 )));
             }
         }
+
         self.note(format!("removed breakpoint {id}"));
         Ok(true)
     }
@@ -822,9 +886,11 @@ impl Client {
         let Error::WatchpointHardwareBusy { thread } = error else {
             return Ok(false);
         };
+
         if !matches!(self.script.debug, DebugBehavior::Contended(_)) {
             return Ok(false);
         }
+
         self.note(format!("running refused: thread {thread} cannot be armed"));
         self.mark(Mark::RunRefusedUnarmed);
         self.remove_watch().await?;
@@ -858,8 +924,10 @@ enum ConditionChoice {
     None,
     True,
     False,
+
     /// The condition of the marker at the breakpoint's line.
     Marker,
+
     /// Its negation.
     NotMarker,
 }
@@ -870,6 +938,7 @@ impl ConditionChoice {
             line.and_then(|line| markers.get(&line))
                 .expect("marker conditions are chosen at marker lines")
         };
+
         let text = match self {
             Self::None => return None,
             Self::True => "true".to_owned(),
@@ -877,6 +946,7 @@ impl ConditionChoice {
             Self::Marker => marker().text.clone(),
             Self::NotMarker => format!("!({})", marker().text),
         };
+
         Some(Condition::parse(&text).expect("the client's conditions parse"))
     }
 }

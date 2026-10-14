@@ -104,6 +104,7 @@ fn assert_same(ours: &str, theirs: &str, context: &str) {
     for (index, (our, their)) in ours.iter().zip(&theirs).enumerate() {
         assert_eq!(our, their, "line {} differs {context}", index + 1);
     }
+
     assert_eq!(
         ours.len(),
         theirs.len(),
@@ -210,6 +211,7 @@ fn ff_writes_each_threads_calls_to_its_own_file() {
             .status()
             .expect("run the tracer");
         assert!(status.success(), "{name}");
+
         // Each file's text, in the order its thread began.
         let mut files: Vec<(u32, String)> = std::fs::read_dir(directory.path())
             .expect("list")
@@ -223,6 +225,7 @@ fn ff_writes_each_threads_calls_to_its_own_file() {
         files.sort_unstable();
         files.into_iter().map(|(_, text)| text).collect::<Vec<_>>()
     };
+
     let theirs = run("strace", &mut Command::new("strace"));
     let ours = run("uscope", &mut uscope(&["--engine", "ptrace"]));
     assert_eq!(ours.len(), theirs.len(), "{ours:#?}\n---\n{theirs:#?}");
@@ -242,6 +245,7 @@ fn sampling_and_a_duration_floor_choose_which_calls_print() {
             .filter(|line| line.starts_with("close("))
             .count()
     };
+
     let every = trace(directory.path(), &["-e", "trace=close"], "files");
     let sampled = trace(
         directory.path(),
@@ -318,23 +322,28 @@ fn stacks_unwind_to_the_frames_strace_finds() {
                 );
                 continue;
             }
+
             let (Some(our), Some(their)) = (frame.captures(our), frame.captures(their)) else {
                 assert_eq!(our, their, "{}", context());
                 continue;
             };
+
             frames += 1;
             let field = |captures: &regex::Captures<'_>, index| {
                 captures.get(index).map(|found| found.as_str().to_owned())
             };
+
             // Module and address, which normalizing leaves as `0x?`, by
             // the text before normalizing them away.
             assert_eq!(field(&our, 1), field(&their, 1), "{}", context());
             if field(&their, 1).as_deref() != Some(program) {
                 continue;
             }
+
             assert_eq!(field(&our, 2), field(&their, 2), "{}", context());
             assert_eq!(field(&our, 6), field(&their, 6), "{}", context());
             let (our_file, their_file) = (field(&our, 5), field(&their, 5));
+
             // strace names a file as its debug information does; uscope
             // resolves it against the compilation's directory.
             assert!(
@@ -346,6 +355,7 @@ fn stacks_unwind_to_the_frames_strace_finds() {
                 context()
             );
         }
+
         assert!(frames > 0, "{}", context());
 
         // The addresses themselves, frame by frame.
@@ -356,6 +366,7 @@ fn stacks_unwind_to_the_frames_strace_finds() {
                 .map(|captures| captures[1].to_owned())
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(addresses(&ours), addresses(&theirs), "with {arguments:?}");
     }
 }
@@ -413,6 +424,7 @@ fn classes_name_the_calls_strace_names() {
             .expect("run strace");
         assert!(status.success());
         let traced = std::fs::read_to_string(&out).expect("read strace");
+
         // strace calls numbers it has no name for `syscall_0x...`, and
         // traces them under every class.
         let theirs: BTreeSet<&str> = traced
@@ -430,6 +442,7 @@ fn classes_name_the_calls_strace_names() {
             })
             .map(|&(_, name)| name)
             .collect();
+
         // The sweep itself forks and waits.
         let theirs: BTreeSet<&str> = theirs
             .into_iter()
@@ -445,6 +458,7 @@ fn classes_name_the_calls_strace_names() {
             ));
         }
     }
+
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
@@ -472,6 +486,7 @@ fn children_and_threads_are_followed_unless_asked_not_to() {
     ] {
         assert!(lines.contains(&expected), "no {expected:?} in\n{lines}");
     }
+
     assert!(
         Regex::new(r"(?m)^\[pid +\d+\] getppid\(\) += \d+$")
             .expect("regex")
@@ -563,6 +578,7 @@ fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
             _ => None,
         })
         .collect();
+
     // -Z shows only the calls that failed, and the capture holds those.
     let failed = text(&shown.stderr)
         .lines()
@@ -576,6 +592,7 @@ fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
         let (functions, _) = profile.syscall_stack(stack.expect("a stack"));
         in_main += usize::from(functions.iter().any(|function| function == "main"));
     }
+
     // The dynamic loader's failed opens come before main.
     assert!(in_main > 0, "no stack reaches main");
     assert!(
@@ -722,6 +739,7 @@ impl TestCgroup {
     /// Removes it once its processes have left, failing at the deadline.
     fn remove(&self) {
         let end = Instant::now() + DEADLINE;
+
         // Polls for an emptiness the kernel reports only so.
         while let Err(error) = std::fs::remove_dir(&self.0) {
             assert!(Instant::now() < end, "the cgroup stayed: {error}");
@@ -795,11 +813,13 @@ impl Running {
                 self.seen.extend(rest);
                 return (status.code(), std::mem::take(&mut self.seen));
             }
+
             assert!(
                 Instant::now() < end,
                 "uscope did not exit; saw:\n{}",
                 self.seen.join("\n")
             );
+
             // Polls for an exit the test has caused and can only observe so.
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -832,6 +852,7 @@ fn a_blocked_call_is_reported_in_flight_until_it_returns() {
     let mut running = Running::spawn(&mut command);
     let line = running.line(|line| line.contains("in flight"));
     assert!(line.starts_with("read(0, "), "{line}");
+
     // Closing standard input returns the read, and the program exits.
     drop(running.child.stdin.take());
     let (code, lines) = running.finish();
@@ -875,6 +896,7 @@ fn attaching_needs_consent_and_detaching_leaves_the_process_running() {
         lines.contains(&format!("uscope: Process {pid} detached")),
         "{lines:?}"
     );
+
     // Untraced again, the process runs to its own end.
     target.release();
     let status = target.wait();
@@ -986,6 +1008,7 @@ mod bpf {
         mode: &str,
     ) -> (Option<i32>, String, String) {
         let out = directory.join("trace.out");
+
         // A launcher that raises capabilities passes on no loader
         // variables, so no run gets any.
         let output = command
@@ -1033,6 +1056,7 @@ mod bpf {
             if prefix.replace(line, "").starts_with("--- lost ") {
                 continue;
             }
+
             // A stack's frames follow their call's line, unprefixed.
             if !line.starts_with(" > ") {
                 thread = prefix
@@ -1040,11 +1064,13 @@ mod bpf {
                     .map(|captures| captures[1].to_owned())
                     .unwrap_or_default();
             }
+
             threads
                 .entry(thread.clone())
                 .or_default()
                 .push(comparable(&prefix.replace(line, "")));
         }
+
         threads.into_values().collect()
     }
 
@@ -1069,6 +1095,7 @@ mod bpf {
                 &format!("with {arguments:?}"),
             );
         }
+
         let (ptrace, bpf) = engines(&["-e", "trace=getpid@32,getpid@x32,getpid"], "compat");
         assert_same(&comparable(&bpf), &comparable(&ptrace), "for compat");
         let (ptrace, bpf) = engines(&["-e", "trace=kill,rt_sigaction"], "signal");
@@ -1090,6 +1117,7 @@ mod bpf {
             assert_eq!(code, Some(3), "{errors}");
             (errors, trace)
         };
+
         let (fentry_errors, fentry) = by("fentry");
         let (tracepoint_errors, tracepoint) = by("tracepoint");
         assert_same(&comparable(&fentry), &comparable(&tracepoint), "by attach");
@@ -1135,6 +1163,7 @@ mod bpf {
                 })
                 .collect::<BTreeSet<_>>()
         };
+
         let (ours, theirs) = (threads(&bpf), threads(&ptrace));
         assert_eq!(
             ours,
@@ -1154,6 +1183,7 @@ mod bpf {
                 _ => calls.push((line.to_owned(), Vec::new())),
             }
         }
+
         calls
     }
 
@@ -1164,6 +1194,7 @@ mod bpf {
     fn a_recording_holds_its_calls_beside_its_samples() {
         let directory = ScratchDir::new("syscalls-record");
         let directory = directory.path();
+
         // Each call by number, and whether it failed: what two runs share.
         let calls = |file: &str| {
             let profile = uscope::profiler::Profile::read(&directory.join(file))
@@ -1177,8 +1208,10 @@ mod bpf {
                     *calls.entry((call.call.number, failed)).or_insert(0) += 1;
                 }
             }
+
             calls
         };
+
         let traced = super::uscope(&["--engine", "ptrace", "-f", "-k"])
             .args(["-e", "trace=write,getppid", "-o", "traced.usprof", "--"])
             .arg(fixture())
@@ -1301,6 +1334,7 @@ mod bpf {
                 })
                 .collect()
         };
+
         for mode in ["files", "family"] {
             let (ptrace, bpf) = engines(&["-c", "-S", "name"], mode);
             assert!(!rows(&ptrace).is_empty(), "{ptrace}");
@@ -1327,6 +1361,7 @@ mod bpf {
         drop(running.child.stdin.take());
         let (code, lines) = running.finish();
         assert_eq!(code, Some(0), "{lines:?}");
+
         // Its return is seen, or the trace says it lost what it could not
         // read: the kernel skips a program's run on a CPU where another run
         // of it was preempted, and fails to take its task storage lock where
@@ -1445,6 +1480,7 @@ mod bpf {
             .filter(|line| line.starts_with("getppid()"))
             .count() as u64;
         assert!(shown < asked, "{shown} of {asked}");
+
         // Before it sampled, the ring overflowed, and what it lost is said.
         let lost: u64 = lines
             .iter()
@@ -1479,9 +1515,11 @@ mod bpf {
     fn continuous_counts_split_into_segments_that_sum_to_every_call() {
         let directory = ScratchDir::new("syscalls-continuous");
         let segments = directory.path().join("segments");
+
         // Made here, so that the test can clean up what a launcher running
         // as another user writes in it.
         std::fs::create_dir(&segments).expect("make the directory");
+
         // Relative to the working directory, which a launcher shares.
         let mut command = uscope(&[
             "-c",
@@ -1508,12 +1546,15 @@ mod bpf {
                     .count()
             })
         };
+
         let end = Instant::now() + DEADLINE;
+
         // Polls for files the trace writes and says nothing of.
         while written() < 3 {
             assert!(Instant::now() < end, "only {} segments", written());
             std::thread::sleep(Duration::from_millis(10));
         }
+
         running
             .child
             .stdin
@@ -1590,6 +1631,7 @@ mod bpf {
                 (cells.last() == Some(&name)).then(|| cells[cells.len() - 2].to_owned())
             })
         };
+
         // The window holds the write before the failed close.
         assert_eq!(calls("write").as_deref(), Some("1"), "{table}");
         assert!(calls("close").is_some(), "{table}");
@@ -1635,10 +1677,12 @@ mod bpf {
                     .count()
             })
         };
+
         let mut input = recording.stdin.take().expect("stdin");
         for _ in 0..3 {
             input.write_all(b"x").expect("a byte");
             input.flush().expect("sent");
+
             // Polls for a file the recording writes and says nothing of.
             let (before, end) = (written(), Instant::now() + DEADLINE);
             while written() <= before {
@@ -1646,6 +1690,7 @@ mod bpf {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+
         drop(input);
         assert!(recording.wait().expect("wait").success());
 
@@ -1671,6 +1716,7 @@ mod bpf {
                 .count();
             found.push((byte, syscalls.lost));
         }
+
         // A read whose return went unseen, as when another tracer attached
         // to its function while it was blocked, is counted lost.
         let read: usize = found.iter().map(|&(byte, _)| byte).sum();
@@ -1690,6 +1736,7 @@ mod bpf {
         let mut running = Running::spawn(&mut uscope(&["-p", &pid]));
         running.line(|line| line == format!("uscope: Process {pid} attached"));
         target.release();
+
         // The read began before the trace did.
         running.line(|line| line.starts_with("read(0, \"x\", 1)") && line.contains("entry unseen"));
         running.line(|line| line.starts_with("exit_group(23)"));
@@ -1731,12 +1778,14 @@ fn threads_and_children_are_announced_before_what_they_do() {
                     problems.push(format!("{child} announced twice"));
                 }
             }
+
             TraceEvent::Exit { process, .. }
                 if *process != events_first(&events)
                     && !announced.contains_key(&process.leader()) =>
             {
                 problems.push(format!("{process} exited before it was announced"));
             }
+
             TraceEvent::Call(call)
                 if call.thread != call.process.leader()
                     && announced.get(&call.thread) != Some(&true) =>
@@ -1749,6 +1798,7 @@ fn threads_and_children_are_announced_before_what_they_do() {
             _ => {}
         }
     }
+
     let threads = announced.values().filter(|thread| **thread).count();
     assert_eq!(
         (threads, announced.len() - threads),

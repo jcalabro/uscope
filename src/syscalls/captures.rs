@@ -15,8 +15,10 @@ use super::specs::{self, Arg, Count, Direction, MemKind, Struct};
 pub struct Limits {
     /// Bytes of a string or buffer (`-s`), past which it is truncated.
     pub string: usize,
+
     /// Bytes of a buffer whose every byte is wanted, as `-e read=` wants.
     pub dump: usize,
+
     /// Elements of an array of strings, as `argv`.
     pub elements: usize,
 }
@@ -33,10 +35,13 @@ impl Default for Limits {
 
 /// The longest path a call takes.
 pub const PATH_MAX: usize = 4096;
+
 /// Elements of an array of structures copied at most.
 const MOST_ELEMENTS: usize = 64;
+
 /// Elements of an iovec array copied at most.
 const MOST_IOVECS: usize = 16;
+
 /// Pointers of an environment counted at most.
 const MOST_COUNTED: usize = 4096;
 
@@ -74,6 +79,7 @@ fn bytes(
             } else {
                 CaptureState::Complete
             };
+
             (buffer, state)
         }
         Ok(read) if read > 0 => {
@@ -103,16 +109,19 @@ fn string(memory: &mut dyn Memory, address: u64, limit: usize) -> (Vec<u8>, Capt
             Err(_) if out.is_empty() => return (Vec::new(), CaptureState::Unreadable),
             Err(_) => 0,
         };
+
         chunk.truncate(read);
         if let Some(end) = chunk.iter().position(|&byte| byte == 0) {
             out.extend_from_slice(&chunk[..end]);
             return (out, CaptureState::Complete);
         }
+
         out.extend_from_slice(&chunk);
         if out.len() > limit {
             out.truncate(limit);
             return (out, CaptureState::Truncated { wanted: u32::MAX });
         }
+
         if read < take {
             // The string runs into memory that cannot be read.
             return if out.is_empty() {
@@ -121,6 +130,7 @@ fn string(memory: &mut dyn Memory, address: u64, limit: usize) -> (Vec<u8>, Capt
                 (out, CaptureState::Truncated { wanted: u32::MAX })
             };
         }
+
         at += read as u64;
     }
 }
@@ -150,14 +160,18 @@ fn strings(
             if index == 0 {
                 return (Vec::new(), CaptureState::Unreadable);
             }
+
             break;
         };
+
         if pointer == 0 {
             ended = true;
             break;
         }
+
         pointers.push(pointer);
     }
+
     let mut blob = Vec::new();
     blobs::start_strings(
         &mut blob,
@@ -169,11 +183,13 @@ fn strings(
             blobs::push_string(&mut blob, &text);
         }
     }
+
     let state = if ended {
         CaptureState::Complete
     } else {
         CaptureState::Truncated { wanted: u32::MAX }
     };
+
     (blob, state)
 }
 
@@ -197,18 +213,22 @@ fn iovecs(
             if index == 0 {
                 return (Vec::new(), CaptureState::Unreadable);
             }
+
             break;
         };
+
         let wanted = usize::try_from(len).unwrap_or(usize::MAX).min(left);
         left -= wanted;
         let (data, _) = bytes(memory, base, wanted, limit);
         blobs::push_iovec(&mut blob, base, len, &data);
     }
+
     let state = if shown < count {
         CaptureState::Truncated { wanted: u32::MAX }
     } else {
         CaptureState::Complete
     };
+
     (blob, state)
 }
 
@@ -219,6 +239,7 @@ fn as_count(value: u64) -> usize {
 /// The most bytes one capture holds, which the BPF engine's scratch record
 /// bounds.
 pub const MOST_BYTES: usize = 4096;
+
 /// Bytes kept of each element of an array of strings or of iovecs.
 pub const MOST_ELEMENT_BYTES: usize = 510;
 
@@ -227,14 +248,17 @@ pub const MOST_ELEMENT_BYTES: usize = 510;
 pub enum CopyKind {
     Path,
     String,
+
     /// An array of strings, its elements read.
     Strings,
+
     /// An array of strings only counted, as an environment.
     StringsCounted,
     Bytes,
     Iovec,
     Sockaddr,
     Struct,
+
     /// A `select` set, as long as its first argument says.
     FdSet,
 }
@@ -247,11 +271,14 @@ pub struct ArgCopy {
     pub arg: u8,
     pub kind: CopyKind,
     pub when: ReadAt,
+
     /// Whether the call writes it, so that a failed call leaves nothing.
     pub writes: bool,
     pub count: Count,
+
     /// One structure's bytes.
     pub size: u32,
+
     /// The most bytes kept: of a string, a buffer, the whole array, or
     /// each element of an array of strings or iovecs.
     pub limit: u32,
@@ -267,6 +294,7 @@ pub fn copies(call: SyscallId, limits: Limits, verbose: bool) -> Vec<ArgCopy> {
     let Some(spec) = specs::spec(call) else {
         return Vec::new();
     };
+
     let name = call.name().unwrap_or_default();
     let buffer = limits.string.max(limits.dump);
     let mut copies = Vec::new();
@@ -321,6 +349,7 @@ pub fn copies(call: SyscallId, limits: Limits, verbose: bool) -> Vec<ArgCopy> {
                 MemKind::Struct(Struct::Dirents) => {
                     (direction, CopyKind::Bytes, count, 1, MOST_BYTES)
                 }
+
                 // Its length grows with the kernel's features.
                 MemKind::Struct(Struct::Rseq) => (direction, CopyKind::Bytes, count, 1, 64),
                 MemKind::Struct(Struct::FdSet) => (direction, CopyKind::FdSet, count, 0, 128),
@@ -337,6 +366,7 @@ pub fn copies(call: SyscallId, limits: Limits, verbose: bool) -> Vec<ArgCopy> {
             },
             _ => continue,
         };
+
         copies.push(ArgCopy {
             arg: arg_index,
             kind,
@@ -347,6 +377,7 @@ pub fn copies(call: SyscallId, limits: Limits, verbose: bool) -> Vec<ArgCopy> {
             limit: limit(most),
         });
     }
+
     copies
 }
 
@@ -374,16 +405,19 @@ pub fn capture(
         if copy.when != phase || address == 0 {
             continue;
         }
+
         // What a call writes is there only once it succeeded.
         if phase == ReadAt::Exit && copy.writes && returned.is_none() {
             continue;
         }
+
         let length = match copy.count {
             Count::One => 1,
             Count::Arg(n) => as_count(args[usize::from(n)] & 0xffff_ffff_ffff),
             Count::Return => result(),
             Count::PointedBy(n) => word(memory, args[usize::from(n)], 4).map_or(0, as_count),
         };
+
         let limit = copy.limit as usize;
         let (blob, state) = match copy.kind {
             CopyKind::Path | CopyKind::String => string(memory, address, limit),
@@ -408,6 +442,7 @@ pub fn capture(
                 } else {
                     length
                 };
+
                 bytes(memory, address, wanted, limit)
             }
             CopyKind::Struct => bytes(
@@ -422,6 +457,7 @@ pub fn capture(
                 bytes(memory, address, wanted, limit)
             }
         };
+
         captured.push(Capture {
             arg: copy.arg,
             when: phase,
@@ -429,6 +465,7 @@ pub fn capture(
             bytes: Arc::from(blob),
         });
     }
+
     captured
 }
 
@@ -449,14 +486,17 @@ mod tests {
                 let Some(page) = self.0.get(&(at & !4095)) else {
                     break;
                 };
+
                 let offset = usize::try_from(at % 4096).unwrap_or(0);
                 let take = (4096 - offset).min(buffer.len() - read);
                 buffer[read..read + take].copy_from_slice(&page[offset..offset + take]);
                 read += take;
             }
+
             if read == 0 && !buffer.is_empty() {
                 return Err(std::io::Error::from_raw_os_error(14));
             }
+
             Ok(read)
         }
     }
@@ -470,6 +510,7 @@ mod tests {
                     [usize::try_from(at % 4096).unwrap_or(0)] = byte;
             }
         }
+
         Pages(map)
     }
 
@@ -537,6 +578,7 @@ mod tests {
         let mut memory = pages(&[(0x1ffa, b"short\0")]);
         let (text, state) = string(&mut memory, 0x1ffa, PATH_MAX);
         assert_eq!((&text[..], state), (&b"short"[..], CaptureState::Complete));
+
         // One that runs into it.
         let mut memory = pages(&[(0x1ffa, b"abcdef")]);
         let (text, state) = string(&mut memory, 0x1ffa, PATH_MAX);

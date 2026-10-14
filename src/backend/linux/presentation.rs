@@ -15,6 +15,7 @@ use crate::eval::error::ErrorKind;
 use crate::eval::target::{
     Lookup, Machine as _, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
 };
+
 use crate::eval::types::{Ty, TypeSource};
 use crate::inspection::InspectionBudget;
 use crate::model::{ValueStorage, ViewChildren};
@@ -34,6 +35,7 @@ use crate::{
 use super::evaluation::{
     StopMachine, StopObject, StopPlace, StopStep, ViewBound, lookup_type_in, plan_in,
 };
+
 use super::frames::StackRoot;
 use super::native::InspectionOps;
 use super::{Controller, RuntimeModule};
@@ -58,9 +60,11 @@ pub(super) struct Views {
     /// and the built-in ones.
     pub(super) set: Arc<ViewSet>,
     pub(super) enabled: bool,
+
     /// The view each type has under this set, bound when first needed.
     choices: RefCell<BTreeMap<TypeReference, Arc<Choice<StopStep>>>>,
     scans: RefCell<Scans>,
+
     /// Where kernel runs are recorded while a request records them; scans
     /// then neither use nor keep checkpoints.
     recording: RefCell<Option<Recordings>>,
@@ -114,12 +118,14 @@ impl Views {
         if let Some(recordings) = recording {
             return run(&mut Checkpoints::recording(recordings));
         }
+
         let mut checkpoints = {
             let mut scans = self.scans.borrow_mut();
             if scans.stop != Some(stop) {
                 scans.stop = Some(stop);
                 scans.entries.clear();
             }
+
             scans
                 .entries
                 .iter()
@@ -127,6 +133,7 @@ impl Views {
                 .map(|(_, checkpoints)| checkpoints.clone())
                 .unwrap_or_default()
         };
+
         let result = run(&mut checkpoints);
         let mut scans = self.scans.borrow_mut();
         if scans.stop == Some(stop) {
@@ -135,9 +142,11 @@ impl Views {
                 if scans.entries.len() == MAX_SCANS {
                     scans.entries.remove(0);
                 }
+
                 scans.entries.push((key, checkpoints));
             }
         }
+
         result
     }
 }
@@ -218,6 +227,7 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
         step: StepKind<'_>,
     ) -> std::result::Result<Planned<StopStep>, Refusal> {
         let planned = plan_in(self.controller, from, step);
+
         // A member with no indexing of its own, such as a `std::vector`, is
         // indexed through the view that presents it, as in any expression.
         match (&planned, step) {
@@ -250,6 +260,7 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
             Err(Error::VariableNotFound(_)) => return Ok(None),
             Err(error) => return Err(Refusal::new(ErrorKind::AmbiguousName, error.to_string())),
         };
+
         let key = self
             .module
             .variables
@@ -369,6 +380,7 @@ fn drawing_bindings(choice: &Choice<StopStep>) -> Vec<crate::VisualizerBinding> 
     let Some(bound) = &choice.bound else {
         return Vec::new();
     };
+
     crate::view::run::visualizers(bound)
         .into_iter()
         .map(|(owner, visualizer)| {
@@ -405,6 +417,7 @@ impl<P: InspectionOps> Controller<P> {
         if let Some(choice) = self.views.choices.borrow().get(&ty) {
             return Arc::clone(choice);
         }
+
         // While its view binds, a type has none: a view that indexes a value
         // of its own type through itself binds no view.
         self.views
@@ -441,10 +454,12 @@ impl<P: InspectionOps> Controller<P> {
                 {
                     continue;
                 }
+
                 seen.push(reference);
                 found.extend(self.type_views(module, reference));
             }
         }
+
         found
     }
 
@@ -462,9 +477,11 @@ impl<P: InspectionOps> Controller<P> {
                 let crate::model::TypeNode::Resolved(info) = node else {
                     continue;
                 };
+
                 let Some(identity) = info.identity.as_deref() else {
                     continue;
                 };
+
                 if !sets.iter().any(|set| set.names(identity))
                     || module
                         .image
@@ -473,12 +490,15 @@ impl<P: InspectionOps> Controller<P> {
                 {
                     continue;
                 }
+
                 let Some(views) = self.type_views(module, info.reference) else {
                     continue;
                 };
+
                 if views.candidates.is_empty() {
                     continue;
                 }
+
                 used.extend(
                     views
                         .candidates
@@ -489,6 +509,7 @@ impl<P: InspectionOps> Controller<P> {
                 types.push(views);
             }
         }
+
         types.sort_by(|left, right| {
             (&left.type_info.name, &left.module).cmp(&(&right.type_info.name, &right.module))
         });
@@ -569,6 +590,7 @@ impl<P: InspectionOps> Controller<P> {
             VariableState::Available { presentation, .. } => presentation.clone(),
             _ => None,
         };
+
         Ok(crate::ViewExplanation {
             type_info: value.type_info,
             enabled: self.views.enabled,
@@ -606,6 +628,7 @@ impl<P: InspectionOps> Controller<P> {
                     crate::InspectionLimits::default(),
                 )?;
             }
+
             Ok(())
         })();
         *self.views.recording.borrow_mut() = None;
@@ -643,6 +666,7 @@ impl<P: InspectionOps> Controller<P> {
         if !self.views.enabled {
             return None;
         }
+
         let bound = self.view_choice(from).bound.clone()?;
         let element = element_type(self, &bound.shape, 0)?;
         Some(Planned {
@@ -658,6 +682,7 @@ impl<P: InspectionOps> Controller<P> {
         if !self.views.enabled {
             return None;
         }
+
         let bound = self.view_choice(from).bound.clone()?;
         let presented = presented_type(&bound.shape)?;
         Some(Planned {
@@ -673,6 +698,7 @@ impl<P: InspectionOps> Controller<P> {
         if !self.views.enabled {
             return None;
         }
+
         let bound = self.view_choice(from).bound.clone()?;
         let value = entry_type(&bound.shape)?;
         Some(Planned {
@@ -709,6 +735,7 @@ impl<P: InspectionOps> Controller<P> {
         let end = offset.saturating_add(u64::from(limit)).min(reference.total);
         let mut children = Vec::new();
         let mut exhausted = None;
+
         // A view that presents the value as another lends it that value's
         // children.
         let mut next = offset;
@@ -746,6 +773,7 @@ impl<P: InspectionOps> Controller<P> {
             next = view.elements;
             exhausted = page.completion.exhaustion();
         }
+
         if exhausted.is_none() && next < end {
             let mut machine = StopMachine::new(&scope, budget, true);
             match &bound {
@@ -760,6 +788,7 @@ impl<P: InspectionOps> Controller<P> {
                     } else {
                         (next, view.elements)
                     };
+
                     let key = scan_key(bound, reference.image, &this);
                     let presented = self.views.scan(reference.stop_id, key, |checkpoints| {
                         crate::view::run::children(
@@ -789,6 +818,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         }
+
         Ok(ValueChildPage {
             stop_id: reference.stop_id,
             offset,
@@ -830,6 +860,7 @@ fn value_child<P: InspectionOps>(
             (ValueChildRelationship::Raw, value)
         }
     };
+
     Ok(ValueChild {
         relationship,
         type_info: value.type_info.unwrap_or_else(|| placeholder(this)),
@@ -841,6 +872,7 @@ fn value_child<P: InspectionOps>(
 enum Dynamic {
     /// Nothing, as a nil interface holds.
     Nil,
+
     /// A value of type `ty` at `place`.
     Value { ty: TypeReference, place: StopPlace },
 }
@@ -870,6 +902,7 @@ fn typedef_chain(types: &dyn TypeSource, ty: TypeReference) -> Vec<&TypeInfo> {
         let Some(info) = types.type_info(ty) else {
             break;
         };
+
         current = match &info.kind {
             TypeKind::Modified { target, .. }
             | TypeKind::Named {
@@ -878,8 +911,10 @@ fn typedef_chain(types: &dyn TypeSource, ty: TypeReference) -> Vec<&TypeInfo> {
             } => Some(*target),
             _ => None,
         };
+
         chain.push(info);
     }
+
     chain
 }
 
@@ -889,9 +924,11 @@ fn polymorphic(types: &dyn TypeSource, ty: TypeReference, depth: usize) -> bool 
     let Ok((_, info)) = crate::eval::types::representation(types, ty) else {
         return false;
     };
+
     let TypeKind::Record { members, bases, .. } = &info.kind else {
         return false;
     };
+
     depth < 16
         && (members.iter().any(|member| {
             member.artificial
@@ -946,6 +983,7 @@ impl Sum {
         machine: &mut StopMachine<'_, '_, P>,
     ) -> std::result::Result<Self, Stop> {
         let zig = language == Some(crate::SourceLanguage::Zig);
+
         // Zig's optionals and error unions stand for what they hold: the
         // LLVM backend names their variants `null`, `some`, `success`, and
         // `error`, and the self-hosted one `null`, `?`, `value`, and
@@ -984,6 +1022,7 @@ impl Sum {
             }
             _ => {}
         }
+
         // An Odin union's variant is named for its one member's type.
         if let (Some(crate::SourceLanguage::Odin), [member]) = (language, members) {
             return Ok(Self {
@@ -991,6 +1030,7 @@ impl Sum {
                 payload: Some(member.clone()),
             });
         }
+
         // One member named as the variant is its payload: a Rust variant's
         // record of fields, or a Zig tagged union's value.
         let fields = match members {
@@ -1024,6 +1064,7 @@ impl Sum {
             },
             _ => members.to_vec(),
         };
+
         let tuple = fields
             .iter()
             .all(|field| member_name(field).is_some_and(|field| field.starts_with("__")));
@@ -1047,6 +1088,7 @@ impl Sum {
                     .join(", ")
             ),
         };
+
         // A variant of one field stands for that field; one of several, or
         // a Rust variant's record, for its members.
         let payload = match (fields.as_slice(), members) {
@@ -1055,6 +1097,7 @@ impl Sum {
             (_, [member]) => Some(member.clone()),
             _ => None,
         };
+
         Ok(Self { payload, summary })
     }
 }
@@ -1094,6 +1137,7 @@ fn coroutine_summary(
             format!("suspended at {}", at.as_deref().unwrap_or("an await"))
         }
     };
+
     if !shown.is_empty() {
         summary.push_str(" {");
         for (index, part) in shown.iter().enumerate() {
@@ -1101,13 +1145,17 @@ fn coroutine_summary(
                 summary.push_str(", …");
                 break;
             }
+
             if index > 0 {
                 summary.push_str(", ");
             }
+
             summary.push_str(part);
         }
+
         summary.push('}');
     }
+
     summary
 }
 
@@ -1197,6 +1245,7 @@ fn collection(
         (Some((_, lent)), None) => *lent,
         (None, _) => presented.count.map_or(0, PresentedCount::known),
     };
+
     (
         shape,
         count,
@@ -1262,6 +1311,7 @@ fn drawings(bound: &ViewBound, children: &ValueChildren) -> Arc<[crate::Visualiz
     let ValueChildren::Available(children) = children else {
         return Arc::from([]);
     };
+
     crate::view::run::visualizers(bound)
         .iter()
         .enumerate()
@@ -1333,6 +1383,7 @@ fn present_as(mut value: InspectedValue, presentation: Presentation) -> Inspecte
     {
         *slot = Some(Arc::new(presentation));
     }
+
     value
 }
 
@@ -1378,6 +1429,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !controller.views.enabled || self.depth >= MAX_DEPTH {
             return Ok(value);
         }
+
         let bound = value
             .type_info
             .as_ref()
@@ -1404,10 +1456,12 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             if address.get() == 0 {
                 return Ok(value);
             }
+
             let target = TypeReference {
                 image: *image,
                 id: *target_type,
             };
+
             let place = StopPlace {
                 module: *module,
                 located: Located {
@@ -1415,7 +1469,9 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                     storage: ValueStorage::Memory(*address),
                 },
             };
+
             let (text, presentation) = self.pointee_text(target, place)?;
+
             // A pointer to what is not text may still be shown as what
             // it points to, as Go's debuggers show one.
             if text.is_some() || presentation.is_some() {
@@ -1428,9 +1484,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                     *state_text = text.map(Arc::new);
                     *state_presentation = presentation.map(Arc::new);
                 }
+
                 return Ok(value);
             }
         }
+
         let (
             Some(type_info),
             VariableState::Available {
@@ -1440,14 +1498,17 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(value);
         };
+
         let Some(bound) = bound else {
             return self.built_in(value);
         };
+
         // An aggregate's children say where it is; another value, such as
         // a Go map's pointer, is where its state was read from.
         let Some(raw) = self.presented_place(type_info, &value.state) else {
             return Ok(value);
         };
+
         let this = StopPlace::of(&raw);
         let key = scan_key(&bound, type_info.reference.image, &this);
         let result = controller
@@ -1463,6 +1524,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             Err(Failure::Problem(problem)) => return Ok(present_as(value, failed(name, problem))),
             Err(Failure::Debugger(error)) => return Err(Stop::Failed(error)),
         };
+
         let text = presented.text.clone();
         let mut value = present_as(value, view_presentation(name, &bound, &raw, presented));
         if let Some(text) = text
@@ -1470,6 +1532,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         {
             *slot = Some(Arc::new(text));
         }
+
         Ok(value)
     }
 
@@ -1482,6 +1545,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         {
             return self.with_dynamic(value, dynamic);
         }
+
         if let Some(type_info) = &value.type_info
             && self.is_go_pointer(type_info)
             && let Some(raw) = self.place_of(type_info, &value.state)
@@ -1498,24 +1562,29 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             } else {
                 self.pointee_summary(&value.state)?
             };
+
             if let Some((summary, lent)) = pointee {
                 let shape = if nil {
                     PresentedShape::Empty
                 } else {
                     PresentedShape::Value
                 };
+
                 return Ok(present_as(
                     value,
                     built_in_presentation("Go pointers", shape, summary, &raw, lent),
                 ));
             }
         }
+
         if let Some(tuple) = self.rust_tuple(&value)? {
             return Ok(tuple);
         }
+
         if let Some(future) = self.coroutine(&value)? {
             return Ok(future);
         }
+
         let (
             Some(type_info),
             VariableState::Available {
@@ -1532,6 +1601,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(value);
         };
+
         let (variant, raw) = (Arc::clone(variant), Arc::clone(raw));
         let language = type_info
             .identity
@@ -1553,6 +1623,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         } else {
             PresentedShape::Empty
         };
+
         let lent = sum
             .payload
             .as_ref()
@@ -1571,9 +1642,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(type_info) = &value.type_info else {
             return Ok(None);
         };
+
         let Some(this) = self.place_of(type_info, &value.state) else {
             return Ok(None);
         };
+
         let place = StopPlace::of(&this);
         let language = typedef_chain(self, type_info.reference)
             .iter()
@@ -1625,21 +1698,26 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !polymorphic(self, type_info.reference, 0) {
             return Ok(None);
         }
+
         let ValueStorage::Memory(address) = place.located.storage else {
             return Ok(None);
         };
+
         let address = address.get();
         let vptr = self.word(address)?;
         let Some((module, image)) = self.module_at(vptr) else {
             return Ok(None);
         };
+
         let Some((class, group)) = module.image.vtable_class(image) else {
             return Ok(None);
         };
+
         let offset_to_top = self.word(vptr.wrapping_sub(16))?.cast_signed();
         let Some(whole) = address.checked_add_signed(offset_to_top) else {
             return Ok(None);
         };
+
         let primary = module
             .loaded
             .load_bias
@@ -1649,12 +1727,15 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if self.word(whole)? != primary {
             return Ok(None);
         }
+
         let Some(ty) = one_type(&module.image, &class) else {
             return Ok(None);
         };
+
         if whole == address && module.image.same_type(ty, type_info.reference) {
             return Ok(None);
         }
+
         Ok(Some(Dynamic::at(module, ty, whole)))
     }
 
@@ -1668,14 +1749,17 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let TypeKind::Record { members, .. } = &type_info.kind else {
             return Ok(None);
         };
+
         let member = |name: &str| {
             members
                 .iter()
                 .find(|member| member.name.as_deref() == Some(name))
         };
+
         let (Some(pointer), Some(vtable)) = (member("pointer"), member("vtable")) else {
             return Ok(None);
         };
+
         let points_to_dyn = self
             .type_info(pointer.type_ref)
             .and_then(|info| match info.kind {
@@ -1700,15 +1784,18 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         let address = address.get();
         let data = self.word(address + pointer_offset)?;
         let table = self.word(address + vtable_offset)?;
         let Some((module, image)) = self.module_at(table) else {
             return Ok(None);
         };
+
         let Some(ty) = module.image.trait_object_type(image) else {
             return Ok(None);
         };
+
         Ok(Some(Dynamic::at(module, ty, data)))
     }
 
@@ -1721,6 +1808,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let TypeKind::Record { .. } = &record.kind else {
             return None;
         };
+
         let stored = match &place.located.storage {
             ValueStorage::Memory(address) => StoredValue::Memory(*address),
             ValueStorage::Bytes {
@@ -1728,12 +1816,14 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             } => StoredValue::Bytes(raw.get(*start..*end)?),
             _ => return None,
         };
+
         let Some(Ok(held)) = self
             .frame
             .runtime_dynamic(place.module, &record.name, stored)
         else {
             return None;
         };
+
         let DynamicValue::Held {
             descriptor,
             offset,
@@ -1742,6 +1832,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Some(Dynamic::Nil);
         };
+
         let (module, _) = self.module_at(descriptor.get())?;
         let ty = module.image.go_runtime_type(offset)?;
         match (held, &place.located.storage) {
@@ -1791,6 +1882,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(value);
         };
+
         let (shape, summary, lent) = match dynamic {
             Dynamic::Nil => (PresentedShape::Empty, "nil".to_owned(), None),
             Dynamic::Value { ty, place } => {
@@ -1809,6 +1901,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 } else {
                     None
                 };
+
                 let (shown, lent) = match pointee {
                     Some((pointee, lent_by_pointee)) => {
                         (pointee, lent_by_pointee.or_else(|| lent(&presented.state)))
@@ -1824,9 +1917,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                         lent(&presented.state),
                     ),
                 };
+
                 (PresentedShape::Dynamic, format!("{name} {shown}"), lent)
             }
         };
+
         Ok(present_as(
             value,
             built_in_presentation("dynamic types", shape, summary, &raw, lent),
@@ -1851,6 +1946,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         let reference = Arc::clone(reference);
         let mut parts = Vec::new();
         self.record_members(&reference, depth, &mut parts)?;
@@ -1860,11 +1956,14 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 line.push_str(", …");
                 break;
             }
+
             if index > 0 {
                 line.push_str(", ");
             }
+
             line.push_str(part);
         }
+
         line.push('}');
         Ok(Some(line))
     }
@@ -1885,6 +1984,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         let crate::DereferenceReference {
             module,
             target_type,
@@ -1894,13 +1994,16 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         if address.address.get() == 0 {
             return Ok(Some(("nil".to_owned(), None)));
         }
+
         let place = Located {
             ty: *target_type,
             storage: crate::model::ValueStorage::Memory(*target),
         };
+
         let module = self.module(*module)?;
         let pointee = self.materialize(module, &place)?;
         let presented = self.nested(self.depth + 1).presented(pointee.clone())?;
@@ -1915,6 +2018,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 lent(&presented.state),
             )));
         }
+
         Ok(self
             .record_summary(&pointee.state, 0)?
             .map(|fields| (format!("*{fields}"), lent(&pointee.state))))
@@ -1949,22 +2053,27 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         let image = Arc::clone(&self.module(raw.module)?.image);
         let Some(Ok(coroutine)) = image.coroutine(type_info.reference.id) else {
             return Ok(None);
         };
+
         let number = match discriminant {
             crate::IntegerValue::Unsigned(number) => u64::try_from(*number).ok(),
             crate::IntegerValue::Signed(number) => u64::try_from(*number).ok(),
         };
+
         let Some(state) = number.and_then(|number| coroutine.state(number)) else {
             return Ok(None);
         };
+
         let (variant, raw) = (Arc::clone(variant), Arc::clone(raw));
         let children = self.children_of(&raw)?;
         let [record] = &children[children.len().saturating_sub(variant.members.len())..] else {
             return Ok(None);
         };
+
         let fields = match &record.state {
             VariableState::Available {
                 children: ValueChildren::Available(reference),
@@ -1975,6 +2084,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             }
             _ => Vec::new(),
         };
+
         // Every state but `Unresumed` ends with the captures.
         let held = if state.kind == crate::CoroutineStateKind::Unresumed
             || coroutine.kind != crate::CoroutineKind::AsyncFunction
@@ -1983,6 +2093,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         } else {
             fields.len().saturating_sub(coroutine.captures.len())
         };
+
         let kept = fields[..held]
             .iter()
             .enumerate()
@@ -1999,6 +2110,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             })
             .collect::<Vec<_>>();
         let summary = coroutine_summary(&image, state, &shown);
+
         // Its children are the variables it keeps; the awaited future,
         // drop flags, and moved captures are under `[raw]`.
         let picked = kept
@@ -2018,6 +2130,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 view.picked = Some(picked);
             }
         }
+
         Ok(Some(present_as(value.clone(), presentation)))
     }
 
@@ -2039,12 +2152,15 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         else {
             return Ok(None);
         };
+
         let Some(identity) = type_info.identity.as_ref() else {
             return Ok(None);
         };
+
         if identity.language != crate::SourceLanguage::Rust || reference.total() == 0 {
             return Ok(None);
         }
+
         let reference = Arc::clone(reference);
         let children = self.children_of(&reference)?;
         let positional = !children.is_empty()
@@ -2056,17 +2172,20 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !positional {
             return Ok(None);
         }
+
         let fields = children
             .iter()
             .map(|child| crate::view::summary::value(Some(&child.type_info), &child.state))
             .collect::<Vec<_>>()
             .join(", ");
+
         // rustc names a tuple by its elements' types, `(i32, &str)`.
         let name = if type_info.name.starts_with('(') {
             ""
         } else {
             identity.base.as_ref()
         };
+
         let summary = format!("{name}({fields})");
         Ok(Some(present_as(
             value.clone(),
@@ -2109,6 +2228,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if depth > 4 || parts.len() >= crate::view::summary::MAX_ELEMENTS {
             return Ok(());
         }
+
         for child in self.children_of(reference)? {
             match &child.relationship {
                 ValueChildRelationship::Base(_) => {
@@ -2131,6 +2251,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 _ => {}
             }
         }
+
         Ok(())
     }
 
@@ -2142,6 +2263,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if reference.total == 0 {
             return Ok(Vec::new());
         }
+
         let module = self.module(reference.module)?;
         let mut runtime = self.frame.runtime(module);
         let limit = u32::try_from(reference.total.min(u64::from(MAX_SUM_CHILDREN)))
@@ -2162,6 +2284,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 machine.presented(machine.finish(Some(child.type_info.clone()), state))?;
             child.state = presented.state;
         }
+
         Ok(children)
     }
 
@@ -2172,12 +2295,14 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if self.depth > 0 {
             return run(&mut self.nested(self.depth + 1));
         }
+
         let mut share = self.budget.share();
         let result = {
             let mut machine = StopMachine::new(self.frame, &mut share, self.interruptible);
             machine.depth = self.depth + 1;
             run(&mut machine)
         };
+
         self.budget.absorb(share.usage());
         result
     }
@@ -2207,9 +2332,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let VariableState::Available { children, .. } = state else {
             return None;
         };
+
         if let ValueChildren::Available(reference) = children {
             return Some(Arc::clone(reference));
         }
+
         self.storage_of(type_info, state)
     }
 
@@ -2223,6 +2350,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let VariableState::Available { source, raw, .. } = state else {
             return None;
         };
+
         let storage = match (source, raw) {
             (crate::VariableValueSource::Memory(address), _) => ValueStorage::Memory(*address),
             (source, Some(raw)) => ValueStorage::Bytes {
@@ -2234,6 +2362,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             },
             _ => return None,
         };
+
         let module = self.frame.controller.module_of(type_info.reference)?;
         let context = self.context(module);
         Some(Arc::new(ValueChildrenReference {
@@ -2263,9 +2392,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(bound) = self.frame.controller.view_choice(ty).bound.clone() else {
             return Ok((None, None));
         };
+
         if !bound.shape.has_text() {
             return Ok((None, None));
         }
+
         // A text view scans nothing.
         let result = self.in_share(|machine| {
             crate::view::run::present(&bound, machine, place, &mut Checkpoints::default())
@@ -2347,10 +2478,12 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !controller.views.enabled {
             return Ok(None);
         }
+
         let ty = TypeReference {
             image: self.module(at.module)?.loaded.image,
             id: at.located.ty,
         };
+
         Ok(controller.view_choice(ty).bound.clone())
     }
 
@@ -2363,6 +2496,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(bound) = self.view_of(at)? else {
             return Ok(None);
         };
+
         let mut machine = self.nested(self.depth);
         crate::view::run::capacity(&bound, &mut machine, at.clone())
             .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
@@ -2377,9 +2511,11 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let Some(bound) = self.view_of(at)? else {
             return Ok(None);
         };
+
         if !bound.shape.has_text() {
             return Ok(None);
         }
+
         let mut machine = self.nested(self.depth);
         crate::view::run::text_span(&bound, &mut machine, at.clone())
             .map_err(|failure| view_stop(failure, &bound, ErrorKind::Type))
@@ -2392,13 +2528,16 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if !controller.views.enabled {
             return Ok(None);
         }
+
         let ty = TypeReference {
             image: self.module(at.module)?.loaded.image,
             id: at.located.ty,
         };
+
         let Some(bound) = controller.view_choice(ty).bound.clone() else {
             return Ok(None);
         };
+
         let stop = self.frame.stop_id;
         let key = scan_key(&bound, ty.image, at);
         let mut machine = self.nested(self.depth);
@@ -2429,6 +2568,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
             Err(Stop::Missing(missing)) => *missing,
             Err(stop) => return Err(stopped(stop)),
         };
+
         Ok(())
     }
 }

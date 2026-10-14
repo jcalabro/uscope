@@ -22,6 +22,7 @@ pub(super) enum ValueShape {
         representation: BaseType,
         enumerators: Arc<[Enumerator]>,
         byte_size: u64,
+
         /// A language's enumeration, or constants Go gave a named type,
         /// which make only the values they name symbolic.
         origin: EnumerationOrigin,
@@ -32,6 +33,7 @@ pub(super) enum ValueShape {
         ordering: ArrayOrdering,
         byte_size: u64,
     },
+
     /// An array bounded at run time, which a value resolves to an
     /// [`ValueShape::Array`] where its elements are.
     RuntimeArray {
@@ -41,6 +43,7 @@ pub(super) enum ValueShape {
         element_size: u64,
         dimensions: Arc<[RuntimeDimension]>,
         ordering: ArrayOrdering,
+
         /// The size of the descriptor, as an Ada array's, or zero when the
         /// producer gives none.
         byte_size: u64,
@@ -78,6 +81,7 @@ pub(super) enum ValueShape {
         byte_size: u64,
         address_class: u64,
     },
+
     /// A function value: null, or a pointer to its closure context.
     Function {
         byte_size: u64,
@@ -96,6 +100,7 @@ pub(super) fn transparent_type_from(
         if !visited.insert(current) {
             return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
         }
+
         let info = type_info_from(types, current).map_err(ValueShapeError::Malformed)?;
         match info.kind {
             TypeKind::Modified { target, .. }
@@ -133,6 +138,7 @@ fn transparent_representation(
             "shared-qualified values require UPC distributed-memory semantics".into(),
         ));
     }
+
     if let (Some(wrapper_size), Some(target_size)) = (wrapper.byte_size, target.byte_size)
         && wrapper_size != target_size
     {
@@ -143,6 +149,7 @@ fn transparent_representation(
             .into(),
         ));
     }
+
     Ok(())
 }
 
@@ -151,6 +158,7 @@ fn transparent_representation(
 pub(super) enum ValueShapeError {
     /// The type graph is defective.
     Malformed(Arc<str>),
+
     /// The type is valid but its shape is not implemented.
     Unsupported(Arc<str>),
 }
@@ -212,15 +220,18 @@ pub(super) fn tagless_variant(
     else {
         return None;
     };
+
     if common_members
         .iter()
         .any(|member| uninhabited(types, member.type_ref.id, 0))
     {
         return None;
     }
+
     if is_single_default_variant(variants) {
         return Some(0);
     }
+
     let mut possible = variants.iter().enumerate().filter(|(_, variant)| {
         matches!(variant.selection, VariantSelection::Default)
             && !variant
@@ -241,9 +252,11 @@ fn uninhabited(types: &(impl TypeEntries + ?Sized), id: TypeId, depth: usize) ->
     if depth >= MAX_TYPE_RESOLUTION_DEPTH {
         return false;
     }
+
     let Ok((_, info)) = transparent_type_from(types, id) else {
         return false;
     };
+
     match &info.kind {
         TypeKind::Variant {
             discriminant,
@@ -292,6 +305,7 @@ fn nested_value_shape(
             "array nesting exceeds its limit".into(),
         ));
     }
+
     let (current, info) = transparent_type_from(types, id)?;
     match &info.kind {
         TypeKind::Base(base) => {
@@ -302,11 +316,13 @@ fn nested_value_shape(
                     "base type has a zero byte size".into(),
                 ));
             }
+
             if base.byte_size > MAX_SCALAR_BYTES {
                 return Err(ValueShapeError::Unsupported(
                     format!("scalar type occupies {} bytes", base.byte_size).into(),
                 ));
             }
+
             let mut base = base.clone();
             base.name = Arc::clone(
                 &type_info_from(types, id)
@@ -315,6 +331,7 @@ fn nested_value_shape(
             );
             Ok(ValueShape::Scalar(base))
         }
+
         TypeKind::Enumeration {
             representation,
             enumerators,
@@ -326,11 +343,13 @@ fn nested_value_shape(
                     "enumeration has a zero byte size".into(),
                 ));
             }
+
             if representation.byte_size > MAX_SCALAR_BYTES {
                 return Err(ValueShapeError::Unsupported(
                     format!("enumeration occupies {} bytes", representation.byte_size).into(),
                 ));
             }
+
             integer_bit_width(representation).map_err(ValueShapeError::Malformed)?;
             let mut representation = representation.clone();
             representation.name = Arc::clone(
@@ -345,6 +364,7 @@ fn nested_value_shape(
                 origin: *origin,
             })
         }
+
         TypeKind::Array {
             element,
             dimensions,
@@ -357,6 +377,7 @@ fn nested_value_shape(
                     ValueShapeError::Unsupported("array element count overflows".into())
                 })?;
             }
+
             let element_size = element_shape.byte_size();
             let byte_size = count
                 .checked_mul(element_size)
@@ -368,6 +389,7 @@ fn nested_value_shape(
                 byte_size,
             })
         }
+
         TypeKind::RuntimeArray {
             element,
             dimensions,
@@ -383,6 +405,7 @@ fn nested_value_shape(
                 byte_size: info.byte_size.unwrap_or(0),
             })
         }
+
         TypeKind::Slice {
             element,
             words,
@@ -398,6 +421,7 @@ fn nested_value_shape(
                 text: *text,
             })
         }
+
         TypeKind::Record {
             members,
             bases,
@@ -409,6 +433,7 @@ fn nested_value_shape(
                     "incomplete record values are unsupported".into(),
                 ));
             }
+
             let byte_size = info.byte_size.ok_or_else(|| {
                 ValueShapeError::Malformed("complete record type has no byte size".into())
             })?;
@@ -419,6 +444,7 @@ fn nested_value_shape(
                 byte_size,
             })
         }
+
         TypeKind::Union {
             members,
             incomplete,
@@ -428,6 +454,7 @@ fn nested_value_shape(
                     "incomplete union values are unsupported".into(),
                 ));
             }
+
             let byte_size = info.byte_size.ok_or_else(|| {
                 ValueShapeError::Malformed("complete union type has no byte size".into())
             })?;
@@ -437,6 +464,7 @@ fn nested_value_shape(
                 byte_size,
             })
         }
+
         TypeKind::Variant {
             common_members,
             bases,
@@ -450,6 +478,7 @@ fn nested_value_shape(
                     "incomplete variant values are unsupported".into(),
                 ));
             }
+
             if !matches!(discriminant.as_ref(), VariantDiscriminant::Stored(_))
                 && tagless_variant(types, current).is_none()
             {
@@ -457,6 +486,7 @@ fn nested_value_shape(
                     "tagless variant selection is unsupported".into(),
                 ));
             }
+
             let byte_size = info.byte_size.ok_or_else(|| {
                 ValueShapeError::Malformed("complete variant type has no byte size".into())
             })?;
@@ -469,6 +499,7 @@ fn nested_value_shape(
                 byte_size,
             })
         }
+
         TypeKind::Pointer {
             target,
             address_class,
@@ -480,6 +511,7 @@ fn nested_value_shape(
                 address_class: *address_class,
             })
         }
+
         TypeKind::Reference {
             target,
             address_class,

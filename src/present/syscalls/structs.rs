@@ -51,9 +51,11 @@ pub fn si_code(signal: i32, code: i32) -> String {
         -6 => Some("SI_TKILL"),
         _ => None,
     };
+
     if let Some(name) = generic {
         return name.to_owned();
     }
+
     let specific: &[&str] = match signal {
         libc::SIGCHLD => &[
             "CLD_EXITED",
@@ -92,6 +94,7 @@ pub fn si_code(signal: i32, code: i32) -> String {
         ],
         _ => &[],
     };
+
     usize::try_from(code - 1)
         .ok()
         .and_then(|index| specific.get(index))
@@ -107,9 +110,11 @@ fn bits(names: &[(u64, &str)], mut value: u64) -> String {
             value &= !bit;
         }
     }
+
     if value != 0 {
         parts.push(format!("{value:#x}"));
     }
+
     if parts.is_empty() {
         "0".to_owned()
     } else {
@@ -129,6 +134,7 @@ pub fn file_mode(mode: u32) -> String {
         0o010_000 => "S_IFIFO|",
         _ => "",
     };
+
     let mut special = String::new();
     for (bit, name) in [
         (0o4000, "S_ISUID|"),
@@ -139,6 +145,7 @@ pub fn file_mode(mode: u32) -> String {
             special.push_str(name);
         }
     }
+
     format!("{kind}{special}{:04o}", mode & 0o777)
 }
 
@@ -263,6 +270,7 @@ impl Decode<'_, '_> {
                 } else {
                     "tv_usec"
                 };
+
                 (|| {
                     let _ = reader.u64(24)?;
                     self.punct("[");
@@ -275,6 +283,7 @@ impl Decode<'_, '_> {
             }
             _ => self.single(structure, &reader),
         };
+
         if printed.is_none() {
             self.address(word);
         }
@@ -287,6 +296,7 @@ impl Decode<'_, '_> {
         if structure != Struct::Sockaddr && b.0.len() < size {
             return None;
         }
+
         match structure {
             Struct::Rseq => {
                 // Each field prints when the registered length covers it.
@@ -304,12 +314,14 @@ impl Decode<'_, '_> {
                     ),
                     cpu => self.number(cpu),
                 }
+
                 self.punct(", ");
                 self.field("rseq_cs");
                 match b.u64(8)? {
                     0 => self.constant("NULL".to_owned()),
                     address => self.number(format!("{address:#x}")),
                 }
+
                 self.punct(", ");
                 self.field("flags");
                 self.number(b.u32(16)?);
@@ -320,6 +332,7 @@ impl Decode<'_, '_> {
                         self.number(b.u32(at)?);
                     }
                 }
+
                 if length >= 32 {
                     self.punct(", ");
                     self.field("slice_ctrl");
@@ -334,14 +347,17 @@ impl Decode<'_, '_> {
                     self.number(b.u16(30)?);
                     self.punct("}");
                 }
+
                 if length >= 33 {
                     self.punct(", ");
                     self.field("__reserved");
                     self.number(b.u8(32)?);
                 }
+
                 if length > 33 {
                     self.more();
                 }
+
                 self.punct("}");
             }
             Struct::Stat => {
@@ -354,6 +370,7 @@ impl Decode<'_, '_> {
                     self.number(b.u64(8)?);
                     self.punct(", ");
                 }
+
                 self.field("st_mode");
                 let mode = b.u32(24)?;
                 self.mode(mode);
@@ -375,6 +392,7 @@ impl Decode<'_, '_> {
                     self.number(b.i64(64)?);
                     self.punct(", ");
                 }
+
                 // A device has numbers where a file has a size.
                 let kind = b.u32(24)? & 0o170_000;
                 if kind == 0o020_000 || kind == 0o060_000 {
@@ -384,9 +402,11 @@ impl Decode<'_, '_> {
                     self.field("st_size");
                     self.number(b.i64(48)?);
                 }
+
                 if !self.style.verbose {
                     self.more();
                 }
+
                 self.punct("}");
             }
             Struct::Statx => {
@@ -432,6 +452,7 @@ impl Decode<'_, '_> {
                 } else {
                     ("tv_nsec", 16)
                 };
+
                 self.punct("{");
                 self.field("it_interval");
                 self.timespec(b, 0, fraction)?;
@@ -477,6 +498,7 @@ impl Decode<'_, '_> {
                     let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
                     format!("{:?}", String::from_utf8_lossy(&raw[..end]))
                 };
+
                 self.punct("{");
                 self.field("sysname");
                 self.out.push(Kind::String, field(0));
@@ -497,6 +519,7 @@ impl Decode<'_, '_> {
                 } else {
                     self.more();
                 }
+
                 self.punct("}");
             }
             Struct::Sysinfo => {
@@ -524,9 +547,11 @@ impl Decode<'_, '_> {
                     if position > 0 {
                         self.punct(", ");
                     }
+
                     self.field(name);
                     self.number(b.i64(position * 8)?);
                 }
+
                 self.punct("}");
             }
             Struct::Sigaction => {
@@ -539,6 +564,7 @@ impl Decode<'_, '_> {
                     1 => self.constant("SIG_IGN"),
                     _ => self.address(handler),
                 }
+
                 self.punct(", ");
                 self.field("sa_mask");
                 self.constant(sigset(&b.0[24..32]));
@@ -550,6 +576,7 @@ impl Decode<'_, '_> {
                     self.field("sa_restorer");
                     self.address(b.u64(16)?);
                 }
+
                 self.punct("}");
             }
             Struct::Sigset => self.constant(sigset(b.0)),
@@ -583,6 +610,7 @@ impl Decode<'_, '_> {
                         .unwrap_or(0),
                     _ => b.0.len(),
                 };
+
                 let address = SocketAddress::parse(&b.0[..b.0.len().min(length)])?;
                 self.constant(address.to_string());
             }
@@ -603,11 +631,13 @@ impl Decode<'_, '_> {
             }
             Struct::Fds2 => {
                 let process = self.event.process;
+
                 // The call made these descriptors.
                 let made = super::Context {
                     before: false,
                     ..self.context
                 };
+
                 self.punct("[");
                 super::descriptor(self.out, process, b.i32(0)?.into(), self.style, made);
                 self.punct(", ");
@@ -677,6 +707,7 @@ impl Decode<'_, '_> {
                 self.number(b.i64(8)?);
                 self.punct("}");
             }
+
             Struct::Pollfd
             | Struct::EpollEvent
             | Struct::Iovec
@@ -686,11 +717,13 @@ impl Decode<'_, '_> {
             | Struct::Timespec2
             | Struct::Timeval2 => return None,
         }
+
         Some(())
     }
 
     fn iovecs(&mut self, b: &Bytes<'_>, elements: usize, truncated: bool) {
         let iovecs = blobs::iovecs(b.0);
+
         // An output vector holds only as many bytes as the call moved,
         // across all its buffers.
         let output = self.spec.args.get(self.index).is_some_and(|arg| {
@@ -706,11 +739,13 @@ impl Decode<'_, '_> {
             Some(moved) if output => usize::try_from(moved).unwrap_or(0),
             _ => usize::MAX,
         };
+
         self.punct("[");
         for (position, iovec) in iovecs.iter().enumerate() {
             if position > 0 {
                 self.punct(", ");
             }
+
             self.punct("{");
             self.field("iov_base");
             let length = usize::try_from(iovec.len).unwrap_or(usize::MAX).min(budget);
@@ -728,12 +763,15 @@ impl Decode<'_, '_> {
             self.number(iovec.len);
             self.punct("}");
         }
+
         if iovecs.len() < elements || truncated {
             if !iovecs.is_empty() {
                 self.punct(", ");
             }
+
             self.punct("...");
         }
+
         self.punct("]");
     }
 
@@ -753,9 +791,11 @@ impl Decode<'_, '_> {
                     if length == 0 {
                         break;
                     }
+
                     count += 1;
                     at += usize::from(length);
                 }
+
                 self.address(self.event.args[self.index]);
                 self.out
                     .push(Kind::Comment, format!(" /* {count} entries */"));
@@ -780,6 +820,7 @@ impl Decode<'_, '_> {
             }
             _ => {}
         }
+
         let size = structure.size() as usize;
         let available = b.0.len() / size;
         let shown = elements.min(available);
@@ -788,6 +829,7 @@ impl Decode<'_, '_> {
             if element > 0 {
                 self.punct(", ");
             }
+
             let at = element * size;
             match structure {
                 Struct::Pollfd => {
@@ -803,6 +845,7 @@ impl Decode<'_, '_> {
                         self.field("revents");
                         self.constant(bits(sets::POLL_EVENTS, u64::from(revents)));
                     }
+
                     self.punct("}");
                 }
                 Struct::EpollEvent => {
@@ -823,12 +866,15 @@ impl Decode<'_, '_> {
                 _ => return None,
             }
         }
+
         if shown < elements {
             if shown > 0 {
                 self.punct(", ");
             }
+
             self.punct("...");
         }
+
         self.punct("]");
         Some(())
     }
@@ -879,9 +925,12 @@ fn wait_status(status: i32) -> String {
         if status & 0x80 != 0 {
             text.push_str(" && WCOREDUMP(s)");
         }
+
         text
     };
+
     text.push('}');
+
     // A ptrace event sits above the stop signal.
     let event = (status >> 16) & 0xff;
     if event != 0 {
@@ -896,8 +945,10 @@ fn wait_status(status: i32) -> String {
             128 => "PTRACE_EVENT_STOP".to_owned(),
             other => other.to_string(),
         };
+
         text = format!("{text} | {name} << 16");
     }
+
     text
 }
 
@@ -914,6 +965,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
         out.push(Kind::Punctuation, "=");
         out.push(kind, value);
     };
+
     let address = |value: u64| {
         if value == 0 {
             (Kind::Constant, "NULL".to_owned())
@@ -921,6 +973,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
             (Kind::Address, format!("{value:#x}"))
         }
     };
+
     out.push(Kind::Punctuation, "{");
     out.push(Kind::Text, "si_signo");
     out.push(Kind::Punctuation, "=");
@@ -932,6 +985,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
         ));
         field(out, "si_errno", Kind::Error, name);
     }
+
     if code <= 0 {
         // Sent by a process: its pid and uid, and a queued value.
         if code == -2 {
@@ -946,6 +1000,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
             field(out, "si_pid", Kind::Pid, b.i32(16)?.to_string());
             field(out, "si_uid", Kind::Number, b.u32(20)?.to_string());
         }
+
         if matches!(code, -3..=-1) {
             field(out, "si_int", Kind::Number, b.i32(24)?.to_string());
             let (kind, text) = address(b.u64(24)?);
@@ -962,6 +1017,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
                 } else {
                     (Kind::Constant, super::signal(status))
                 };
+
                 field(out, "si_status", status.0, status.1);
                 field(out, "si_utime", Kind::Number, b.i64(32)?.to_string());
                 field(out, "si_stime", Kind::Number, b.i64(40)?.to_string());
@@ -984,11 +1040,13 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
                     0x4000_0003 => "AUDIT_ARCH_I386".to_owned(),
                     other => format!("{other:#x}"),
                 };
+
                 field(out, "si_arch", Kind::Constant, arch);
             }
             _ => {}
         }
     }
+
     out.push(Kind::Punctuation, "}");
     Some(())
 }

@@ -29,6 +29,7 @@ fn the_filter_for_every_panic_stops_on_one_the_server_recovers_from() {
             .is_some_and(|text| text.contains("assignment to entry in nil map")),
         "{info}"
     );
+
     // The handler that panicked is the program's first frame, below the
     // runtime's, which are subdued.
     let frames = dap.inspect_as(Profile::VsCode, &stop);
@@ -54,6 +55,7 @@ fn a_build_without_its_source_paths_shows_them_through_a_source_map() {
         sources: vec![(local.clone(), vec![line])],
         ..Configuration::default()
     };
+
     // The breakpoint binds by the file's name, but the program names the
     // file by a path this machine does not have.
     let shown = |arguments| {
@@ -75,6 +77,7 @@ fn a_build_without_its_source_paths_shows_them_through_a_source_map() {
         dap.finish();
         PathBuf::from(path)
     };
+
     let recorded = shown(json!({}));
     assert!(!recorded.exists(), "{}", recorded.display());
 

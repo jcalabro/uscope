@@ -25,8 +25,10 @@ use crate::{ImageAddress, LoadBias, VirtualAddress};
 pub struct Calls {
     /// The instruction's address in the program's image.
     pub address: ImageAddress,
+
     /// The bias the program must load at for the breakpoint to be right.
     pub bias: LoadBias,
+
     /// When the instruction is a Go stack check's branch, the condition
     /// under which it branches to grow the stack.
     pub repeats_when: Option<Branch>,
@@ -45,6 +47,7 @@ impl Calls {
 pub enum Branch {
     /// `jb`: the carry flag.
     Below,
+
     /// `jbe`: the carry or zero flag.
     BelowOrEqual,
 }
@@ -84,6 +87,7 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Call
             _ => 0,
         })
     });
+
     // A symbol, or the name a profile shows for one.
     let addresses: BTreeSet<u64> = file
         .symbols()
@@ -107,22 +111,27 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Call
             });
         }
     };
+
     let plain = Calls {
         address: ImageAddress::new(entry),
         bias,
         repeats_when: None,
     };
+
     // Only Go grows stacks in its prologues.
     let Some(table) = crate::debug_info::gopclntab::load(&file).ok().flatten() else {
         return Ok(plain);
     };
+
     let Some(check) = stack_check(&file, &table, entry) else {
         return Ok(plain);
     };
+
     let uncountable = |why: &str| RecordError::Uncountable {
         name: symbol.to_owned(),
         why: why.to_owned(),
     };
+
     let repeats_when = match check.condition_code() {
         ConditionCode::b => Branch::Below,
         ConditionCode::be => Branch::BelowOrEqual,
@@ -132,6 +141,7 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Call
             ));
         }
     };
+
     let function = table
         .function_containing(entry)
         .ok_or_else(|| uncountable("its stack check is not in a Go function table"))?;
@@ -140,9 +150,11 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Call
             "the Go runtime may preempt it at its stack check",
         ));
     }
+
     if table.restarts_at_entry(function).unwrap_or(true) {
         return Err(uncountable("the Go runtime may restart it at its entry"));
     }
+
     Ok(Calls {
         address: ImageAddress::new(check.ip()),
         bias,
@@ -165,6 +177,7 @@ fn stack_check(file: &object::File<'_>, table: &GoTable, entry: u64) -> Option<I
         let mut decoder = Decoder::with_ip(64, code, at, DecoderOptions::NONE);
         std::iter::from_fn(move || decoder.can_decode().then(|| decoder.decode()))
     };
+
     let grows_the_stack = |at: u64| {
         let block: Vec<Instruction> = decode(at).take(8).collect();
         let calls_morestack = block.iter().any(|instruction| {
@@ -177,6 +190,7 @@ fn stack_check(file: &object::File<'_>, table: &GoTable, entry: u64) -> Option<I
         });
         calls_morestack && returns_to_entry
     };
+
     decode(entry)
         .take(5)
         .filter(|instruction| {

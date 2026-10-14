@@ -47,6 +47,7 @@ fn issued<T: Debug + PartialEq, E: Debug>(
         Ok(value) => record!("{call} -> {value:?}"),
         Err(error) => record!("{call} -> error {error:?}"),
     }
+
     result
 }
 
@@ -59,6 +60,7 @@ fn queried<T: Debug, E: Debug>(
         Ok(value) => record!("{call} -> {value:?}"),
         Err(error) => record!("{call} -> error {error:?}"),
     }
+
     result
 }
 
@@ -88,6 +90,7 @@ impl Display for Described<'_> {
                         return write!(f, "{pid} stopped by ptrace event {event} with {signal}");
                     }
                 };
+
                 write!(f, "{pid} PTRACE_EVENT_{name} with {signal}")
             }
             WaitEvent::PtraceSyscall(pid) => write!(f, "{pid} stopped at a syscall"),
@@ -139,6 +142,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
             Ok(pid) => record!("spawned {pid}"),
             Err(error) => record!("spawn -> error {error:?}"),
         }
+
         pid
     }
 
@@ -148,6 +152,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
             Ok(_) => record!("spawned the waiter"),
             Err(error) => record!("spawn waiter -> error {error:?}"),
         }
+
         waiter
     }
 
@@ -247,6 +252,7 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
             Ok(bias) => record!("load bias of {pid} -> {bias:#x}"),
             Err(error) => record!("load bias of {pid} -> error {error:?}"),
         }
+
         bias
     }
 

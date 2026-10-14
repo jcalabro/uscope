@@ -39,6 +39,7 @@ impl Truth {
                 _ => {}
             }
         }
+
         truth
     }
 }
@@ -50,6 +51,7 @@ impl Truth {
 async fn a_damaged_list_is_reported_and_the_rest_listed() {
     let scratch = ScratchDir::new("corrupt");
     let output = scratch.path().join("stdout");
+
     // The invariants hold no list with gaps of damage.
     let mut scenario = Scenario::launch(FIXTURE);
     scenario.add_breakpoint("truth_reached").await;
@@ -98,6 +100,7 @@ async fn a_damaged_list_is_reported_and_the_rest_listed() {
             assert!(unique.contains(id), "task {id} of shard {shard}: {gaps:?}");
         }
     }
+
     for (kind, id, _) in &truth.damaged {
         let reason = match kind.as_str() {
             "owner" => "belongs to task list",
@@ -105,10 +108,12 @@ async fn a_damaged_list_is_reported_and_the_rest_listed() {
             "broken" => "the task at 0x10 is unreadable",
             _ => "links back to",
         };
+
         assert!(
             gaps.iter().any(|gap| gap.contains(reason)),
             "{kind}: {gaps:?}"
         );
+
         // A task whose header is not its list's, or not a task's, is not
         // listed as one; one whose link alone is broken is.
         let refused = matches!(kind.as_str(), "owner" | "vtable");

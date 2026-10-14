@@ -25,23 +25,28 @@ pub enum Variables {
         context: StopContext,
         kind: VariableKind,
     },
+
     /// A frame's registers.
     Registers { context: StopContext },
+
     /// The static variables declared in a frame's source file.
     Statics {
         context: StopContext,
         module: uscope::ModuleId,
         file: uscope::SourceFileId,
     },
+
     /// The children of an aggregate, named by `path` when it has a name.
     Children {
         context: StopContext,
         reference: Arc<ValueChildrenReference>,
         path: Option<uscope::Expression>,
+
         /// Whether the children are all elements, all named members, or
         /// (`None`) a view's elements followed by its named children.
         indexed: Option<bool>,
     },
+
     /// What a pointer or reference refers to.
     Pointee {
         context: StopContext,
@@ -49,6 +54,7 @@ pub enum Variables {
         name: Arc<str>,
         path: Option<uscope::Expression>,
     },
+
     /// The elements of an evaluated range, such as `values[2..6]`.
     Range {
         context: StopContext,
@@ -90,13 +96,17 @@ pub struct References {
     frames: HashMap<i64, StopContext>,
     frame_ids: HashMap<(ExecutionContext, StackFrameId), i64>,
     variables: HashMap<i64, Variables>,
+
     /// The expression of each named row of a variables list, by the list's
     /// reference and the row's name.
     paths: HashMap<(i64, String), (StopContext, uscope::Expression)>,
+
     /// What each location reference names.
     locations: HashMap<i64, Location>,
+
     /// The source line each goto target names.
     targets: HashMap<i64, uscope::BreakpointSpec>,
+
     /// The call each step-in target names.
     calls: HashMap<i64, uscope::VirtualAddress>,
 }
@@ -106,6 +116,7 @@ pub struct References {
 pub enum Location {
     /// The code at an address, such as the function a pointer points to.
     Code(u64),
+
     /// Where a module's debug information says something is declared.
     Declared {
         module: uscope::ModuleId,
@@ -144,6 +155,7 @@ impl References {
         if self.next > MAX_REFERENCE {
             return Err(Exhausted);
         }
+
         let id = self.next;
         self.next += 1;
         Ok(id)
@@ -155,6 +167,7 @@ impl References {
         if let Some(&id) = self.frame_ids.get(&(context.execution, context.frame)) {
             return Ok(id);
         }
+
         let id = self.allocate()?;
         self.frames.insert(id, context);
         self.frame_ids
@@ -236,6 +249,7 @@ impl References {
         if let Some(recorded) = self.paths.get(&(list, name.to_owned())) {
             return Some(recorded.clone());
         }
+
         // A row is named `[i]`, `[i][j]`, or by its member's name.
         let row = |parent: &uscope::Expression, name: &str| {
             if name.starts_with('[') {
@@ -250,6 +264,7 @@ impl References {
                 parent.member(name)
             }
         };
+
         match self.variables.get(&list)? {
             Variables::Scope { context, .. } => Some((*context, uscope::Expression::name(name)?)),
             Variables::Children {
@@ -270,6 +285,7 @@ impl References {
                     Some((*context, row(&pointee, name)?))
                 }
             }
+
             Variables::Range {
                 context,
                 expression,
@@ -313,6 +329,7 @@ mod tests {
             next: MAX_REFERENCE,
             ..References::default()
         };
+
         assert_eq!(references.frame(context(1, 1)), Ok(MAX_REFERENCE));
         assert_eq!(references.frame(context(1, 2)), Err(Exhausted));
         assert_eq!(

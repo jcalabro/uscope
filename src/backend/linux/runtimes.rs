@@ -13,6 +13,7 @@ use crate::protocol::StopId;
 use crate::runtime_model::{
     self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext, TaskRef,
 };
+
 use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{
     ColumnNumber, Error, ExecutionContext, ImageAddress, InspectionUsage, LineNumber, LoadedModule,
@@ -77,14 +78,18 @@ fn runtime_id(module: crate::ModuleId, index: usize) -> Option<RuntimeId> {
 /// One stop of the process, as a runtime model reads it.
 struct ProcessStop<'a, P> {
     ptrace: &'a P,
+
     /// A stopped thread, through which memory is read.
     reader: Pid,
     breakpoints: &'a std::collections::BTreeMap<VirtualAddress, BreakpointSite>,
     bias: crate::LoadBias,
+
     /// Where the reads made are counted, when they are.
     usage: Option<&'a Cell<InspectionUsage>>,
+
     /// The process's threads, in the order of their ids.
     threads: Vec<ThreadId>,
+
     /// The sets of tasks threads drive, once found at this stop.
     task_sets: Vec<u64>,
 }
@@ -97,6 +102,7 @@ impl<P: InspectionOps> RuntimeStop for ProcessStop<'_, P> {
             counted.memory_bytes += bytes.len() as u64;
             usage.set(counted);
         }
+
         match read_logical_memory(
             self.ptrace,
             self.reader,
@@ -268,9 +274,11 @@ impl<P: InspectionOps> Controller<P> {
         let Some(stop) = inferior.public_stop.as_ref() else {
             return Arc::from([]);
         };
+
         if let Some(found) = stop.task_sets.borrow().as_ref() {
             return Arc::clone(&found.gaps);
         }
+
         let (sets, gaps) = self.find_task_sets(inferior, stop.triggering_thread);
         let gaps: Arc<[Arc<str>]> = gaps.into();
         *stop.task_sets.borrow_mut() = Some(TaskSets {
@@ -282,6 +290,7 @@ impl<P: InspectionOps> Controller<P> {
 
     fn find_task_sets(&self, inferior: &Inferior, reader: Pid) -> (Vec<u64>, Vec<Arc<str>>) {
         let runtimes = self.runtimes(inferior);
+
         // In the order of the threads that drive them, not of their
         // addresses, which change from run to run.
         let mut sets = Vec::new();
@@ -289,12 +298,14 @@ impl<P: InspectionOps> Controller<P> {
         if runtimes.is_empty() {
             return (Vec::new(), gaps);
         }
+
         let modules = self.unwind_modules(inferior);
         for &pid in inferior.threads.keys() {
             // Only a thread no runtime schedules tasks on drives a future.
             if self.thread_activity(inferior, pid) != Some(ThreadActivity::Outside) {
                 continue;
             }
+
             let root = StackRoot::of_thread(pid);
             let expanded = self.root_presentation(&root).and_then(|presentation| {
                 let stack = self.physical_stack(inferior, &root, DEFAULT_MAX_FRAMES)?;
@@ -320,6 +331,7 @@ impl<P: InspectionOps> Controller<P> {
                     continue;
                 }
             };
+
             // A set that a future that cannot be read runs is not found.
             if let Some(unread) = expanded.trace.unfollowed.first()
                 && expanded.lost.iter().any(|ty| {
@@ -337,6 +349,7 @@ impl<P: InspectionOps> Controller<P> {
                     .into(),
                 );
             }
+
             for future in &expanded.futures {
                 for runtime in runtimes
                     .iter()
@@ -353,6 +366,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         }
+
         (sets, gaps)
     }
 
@@ -390,6 +404,7 @@ impl<P: InspectionOps> Controller<P> {
             position: 0,
         });
         let mut tasks = Vec::new();
+
         // A runtime that cannot be read leaves its tasks out of every page.
         // So are the tasks of a set that cannot be found.
         let set_gaps = self.task_sets(inferior);
@@ -400,6 +415,7 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             Vec::new()
         };
+
         let usage = Cell::new(InspectionUsage::default());
         while let Some(runtime) = runtimes.get(cursor.runtime) {
             let page =
@@ -422,6 +438,7 @@ impl<P: InspectionOps> Controller<P> {
                         )
                     }));
             }
+
             tasks.extend(
                 page.value
                     .tasks
@@ -442,6 +459,7 @@ impl<P: InspectionOps> Controller<P> {
                 break;
             }
         }
+
         // A task suspended in its future waits for what that future does.
         for task in &mut tasks {
             if task.state == TaskState::Blocked
@@ -451,6 +469,7 @@ impl<P: InspectionOps> Controller<P> {
                 task.detail = Some(awaiting);
             }
         }
+
         Ok(TaskPage {
             tasks: tasks.into(),
             next: (cursor.runtime < runtimes.len()).then_some(cursor),
@@ -469,6 +488,7 @@ impl<P: InspectionOps> Controller<P> {
             runtime: runtime.id,
             number,
         };
+
         let code = |code: CodeAddress| self.task_location(inferior, code);
         TaskSnapshot {
             id: id(task.number),
@@ -502,6 +522,7 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             code.address
         };
+
         let found = std::iter::once((inferior.loaded_module, &self.module_image))
             .chain(
                 self.modules
@@ -523,6 +544,7 @@ impl<P: InspectionOps> Controller<P> {
                 recorded: None,
             };
         };
+
         TaskLocation {
             address: Some(code.address),
             module: Some(module.id),
@@ -548,6 +570,7 @@ impl<P: InspectionOps> Controller<P> {
         } else {
             self.modules.get(&module.id).map(|found| &found.image)
         };
+
         let source = image
             .and_then(|image| {
                 image
@@ -580,9 +603,11 @@ impl<P: InspectionOps> Controller<P> {
         let Some(stop) = inferior.public_stop.as_ref() else {
             return self.read_thread_activity(inferior, pid);
         };
+
         if let Some(known) = stop.activities.borrow().get(&pid) {
             return known.clone();
         }
+
         let activity = self.read_thread_activity(inferior, pid);
         stop.activities.borrow_mut().insert(pid, activity.clone());
         activity
@@ -621,11 +646,13 @@ impl<P: InspectionOps> Controller<P> {
                 Err(reason) => found = Some(Err(reason)),
             }
         }
+
         found
     }
 
     fn read_thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
         let runtimes = self.runtimes(inferior);
+
         // A thread may run the tasks of a runtime that cannot be read. One
         // runtime's idle thread is idle whatever another says of it.
         let mut found = self
@@ -661,6 +688,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         }
+
         found
     }
 }
@@ -672,6 +700,7 @@ impl<P: InspectionOps> Controller<P> {
         let Some(ThreadActivity::Task { task, .. }) = self.thread_activity(inferior, pid) else {
             return None;
         };
+
         let runtime = self
             .runtimes(inferior)
             .into_iter()
@@ -722,6 +751,7 @@ impl<P: InspectionOps> Controller<P> {
                         Ok(model) => model.signals().deferrable,
                         Err(unbound) => unbound.deferrable,
                     };
+
                     deferrable.contains(&signal.number())
                 })
         })
@@ -743,6 +773,7 @@ impl<P: InspectionOps> Controller<P> {
             }
             ExecutionContext::Task(task) => task,
         };
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         let reader = inferior
@@ -769,6 +800,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(None);
         };
+
         self.task_sets(inferior);
         let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
             runtime
@@ -794,6 +826,7 @@ impl<P: InspectionOps> Controller<P> {
             Ok(None) => return Ok(None),
             Err(reason) => return Err(Error::TaskUnavailable { task, reason }),
         };
+
         Ok(Some(StackRoot {
             context: ExecutionContext::Task(task),
             origin,

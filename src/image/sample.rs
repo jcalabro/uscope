@@ -18,9 +18,11 @@ use super::functions::{self, FunctionView};
 use super::lines::{
     self, FileRecord, LineExtra, LineRange, LineRow, LineSequence, LineTables, Row, RowAddress,
 };
+
 use super::locations::{
     self, EvaluationUnit, ExpressionId, LocationListId, LocationTables, LocationsBuilder,
 };
+
 use super::packages::{self, PackageView};
 use super::resumes::{self, ResumeView};
 use super::symbols::{self, SymbolView};
@@ -32,9 +34,11 @@ use super::variables::{
     ReturnConvention, SystemV, TypeResolution, ValueDescription, VariableFunctionId, VariableView,
     Variables,
 };
+
 use super::{
     Builder, Image, ImageError, Limits, PathId, Paths, PathsBuilder, StringsBuilder, TableKind,
 };
+
 use crate::{
     AddressRange, BoundaryEvidence, BreakpointEntry, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, CodeRole, ColumnNumber, EntryProvenance, FunctionId, FunctionInfo, GotSlot,
@@ -133,9 +137,11 @@ pub(super) fn sample() -> (LineTables, lines::Files) {
                     .push_range(range(open.address, row.address), index, open.statement)
                     .unwrap();
             }
+
             previous = Some((at, row));
         }
     }
+
     (tables, files)
 }
 
@@ -153,6 +159,7 @@ pub(super) fn sample_symbols() -> Vec<SymbolInfo> {
         storage: None,
         role: CodeRole::Ordinary,
     };
+
     let code = |range, provenance| Some(SymbolExtent { range, provenance });
     vec![
         SymbolInfo {
@@ -187,6 +194,7 @@ pub(super) fn sample_sections() -> Vec<SectionInfo> {
         executable,
         writable: !executable,
     };
+
     vec![
         section(0, ".text", range(0x1000, 0x2000), true),
         section(1, ".data", range(0x3000, 0x3100), false),
@@ -221,6 +229,7 @@ pub(super) fn sample_functions() -> Vec<FunctionInfo> {
         generics: std::sync::Arc::from([]),
         main_subprogram: false,
     };
+
     vec![
         FunctionInfo {
             linkage_name: Some("_Z4mainv".into()),
@@ -257,6 +266,7 @@ pub(super) fn sample_instances() -> Vec<CodeInstanceInfo> {
             provenance,
         })
     };
+
     vec![
         CodeInstanceInfo {
             id: CodeInstanceId::new(0),
@@ -317,6 +327,7 @@ pub(super) fn sample_unwind() -> unwind::Unwind {
         ),
         first_error: first_error.map(|(offset, text)| (offset, text.to_owned())),
     };
+
     unwind::Unwind {
         eh_frame: (0..64).collect::<Vec<u8>>().into(),
         debug_frame: (0..32).collect::<Vec<u8>>().into(),
@@ -419,10 +430,12 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
         TypeKind, TypeModifier, TypeNode, TypeReference, Variant, VariantDiscriminant,
         VariantSelection, VariantSelector, VariantStorageKind,
     };
+
     let reference = |id| TypeReference {
         image: ModuleImageId::new(0),
         id: TypeId::new(id),
     };
+
     let identity = |language, path: &[&str], base: &str| TypeIdentity {
         language,
         path: path.iter().map(|segment| (*segment).into()).collect(),
@@ -433,6 +446,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
         origin: ArgumentOrigin::None,
         go: None,
     };
+
     let member = |name: Option<&str>, ty, layout| RecordMember {
         name: name.map(Into::into),
         type_ref: reference(ty),
@@ -442,6 +456,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
         embedded: false,
         declaration: None,
     };
+
     let int = BaseType {
         name: "int".into(),
         base_name: "int".into(),
@@ -449,6 +464,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
         byte_size: 4,
         bit_size: None,
     };
+
     let kinds: Vec<(&str, Option<u64>, TypeKind, Option<TypeIdentity>)> = vec![
         (
             "int",
@@ -786,6 +802,7 @@ pub(super) fn sample_types() -> (Vec<crate::TypeNode>, Vec<u32>) {
         reference: reference(14),
         description: "the type's size is negative".into(),
     };
+
     let mut classes = (0..u32::try_from(nodes.len()).unwrap()).collect::<Vec<_>>();
     *classes.last_mut().unwrap() = 1;
     (nodes, classes)
@@ -845,6 +862,7 @@ pub(super) fn sample_variables() -> Variables {
         line: LineNumber::new(3).unwrap(),
         column: ColumnNumber::new(7),
     };
+
     let local = |name: &str, value| DataObject {
         debug_info_offset: Some(0x40),
         kind: crate::VariableKind::Local,
@@ -866,6 +884,7 @@ pub(super) fn sample_variables() -> Variables {
         frame_base: Metadata::Value(LocationListId(1)),
         malformed: None,
     };
+
     let objects = vec![
         local(
             "x",
@@ -1020,10 +1039,12 @@ pub(super) fn sample_calls() -> Calls {
         parameters: Vec::new(),
         malformed: None,
     };
+
     let jump = |instruction, lookup| crate::debug_info::TailJump {
         instruction: ImageAddress::new(instruction),
         lookup: ImageAddress::new(lookup),
     };
+
     Calls {
         functions: vec![
             CallingFunction {
@@ -1150,6 +1171,7 @@ pub(super) fn sample_resumes() -> resumes::Resumes {
         address: ImageAddress::new(address),
         resumption: resumption.into(),
     };
+
     resumes::Resumes {
         points: vec![
             (CodeInstanceId::new(3), Err("an indirect dispatch".into())),
@@ -1267,6 +1289,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     for index in 0..rows.len() {
         read = read.wrapping_add(lines::decode_row(addresses, rows, extras, index).line);
     }
+
     read += lines::statement_rows(addresses, rows, extras, image.table::<LineSequence>()).count()
         as u64;
     for range in image.table::<LineRange>() {
@@ -1278,10 +1301,12 @@ pub(super) fn read_everything(image: &Image) -> u64 {
                 .get(),
         );
     }
+
     let paths = Paths(image.bytes(TableKind::Paths));
     for file in image.table::<FileRecord>() {
         read += paths.get(PathId(file.path.get())).as_os_str().len() as u64;
     }
+
     let view = SymbolView::new(image);
     for symbol in view.all() {
         let info = symbol.info();
@@ -1291,8 +1316,10 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             read += u64::from(view.code_at(address).is_some());
             read += u64::from(view.data_at(address).is_some());
         }
+
         read += u64::from(symbol.answers_to("main"));
     }
+
     read += symbols::sections(image).len() as u64;
     read += symbols::got_slots(image).len() as u64;
     let view = FunctionView::new(image);
@@ -1304,6 +1331,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             .map(|instance| instance.info().ranges.len() as u64)
             .sum::<u64>();
     }
+
     for instance in view.instances() {
         let info = instance.info();
         read += instance.recommended_entries().count() as u64;
@@ -1312,6 +1340,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             read += view.instruction_starts(*range).count() as u64;
         }
     }
+
     let view = UnwindView::new(image);
     for lookup in [view.eh_frame_index(), view.debug_frame_index()] {
         for interval in lookup.entries {
@@ -1320,6 +1349,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             }
         }
     }
+
     read += (view.eh_frame().len() + view.debug_frame().len()) as u64;
     read += u64::from(view.is_go_code(ImageAddress::new(0x3000)));
     read += u64::from(view.stub_pushes(ImageAddress::new(0x340b)).unwrap_or(0));
@@ -1327,6 +1357,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
     if let Some((bytes, _)) = view.go() {
         read += bytes.len() as u64;
     }
+
     let view = TypeView::new(image);
     for index in 0..view.len() {
         let id = TypeId::new(u32::try_from(index).unwrap());
@@ -1336,6 +1367,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             if let Some(identity) = &info.identity {
                 read += view.with_base(&identity.base).count() as u64;
             }
+
             if let crate::TypeKind::Enumeration { enumerators, .. } = &info.kind {
                 for enumerator in enumerators.iter() {
                     read += view.with_enumerator(&enumerator.name).count() as u64;
@@ -1343,6 +1375,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             }
         }
     }
+
     read += u64::from(view.go_runtime_type(0x100).is_some());
     let view = PackageView::new(image);
     for index in 0..image.table::<packages::PackagedRecord>().len() {
@@ -1352,6 +1385,7 @@ pub(super) fn read_everything(image: &Image) -> u64 {
             read += u64::from(view.package_name(package).is_some());
         }
     }
+
     read + read_families(image)
 }
 
@@ -1388,6 +1422,7 @@ pub fn fuzz(data: &[u8]) {
     let Some((&mode, data)) = data.split_first() else {
         return;
     };
+
     let mut bytes = if mode & 1 == 1 {
         let (tables, files) = sample();
         let mut bytes = seal(&tables, &files)
@@ -1398,16 +1433,20 @@ pub fn fuzz(data: &[u8]) {
             let at = usize::from(u16::from_le_bytes([*low, *high])) % bytes.len();
             bytes[at] ^= flip;
         }
+
         bytes
     } else {
         data.to_vec()
     };
+
     if bytes.len() >= size_of::<Trailer>() {
         reseal(&mut bytes);
     }
+
     let Some(mut aligned) = super::AlignedBytes::zeroed(bytes.len()) else {
         return;
     };
+
     aligned.as_mut_bytes().copy_from_slice(&bytes);
     if let Ok(image) = Image::from_bytes(aligned, Limits::default()) {
         read_everything(&image);
@@ -1436,6 +1475,7 @@ pub(super) fn read_locations(tables: LocationTables<'_>, expressions: usize, lis
             read = read.wrapping_add(index ^ address);
             read += u64::from(expression.indexed_address(index) == Some(address));
         }
+
         for (offset, list) in expression.procedures() {
             read = read.wrapping_add(offset + list.map_or(9, |list| u64::from(list.0)));
             read += expression
@@ -1443,17 +1483,21 @@ pub(super) fn read_locations(tables: LocationTables<'_>, expressions: usize, lis
                 .and_then(locations::Procedure::locations)
                 .map_or(0, |list| list.entries().count() as u64);
         }
+
         read + u64::from(expression.base_type(0x30).is_some())
     };
+
     for id in (0..).map(ExpressionId).take(expressions) {
         read = read.wrapping_add(summarize(tables.expression(id)));
     }
+
     for id in (0..).map(LocationListId).take(lists) {
         for (range, expression) in tables.list(id).entries() {
             read = read.wrapping_add(range.map_or(5, |range| range.start.get() ^ range.end.get()));
             read = read.wrapping_add(u64::from(expression.id().0));
         }
     }
+
     read
 }
 
@@ -1477,6 +1521,7 @@ pub(super) fn read_variables(image: &Image) -> u64 {
         read += object.debug_info_offset().unwrap_or(1);
         read += u64::from(object.declaration().is_some()) + object.kind() as u64;
     }
+
     let functions = image.table::<variables::VariableFunctionRecord>().len();
     for index in 0..functions {
         let function = view.function(VariableFunctionId(u32::try_from(index).unwrap()));
@@ -1487,6 +1532,7 @@ pub(super) fn read_variables(image: &Image) -> u64 {
             .map_or(1, |captures| captures.len() as u64);
         read += u64::from(function.returns().is_some());
     }
+
     for start in image.table::<variables::FunctionStartRecord>() {
         for address in [start.start.get(), start.end.get() - 1, start.end.get()] {
             let address = ImageAddress::new(address);
@@ -1496,11 +1542,13 @@ pub(super) fn read_variables(image: &Image) -> u64 {
             read += u64::from(view.go_function(address).is_some());
         }
     }
+
     read += view.globals().count() as u64;
     for offset in [0x30, 0x40, 0x70, 0x80] {
         read += u64::from(view.object_at_offset(offset).is_some());
         read += u64::from(view.procedure(offset).is_some());
     }
+
     read
 }
 
@@ -1518,6 +1566,7 @@ pub(super) fn read_calls(image: &Image) -> u64 {
             .map(|site| u64::from(site.0))
             .sum::<u64>();
     }
+
     for index in 0..image.table::<calls::CallSiteRecord>().len() {
         let site = view
             .site(calls::SiteId(u32::try_from(index).unwrap()))
@@ -1526,11 +1575,13 @@ pub(super) fn read_calls(image: &Image) -> u64 {
         if let Some(address) = site.return_address() {
             read += view.returning_to(address).count() as u64;
         }
+
         read += u64::from(matches!(site.target(), SiteTarget::Computed(_)));
         read += u64::from(site.enters().is_some()) + u64::from(site.jump().is_some());
         read += site.parameters().count() as u64;
         read += u64::from(site.malformed().is_some());
     }
+
     read
 }
 
@@ -1542,11 +1593,13 @@ pub(super) fn read_declarations(image: &Image) -> u64 {
     for (name, _) in view.constants() {
         read += u64::from(view.constant(name).is_some());
     }
+
     read += u64::from(view.constant("").is_some());
     for (address, _) in view.vtables() {
         read += u64::from(view.vtable(address).is_some());
         read += u64::from(view.vtable(ImageAddress::new(address.get() + 1)).is_some());
     }
+
     read
 }
 
@@ -1565,12 +1618,14 @@ pub(super) fn read_resumes(image: &Image) -> u64 {
             Some(Err(why)) => why.len() as u64,
             None => 0,
         };
+
         for state in 0..8 {
             read += view
                 .held(u64::from(index) * 0x20, state)
                 .map_or(0, |held| held.count() as u64);
         }
     }
+
     read
 }
 
@@ -1595,5 +1650,6 @@ pub(super) fn read_type_facts(image: &Image) -> u64 {
                 .is_some(),
         );
     }
+
     read
 }

@@ -27,6 +27,7 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Truth {
     Items(Vec<Item>),
+
     /// The view refuses the container, for this reason.
     Refused(Refusal),
 }
@@ -36,8 +37,10 @@ pub enum Truth {
 pub enum Refusal {
     /// A check fails: more elements than room.
     Check,
+
     /// A node leads back to one visited before this element.
     Cycle { at: u64 },
+
     /// The generators end before the declared count.
     Short { declared: u64, generated: u64 },
 }
@@ -65,6 +68,7 @@ pub fn truth(
             if n > cap {
                 return Some(Truth::Refused(Refusal::Check));
             }
+
             let mut items = Vec::new();
             for index in 0..n {
                 items.push(Item {
@@ -72,8 +76,10 @@ pub fn truth(
                     value: item(data.checked_add(index * 4)?, 4)?,
                 });
             }
+
             Some(Truth::Items(items))
         }
+
         // {node *head; u64 count}, nodes {i32 value; node *next}
         "list" => {
             let (head, count) = (word(address)?, word(address + 8)?);
@@ -87,33 +93,40 @@ pub fn truth(
                         generated: items.len() as u64,
                     }));
                 }
+
                 if visited.contains(&node) {
                     return Some(Truth::Refused(Refusal::Cycle {
                         at: items.len() as u64,
                     }));
                 }
+
                 visited.push(node);
                 items.push(Item {
                     key: None,
                     value: item(node, 4)?,
                 });
                 let next = word(node + 8)?;
+
                 // A ring ends where it began.
                 node = if next == head { 0 } else { next };
             }
+
             Some(Truth::Items(items))
         }
+
         // {slot *slots; u64 cap; u64 n}, slots {i32 used; i32 key; i32 value}
         "table" => {
             let (slots, cap, n) = (word(address)?, word(address + 8)?, word(address + 16)?);
             if n > cap {
                 return Some(Truth::Refused(Refusal::Check));
             }
+
             let mut items = Vec::new();
             for index in 0..cap.min(MAX_WALK) {
                 if items.len() as u64 == n {
                     break;
                 }
+
                 let slot = slots.checked_add(index * 12)?;
                 if read(slot, 4)? != [0; 4] {
                     items.push(Item {
@@ -122,12 +135,14 @@ pub fn truth(
                     });
                 }
             }
+
             if (items.len() as u64) < n {
                 return Some(Truth::Refused(Refusal::Short {
                     declared: n,
                     generated: items.len() as u64,
                 }));
             }
+
             Some(Truth::Items(items))
         }
         _ => None,
@@ -141,6 +156,7 @@ pub struct Shown {
     pub shape: PresentedShape,
     pub count: Option<PresentedCount>,
     pub problem: Option<ViewProblem>,
+
     /// Elements from one page, then from pages of the client's size.
     pub whole: Vec<Item>,
     pub paged: Vec<Item>,
@@ -168,12 +184,14 @@ pub fn items(pages: &[ValueChildPage]) -> Result<Vec<Item>, String> {
                 ValueChildRelationship::Entry { index, key } => (*index, Some(&key.state)),
                 _ => continue,
             };
+
             if index != items.len() as u64 {
                 return Err(format!(
                     "child {index} came where child {} belongs",
                     items.len()
                 ));
             }
+
             let value = place(&child.state)
                 .ok_or_else(|| format!("element {index} was read from no memory: {child:?}"))?;
             let key = match key {
@@ -183,9 +201,11 @@ pub fn items(pages: &[ValueChildPage]) -> Result<Vec<Item>, String> {
                 ),
                 None => None,
             };
+
             items.push(Item { key, value });
         }
     }
+
     Ok(items)
 }
 
@@ -213,12 +233,14 @@ pub fn judge(truth: &Truth, shown: &Shown) -> Result<Vec<Mark>, String> {
                 ) => declared == shown_declared && generated == shown_generated,
                 _ => false,
             };
+
             if shown.shape != PresentedShape::Raw || !matches {
                 return Err(format!(
                     "the view must refuse it, {refusal:?}, but presented it as {:?} with {:?}",
                     shown.shape, shown.problem
                 ));
             }
+
             if matches!(refusal, Refusal::Cycle { .. }) {
                 marks.push(Mark::ViewCycleRefused);
             }
@@ -232,6 +254,7 @@ pub fn judge(truth: &Truth, shown: &Shown) -> Result<Vec<Mark>, String> {
                     shown.problem
                 ));
             }
+
             if shown.count != Some(PresentedCount::Exact(items.len() as u64)) {
                 return Err(format!(
                     "it holds {} elements, but its count is {:?}",
@@ -239,6 +262,7 @@ pub fn judge(truth: &Truth, shown: &Shown) -> Result<Vec<Mark>, String> {
                     shown.count
                 ));
             }
+
             for (pages, which) in [(&shown.whole, "one page"), (&shown.paged, "small pages")] {
                 if pages.len() > items.len() || pages[..] != items[..pages.len()] {
                     return Err(format!(
@@ -246,12 +270,14 @@ pub fn judge(truth: &Truth, shown: &Shown) -> Result<Vec<Mark>, String> {
                     ));
                 }
             }
+
             marks.push(Mark::ViewPresented);
             if shown.whole.len() == items.len() && shown.paged.len() == items.len() {
                 marks.push(Mark::ViewPaged);
             }
         }
     }
+
     Ok(marks)
 }
 
@@ -267,6 +293,7 @@ pub fn within(page: &ValueChildPage, limits: InspectionLimits) -> Result<(), Str
             "a page used {usage:?}, beyond its limits {limits:?}"
         ));
     }
+
     Ok(())
 }
 
@@ -280,6 +307,7 @@ pub fn shown(value: &InspectedValue, whole: Vec<Item>, paged: Vec<Item>) -> Opti
     else {
         return None;
     };
+
     Some(Shown {
         shape: presentation.shape,
         count: presentation.count,
@@ -304,6 +332,7 @@ mod tests {
                 memory.insert(address + offset as u64, *byte);
             }
         };
+
         put(0x10, &0x100_u64.to_le_bytes());
         put(0x18, &3_u64.to_le_bytes());
         for (index, next) in [(0_u64, 0x110_u64), (1, 0x120), (2, 0)] {
@@ -314,6 +343,7 @@ mod tests {
             );
             put(node + 8, &next.to_le_bytes());
         }
+
         memory
     }
 
@@ -344,6 +374,7 @@ mod tests {
         let Truth::Items(items) = &truth else {
             panic!("{truth:?}");
         };
+
         let mut dropped = list_shown(items.clone());
         dropped.whole.remove(1);
         assert!(judge(&truth, &dropped).is_err());
@@ -363,9 +394,11 @@ mod tests {
         for (offset, byte) in 0x110_u64.to_le_bytes().iter().enumerate() {
             memory.insert(0x128 + offset as u64, *byte);
         }
+
         for (offset, byte) in 5_u64.to_le_bytes().iter().enumerate() {
             memory.insert(0x18 + offset as u64, *byte);
         }
+
         let truth = truth("list", 0x10, &reader(&memory)).expect("memory says");
         assert_eq!(truth, Truth::Refused(Refusal::Cycle { at: 3 }));
         let refused = Shown {
@@ -375,11 +408,13 @@ mod tests {
             whole: Vec::new(),
             paged: Vec::new(),
         };
+
         assert_eq!(judge(&truth, &refused), Ok(vec![Mark::ViewCycleRefused]));
         let elsewhere = Shown {
             problem: Some(ViewProblem::Cycle { at: 2 }),
             ..refused.clone()
         };
+
         assert!(judge(&truth, &elsewhere).is_err());
         let presented = Shown {
             shape: PresentedShape::Sequence,
@@ -387,6 +422,7 @@ mod tests {
             problem: None,
             ..refused
         };
+
         assert!(judge(&truth, &presented).is_err());
     }
 }

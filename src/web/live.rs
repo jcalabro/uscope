@@ -28,12 +28,14 @@ pub fn options(spec: &RecordSyscalls) -> Result<TraceOptions, Failure> {
     let expressions: Vec<String> = spec.filter.split_whitespace().map(str::to_owned).collect();
     let filter = Filter::parse(&expressions, &present::signal_named)
         .map_err(|error| Failure::new(ErrorKind::Invalid, error.to_string()))?;
+
     // The descriptor table must see every call that changes it, for the
     // paths the view shows to be true.
     let mut calls = filter.calls;
     for id in fds::followed() {
         calls.insert(id);
     }
+
     Ok(TraceOptions {
         calls,
         limits: Limits::default(),
@@ -83,6 +85,7 @@ pub fn record(
         revision: 0,
         published: None,
     };
+
     let traced = ptrace::trace(Target::Launch(command), options, stop, &mut live);
     let Live {
         capture, revision, ..
@@ -94,6 +97,7 @@ pub fn record(
             publisher
                 .profiles
                 .publish(info, capture.finish(), (Vec::new(), 0));
+
             // Published before the page hears it began, so it can be read.
             if let Some(started) = publisher.started.take() {
                 let _ = started.send(Ok(()));
@@ -116,9 +120,11 @@ pub fn record(
 struct Live<'a, 'b> {
     publisher: &'a mut Publisher<'b>,
     capture: SyscallCapture,
+
     /// Descriptors as the trace knows them, to seed a program's own.
     fds: FdTable,
     in_flight: Vec<InFlight>,
+
     /// When the in-flight calls were read.
     seen_at: u64,
     revision: u32,
@@ -134,6 +140,7 @@ impl Live<'_, '_> {
         {
             return;
         }
+
         self.published = Some(Instant::now());
         let info = self.publisher.info(self.revision, None);
         self.publisher.profiles.publish(
@@ -161,6 +168,7 @@ impl Sink for Live<'_, '_> {
     fn event(&mut self, event: TraceEvent) {
         self.capture.event(&event);
         self.fds.apply(&event);
+
         // A program's own descriptors, which it inherited rather than made.
         if let TraceEvent::Exec { process, .. } = event
             && self.fds.of(process).next().is_none()
@@ -172,6 +180,7 @@ impl Sink for Live<'_, '_> {
                 self.fds.apply(&seed);
             }
         }
+
         self.publish();
     }
 

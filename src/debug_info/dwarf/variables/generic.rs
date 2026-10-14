@@ -39,8 +39,10 @@ impl From<ShapeUnresolvedReason> for Failure {
 pub(super) enum Generic {
     /// Not a type parameter's.
     Plain,
+
     /// The type argument.
     Resolved(TypeId),
+
     /// The shape, and why the type argument is unknown.
     Unresolved(TypeId, ShapeUnresolvedReason),
 }
@@ -59,6 +61,7 @@ impl DwarfVariableInfo {
         let Some(index) = self.type_facts().dictionary_index(type_id) else {
             return Ok(Generic::Plain);
         };
+
         let shape = match self.type_info(type_id).map(|info| &info.kind) {
             Ok(crate::TypeKind::Named {
                 target: Some(target),
@@ -66,6 +69,7 @@ impl DwarfVariableInfo {
             }) => target.id,
             _ => type_id,
         };
+
         match self.type_argument(index, shape, instance, address, runtime, budget) {
             Ok(argument) => Ok(Generic::Resolved(argument)),
             Err(Failure::Unresolved(reason)) => Ok(Generic::Unresolved(shape, reason)),
@@ -97,17 +101,20 @@ impl DwarfVariableInfo {
         if !(types..end).contains(&descriptor.get()) {
             return Err(ShapeUnresolvedReason::ForeignType.into());
         }
+
         let argument = self
             .types
             .view()
             .go_runtime_type(descriptor.get() - types)
             .ok_or(ShapeUnresolvedReason::UndescribedType)?;
+
         // A dictionary read where the function has not stored it yet holds
         // whatever was there; a type laid out unlike the shape is not the
         // argument.
         if !self.same_layout(argument, shape) {
             return Err(ShapeUnresolvedReason::MismatchedShape.into());
         }
+
         Ok(argument)
     }
 
@@ -131,6 +138,7 @@ impl DwarfVariableInfo {
                     && self.visible_at(*object, at)
             })
             .ok_or(ShapeUnresolvedReason::NoDictionary)?;
+
         // Optimized Go places its dictionary, for the whole function, in
         // the register argument's spill slot at the frame's CFA, though the
         // function may never spill it there, and the slot may hold another
@@ -148,6 +156,7 @@ impl DwarfVariableInfo {
         {
             return Err(ShapeUnresolvedReason::UnreliableDictionary.into());
         }
+
         let storage = self
             .located_data_object(
                 dictionary,
@@ -182,12 +191,14 @@ impl DwarfVariableInfo {
             )
             .into());
         };
+
         let Ok(ValueShape::Record { members, .. }) = self.value_shape(type_id) else {
             return Err(ShapeUnresolvedReason::Malformed(
                 "runtime.firstmoduledata is not a structure".into(),
             )
             .into());
         };
+
         let offset = |name: &str| {
             members
                 .iter()
@@ -202,6 +213,7 @@ impl DwarfVariableInfo {
                     )
                 })
         };
+
         let (types, end) = (offset("types")?, offset("etypes")?);
         let storage = self
             .located_data_object(
@@ -218,6 +230,7 @@ impl DwarfVariableInfo {
                 .map(VirtualAddress::get)
                 .map_err(|error| unavailable(error, ShapeUnresolvedReason::ModuleDataUnavailable))
         };
+
         Ok((field(types)?, field(end)?))
     }
 
@@ -236,6 +249,7 @@ impl DwarfVariableInfo {
             )
             .into());
         }
+
         Ok(address)
     }
 
@@ -245,6 +259,7 @@ impl DwarfVariableInfo {
         let (Ok(left), Ok(right)) = (self.value_shape(left), self.value_shape(right)) else {
             return false;
         };
+
         // An integer and a Go type with constants are both integers.
         let integral = |shape: &ValueShape| match shape {
             ValueShape::Scalar(base)
@@ -254,11 +269,13 @@ impl DwarfVariableInfo {
             } => Some(base.encoding),
             _ => None,
         };
+
         let same_kind = match (integral(&left), integral(&right)) {
             (Some(left), Some(right)) => left == right,
             (None, None) => std::mem::discriminant(&left) == std::mem::discriminant(&right),
             _ => false,
         };
+
         same_kind && left.byte_size() == right.byte_size()
     }
 }

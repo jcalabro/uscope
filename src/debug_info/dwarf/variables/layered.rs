@@ -174,6 +174,7 @@ impl Marks {
             base.union(&own);
             own = base;
         }
+
         self.base = Arc::new(own);
     }
 

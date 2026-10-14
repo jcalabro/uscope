@@ -17,6 +17,7 @@ const SOURCE: &str = "tests/fixtures/go/hosted/main.go";
 #[tokio::test]
 async fn a_hosted_go_library_shows_the_goroutines_of_its_runtime() {
     let mut scenario = checked("go-host");
+
     // The library loads once the host runs.
     scenario
         .operation(
@@ -59,6 +60,7 @@ async fn a_hosted_go_library_shows_the_goroutines_of_its_runtime() {
     let [(StackSegment::Task, go), (StackSegment::System, c), ..] = found.as_slice() else {
         panic!("{context}");
     };
+
     assert_eq!(
         *go,
         names(&[
@@ -114,6 +116,7 @@ async fn assert_listed(scenario: &Scenario, task: i128) {
     let user = trace
         .user_frame()
         .expect("the goroutine runs the library's code");
+
     // It may not have run yet; nothing the host does waits until it has.
     let lines = ["// HOSTED: began", "// HOSTED: waiting"]
         .map(|marker| support::source_line(SOURCE, marker));

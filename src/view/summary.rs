@@ -39,10 +39,12 @@ pub fn quoted(text: &TextSummary) -> String {
                 character => output.push(character),
             }
         }
+
         for byte in chunk.invalid() {
             let _ = write!(output, "\\x{byte:02x}");
         }
     }
+
     output.push('"');
     match text.completion {
         TextCompletion::Complete => {}
@@ -61,6 +63,7 @@ pub fn quoted(text: &TextSummary) -> String {
             } else {
                 output.push_str("...");
             }
+
             let _ = write!(
                 output,
                 " <{}>",
@@ -68,6 +71,7 @@ pub fn quoted(text: &TextSummary) -> String {
             );
         }
     }
+
     output
 }
 
@@ -85,9 +89,11 @@ pub fn integer(value: IntegerValue) -> String {
 pub enum Characters {
     /// None: the scalar is a number.
     None,
+
     /// Bytes of an encoding the type does not say, of which only ASCII
     /// is known: C's `char`.
     Bytes,
+
     /// Unicode code points: UTF-16 and UTF-32 units, `wchar_t`, and
     /// Rust's `char`.
     Unicode,
@@ -111,6 +117,7 @@ pub fn scalar(value: &ScalarValue, characters: Characters) -> String {
             |character| format!("{number} '{}'", character.escape_debug()),
         )
     };
+
     match value {
         ScalarValue::Boolean(value) => value.to_string(),
         ScalarValue::Signed(value) => with_character(value.to_string(), u32::try_from(*value).ok()),
@@ -152,12 +159,15 @@ fn soft_shortest<F: rustc_apfloat::Float + std::fmt::Display>(value: F) -> Strin
     if value.is_nan() {
         return "NaN".to_owned();
     }
+
     if value.is_infinite() {
         return if value.is_negative() { "-inf" } else { "inf" }.to_owned();
     }
+
     if value.is_zero() {
         return if value.is_negative() { "-0" } else { "0" }.to_owned();
     }
+
     let natural = value.to_string();
     let digits = (1..64)
         .map(|precision| format!("{value:.precision$}"))
@@ -180,6 +190,7 @@ fn decimal(text: &str) -> Option<String> {
         Some((significand, exponent)) => (significand, exponent.parse::<i32>().ok()?),
         None => (text, 0),
     };
+
     let (whole, fraction) = significand.split_once('.').unwrap_or((significand, ""));
     if !whole
         .chars()
@@ -188,6 +199,7 @@ fn decimal(text: &str) -> Option<String> {
     {
         return None;
     }
+
     // The digits, and where the decimal point falls among them.
     let all = format!("{whole}{fraction}");
     let leading = all.len() - all.trim_start_matches('0').len();
@@ -195,7 +207,9 @@ fn decimal(text: &str) -> Option<String> {
     if digits.is_empty() {
         return Some(if negative { "-0" } else { "0" }.to_owned());
     }
+
     let point = i32::try_from(whole.len()).ok()? + exponent - i32::try_from(leading).ok()?;
+
     // The exponent of the first significant digit.
     let scientific = point - 1;
     let sign = if negative { "-" } else { "" };
@@ -222,6 +236,7 @@ fn decimal(text: &str) -> Option<String> {
         } else {
             format!(".{rest}")
         };
+
         format!("{sign}{first}{rest}e{scientific}")
     })
 }
@@ -276,14 +291,17 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         VariableState::Malformed(_) => return "<malformed>".to_owned(),
         VariableState::Invalid { .. } => return "<invalid>".to_owned(),
     };
+
     if let Some(presentation) = presentation
         && presentation.shape != PresentedShape::Raw
     {
         return presentation.summary.to_string();
     }
+
     if let (Some(text), false) = (text, matches!(value, VariableValue::Address(_))) {
         return quoted(text);
     }
+
     let characters = type_info.map_or(Characters::None, characters);
     let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
@@ -315,6 +333,7 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
             "{…}".to_owned()
         }
     };
+
     match (text, value) {
         (Some(text), VariableValue::Address(_)) => format!("{rendered} {}", quoted(text)),
         _ => rendered,
@@ -330,6 +349,7 @@ pub fn symbol(value: IntegerValue, matches: &[crate::Enumerator]) -> Option<Stri
             .first()
             .map(|enumerator| enumerator.name.to_string());
     }
+
     (!matches.is_empty()).then(|| {
         matches
             .iter()
@@ -387,20 +407,25 @@ pub fn record(members: &[(Arc<str>, String)], complete: bool) -> String {
         if index > 0 {
             output.push_str(", ");
         }
+
         if output.chars().count() > MAX_CHARACTERS {
             output.push('…');
             output.push(close);
             return output;
         }
+
         if !positional {
             output.push_str(name);
             output.push_str(": ");
         }
+
         output.push_str(value);
     }
+
     if !complete {
         output.push_str(if members.is_empty() { "…" } else { ", …" });
     }
+
     output.push(close);
     output
 }
@@ -416,11 +441,14 @@ fn bracketed(
         if index > 0 {
             output.push_str(", ");
         }
+
         output.push_str(item);
     }
+
     if !complete {
         output.push_str(if items.is_empty() { "…" } else { ", …" });
     }
+
     output.push(close);
     output
 }

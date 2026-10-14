@@ -53,6 +53,7 @@ impl<'a> Raw<'a> {
                             _ => {}
                         }
                     }
+
                     raw.types.push(kind);
                 }
                 (2, value) => raw.samples.push(value.bytes("a sample")?),
@@ -69,9 +70,11 @@ impl<'a> Raw<'a> {
                 _ => {}
             }
         }
+
         if raw.strings.first().is_none_or(|first| !first.is_empty()) {
             return Err("its string table does not begin with the empty string".to_owned());
         }
+
         Ok(raw)
     }
 
@@ -106,10 +109,12 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
         if plain.len() as u64 > MOST_BYTES {
             return Err(format!("it decompresses to more than {MOST_BYTES} bytes"));
         }
+
         Cow::Owned(plain)
     } else {
         Cow::Borrowed(bytes)
     };
+
     let raw = Raw::parse(&bytes)?;
     let mut builder = CaptureBuilder::new();
     let weigh = weighing(&raw, &mut builder)?;
@@ -135,9 +140,11 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
                 _ => {}
             }
         }
+
         let Some(weight) = weigh.weight(&values)? else {
             continue;
         };
+
         total = total
             .checked_add(weight)
             .ok_or_else(|| format!("the samples weigh more than {} in all", u64::MAX))?;
@@ -148,9 +155,11 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
                 .ok_or_else(|| format!("a sample names location {id}, which it lacks"))?;
             stack.push(*frame);
         }
+
         if stack.is_empty() {
             stack.push(builder.truncation(Truncation::NoStack, NONE));
         }
+
         let stack = builder.stack(&stack);
         let task = if labels.is_empty() {
             NONE
@@ -164,8 +173,10 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
                 task
             })
         };
+
         builder.sample(thread, time, weight, stack, task);
     }
+
     builder.thread_exit(Tid::new(0), end);
     builder.setting("sample times", "none");
     let comments: Result<Vec<&str>, String> = raw
@@ -177,6 +188,7 @@ pub fn import(bytes: &[u8]) -> Result<Capture, String> {
     if !comments.is_empty() {
         builder.setting("comments", &comments);
     }
+
     Ok(builder.finish())
 }
 
@@ -202,6 +214,7 @@ impl Weighing {
         if value < 0 {
             return Err("a sample's value is negative, as a diff's are".to_owned());
         }
+
         value
             .cast_unsigned()
             .checked_mul(self.scale)
@@ -229,6 +242,7 @@ fn weighing(raw: &Raw<'_>, builder: &mut CaptureBuilder) -> Result<Weighing, Str
         "count" | "" => (name, 1),
         unit => (unit, 1),
     };
+
     builder.setting("source", &format!("pprof's {name} ({unit})"));
     builder.setting("weight", weight);
     Ok(Weighing { chosen, scale })
@@ -249,14 +263,17 @@ fn mappings(raw: &Raw<'_>, builder: &mut CaptureBuilder) -> Result<BTreeMap<u64,
                 _ => {}
             }
         }
+
         let path = raw.string(file)?;
         if modules.is_empty() && !path.is_empty() {
             builder.setting("program", path);
         }
+
         let build_id = Some(raw.string(build_id)?).filter(|id| !id.is_empty());
         let module = builder.module(path, build_id, [0; 16], limit.saturating_sub(start));
         modules.insert(id, module);
     }
+
     Ok(modules)
 }
 
@@ -274,8 +291,10 @@ fn functions(raw: &Raw<'_>) -> Result<BTreeMap<u64, Function>, String> {
                 _ => {}
             }
         }
+
         functions.insert(id, read);
     }
+
     Ok(functions)
 }
 
@@ -308,21 +327,25 @@ fn locations(
                             _ => {}
                         }
                     }
+
                     lines.push(line);
                 }
                 _ => {}
             }
         }
+
         let module = match mapping {
             0 => NONE,
             mapping => *modules
                 .get(&mapping)
                 .ok_or_else(|| format!("location {id} names mapping {mapping}, which it lacks"))?,
         };
+
         // Two locations at one address, or none, are still two frames.
         if address == 0 || !used.insert(address) {
             address = UNADDRESSED | id;
         }
+
         let frame = builder.frame(FrameKind::Native, NONE, address, 0);
         if !lines.is_empty() {
             let mut names = Vec::with_capacity(lines.len());
@@ -337,9 +360,11 @@ fn locations(
                     ("", "") => format!("[function at {line}]"),
                     ("", name) | (name, _) => name.to_owned(),
                 };
+
                 let file = raw.string(function.file)?;
                 names.push((name, file, line, column, function.line));
             }
+
             let lines: Vec<LineInput<'_>> = names
                 .iter()
                 .map(|(name, file, line, column, declared)| LineInput {
@@ -354,10 +379,12 @@ fn locations(
                 .collect();
             builder.symbolize(frame, module, &lines);
         }
+
         if frames.insert(id, frame).is_some() {
             return Err(format!("two locations are numbered {id}"));
         }
     }
+
     Ok(frames)
 }
 
@@ -373,6 +400,7 @@ fn label(raw: &Raw<'_>, bytes: &[u8]) -> Result<String, String> {
             _ => {}
         }
     }
+
     let key = raw.string(key)?;
     Ok(match number {
         Some(number) => match raw.string(unit)? {
@@ -398,6 +426,7 @@ pub fn export(
         "bytes" => ("space", "bytes"),
         unit => (unit, "count"),
     };
+
     let mut profile = Message::default();
     let (kind, kind_unit) = (strings.of(kind), strings.of(kind_unit));
     profile.message(1, |message| {
@@ -412,6 +441,7 @@ pub fn export(
         if tree.own[node] == 0 {
             continue;
         }
+
         path.clear();
         let mut at = u32::try_from(node).unwrap_or(NONE);
         while at != NONE {
@@ -444,15 +474,18 @@ pub fn export(
             path.push(location);
             at = tree.parent[at as usize];
         }
+
         profile.message(2, |message| {
             message.packed(1, path.iter().copied());
             message.packed(2, [tree.own[node]]);
         });
     }
+
     profile.bytes.extend_from_slice(&written.bytes);
     for string in &strings.list {
         profile.bytes(6, string.as_bytes());
     }
+
     profile.signed(10, duration);
     let mut out = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     std::io::Write::write_all(&mut out, &profile.bytes)?;
@@ -473,8 +506,10 @@ fn located(capture: &Capture, keys: &Keys<'_>, key: u32) -> (String, String, u32
         } else {
             capture.string(file)
         };
+
         return (name.to_owned(), file.to_owned(), line);
     }
+
     let (file, line) = keys.location(key).unwrap_or(("", 0));
     (keys.name(key), file.to_owned(), line)
 }
@@ -499,6 +534,7 @@ impl Strings {
         if let Some(&index) = self.index.get(text) {
             return index;
         }
+
         let index = self.list.len() as u64;
         self.list.push(text.to_owned());
         self.index.insert(text.to_owned(), index);

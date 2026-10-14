@@ -11,6 +11,7 @@ use crate::debug_info::dwarf::{
     DieKey, DieMap, DieWalk, Reader, TypeSignatures, Units, die_reference_with_signatures,
     unit_dwarf,
 };
+
 use crate::image::type_facts::BoundPart;
 use crate::model::{ArrayDimension, ArrayOrdering};
 use crate::{
@@ -29,16 +30,19 @@ use super::die::{
     index_type_is_signed, origin_chain, strict_flag, string_with_origins, type_with_origins,
     unsigned_constant, zig_qualified_name,
 };
+
 use super::identity::{
     GoParts, IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path,
     module_segments, produced_language, scope_segment, source_language,
 };
+
 use super::layered::{Layered, Marks, Rows};
 use super::location::copy_expression;
 use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
     validate_variant_selections,
 };
+
 use super::{MAX_BUILT_TYPES, MAX_RECORD_CHILDREN, MAX_TYPE_RESOLUTION_DEPTH};
 use crate::image::locations::ExpressionId;
 
@@ -57,53 +61,68 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) type_signatures: &'a TypeSignatures,
     pub(super) image: ModuleImageId,
     pub(super) by_die: Layered<DieMap<TypeId>>,
+
     /// What the prepass read of every unit, which building types only
     /// reads.
     pub(super) context: Arc<TypeContext>,
     pub(super) entries: Rows<TypeEntry>,
     pub(super) explicit_names: Marks,
+
     /// The arguments identities spell by name, which resolve once every
     /// identity exists.
     pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
     pub(super) resolution_depth: usize,
     pub(super) byte_order: ByteOrder,
     pub(super) limit_type: Option<TypeId>,
+
     /// The shared `void` that qualifiers and typedefs without a target name.
     pub(super) void_type: Option<TypeId>,
+
     /// The character [`Self::character_type`] made, once it has.
     pub(super) character_type: Option<TypeId>,
     pub(super) dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, ExpressionId>,
+
     /// Where every location is pooled.
     pub(super) pool: &'a std::sync::Mutex<super::location::LocationsBuilder>,
+
     /// The DIEs [`Children`] read into.
     pub(super) die_buffers: &'a DieBuffers<'data>,
     pub(super) record_member_declarations: Vec<AggregateMemberDeclaration>,
+
     /// What the records the loader builds may still cost.
     pub(super) budget: crate::debug_info::dwarf::budget::Meter,
+
     /// What each named type's identity is built from, by its identifier.
     /// Nearly every type is named and identifiers are dense, so a vector
     /// holds them in a third of the hash map's memory: the map's buckets
     /// were mostly empty and every one was touched.
     pub(super) identity_parts: Rows<Option<IdentityParts>>,
+
     /// The Go parts of each Go type's identity, apart so that no other
     /// type's parts make room for them.
     pub(super) go_identity_parts: Layered<HashMap<TypeId, GoParts>>,
+
     /// The float type each complex type's parts have, by the part's name
     /// and size.
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+
     /// Go's generic type parameters: each typedef of a shape that names
     /// its type argument's entry in the function's dictionary.
     pub(super) go_dict_indices: Layered<HashMap<TypeId, u64>>,
+
     /// Whether each C++ class whose producer says how calls pass it is
     /// passed by value, in registers where it fits, rather than by
     /// reference to a copy.
     pub(super) passed_by_value: Layered<HashMap<TypeId, bool>>,
+
     /// The group whose units' types this arena builds, when it builds one
     /// group's apart from the others', and each unit's group.
     pub(super) home: Option<(usize, &'a [usize])>,
+
     /// Whether it was asked for a type of another group, which a walk of
     /// every unit in order may have built before this one.
     pub(super) foreign: bool,
+
     /// The DIEs it took for another's type, in order, when it builds one
     /// group's.
     pub(super) aliases: Vec<DieKey>,
@@ -114,15 +133,19 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
 pub(super) struct TypeContext {
     pub(super) type_definitions: DieMap<DieKey>,
     pub(super) ambiguous_type_declarations: DieMap<()>,
+
     /// Where each unit's DIEs begin. A reference to any other offset
     /// points into the middle of a DIE, whose bytes could decode as
     /// convincing nonsense.
     pub(super) die_offsets: Vec<Bits>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
+
     /// The language each unit's producer proves, where it does.
     pub(super) produced_languages: Vec<Option<SourceLanguage>>,
+
     /// The scopes enclosing each type DIE that has any.
     pub(super) type_scopes: DieMap<ScopePath>,
+
     /// The declaration each out-of-line type definition completes.
     pub(super) definition_declarations: DieMap<DieKey>,
 }
@@ -151,11 +174,13 @@ impl Bits {
 
     pub(super) fn insert(&mut self, value: usize) {
         let word = value / 64;
+
         // The set grows to fit: a unit's DIEs lie within its length, but a
         // header that lies about it must not lose one.
         if word >= self.words.len() {
             self.words.resize(word + 1, 0);
         }
+
         self.words[word] |= 1 << (value % 64);
     }
 
@@ -174,6 +199,7 @@ impl Bits {
         if other.words.len() > self.words.len() {
             self.words.resize(other.words.len(), 0);
         }
+
         for (word, other) in self.words.iter_mut().zip(&other.words) {
             *word |= other;
         }
@@ -203,11 +229,14 @@ const MEMBER_DECLARATION_CHUNK: usize = 1 << 15;
 struct UnitPrepass {
     offsets: Bits,
     language: Option<gimli::DwLang>,
+
     /// The language the unit's producer or name proves, where it does.
     produced: Option<SourceLanguage>,
+
     /// Each type DIE declared in a scope, and the scope's segments.
     scoped_types: Vec<(DieKey, Arc<[ScopeSegment]>)>,
     inline_namespaces: Vec<Vec<Arc<str>>>,
+
     /// Each out-of-line type definition and the declaration it completes.
     definitions: Vec<(DieKey, DieKey)>,
 }
@@ -228,10 +257,12 @@ impl UnitPrepass {
             inline_namespaces: Vec::new(),
             definitions: Vec::new(),
         };
+
         let mut cpp = false;
         let mut d = false;
         let mut first = true;
         let mut scopes = Vec::<(isize, ScopeSegment)>::new();
+
         // The path of the first `n` scopes at `n`, shared by the types
         // declared in them. Leaving a scope keeps its parents' paths, so
         // the types after a record share one path with those before it.
@@ -239,17 +270,20 @@ impl UnitPrepass {
         let Ok(mut walk) = DieWalk::new(unit) else {
             return prepass;
         };
+
         while let Ok(Some(die)) = walk.next() {
             prepass.offsets.insert(die.offset.0);
             let depth = die.depth;
             while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
                 scopes.pop();
             }
+
             paths_at.truncate(scopes.len() + 1);
             let key = DieKey {
                 unit: unit_index,
                 offset: die.offset.0,
             };
+
             // Paths are resolved once every unit is read, since a
             // function's name may live in another unit.
             if is_type_die_tag(die.tag) && !scopes.is_empty() {
@@ -259,6 +293,7 @@ impl UnitPrepass {
                 });
                 prepass.scoped_types.push((key, Arc::clone(segments)));
             }
+
             // Only the root, namespaces, and types have attributes
             // this reads; a function scopes the types in it by its
             // offset alone.
@@ -266,6 +301,7 @@ impl UnitPrepass {
                 scopes.push((depth, ScopeSegment::Function(key)));
                 continue;
             }
+
             // A D module scopes what it declares; Zig's names spell
             // their own modules.
             let scopes_or_names = first
@@ -275,19 +311,23 @@ impl UnitPrepass {
             if !scopes_or_names {
                 continue;
             }
+
             let Ok(entry) = walk.decode() else {
                 break;
             };
+
             if first {
                 first = false;
                 prepass.language = match entry.attr_value(gimli::DW_AT_language) {
                     Some(gimli::AttributeValue::Language(language)) => Some(language),
                     _ => units.inherited_language(unit_index),
                 };
+
                 prepass.produced = unit_produced_language(dwarf, unit, entry);
                 cpp = source_language(prepass.language, prepass.produced) == SourceLanguage::Cpp;
                 d = source_language(prepass.language, prepass.produced) == SourceLanguage::D;
             }
+
             if entry.tag() == gimli::DW_TAG_module {
                 scopes.extend(
                     module_segments(dwarf, unit, entry)
@@ -300,11 +340,14 @@ impl UnitPrepass {
                         .inline_namespaces
                         .push(inline_namespace_path(&scopes, name));
                 }
+
                 scopes.push((depth, segment));
             }
+
             if !is_type_die_tag(entry.tag()) {
                 continue;
             }
+
             let Ok(Some(declaration)) = die_reference_with_signatures(
                 entry.attr_value(gimli::DW_AT_specification),
                 unit_index,
@@ -313,6 +356,7 @@ impl UnitPrepass {
             ) else {
                 continue;
             };
+
             prepass.definitions.push((
                 DieKey {
                     unit: unit_index,
@@ -321,6 +365,7 @@ impl UnitPrepass {
                 declaration,
             ));
         }
+
         prepass
     }
 }
@@ -336,6 +381,7 @@ fn unit_produced_language(
             .and_then(|value| unit_dwarf(dwarf, unit).attr_string(unit, value).ok())
             .map(|text| text.to_string_lossy())
     };
+
     produced_language(
         text(gimli::DW_AT_producer).as_deref(),
         text(gimli::DW_AT_name).as_deref(),
@@ -350,6 +396,7 @@ pub(super) struct BuiltTypes {
     pub(super) go_dict_indices: HashMap<TypeId, u64>,
     pub(super) passed_by_value: HashMap<TypeId, bool>,
     pub(super) image: ModuleImageId,
+
     /// The arguments identities spell by name, which deduplication
     /// resolves.
     pub(super) pending_arguments: Vec<super::identity::PendingArguments>,
@@ -390,15 +437,19 @@ pub(super) enum DynamicAggregateChild {
         variant: usize,
         member: usize,
     },
+
     /// A bound of a dimension of an array bounded at run time.
     Bound {
         dimension: usize,
         part: crate::image::type_facts::BoundPart,
     },
+
     /// Where an array's elements are.
     DataLocation,
+
     /// Whether an array is allocated.
     Allocated,
+
     /// Whether an array is associated with storage.
     Associated,
 }
@@ -410,17 +461,20 @@ const DEREFERENCE_OBJECT: [u8; 2] = [gimli::DW_OP_push_object_address.0, gimli::
 /// A subrange's bound, count, or stride, as its attribute gives it.
 pub(super) enum SubrangeBound<'data> {
     Constant(i128),
+
     /// The value of an expression.
     Computed {
         expression: gimli::Expression<Reader<'data>>,
         byte_size: u8,
         signed: bool,
     },
+
     /// What the program stored where an expression says.
     Stored {
         expression: gimli::Expression<Reader<'data>>,
         byte_size: u8,
     },
+
     /// The value of the variable at this offset in `.debug_info`.
     Variable(u64),
 }
@@ -471,6 +525,7 @@ pub(super) fn zig_error_union_type_names(name: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
+
     Some((error, payload))
 }
 
@@ -519,6 +574,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         let mut builder = Self {
             dwarf,
             units,
@@ -556,6 +612,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             foreign: false,
             aliases: Vec::new(),
         };
+
         // Types in one scope share its segments, so each distinct list is
         // resolved once, in parallel, as a path may name another unit's
         // function.
@@ -582,6 +639,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 context.type_scopes.insert(key, path.clone());
             }
         }
+
         builder
     }
 
@@ -612,6 +670,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Ok(None) => return TypeResolution::Malformed("variable has no type".into()),
             Err(error) => return TypeResolution::Malformed(error.to_string().into()),
         };
+
         let id = self.resolve(key);
         match self.entries.get(id.index()) {
             Some(TypeEntry::Malformed(reason)) => TypeResolution::Malformed(Arc::clone(reason)),
@@ -723,6 +782,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 TypeEntry::Building | TypeEntry::Malformed(_) => return None,
             }
         }
+
         None
     }
 
@@ -738,11 +798,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
         }
+
         if let Some((home, groups)) = self.home
             && groups.get(key.unit) != Some(&home)
         {
             self.foreign = true;
         }
+
         let canonical = self.canonical_type_key(key);
         if let Ok(canonical) = canonical
             && canonical != key
@@ -752,14 +814,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if self.home.is_some() {
                 self.aliases.push(key);
             }
+
             return id;
         }
+
         let Some(id) = self.next_id() else {
             return self.type_limit(key);
         };
+
         if self.budget.charge("types", size_of::<TypeEntry>()).is_err() {
             return self.type_limit(key);
         }
+
         self.by_die.insert(key, id);
         self.entries.push(TypeEntry::Building);
         let entry = match canonical {
@@ -774,6 +840,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 entry
             }
         };
+
         self.entries[id.index()] = entry;
         id
     }
@@ -789,6 +856,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             self.limit_type = Some(id);
             id
         };
+
         self.by_die.insert(key, id);
         id
     }
@@ -800,6 +868,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             image: self.image,
             id: self.void_type.unwrap_or_else(|| self.reserved_id()),
         };
+
         if self.void_type.is_none() {
             self.entries.push(resolved(
                 reference,
@@ -809,6 +878,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             ));
             self.void_type = Some(reference.id);
         }
+
         reference
     }
 
@@ -818,6 +888,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             image: self.image,
             id: self.character_type.unwrap_or_else(|| self.reserved_id()),
         };
+
         if self.character_type.is_none() {
             let name: Arc<str> = "character".into();
             self.entries.push(resolved(
@@ -835,6 +906,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             self.explicit_names.insert(reference.id.index());
             self.character_type = Some(reference.id);
         }
+
         reference
     }
 
@@ -854,6 +926,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             {
                 return Err("type reference does not identify a DIE".into());
             }
+
             let offset = gimli::UnitOffset(current.offset);
             let entry = unit
                 .entries_raw(Some(offset))
@@ -862,6 +935,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if !is_type_die_tag(entry.tag()) {
                 return Err(format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into());
             }
+
             if self
                 .context
                 .ambiguous_type_declarations
@@ -869,13 +943,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             {
                 return Err("type declaration has multiple definitions".into());
             }
+
             if let Some(definition) = self.context.type_definitions.get(&current).copied() {
                 current = definition;
                 continue;
             }
+
             let Some(signature) = entry.attr_value(gimli::DW_AT_signature) else {
                 return Ok(current);
             };
+
             current = die_reference_with_signatures(
                 Some(signature),
                 current.unit,
@@ -885,6 +962,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .map_err(|error| Arc::from(error.to_string()))?
             .ok_or_else(|| Arc::from("type declaration signature has no definition"))?;
         }
+
         Err("type declaration/definition references form a cycle".into())
     }
 
@@ -905,10 +983,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             image: self.image,
             id,
         };
+
         let origins = origin_chain(units, key.unit, &entry).map_err(malformed)?;
         let explicit_name =
             string_with_origins(self.dwarf, units, unit, &entry, &origins, gimli::DW_AT_name)
                 .map_err(malformed)?;
+
         // Self-hosted Zig names a type declared in another by its own name,
         // and says which one it is in.
         let explicit_name = match explicit_name {
@@ -920,22 +1000,27 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             name => name,
         };
+
         if explicit_name.is_some() {
             self.explicit_names.insert(id.index());
         }
+
         // Validate the tag's mandatory attributes first: an unusable size
         // returns an opaque type early, which must not mask a defect.
         if let Some(defect) = self.mandatory_attribute_defect(&entry, key.unit) {
             return Err(defect);
         }
+
         let address_class = match resolve_address_class(&entry, reference, explicit_name.clone()) {
             Ok(address_class) => address_class,
             Err(entry) => return Ok(*entry),
         };
+
         let explicit_size = match resolve_explicit_size(&entry, reference, explicit_name.clone()) {
             Ok(size) => size,
             Err(entry) => return Ok(*entry),
         };
+
         let pointer_size = explicit_size
             .or_else(|| (address_class == 0).then_some(u64::from(unit.encoding().address_size)));
         let named = explicit_name.is_some();
@@ -944,6 +1029,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             None
         };
+
         // GNAT passes an array of an unconstrained type as a record of
         // pointers to its elements and bounds, which is the array.
         if slice_layout.is_none()
@@ -965,8 +1051,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if named && matches!(built, TypeEntry::Resolved(_)) {
                 self.record_identity_parts(&entry, key, id);
             }
+
             return Ok(built);
         }
+
         let built = match slice_layout {
             Some(layout) => self.build_slice_type(
                 &entry,
@@ -989,6 +1077,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if named && matches!(built, TypeEntry::Resolved(_)) {
             self.record_identity_parts(&entry, key, id);
         }
+
         Ok(built)
     }
 
@@ -1050,6 +1139,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_union_type => {
                 self.build_union_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
+
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_template_alias
             | gimli::DW_TAG_const_type
@@ -1083,6 +1173,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_subroutine_type => {
                 self.build_signature_type(entry, unit_index, reference, explicit_name)
             }
+
             // A type this backend does not model is opaque, not defective.
             tag => Ok(opaque(
                 reference,
@@ -1103,11 +1194,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             {
                 Ok(Accessibility::Public)
             }
+
             Some(gimli::AttributeValue::Accessibility(value))
                 if value == gimli::DW_ACCESS_protected =>
             {
                 Ok(Accessibility::Protected)
             }
+
             Some(gimli::AttributeValue::Accessibility(value))
                 if value == gimli::DW_ACCESS_private =>
             {
@@ -1155,6 +1248,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         )
                     })
             }
+
             gimli::DW_TAG_array_type
             | gimli::DW_TAG_coarray_type
             | gimli::DW_TAG_set_type
@@ -1165,6 +1259,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             | gimli::DW_TAG_shared_type => {
                 self.target_defect(entry, unit_index, "type", TargetRequirement::Required)
             }
+
             // A pointer's target is optional (`void *`), but must be a type.
             _ => self.target_defect(entry, unit_index, "type", TargetRequirement::Optional),
         }
@@ -1232,19 +1327,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     incomplete: false,
                 }
             };
+
             return Ok(resolved(reference, name, Some(0), kind));
         }
+
         let raw_encoding = gimli::DwAte(base_type_encoding(entry)?);
         let encoding = match raw_encoding {
             gimli::DW_ATE_float => Some(BaseTypeEncoding::Floating),
             gimli::DW_ATE_complex_float if byte_size % 2 == 0 => {
                 Some(BaseTypeEncoding::ComplexFloating)
             }
+
             // `char8_t`, `char16_t`, `char32_t`, and Rust's `char` are code
             // units of UTF-8, UTF-16, and UTF-32.
             gimli::DW_ATE_UTF if matches!(byte_size, 1 | 2 | 4) => {
                 Some(BaseTypeEncoding::UnsignedCharacter)
             }
+
             // C++'s `wchar_t` is a type of its own, which compilers encode
             // as an integer; on Linux it holds UTF-32.
             gimli::DW_ATE_signed if name.as_ref() == "wchar_t" => {
@@ -1255,6 +1354,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             _ => integer_encoding(raw_encoding),
         };
+
         let Some(encoding) = encoding else {
             return Ok(opaque(
                 reference,
@@ -1263,6 +1363,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 format!("base type encoding {raw_encoding:?} is unsupported"),
             ));
         };
+
         let bit_size = match entry.attr(gimli::DW_AT_bit_size).map(unsigned_constant) {
             None => None,
             Some(UnsignedConstant::Value(0)) => {
@@ -1278,6 +1379,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 return Err("DW_AT_bit_size is not an unsigned integer constant".into());
             }
         };
+
         let base = BaseType {
             name: Arc::clone(&name),
             base_name: Arc::clone(&name),
@@ -1285,6 +1387,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             byte_size,
             bit_size,
         };
+
         Ok(resolved(
             reference,
             name,
@@ -1303,6 +1406,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if !visited.insert(current) {
                 return Err("enumeration underlying type contains a wrapper cycle".into());
             }
+
             let entry = self
                 .entries
                 .get(current.index())
@@ -1314,6 +1418,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     return Err("enumeration underlying type did not finish building".into());
                 }
             };
+
             match &info.kind {
                 TypeKind::Base(base) if !is_floating(base.encoding) => {
                     return Ok(base.clone());
@@ -1321,6 +1426,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 TypeKind::Enumeration { representation, .. } => {
                     return Ok(representation.clone());
                 }
+
                 TypeKind::Modified { target, .. }
                 | TypeKind::Named {
                     target: Some(target),
@@ -1360,9 +1466,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if byte_size == 0 {
                 return Err("enumeration has a zero byte size".into());
             }
+
             let Ok(raw_encoding) = base_type_encoding(entry) else {
                 return Err("enumeration without an underlying type has no encoding".into());
             };
+
             BaseType {
                 name: Arc::clone(&name),
                 base_name: Arc::clone(&name),
@@ -1372,18 +1480,22 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 bit_size: None,
             }
         };
+
         let byte_size = explicit_size.unwrap_or(representation.byte_size);
         if byte_size == 0 {
             return Err("enumeration has a zero byte size".into());
         }
+
         if byte_size != representation.byte_size {
             return Err("enumeration byte size differs from its underlying type".into());
         }
+
         if let Some(attribute) = entry.attr(gimli::DW_AT_encoding) {
             let enum_encoding = match unsigned_constant(attribute) {
                 UnsignedConstant::Value(value) => u8::try_from(value).ok(),
                 UnsignedConstant::Oversized | UnsignedConstant::NonConstant => None,
             };
+
             let compatible = enum_encoding.is_some_and(|encoding| {
                 matches!(
                     (gimli::DwAte(encoding), representation.encoding),
@@ -1402,6 +1514,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 return Err("enumeration encoding differs from its underlying type".into());
             }
         }
+
         if let Some(attribute) = entry.attr(gimli::DW_AT_bit_size) {
             representation.bit_size = match unsigned_constant(attribute) {
                 UnsignedConstant::Value(0) => {
@@ -1410,6 +1523,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 UnsignedConstant::Value(value) if value <= byte_size.saturating_mul(8) => {
                     Some(value)
                 }
+
                 UnsignedConstant::Value(_)
                 | UnsignedConstant::Oversized
                 | UnsignedConstant::NonConstant => {
@@ -1417,6 +1531,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             };
         }
+
         representation.name = Arc::clone(&name);
 
         let unit = &self.units[unit_index];
@@ -1433,6 +1548,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             ) {
                 continue;
             }
+
             if child.tag() != gimli::DW_TAG_enumerator {
                 return Err(format!(
                     "enumeration contains unsupported direct child {:?}",
@@ -1440,6 +1556,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
                 .into());
             }
+
             if enumerators.len() >= MAX_RECORD_CHILDREN
                 || self
                     .budget
@@ -1453,6 +1570,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "enumerator metadata exceeds its resource limit",
                 ));
             }
+
             let enumerator_name = copy_name(self.dwarf, unit, child)
                 .map_err(malformed)?
                 .ok_or("enumerator has no name")?;
@@ -1464,6 +1582,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 value: enumeration_constant(value, &representation, self.byte_order)?,
             });
         }
+
         let scoped = strict_flag(entry, gimli::DW_AT_enum_class)?;
         Ok(resolved(
             reference,
@@ -1502,6 +1621,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             "parameter metadata exceeds its resource limit",
                         ));
                     }
+
                     parameters.push(
                         self.target(child, unit_index)?
                             .ok_or("a function type's parameter has no type")?,
@@ -1513,6 +1633,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 _ => {}
             }
         }
+
         let prototyped = strict_flag(entry, gimli::DW_AT_prototyped)?;
         let kind = TypeKind::Signature {
             returns,
@@ -1520,6 +1641,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             variadic,
             prototyped,
         };
+
         // Named from its parts once every type is built.
         let name = explicit_name.unwrap_or_else(|| Arc::from("<function>"));
         Ok(resolved(reference, name, None, kind))
@@ -1548,15 +1670,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let Ok(mut walk) = DieWalk::new(unit) else {
                     return found;
                 };
+
                 while let Ok(Some(die)) = walk.next() {
                     if die.depth != 1 || die.tag != gimli::DW_TAG_constant {
                         continue;
                     }
+
                     let Ok(entry) = walk.decode() else {
                         break;
                     };
+
                     found.push(entry.clone());
                 }
+
                 found
             })
             .collect::<Vec<_>>();
@@ -1570,9 +1696,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ) else {
                     continue;
                 };
+
                 let Ok(Some(target)) = self.target(entry, unit_index) else {
                     continue;
                 };
+
                 let Some(TypeEntry::Resolved(TypeInfo {
                     kind: TypeKind::Base(base),
                     ..
@@ -1580,14 +1708,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 else {
                     continue;
                 };
+
                 if matches!(base.encoding, BaseTypeEncoding::Floating) {
                     continue;
                 }
+
                 if let Ok(value) = enumeration_constant(value, base, self.byte_order) {
                     constants.insert(name, value);
                 }
             }
         }
+
         constants
     }
 
@@ -1597,29 +1728,37 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if self.language(unit_index) != SourceLanguage::Go {
                 continue;
             }
+
             let Ok(mut walk) = DieWalk::new(unit) else {
                 continue;
             };
+
             while let Ok(Some(die)) = walk.next() {
                 if die.tag != gimli::DW_TAG_constant {
                     continue;
                 }
+
                 let Ok(entry) = walk.decode() else {
                     break;
                 };
+
                 let Ok(Some(target)) = self.target(entry, unit_index) else {
                     continue;
                 };
+
                 let target = target.id;
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(target.index()) else {
                     continue;
                 };
+
                 let TypeKind::Base(base) = &info.kind else {
                     continue;
                 };
+
                 if !info.name.contains('.') || is_floating(base.encoding) {
                     continue;
                 }
+
                 let representation = base.clone();
                 let enumerator = copy_name(self.dwarf, unit, entry)
                     .map_err(|error| Arc::from(error.to_string()))
@@ -1645,6 +1784,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     *collection = NamedConstantCollection::Limit;
                     continue;
                 }
+
                 match (collection, enumerator) {
                     (NamedConstantCollection::Enumerators(values), Ok(enumerator))
                         if values.len() < MAX_RECORD_CHILDREN =>
@@ -1662,6 +1802,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         self.declare_go_named_constants(constants);
     }
 
@@ -1677,6 +1818,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     let TypeEntry::Resolved(info) = &mut self.entries[index] else {
                         continue;
                     };
+
                     info.kind = TypeKind::Opaque {
                         description: "typed Go constant count exceeds its resource limit".into(),
                     };
@@ -1685,9 +1827,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     let TypeEntry::Resolved(info) = &mut self.entries[index] else {
                         continue;
                     };
+
                     let TypeKind::Base(base) = &info.kind else {
                         continue;
                     };
+
                     let mut representation = base.clone();
                     representation.name = Arc::clone(&info.name);
                     info.kind = TypeKind::Enumeration {
@@ -1707,6 +1851,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// aggregate malformed when one of its members' cannot be read.
     pub(super) fn populate_record_member_declarations(&mut self, files: &mut Files) {
         let pending = std::mem::take(&mut self.record_member_declarations);
+
         // Each declaration is read on its own in parallel, and their files
         // interned in the order noted, which numbers them as a serial pass.
         // A chunk at a time, so that only a chunk's paths are held at once.
@@ -1722,6 +1867,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             ));
         }
+
         let mut order = (0..pending.len()).collect::<Vec<_>>();
         order.par_sort_by_key(|index| pending[*index].aggregate);
         for members in
@@ -1736,6 +1882,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 self.entries[record.index()] = TypeEntry::Malformed(Arc::clone(reason));
                 continue;
             }
+
             if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(record.index()) {
                 declare_members(
                     &mut info.kind,
@@ -1784,6 +1931,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 );
             }
         }
+
         self.add_complex_parts();
 
         propagate_wrapper_sizes(self.entries.flat());
@@ -1791,6 +1939,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.reject_inline_storage_cycles();
 
         let names_phase = crate::span!("types.names");
+
         // Most types are named explicitly and keep their names, so only the
         // others are rendered, and with one set of the types being visited,
         // which every rendering leaves empty.
@@ -1801,6 +1950,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 if self.explicit_names.contains(id.index()) {
                     return None;
                 }
+
                 visiting.clear();
                 Some(self.render_type_name(id, &mut visiting))
             })
@@ -1812,6 +1962,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 info.name = name;
             }
         }
+
         drop(names_phase);
         let _phase = crate::span!("types.identities");
         self.assign_identities();
@@ -1857,6 +2008,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             else {
                 continue;
             };
+
             match base.encoding {
                 BaseTypeEncoding::Floating => {
                     let id = TypeId::new(super::row(index));
@@ -1868,20 +2020,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 _ => {}
             }
         }
+
         for part in parts {
             let key = (Arc::clone(&part.base_name), part.byte_size);
             let Some(id) = self.next_id() else {
                 continue;
             };
+
             if self.complex_parts.contains_key(&key)
                 || self.budget.charge("types", size_of::<TypeEntry>()).is_err()
             {
                 continue;
             }
+
             let reference = TypeReference {
                 image: self.image,
                 id,
             };
+
             self.entries.push(resolved(
                 reference,
                 Arc::clone(&part.name),
@@ -1908,10 +2064,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if visiting.len() >= MAX_TYPE_RESOLUTION_DEPTH || !visiting.insert(id) {
             return Arc::from(format!("<type #{}>", id.get()));
         }
+
         let Some(TypeEntry::Resolved(info)) = self.entries.get(id.index()) else {
             visiting.remove(&id);
             return Arc::from(format!("<type #{}>", id.get()));
         };
+
         if self.explicit_names.contains(id.index()) {
             visiting.remove(&id);
             return Arc::clone(&info.name);
@@ -1928,6 +2086,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 visiting.insert(id);
                 Arc::from(declared)
             }
+
             // A qualified pointer qualifies its declarator, as in
             // `int (* const)(int)`.
             TypeKind::Modified { modifier, target }
@@ -1948,12 +2107,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     target_is_indirection,
                 ))
             }
+
             TypeKind::Named {
                 target: Some(target),
                 ..
             } => self.render_type_name(target.id, visiting),
             _ => Arc::clone(&info.name),
         };
+
         visiting.remove(&id);
         rendered
     }
@@ -1965,12 +2126,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let Some(TypeEntry::Resolved(info)) = self.entries.get(current.index()) else {
                 return false;
             };
+
             match info.kind {
                 TypeKind::Pointer { .. } | TypeKind::Reference { .. } => return true,
                 TypeKind::Modified { target, .. } => current = target.id,
                 _ => return false,
             }
         }
+
         false
     }
 
@@ -1987,6 +2150,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 format!("{base} {inner}")
             }
         };
+
         let info = match self.entries.get(id.index()) {
             Some(TypeEntry::Resolved(
                 info @ TypeInfo {
@@ -2011,9 +2175,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             _ => return join(&self.render_type_name(id, visiting), inner),
         };
+
         if visiting.len() >= MAX_TYPE_RESOLUTION_DEPTH || !visiting.insert(id) {
             return join(&format!("<type #{}>", id.get()), inner);
         }
+
         let declared = match &info.kind {
             TypeKind::Pointer { target: None, .. } => join("void", format!("*{inner}")),
             TypeKind::Pointer {
@@ -2026,8 +2192,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 } else {
                     "&&"
                 };
+
                 self.declare_indirection(target.id, symbol, &inner, visiting)
             }
+
             TypeKind::Array {
                 element,
                 dimensions,
@@ -2038,8 +2206,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 for dimension in dimensions.iter() {
                     let _ = write!(inner, "[{}]", dimension.count);
                 }
+
                 self.declare(element.id, inner, visiting)
             }
+
             TypeKind::Signature {
                 returns,
                 parameters,
@@ -2050,6 +2220,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     .iter()
                     .map(|parameter| self.render_type_name(parameter.id, visiting).to_string())
                     .collect::<Vec<_>>();
+
                 // An unprototyped C function's `()` says nothing of its
                 // parameters, though producers describe them as variadic.
                 let unprototyped = list.is_empty() && !*prototyped;
@@ -2058,6 +2229,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 } else if list.is_empty() && *prototyped {
                     list.push("void".to_owned());
                 }
+
                 let inner = format!("{inner}({})", list.join(", "));
                 match returns {
                     Some(returns) => self.declare(returns.id, inner, visiting),
@@ -2071,12 +2243,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     } else {
                         format!(" {keyword}{inner}")
                     };
+
                     self.declare(target.id, inner, visiting)
                 }
                 None => join(&format!("<type #{}>", id.get()), inner),
             },
             _ => join(&format!("<type #{}>", id.get()), inner),
         };
+
         visiting.remove(&id);
         declared
     }
@@ -2104,6 +2278,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             format!("{symbol}{inner}")
         };
+
         self.declare(target, inner, visiting)
     }
 
@@ -2151,6 +2326,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             (ReferenceKind::Rvalue, "&&")
         };
+
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("{} {suffix}", self.target_name(target))));
         Ok(resolved(
@@ -2174,6 +2350,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_size: Option<u64>,
     ) -> Built {
         let target = self.target(entry, unit_index)?;
+
         // An absent target means `void`, except on a typedef declaration,
         // which is incomplete.
         let declaration = strict_flag(entry, gimli::DW_AT_declaration).unwrap_or(false);
@@ -2181,6 +2358,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             None if !declaration => Some(self.void_type()),
             target => target,
         };
+
         let byte_size =
             explicit_size.or_else(|| target.and_then(|target| self.byte_size_of(target.id)));
         if matches!(
@@ -2200,6 +2378,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             {
                 self.go_dict_indices.insert(reference.id, index);
             }
+
             return Ok(resolved(
                 reference,
                 name,
@@ -2210,11 +2389,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             ));
         }
+
         // Only a declaration keeps an absent target; a qualifier cannot be one.
         let target = target.ok_or("type modifier has no target")?;
         let Some(modifier) = type_modifier(entry.tag()) else {
             return Err("type modifier has no modifier kind".into());
         };
+
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("{modifier:?} {}", self.target_name(target))));
         Ok(resolved(
@@ -2237,9 +2418,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 if found {
                     return Err("aggregate contains multiple direct variant parts".into());
                 }
+
                 found = true;
             }
         }
+
         Ok(found)
     }
 
@@ -2257,6 +2440,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if incomplete || !self.is_zig(unit_index) || members.len() != 2 {
             return None;
         }
+
         let payload_index = members
             .iter()
             .position(|member| member.name.as_deref() == Some("payload"))?;
@@ -2291,12 +2475,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         else {
             return None;
         };
+
         if !payload_name.ends_with(":Payload")
             || !tag_name.starts_with("@typeInfo(")
             || !tag_name.contains(".@\"union\".tag_type")
         {
             return None;
         }
+
         let payload_members = Arc::clone(payload_members);
         let enumerators = Arc::clone(enumerators);
         let payload_offset = match payload.layout {
@@ -2307,6 +2493,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ));
             }
         };
+
         let mut variants = Vec::with_capacity(enumerators.len());
         for enumerator in enumerators.iter() {
             let matching = payload_members
@@ -2321,6 +2508,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
                 .into()));
             };
+
             let payload_type = self
                 .entries
                 .get(payload_member.type_ref.id.index())
@@ -2339,8 +2527,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                                 "Zig tagged-union payload member offset overflows".into()
                             ));
                         };
+
                         RecordMemberLayout::ByteOffset(offset)
                     }
+
                     RecordMemberLayout::BitRange {
                         bit_offset,
                         bit_size,
@@ -2353,6 +2543,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                                 "Zig tagged-union payload bit offset overflows".into()
                             ));
                         };
+
                         RecordMemberLayout::BitRange {
                             bit_offset,
                             bit_size,
@@ -2364,6 +2555,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         ));
                     }
                 };
+
                 if let Some(metadata) = self.record_member_declarations.iter().find(|metadata| {
                     metadata.aggregate == payload.type_ref.id
                         && matches!(
@@ -2382,8 +2574,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             die: metadata.die,
                         });
                 }
+
                 Arc::from([member])
             };
+
             variants.push(Variant {
                 name: Some(Arc::clone(&enumerator.name)),
                 selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(
@@ -2392,6 +2586,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 members: variant_members,
             });
         }
+
         for metadata in &mut self.record_member_declarations {
             if metadata.aggregate == aggregate
                 && matches!(
@@ -2402,6 +2597,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 metadata.member = AggregateMemberPath::Discriminant;
             }
         }
+
         self.record_member_declarations.retain(|metadata| {
             metadata.aggregate != aggregate
                 || !matches!(
@@ -2434,6 +2630,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if incomplete || !self.is_zig(unit_index) || members.len() != 2 {
             return None;
         }
+
         let payload_index = members
             .iter()
             .position(|member| member.name.as_deref() == Some("payload"))?;
@@ -2444,6 +2641,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 if self.target_name(members[payload_index].type_ref).as_ref() != expected_payload {
                     return None;
                 }
+
                 let some_index = members
                     .iter()
                     .position(|member| member.name.as_deref() == Some("some"))?;
@@ -2460,6 +2658,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 {
                     return None;
                 }
+
                 (
                     some_index,
                     vec![
@@ -2490,6 +2689,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 {
                     return None;
                 }
+
                 let error_type = self
                     .resolved_integer_base(members[error_index].type_ref.id)
                     .ok()?;
@@ -2502,6 +2702,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ) {
                     return None;
                 }
+
                 (
                     error_index,
                     vec![
@@ -2533,6 +2734,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if metadata.aggregate != aggregate {
                 continue;
             }
+
             match metadata.member {
                 AggregateMemberPath::Direct(index) if index == discriminant_index => {
                     metadata.member = AggregateMemberPath::Discriminant;
@@ -2546,6 +2748,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 _ => {}
             }
         }
+
         if duplicate_discriminant_member
             && let Some(metadata) = declaration_snapshot.iter().find(|metadata| {
                 metadata.aggregate == aggregate
@@ -2587,6 +2790,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     .insert(DynamicAggregateLayoutKey { aggregate, child }, expression);
             }
         }
+
         if duplicate_discriminant_member
             && let Some(expression) = self
                 .dynamic_record_layouts
@@ -2656,6 +2860,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if layout == RecordMemberLayout::Runtime {
             self.record_dynamic_layout(child, unit_index, aggregate, dynamic_child)?;
         }
+
         let member = RecordMember {
             name,
             type_ref: target,
@@ -2665,6 +2870,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             embedded: go_embedded(child),
             declaration: None,
         };
+
         self.record_member_declarations
             .push(AggregateMemberDeclaration {
                 aggregate,
@@ -2699,10 +2905,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 DynamicAggregateChild::Base(index),
             )?;
         }
+
         let virtuality = match child.attr_value(gimli::DW_AT_virtuality) {
             None | Some(gimli::AttributeValue::Virtuality(gimli::DW_VIRTUALITY_none)) => {
                 BaseClassVirtuality::None
             }
+
             Some(gimli::AttributeValue::Virtuality(value))
                 if value == gimli::DW_VIRTUALITY_virtual
                     || value == gimli::DW_VIRTUALITY_pure_virtual =>
@@ -2711,6 +2919,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             _ => return Err("base-class virtuality has an invalid encoding".into()),
         };
+
         Ok(BaseClass {
             type_ref,
             layout,
@@ -2734,6 +2943,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         else {
             return Ok(());
         };
+
         let unit = &self.units[unit_index];
         let expression = copy_expression(
             self.dwarf,
@@ -2766,6 +2976,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if !incomplete && explicit_size.is_none() {
             return Err("complete variant aggregate has no byte size".into());
         }
+
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous variant@0x{:x}>", entry.offset().0)));
         let limit = || {
@@ -2776,12 +2987,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "variant metadata exceeds its resource limit",
             )
         };
+
         let mut budget = VariantMetadataBudget::default();
         let record_kind = if storage == VariantStorageKind::Class {
             RecordKind::Class
         } else {
             RecordKind::Struct
         };
+
         let mut common_members = Vec::new();
         let mut bases = Vec::new();
         let mut part = None;
@@ -2792,6 +3005,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     if budget.consume().is_err() {
                         return Ok(limit());
                     }
+
                     let index = common_members.len();
                     common_members.push(self.build_member(
                         child,
@@ -2808,6 +3022,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     if budget.consume().is_err() {
                         return Ok(limit());
                     }
+
                     bases.push(self.build_base(
                         child,
                         unit_index,
@@ -2821,6 +3036,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     if part.is_some() {
                         return Err("variant aggregate contains multiple variant parts".into());
                     }
+
                     part = match self.variant_part(
                         child,
                         unit_index,
@@ -2844,6 +3060,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         let (discriminant, variants) = part.ok_or("variant aggregate has no variant part")?;
         Ok(resolved(
             reference,
@@ -2888,11 +3105,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 if child.offset().0 != discriminator.offset || discriminator.unit != unit_index {
                     continue;
                 }
+
                 if child.tag() != gimli::DW_TAG_member {
                     return Err(VariantMetadataError::Malformed(
                         "DW_AT_discr does not reference a member child".into(),
                     ));
                 }
+
                 budget.consume()?;
                 stored = Some(self.build_member(
                     child,
@@ -2905,6 +3124,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "variant component",
                 )?);
             }
+
             let stored = stored
                 .ok_or_else(|| Arc::from("DW_AT_discr references a non-child discriminator"))?;
             if let Some(tag_type) = tag_type
@@ -2914,10 +3134,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "variant tag type differs from its discriminator member".into(),
                 ));
             }
+
             VariantDiscriminant::Stored(stored)
         } else {
             tag_type.map_or(VariantDiscriminant::Absent, VariantDiscriminant::TagType)
         };
+
         let representation = match &discriminant {
             VariantDiscriminant::Stored(member) => Some(member.type_ref.id),
             VariantDiscriminant::TagType(tag_type) => Some(tag_type.id),
@@ -2933,6 +3155,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if variant.tag() == gimli::DW_TAG_member {
                 continue;
             }
+
             if variant.tag() != gimli::DW_TAG_variant {
                 return Err(VariantMetadataError::Malformed(
                     format!(
@@ -2942,11 +3165,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     .into(),
                 ));
             }
+
             budget.consume()?;
             let selection = match &representation {
                 Some(representation) => {
                     copy_variant_selection(variant, representation, self.byte_order, budget)?
                 }
+
                 None if variant.attr_value(gimli::DW_AT_discr_value).is_some()
                     || variant.attr_value(gimli::DW_AT_discr_list).is_some() =>
                 {
@@ -2956,6 +3181,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
                 None => VariantSelection::Default,
             };
+
             let name = copy_name(self.dwarf, unit, variant).map_err(malformed)?;
             let variant_index = variants.len();
             let mut members = Vec::new();
@@ -2966,6 +3192,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         format!("variant contains unsupported component {:?}", member.tag()).into(),
                     ));
                 }
+
                 budget.consume()?;
                 let member_index = members.len();
                 members.push(self.build_member(
@@ -2985,12 +3212,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "variant component",
                 )?);
             }
+
             variants.push(Variant {
                 name,
                 selection,
                 members: members.into(),
             });
         }
+
         // A sum with no stored tag selects among its variants by which can
         // hold a value, not by selectors; one with none holds no value.
         if !matches!(discriminant, VariantDiscriminant::Absent) {
@@ -2999,8 +3228,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "variant part has no variants".into(),
                 ));
             }
+
             validate_variant_selections(&variants)?;
         }
+
         Ok((discriminant, variants))
     }
 
@@ -3032,6 +3263,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if self.language(unit_index) != SourceLanguage::Zig {
             return Ok(None);
         }
+
         Ok(self
             .target(entry, unit_index)?
             .and_then(|backing| self.byte_size_of(backing.id)))
@@ -3050,14 +3282,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             RecordKind::Struct
         };
+
         let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
         let explicit_size = match explicit_size {
             None if !incomplete => self.packed_size(entry, unit_index)?,
             size => size,
         };
+
         if !incomplete && explicit_size.is_none() {
             return Err("complete record type has no byte size".into());
         }
+
         self.note_calling_convention(entry, reference.id);
         if self.has_direct_variant_part(entry, unit_index)? {
             let storage = if kind == RecordKind::Class {
@@ -3065,6 +3300,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             } else {
                 VariantStorageKind::Struct
             };
+
             return self.build_variant_type(
                 entry,
                 unit_index,
@@ -3074,6 +3310,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 storage,
             );
         }
+
         let name = explicit_name.unwrap_or_else(|| {
             Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
         });
@@ -3125,6 +3362,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         let normalized = self
             .normalize_zig_optional_or_error_union(
                 unit_index,
@@ -3145,6 +3383,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 incomplete,
             },
         };
+
         Ok(resolved(reference, name, explicit_size, kind))
     }
 
@@ -3158,6 +3397,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Some(TypeEntry::Resolved(info)) => Some(info),
             _ => None,
         };
+
         let TypeKind::Variant {
             common_members,
             bases,
@@ -3168,13 +3408,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         else {
             return info;
         };
+
         let VariantDiscriminant::Stored(discriminant) = discriminant.as_ref() else {
             return info;
         };
+
         let whole = |member: &RecordMember| {
             member.layout == RecordMemberLayout::ByteOffset(0)
                 && info_of(member.type_ref).and_then(|member| member.byte_size) == info.byte_size
         };
+
         let pointer = match variants.as_ref() {
             [null, some]
                 if info.name.starts_with('?')
@@ -3195,6 +3438,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             _ => None,
         };
+
         match pointer {
             Some(pointer) => TypeInfo {
                 kind: pointer.kind.clone(),
@@ -3216,6 +3460,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if !incomplete && explicit_size.is_none() {
             return Err("complete union type has no byte size".into());
         }
+
         if self.has_direct_variant_part(entry, unit_index)? {
             let built = self.build_variant_type(
                 entry,
@@ -3232,6 +3477,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 built => built,
             });
         }
+
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous union@0x{:x}>", entry.offset().0)));
         let mut members = Vec::new();
@@ -3272,6 +3518,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         let kind = self
             .normalize_odin_union(unit_index, reference.id, &members, incomplete)
             .unwrap_or_else(|| TypeKind::Union {
@@ -3296,6 +3543,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if incomplete || self.language(unit_index) != SourceLanguage::Odin {
             return None;
         }
+
         let tag_index = members
             .iter()
             .position(|member| member.name.as_deref() == Some("tag"))?;
@@ -3303,11 +3551,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let TypeKind::Base(base) = &self.unnamed(tag.type_ref.id)?.kind else {
             return None;
         };
+
         let signed = match base.encoding {
             BaseTypeEncoding::Signed => true,
             BaseTypeEncoding::Unsigned => false,
             _ => return None,
         };
+
         let value = |number: u64| {
             if signed {
                 IntegerValue::Signed(i128::from(number))
@@ -3315,12 +3565,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 IntegerValue::Unsigned(u128::from(number))
             }
         };
+
         let mut variants = Vec::with_capacity(members.len());
         let mut tags = Vec::with_capacity(members.len());
         for (index, member) in members.iter().enumerate() {
             if index == tag_index {
                 continue;
             }
+
             let number = member
                 .name
                 .as_deref()?
@@ -3330,9 +3582,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if member.layout != RecordMemberLayout::ByteOffset(0) || tags.contains(&number) {
                 return None;
             }
+
             let TypeEntry::Resolved(info) = self.entries.get(member.type_ref.id.index())? else {
                 return None;
             };
+
             tags.push(number);
             variants.push((
                 index,
@@ -3345,6 +3599,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             ));
         }
+
         // Every member's path is found before any is changed, so a union
         // that cannot be normalized keeps its declarations as they were.
         let mut paths = Vec::new();
@@ -3352,6 +3607,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if metadata.aggregate != aggregate {
                 continue;
             }
+
             if let AggregateMemberPath::Direct(index) = metadata.member {
                 let path = if index == tag_index {
                     AggregateMemberPath::Discriminant
@@ -3359,12 +3615,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     let variant = variants.iter().position(|(member, _)| *member == index)?;
                     AggregateMemberPath::Variant { variant, member: 0 }
                 };
+
                 paths.push((position, path));
             }
         }
+
         for (position, path) in paths {
             self.record_member_declarations[position].member = path;
         }
+
         let mut variants = variants
             .into_iter()
             .map(|(_, variant)| variant)
@@ -3378,6 +3637,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 members: Arc::from([]),
             });
         }
+
         Some(TypeKind::Variant {
             storage: VariantStorageKind::Union,
             common_members: Arc::from([]),
@@ -3401,6 +3661,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if bit_size == 0 {
                 return Err("record bit-field has zero width".into());
             }
+
             if let Some(bit_offset) = entry
                 .attr(gimli::DW_AT_data_bit_offset)
                 .and_then(gimli::Attribute::udata_value)
@@ -3413,6 +3674,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     bit_size,
                 });
             }
+
             if let Some(legacy_offset) = entry
                 .attr(gimli::DW_AT_bit_offset)
                 .and_then(gimli::Attribute::udata_value)
@@ -3437,6 +3699,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         .and_then(|value| value.checked_sub(bit_size))
                         .ok_or_else(|| Arc::from("legacy bit-field range exceeds storage"))?,
                 };
+
                 let bit_offset = byte_offset
                     .checked_mul(8)
                     .and_then(|value| value.checked_add(within))
@@ -3446,8 +3709,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     bit_size,
                 });
             }
+
             return Err("bit-field has no bit offset".into());
         }
+
         // A member placed by its first bit alone, as Zig's own backend
         // places a packed struct's, spans its type's bits.
         if let Some(bit_offset) = entry
@@ -3457,6 +3722,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if bit_offset % 8 == 0 {
                 return Ok(RecordMemberLayout::ByteOffset(bit_offset / 8));
             }
+
             let bit_size = match self.entries.get(target.id.index()) {
                 Some(TypeEntry::Resolved(TypeInfo {
                     kind: TypeKind::Base(base),
@@ -3473,6 +3739,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 bit_size,
             });
         }
+
         Ok(entry.attr(gimli::DW_AT_data_member_location).map_or_else(
             || {
                 absent_byte_offset
@@ -3517,6 +3784,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         {
             return None;
         }
+
         let unit = &self.units[unit_index];
         let mut children = self.children(unit_index, entry.offset()).ok()?;
         let mut members = Vec::new();
@@ -3524,6 +3792,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
+
             let name = child
                 .attr_value(gimli::DW_AT_name)
                 .and_then(|name| self.dwarf.attr_string(unit, name).ok())?;
@@ -3535,6 +3804,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 child.attr_value(gimli::DW_AT_type),
             ));
         }
+
         let [
             (array, Some(0), Some(gimli::AttributeValue::UnitRef(pointer))),
             (bounds, ..),
@@ -3542,17 +3812,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         else {
             return None;
         };
+
         if array.as_slice() != b"P_ARRAY" || bounds.as_slice() != b"P_BOUNDS" {
             return None;
         }
+
         let pointer = unit.entry(*pointer).ok()?;
         if pointer.tag() != gimli::DW_TAG_pointer_type {
             return None;
         }
+
         let Some(gimli::AttributeValue::UnitRef(array)) = pointer.attr_value(gimli::DW_AT_type)
         else {
             return None;
         };
+
         (unit.entry(array).ok()?.tag() == gimli::DW_TAG_array_type).then_some(array)
     }
 
@@ -3575,6 +3849,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 .clone()
                 .unwrap_or_else(|| Arc::from("<dynamic array>"))
         };
+
         // A stride for the whole array, or one in bits, spaces elements as
         // nothing here reads.
         if entry.attr(gimli::DW_AT_byte_stride).is_some()
@@ -3587,6 +3862,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "arrays whose elements a stride of the whole array spaces are unsupported",
             ));
         }
+
         let default_lower =
             default_lower_bound(self.dwarf_language(unit_index), self.language(unit_index));
         let mut subranges = Vec::new();
@@ -3595,6 +3871,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             if child.tag() != gimli::DW_TAG_subrange_type {
                 continue;
             }
+
             match self.read_subrange(unit_index, child, default_lower) {
                 Ok(subrange) => subranges.push(subrange),
                 Err(description) => {
@@ -3602,9 +3879,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         if subranges.is_empty() {
             return Err("array type has no subrange dimensions".into());
         }
+
         let ordering = self.array_ordering(entry, unit_index, subranges.len())?;
         let located = [
             gimli::DW_AT_data_location,
@@ -3620,6 +3899,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let SubrangeBound::Constant(lower) = *lower else {
                     return None;
                 };
+
                 let count = match extent {
                     Extent::Count(SubrangeBound::Constant(count)) => u64::try_from(*count).ok()?,
                     Extent::Upper(SubrangeBound::Constant(upper)) => {
@@ -3627,6 +3907,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     }
                     _ => return None,
                 };
+
                 stride.is_none().then_some(ArrayDimension {
                     lower_bound: lower,
                     count,
@@ -3648,6 +3929,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 data_location,
             );
         };
+
         // Producers rarely give a C array a size of its own: it is its
         // elements', laid end to end.
         let byte_size = explicit_size.or_else(|| {
@@ -3702,6 +3984,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 Some(gimli::AttributeValue::Exprloc(expression)) => {
                     expressions.push((child, expression));
                 }
+
                 // An array that says it is always allocated is.
                 Some(gimli::AttributeValue::Flag(true))
                     if attribute != gimli::DW_AT_data_location => {}
@@ -3715,6 +3998,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             }
         }
+
         let mut bound = |bound: SubrangeBound<'data>, child| match bound {
             SubrangeBound::Constant(value) => ArrayBound::Constant(value),
             SubrangeBound::Computed {
@@ -3725,6 +4009,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 expressions.push((child, expression));
                 ArrayBound::Computed { byte_size, signed }
             }
+
             SubrangeBound::Stored {
                 expression,
                 byte_size,
@@ -3739,6 +4024,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ArrayBound::Variable { debug_info_offset }
             }
         };
+
         let dimensions = subranges
             .into_iter()
             .enumerate()
@@ -3797,6 +4083,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 expression,
             );
         }
+
         Ok(())
     }
 
@@ -3821,6 +4108,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             None => ArrayOrdering::RowMajor,
         };
+
         // One dimension has one order.
         Ok(if rank == 1 {
             ArrayOrdering::RowMajor
@@ -3840,11 +4128,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if child.attr(gimli::DW_AT_bit_stride).is_some() {
             return Err("arrays whose elements a stride in bits spaces are unsupported");
         }
+
         let index = self.index_type(unit_index, child);
         let bound = |attribute: &gimli::Attribute<Reader<'data>>| {
             self.subrange_bound(unit_index, attribute, index)?
                 .ok_or("array bound has an invalid encoding")
         };
+
         let lower = child.attr(gimli::DW_AT_lower_bound).map_or_else(
             || {
                 default_lower
@@ -3861,6 +4151,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             (None, Some(upper)) => Extent::Upper(bound(upper)?),
             (None, None) => Extent::Unknown,
         };
+
         let stride = child
             .attr(gimli::DW_AT_byte_stride)
             .map(bound)
@@ -3881,9 +4172,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         else {
             return word;
         };
+
         let Ok(index_type) = unit.entry(offset) else {
             return word;
         };
+
         let size = index_type
             .attr(gimli::DW_AT_byte_size)
             .and_then(gimli::Attribute::udata_value)
@@ -3903,6 +4196,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(value) = array_bound(attribute, signed) {
             return Ok(Some(SubrangeBound::Constant(value)));
         }
+
         match attribute.value() {
             gimli::AttributeValue::Exprloc(expression) => Ok(Some(SubrangeBound::Computed {
                 expression,
@@ -3920,6 +4214,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 ) {
                     return Err("array bounds a record's member gives are unsupported");
                 }
+
                 Ok(self
                     .units
                     .debug_info_offset(DieKey {
@@ -3928,6 +4223,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     })
                     .map(SubrangeBound::Variable))
             }
+
             gimli::AttributeValue::Sdata(_)
             | gimli::AttributeValue::Udata(_)
             | gimli::AttributeValue::Data1(_)
@@ -3976,6 +4272,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     }
                 },
             };
+
             let element = self
                 .target(entry, unit_index)?
                 .unwrap_or_else(|| self.character_type());
@@ -3991,6 +4288,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 None,
             );
         }
+
         // With a length of its own, a string's byte size is the length's.
         let Some(byte_size) = explicit_size else {
             return Ok(opaque(
@@ -4000,6 +4298,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "string has no length",
             ));
         };
+
         let element = self
             .target(entry, unit_index)?
             .unwrap_or_else(|| self.character_type());
@@ -4043,6 +4342,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "subrange type names no base type",
             ));
         };
+
         let byte_size = explicit_size.or_else(|| self.byte_size_of(target.id));
         let name = explicit_name.unwrap_or_else(|| self.target_name(target));
         Ok(resolved(
@@ -4079,12 +4379,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "slice descriptor does not use target-sized words",
             ));
         }
+
         let mut fields = Vec::new();
         let mut children = self.children(unit_index, entry.offset())?;
         while let Some(child) = children.next_child()? {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
+
             let field_name = copy_name(self.dwarf, unit, child)
                 .map_err(malformed)?
                 .ok_or("slice member has no name")?;
@@ -4097,6 +4399,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 .ok_or("slice member has no type")?;
             fields.push((field_name, offset, field_type));
         }
+
         if fields.len() != field_names.len()
             || fields.iter().zip(field_names).enumerate().any(
                 |(index, ((name, offset, _), expected_name))| {
@@ -4111,6 +4414,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 "unrecognized slice descriptor layout",
             ));
         }
+
         let words = layout.words();
         let element = self.slice_element(layout, fields[usize::from(words.data)].2)?;
         let counts = [Some(words.length), words.capacity];
@@ -4135,6 +4439,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 );
             }
         }
+
         let text = layout.is_text(&name);
         Ok(resolved(
             reference,
@@ -4165,6 +4470,7 @@ impl TypeArenaBuilder<'_, '_> {
                 .type_reference(bytes.unit, array.attr_value(gimli::DW_AT_type))?
                 .ok_or_else(|| "string type's bytes have no type".into());
         }
+
         match self.entries.get(data.id.index()) {
             Some(TypeEntry::Resolved(TypeInfo {
                 kind:
@@ -4184,18 +4490,24 @@ impl TypeArenaBuilder<'_, '_> {
 pub(super) enum SliceLayout {
     /// `{data_ptr, length}`: a pointer to a slice or `str`.
     Rust,
+
     /// `{data_ptr, length}`: a pointer to a string type, such as `Path`,
     /// `OsStr`, or `CStr`, which wraps the unsized array of bytes it holds.
     RustBytes(DieKey),
+
     /// `{ptr, len}`.
     Zig,
+
     /// `{array, len, cap}`.
     Go,
+
     /// `{data, len}`: Odin's slices and strings.
     Odin,
+
     /// `{data, len, cap, allocator}`: Odin's dynamic arrays, whose
     /// allocator is two words.
     OdinDynamic,
+
     /// `{length, ptr}`: D's slices and strings.
     D,
 }
@@ -4302,10 +4614,12 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 if !(name.ends_with("[]") || matches!(name, "string" | "wstring" | "dstring")) {
                     return None;
                 }
+
                 let members = self.member_types(entry, key.unit)?;
                 let [(length, _), (pointer, _)] = members.as_slice() else {
                     return None;
                 };
+
                 (length.as_ref() == "length" && pointer.as_ref() == "ptr").then_some(SliceLayout::D)
             }
             SourceLanguage::Rust if !self.context.type_scopes.contains_key(&key) => {
@@ -4313,13 +4627,16 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let [(first, data), (second, _)] = members.as_slice() else {
                     return None;
                 };
+
                 if first.as_ref() != "data_ptr" || second.as_ref() != "length" {
                     return None;
                 }
+
                 let data = (*data)?;
                 if !self.points_to_unsized(data) {
                     return Some(SliceLayout::Rust);
                 }
+
                 self.string_bytes(data).map(SliceLayout::RustBytes)
             }
             _ => None,
@@ -4339,9 +4656,11 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
+
             if members.len() >= MAX_RECORD_CHILDREN {
                 return None;
             }
+
             let name = copy_name(self.dwarf, unit, child).ok()??;
             let target = die_reference_with_signatures(
                 child.attr_value(gimli::DW_AT_type),
@@ -4352,6 +4671,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .ok()?;
             members.push((name, target));
         }
+
         Some(members)
     }
 
@@ -4375,16 +4695,20 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .ok()?;
             Some((entry, target))
         };
+
         let Some((pointer_entry, Some(mut current))) = target(pointer) else {
             return true;
         };
+
         if pointer_entry.tag() != gimli::DW_TAG_pointer_type {
             return true;
         }
+
         for _ in 0..MAX_DEPTH {
             let Some((entry, next)) = target(current) else {
                 return true;
             };
+
             match entry.tag() {
                 gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type => {
                     match next {
@@ -4397,9 +4721,11 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     if self.tail_overruns(&entry, current.unit) {
                         return true;
                     }
+
                     let Some(members) = self.member_types(&entry, current.unit) else {
                         return true;
                     };
+
                     match members.last() {
                         Some((_, Some(last))) => current = *last,
                         Some((_, None)) => return true,
@@ -4409,6 +4735,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 _ => return false,
             }
         }
+
         true
     }
 
@@ -4428,14 +4755,17 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         else {
             return false;
         };
+
         let Ok(mut children) = self.children(unit_index, entry.offset()) else {
             return false;
         };
+
         let mut last = None;
         while let Ok(Some(child)) = children.next_child() {
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
+
             let offset = child
                 .attr(gimli::DW_AT_data_member_location)
                 .and_then(gimli::Attribute::udata_value);
@@ -4449,9 +4779,11 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .flatten();
             last = Some((offset, target));
         }
+
         let Some((Some(offset), Some(target))) = last else {
             return false;
         };
+
         self.die_byte_size(target)
             .and_then(|member| offset.checked_add(member))
             .is_some_and(|end| end > size)
@@ -4473,12 +4805,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             {
                 return Some(size);
             }
+
             if !matches!(
                 entry.tag(),
                 gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type
             ) {
                 return None;
             }
+
             key = die_reference_with_signatures(
                 entry.attr_value(gimli::DW_AT_type),
                 key.unit,
@@ -4487,6 +4821,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             )
             .ok()??;
         }
+
         None
     }
 
@@ -4501,6 +4836,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 .entry(gimli::UnitOffset(key.offset))
                 .ok()
         };
+
         let target = |entry: &gimli::DebuggingInformationEntry<Reader<'data>>, unit| {
             die_reference_with_signatures(
                 entry.attr_value(gimli::DW_AT_type),
@@ -4511,6 +4847,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             .ok()
             .flatten()
         };
+
         let pointer_entry = entry(pointer)?;
         let mut current = target(&pointer_entry, pointer.unit)?;
         let mut wrapped = false;
@@ -4527,19 +4864,23 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                         if child.tag() != gimli::DW_TAG_member {
                             continue;
                         }
+
                         if only.is_some() {
                             return None;
                         }
+
                         let at_start = child
                             .attr(gimli::DW_AT_data_member_location)
                             .and_then(gimli::Attribute::udata_value)
                             == Some(0);
                         only = Some((at_start, target(child, current.unit)));
                     }
+
                     let (at_start, member_type) = only?;
                     if !at_start {
                         return None;
                     }
+
                     current = member_type?;
                     wrapped = true;
                 }
@@ -4555,6 +4896,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 _ => return None,
             }
         }
+
         None
     }
 
@@ -4563,6 +4905,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         let Ok(mut children) = self.children(array.unit, gimli::UnitOffset(array.offset)) else {
             return true;
         };
+
         while let Ok(Some(child)) = children.next_child() {
             if child.tag() == gimli::DW_TAG_subrange_type
                 && child.attr(gimli::DW_AT_count).is_none()
@@ -4571,6 +4914,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 return true;
             }
         }
+
         false
     }
 }
@@ -4591,6 +4935,7 @@ fn default_lower_bound(language: Option<gimli::DwLang>, source: SourceLanguage) 
     ) {
         return Some(0);
     }
+
     let language = language?;
     match language {
         gimli::DW_LANG_Kotlin | gimli::DW_LANG_Crystal => Some(0),
@@ -4613,6 +4958,7 @@ fn resolve_address_class(
     let Some(attribute) = entry.attr(gimli::DW_AT_address_class) else {
         return Ok(0);
     };
+
     match unsigned_constant(attribute) {
         UnsignedConstant::Value(value) => Ok(value),
         UnsignedConstant::Oversized => Err(Box::new(opaque(
@@ -4675,6 +5021,7 @@ fn declare_members(
         TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => {
             (Some(members), None, None)
         }
+
         TypeKind::Variant {
             common_members,
             discriminant,
@@ -4683,6 +5030,7 @@ fn declare_members(
         } => (Some(common_members), Some(discriminant), Some(variants)),
         _ => (None, None, None),
     };
+
     for (path, declaration) in declarations {
         match path {
             AggregateMemberPath::Direct(member) => {
@@ -4813,10 +5161,12 @@ impl<'data> DieBuffers<'data> {
             entry: self.take(),
             buffers: self,
         };
+
         raw.read_entry(&mut spare.entry)?;
         if spare.entry.is_null() {
             return Err(gimli::Error::NoEntryAtGivenOffset(offset.0 as u64));
         }
+
         Ok(spare)
     }
 }
@@ -4873,6 +5223,7 @@ impl<'a, 'data> Children<'a, 'data> {
         if self.done {
             return Ok(None);
         }
+
         match self.advance() {
             Ok(true) => Ok(Some(&self.entry)),
             Ok(false) => {
@@ -4890,15 +5241,18 @@ impl<'a, 'data> Children<'a, 'data> {
     fn advance(&mut self) -> gimli::Result<bool> {
         if !self.started {
             self.started = true;
+
             // The parent itself, whose attributes nothing here reads.
             let Some(parent) = self.raw.read_abbreviation()? else {
                 return Ok(false);
             };
+
             self.raw.skip_attributes(parent.attributes())?;
             if !parent.has_children() {
                 return Ok(false);
             }
         }
+
         // The parent is at depth zero and its children at one. Their own
         // children are skipped by their abbreviations, without decoding
         // the attributes nothing here reads.
@@ -4907,10 +5261,12 @@ impl<'a, 'data> Children<'a, 'data> {
                 // A null entry ends the children.
                 return self.raw.read_entry(&mut self.entry);
             }
+
             if let Some(abbreviation) = self.raw.read_abbreviation()? {
                 self.raw.skip_attributes(abbreviation.attributes())?;
             }
         }
+
         Ok(false)
     }
 }
@@ -4933,11 +5289,13 @@ fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> Named
     if tag == gimli::DW_TAG_template_alias {
         return NamedTypeRelationship::Synonym;
     }
+
     match language {
         // Nim's are the C typedefs it compiles to.
         SourceLanguage::C | SourceLanguage::Cpp | SourceLanguage::Nim => {
             NamedTypeRelationship::Synonym
         }
+
         // Odin's typedefs are its `distinct` types, and wrappers that name
         // its own types, as `int`; GNAT's name Ada's types, as an access
         // type.
@@ -5052,10 +5410,12 @@ pub(super) fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
         let TypeEntry::Resolved(info) = entry else {
             continue;
         };
+
         if info.byte_size.is_some() {
             ready.push_back(index);
             continue;
         }
+
         let (TypeKind::Modified { target, .. }
         | TypeKind::Named {
             target: Some(target),
@@ -5064,6 +5424,7 @@ pub(super) fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
         else {
             continue;
         };
+
         if let Some(target_dependents) = dependents.get_mut(target.id.index()) {
             target_dependents.push(index);
         }
@@ -5077,10 +5438,12 @@ pub(super) fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
         else {
             continue;
         };
+
         for dependent in std::mem::take(&mut dependents[target]) {
             let Some(TypeEntry::Resolved(info)) = types.get_mut(dependent) else {
                 continue;
             };
+
             if info.byte_size.is_none() {
                 info.byte_size = Some(size);
                 ready.push_back(dependent);
@@ -5103,8 +5466,10 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
                 .targets
                 .extend(targets.iter().filter(|target| **target < types.len()));
         }
+
         edges.ends.push(edges.targets.len());
     }
+
     let reverse = edges.reversed();
 
     let mut visited = vec![false; types.len()];
@@ -5114,6 +5479,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
         if visited[start] {
             continue;
         }
+
         visited[start] = true;
         stack.push((start, 0_usize));
         while let Some((node, edge_index)) = stack.last_mut() {
@@ -5138,6 +5504,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
         if assigned[start] {
             continue;
         }
+
         assigned[start] = true;
         component.clear();
         stack.push(start);
@@ -5150,6 +5517,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
                 }
             }
         }
+
         let cyclic = component.len() > 1
             || component
                 .first()
@@ -5158,6 +5526,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
             cyclic_nodes.extend_from_slice(&component);
         }
     }
+
     cyclic_nodes
 }
 
@@ -5165,6 +5534,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
 #[derive(Default)]
 struct Edges {
     targets: Vec<usize>,
+
     /// Where each node's targets end.
     ends: Vec<usize>,
 }
@@ -5182,11 +5552,13 @@ impl Edges {
         for target in &self.targets {
             ends[*target] += 1;
         }
+
         let mut total = 0;
         for end in &mut ends {
             total += *end;
             *end = total;
         }
+
         // Each node's predecessors fill its slot from its start.
         let mut next = ends.clone();
         let mut targets = vec![0; self.targets.len()];
@@ -5196,6 +5568,7 @@ impl Edges {
                 targets[next[*target]] = source;
             }
         }
+
         Self { targets, ends }
     }
 }
@@ -5204,6 +5577,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
     let mut push = |reference: TypeReference| {
         targets.push(reference.id.index());
     };
+
     match kind {
         TypeKind::Enumeration {
             underlying: Some(target),
@@ -5219,6 +5593,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
             for member in members.iter() {
                 push(member.type_ref);
             }
+
             for base in bases.iter() {
                 push(base.type_ref);
             }
@@ -5228,6 +5603,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
                 push(member.type_ref);
             }
         }
+
         TypeKind::Variant {
             common_members,
             bases,
@@ -5238,18 +5614,22 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
             for member in common_members.iter() {
                 push(member.type_ref);
             }
+
             for base in bases.iter() {
                 push(base.type_ref);
             }
+
             if let VariantDiscriminant::Stored(member) = discriminant.as_ref() {
                 push(member.type_ref);
             }
+
             for variant in variants.iter() {
                 for member in variant.members.iter() {
                     push(member.type_ref);
                 }
             }
         }
+
         TypeKind::Signature {
             returns,
             parameters,
@@ -5258,10 +5638,12 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
             if let Some(returns) = returns {
                 push(*returns);
             }
+
             for parameter in parameters.iter() {
                 push(*parameter);
             }
         }
+
         TypeKind::Base(_)
         | TypeKind::Function
         | TypeKind::Enumeration {
@@ -5270,6 +5652,7 @@ fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
         | TypeKind::Pointer { .. }
         | TypeKind::Reference { .. }
         | TypeKind::Slice { .. }
+
         // A Fortran type may hold an allocatable array of itself, whose
         // elements are elsewhere.
         | TypeKind::RuntimeArray { .. }
@@ -5297,6 +5680,7 @@ fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -
     let Some(keyword) = modifier_keyword(modifier) else {
         return format!("_Atomic({target})");
     };
+
     if indirection {
         format!("{target} {keyword}")
     } else {

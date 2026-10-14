@@ -10,11 +10,13 @@ use super::syntax::ast::{
     BinaryOp, Builtin, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase,
     TypeName, UnaryOp,
 };
+
 use super::syntax::{Expression, Span};
 use super::target::{Lookup, Refusal, Scope, StepKind, TypeLookup, TypeQuery};
 use super::types::{
     Category, Ty, builtin, c_type_key, category, is_character, representation, size_of, type_name,
 };
+
 use crate::{CBaseType, RecordMemberLayout, TypeKind, TypeReference};
 
 /// Whether an expression may assign.
@@ -22,6 +24,7 @@ use crate::{CBaseType, RecordMemberLayout, TypeKind, TypeReference};
 pub enum Mode {
     /// Reading only: hovers, watches, conditions, and log messages.
     Read,
+
     /// Assigning too: the console and `set var`.
     Assign,
 }
@@ -40,8 +43,10 @@ type BindResult<S> = Result<Bound<S>, ExpressionError>;
 enum Finish {
     /// The value or place as written.
     AsWritten,
+
     /// Its truth.
     Truth,
+
     /// Its value: a place of a scalar type is read, and any other place
     /// stays one.
     Value,
@@ -94,11 +99,13 @@ fn bind_as<S: Scope>(
         if Binder::names_value(scope, &ambiguity.name)? {
             continue;
         }
+
         let ty = TypeName {
             base: TypeBase::Named(ambiguity.name.clone()),
             pointers: 0,
             span: ambiguity.span,
         };
+
         if Binder::resolve_type(scope, &ty).is_ok() {
             casts |= 1 << index;
         } else {
@@ -112,6 +119,7 @@ fn bind_as<S: Scope>(
             ));
         }
     }
+
     let tree = expression.reading(casts).map_err(Clone::clone)?;
     let mut binder = Binder::new(scope, expression.text(), mode, tree);
     let root = match tree.kind(tree.root()) {
@@ -120,16 +128,19 @@ fn bind_as<S: Scope>(
         }
         _ => binder.bind(tree.root())?,
     };
+
     let root = if matches!(root.op, Op::Range { .. } | Op::Assign { .. }) {
         root
     } else {
         binder.settle(root)?
     };
+
     let root = match finish {
         Finish::AsWritten => root,
         Finish::Truth => binder.truth(root)?,
         Finish::Value => binder.value(root)?,
     };
+
     // A string the expression writes is only compared; one it computes
     // from the program's text, or a stop's `$path`, is a value of its own.
     if matches!(root.op, Op::Constant(Constant::Text(_)))
@@ -141,6 +152,7 @@ fn bind_as<S: Scope>(
             "a string is only compared with the program's text",
         ));
     }
+
     Ok(Program { root })
 }
 
@@ -207,6 +219,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 (Integer::Exact(Exact::from(call.args[index])), Ty::Exact)
             }
         };
+
         self.node(Op::Constant(Constant::Integer(constant)), ty, span)
     }
 
@@ -264,6 +277,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 "the expression binds to too many operations",
             ));
         }
+
         Ok(Node { op, ty, span })
     }
 
@@ -309,6 +323,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         format!("`${name}` has a width of {} bits", register.width),
                     ));
                 };
+
                 let ty = Ty::Int(int);
                 self.node(Op::Register(register), ty, span)
             }
@@ -352,6 +367,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let operand = self.bind(operand)?;
                 self.convert(operand, target, span)
             }
+
             NodeKind::Member {
                 base,
                 field,
@@ -363,6 +379,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 if let Some(path) = self.dotted(id) {
                     return self.name(&path, span);
                 }
+
                 let base = self.bind(base)?;
                 self.member(base, &field, field_span, arrow, span)
             }
@@ -382,6 +399,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         format!("`{}` is not an array or slice", self.quote(base.span)),
                     ));
                 }
+
                 let start = self.bound_index(start)?;
                 let end = self.bound_index(end)?;
                 let ty = base.ty.clone();
@@ -409,9 +427,11 @@ impl<'a, S: Scope> Binder<'a, S> {
                         pointers: 0,
                         span: self.tree().span(operand),
                     };
+
                     let ty = Self::resolve_type(self.scope, &name)?;
                     return self.size_constant(&ty, span);
                 }
+
                 let operand = self.bind(operand)?;
                 let operand = self.settle(operand)?;
                 self.size_constant(&operand.ty, span)
@@ -420,6 +440,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let ty = Self::resolve_type(self.scope, &ty)?;
                 self.offset_constant(&ty, &member, span)
             }
+
             NodeKind::ContainerOf {
                 pointer,
                 ty,
@@ -447,6 +468,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let operand = self.bind(operand)?;
                 self.capacity(operand, span)
             }
+
             NodeKind::Call {
                 function: Builtin::Inner,
                 operand,
@@ -466,15 +488,19 @@ impl<'a, S: Scope> Binder<'a, S> {
             let Ty::Program(reference) = node.ty else {
                 return Ok(node);
             };
+
             if !node.is_place() {
                 return Ok(node);
             }
+
             let Ok((_, info)) = representation(self.scope, reference) else {
                 return Ok(node);
             };
+
             let TypeKind::Record { members, bases, .. } = &info.kind else {
                 return Ok(node);
             };
+
             let sized = members
                 .iter()
                 .filter(|member| {
@@ -487,11 +513,14 @@ impl<'a, S: Scope> Binder<'a, S> {
             let ([member], true) = (sized.as_slice(), bases.is_empty()) else {
                 return Ok(node);
             };
+
             let Some(name) = member.name.as_deref() else {
                 return Ok(node);
             };
+
             node = self.member(node, &Field::Named(name.to_owned()), span, false, span)?;
         }
+
         Err(Self::error(
             span,
             ErrorKind::Limit,
@@ -533,8 +562,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                     Separator::Dot => ".",
                 });
             }
+
             text.push_str(&segment.name);
         }
+
         text
     }
 
@@ -560,6 +591,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 _ => return Ok(true),
             }
         }
+
         Ok(false)
     }
 
@@ -584,6 +616,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                             format!("the enumerator `{name}` has no members"),
                         ));
                     }
+
                     return self.enumerator(value, ty, span);
                 }
                 Lookup::Constant(value) => {
@@ -594,6 +627,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                             format!("the constant `{name}` has no members"),
                         ));
                     }
+
                     return self.node(
                         Op::Constant(Constant::Integer(Integer::Exact(value))),
                         Ty::Exact,
@@ -603,6 +637,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 Lookup::Bound { object, ty } => self.node(Op::Bound(object), ty, name_span)?,
                 Lookup::Object { object, ty } => self.object(&name, object, ty, name_span)?,
             };
+
             for segment in &path.segments[count..] {
                 let member_span = path.segments[0].span.to(segment.span);
                 node = self.member(
@@ -613,8 +648,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                     member_span,
                 )?;
             }
+
             return Ok(node);
         }
+
         let name = Self::prefix_text(path, path.segments.len());
         Err(Self::error(
             span,
@@ -646,6 +683,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             Category::Integer { int: Some(int), .. } => Integer::Typed(Bits::truncate(int, value)),
             _ => Integer::Exact(value),
         };
+
         self.node(Op::Constant(Constant::Integer(integer)), ty, span)
     }
 
@@ -666,6 +704,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         } else {
             exact
         };
+
         let int = match suffix {
             None => {
                 return self.node(
@@ -680,6 +719,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
             Some(Suffix::F32 | Suffix::F64) => None,
         };
+
         let int =
             int.ok_or_else(|| Self::error(span, ErrorKind::Syntax, "the suffix names no type"))?;
         let bits = Bits::exactly(int, exact).map_err(|_| {
@@ -712,6 +752,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 {
                     return Ok(Self::pointers(ty, name.pointers));
                 }
+
                 TypeQuery {
                     name: Self::prefix_text(path, path.segments.len()),
                     tag: None,
@@ -728,6 +769,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 tag: Some(*tag),
             },
         };
+
         match scope.lookup_type(&query) {
             TypeLookup::Found(ty) => Ok(Self::pointers(Ty::Program(ty), name.pointers)),
             TypeLookup::Ambiguous(candidates) => Err(Self::error(
@@ -761,6 +803,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         for _ in 0..count {
             ty = Ty::Pointer(Arc::new(ty));
         }
+
         ty
     }
 
@@ -792,6 +835,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 format!("`{name}` has no members"),
             ));
         };
+
         let info = representation(self.scope, *reference)
             .map_err(|reason| Self::error(span, ErrorKind::Type, reason.to_string()))?
             .1;
@@ -802,6 +846,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 format!("`{name}` has no members"),
             ));
         };
+
         let found = members
             .iter()
             .find(|candidate| candidate.name.as_deref() == Some(member))
@@ -819,6 +864,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 format!("`{member}` of `{name}` is not at a whole byte"),
             ));
         };
+
         self.node(
             Op::Constant(Constant::Integer(Integer::Exact(Exact::from(u128::from(
                 offset,
@@ -842,6 +888,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         let Category::Pointer(target_of) = &category else {
             return Err(self.type_error(&pointer, &category, "is not a pointer"));
         };
+
         // The pointer points to the member's type, or to nothing in
         // particular, so a mistyped view cannot locate the wrong object.
         let offset = self.offset_constant(&target, member, span)?;
@@ -859,6 +906,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
             _ => None,
         };
+
         let canonical = |ty: TypeReference| representation(self.scope, ty).ok().map(|(ty, _)| ty);
         let points_to_member = match (target_of, member_type) {
             (None | Some(Ty::Void), _) => true,
@@ -867,6 +915,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 .is_some_and(|(left, right)| self.scope.same_type(left, right)),
             _ => false,
         };
+
         if !points_to_member {
             return Err(Self::error(
                 pointer.span,
@@ -879,6 +928,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let ty = pointer.ty.clone();
         let moved = self.node(
             Op::Offset {
@@ -900,6 +950,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         if matches!(self.category(&node.ty), Category::Reference) {
             return self.deref_place(node);
         }
+
         Ok(node)
     }
 
@@ -913,6 +964,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 "only program types are stored in places",
             ));
         };
+
         let planned = self
             .scope
             .plan(from, StepKind::Deref)
@@ -991,8 +1043,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let Ty::Pointer(element) = pointer.ty.clone() else {
                     return Err(Self::broken(span, "an array decays to a pointer"));
                 };
+
                 self.deref_value(pointer, &element, span)
             }
+
             // A value a view presents as another, as a smart pointer
             // presents what it points to, dereferences to that one.
             category => match &node.ty {
@@ -1026,6 +1080,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         if let Category::Opaque(reason) = category {
             return self.unsupported(node.span, reason);
         }
+
         Self::error(
             node.span,
             ErrorKind::Type,
@@ -1043,6 +1098,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         if !node.is_place() {
             return Ok(node);
         }
+
         match self.category(&node.ty) {
             Category::Integer { .. }
             | Category::Float(_)
@@ -1070,6 +1126,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+
         self.value(node)
     }
 
@@ -1114,6 +1171,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             // the negation of a literal that alone would not fit.
             return self.integer(value, suffix, true, span);
         }
+
         let operand = self.bind(operand)?;
         match op {
             UnaryOp::Neg => {
@@ -1150,6 +1208,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         ),
                     ));
                 }
+
                 let ty = Ty::Pointer(Arc::new(operand.ty.clone()));
                 self.node(Op::AddressOf(Box::new(operand)), ty, span)
             }
@@ -1164,9 +1223,11 @@ impl<'a, S: Scope> Binder<'a, S> {
         let Err(error) = &bound else {
             return bound;
         };
+
         let (Some(other), NodeKind::Name(path)) = (other, self.tree().kind(id)) else {
             return bound;
         };
+
         if !matches!(
             error.kind,
             ErrorKind::UnknownName | ErrorKind::AmbiguousName
@@ -1175,6 +1236,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         {
             return bound;
         }
+
         let Category::Integer {
             enumerators: Some(enumerators),
             ..
@@ -1182,9 +1244,11 @@ impl<'a, S: Scope> Binder<'a, S> {
         else {
             return bound;
         };
+
         let Ty::Program(enumeration) = other.ty else {
             return bound;
         };
+
         let name = &path.segments[0].name;
         let Some(found) = enumerators
             .iter()
@@ -1192,6 +1256,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         else {
             return bound;
         };
+
         self.enumerator(Exact::from(found.value), enumeration, self.tree().span(id))
     }
 
@@ -1211,6 +1276,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let Ok(right) = self.bind(right) else {
                     return Err(error);
                 };
+
                 let left = self.bind_beside(left, Some(&right))?;
                 Ok((left, right))
             }
@@ -1233,15 +1299,18 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
             let negate = op == BinaryOp::Ne;
             if let Some(test) = self.holds_variant(left, right, negate, span)? {
                 return Ok(test);
             }
+
             if let Some(test) = self.holds_variant(right, left, negate, span)? {
                 return Ok(test);
             }
         }
+
         let (left, right) = self.operands(left, right)?;
         self.binary_bound(op, left, right, span)
     }
@@ -1259,9 +1328,11 @@ impl<'a, S: Scope> Binder<'a, S> {
         let NodeKind::Name(path) = self.tree().kind(name) else {
             return Ok(None);
         };
+
         if path.segments.len() != 1 || path.global {
             return Ok(None);
         }
+
         let variant = path.segments[0].name.clone();
         if let Err(error) = self.bind(name) {
             if !matches!(
@@ -1273,19 +1344,24 @@ impl<'a, S: Scope> Binder<'a, S> {
         } else {
             return Ok(None);
         }
+
         let Ok(bound) = self.bind(value) else {
             return Ok(None);
         };
+
         let base = self.settle(bound)?;
         let Ty::Program(from) = base.ty else {
             return Ok(None);
         };
+
         let Ok((_, info)) = representation(self.scope, from) else {
             return Ok(None);
         };
+
         let TypeKind::Variant { variants, .. } = &info.kind else {
             return Ok(None);
         };
+
         let names = |variant: &crate::Variant| {
             variant
                 .name
@@ -1296,12 +1372,14 @@ impl<'a, S: Scope> Binder<'a, S> {
                     _ => None,
                 })
         };
+
         if !variants
             .iter()
             .any(|candidate| names(candidate).any(|known| *known == *variant))
         {
             return Ok(None);
         }
+
         if !base.is_place() {
             return Err(Self::error(
                 base.span,
@@ -1312,6 +1390,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let step = self
             .scope
             .plan(from, StepKind::Member(&variant))
@@ -1350,6 +1429,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     BinaryOp::BitOr => BitOperator::Or,
                     _ => BitOperator::Xor,
                 };
+
                 self.node(
                     Op::Bitwise {
                         op,
@@ -1385,6 +1465,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             Category::Integer { int, .. } => int,
             _ => None,
         };
+
         match (int(left), int(right)) {
             (None, None) => Ty::Exact,
             (Some(_), None) => left.clone(),
@@ -1447,6 +1528,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     BinaryOp::Div => FloatOperator::Div,
                     _ => FloatOperator::Rem,
                 };
+
                 self.node(
                     Op::FloatArithmetic {
                         op,
@@ -1457,6 +1539,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 )
             }
+
             (Category::Pointer(pointee), Category::Integer { .. })
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub) =>
             {
@@ -1487,6 +1570,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 )
             }
+
             (Category::Pointer(left_pointee), Category::Pointer(right_pointee))
                 if op == BinaryOp::Sub =>
             {
@@ -1499,6 +1583,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         "the pointers point at types of different sizes",
                     ));
                 }
+
                 if scale == 0 {
                     return Err(Self::error(
                         span,
@@ -1506,6 +1591,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         "the pointers point at a zero-sized type, whose elements share one address",
                     ));
                 }
+
                 self.node(
                     Op::Difference {
                         left: Box::new(left),
@@ -1522,6 +1608,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 } else {
                     &right
                 };
+
                 Err(Self::error(
                     operand.span,
                     ErrorKind::Type,
@@ -1532,6 +1619,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 )
                 .with_hint("convert it with `as u8`"))
             }
+
             (category, _)
                 if !matches!(
                     category,
@@ -1540,6 +1628,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             {
                 Err(self.type_error(&left, category, "is not a number"))
             }
+
             (_, category)
                 if !matches!(
                     category,
@@ -1579,6 +1668,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             )
             .with_hint("cast it to `u8*` to count bytes"));
         };
+
         size_of(self.scope, target).ok_or_else(|| {
             Self::error(
                 pointer.span,
@@ -1598,6 +1688,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             Category::Float(_) => Conversion::FloatToFloat(format),
             _ => Conversion::IntegerToFloat(format),
         };
+
         self.node(
             Op::Convert {
                 operand: Box::new(node),
@@ -1618,6 +1709,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         let ordering = !matches!(op, BinaryOp::Eq | BinaryOp::Ne);
         let left = self.settle(left)?;
         let right = self.settle(right)?;
+
         // Text compares with a string literal, equality only.
         if matches!(left.ty, Ty::Text) || matches!(right.ty, Ty::Text) {
             let (text, other) = if matches!(left.ty, Ty::Text) {
@@ -1625,6 +1717,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             } else {
                 (right, left)
             };
+
             if !ordering && matches!(other.ty, Ty::Text) {
                 return self.node(
                     Op::Compare {
@@ -1637,6 +1730,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 );
             }
+
             if ordering || !other.is_place() {
                 return Err(Self::error(
                     span,
@@ -1644,6 +1738,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     "a string only compares, by `==` or `!=`, with text the program holds",
                 ));
             }
+
             return self.node(
                 Op::Compare {
                     op,
@@ -1655,6 +1750,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+
         let left = self.operand(left)?;
         let right = self.operand(right)?;
         let how = match (self.category(&left.ty), self.category(&right.ty)) {
@@ -1678,6 +1774,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                         return Err(self.unsupported(node.span, reason));
                     }
                 }
+
                 return Err(Self::error(
                     span,
                     ErrorKind::Type,
@@ -1690,6 +1787,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ));
             }
         };
+
         self.node(
             Op::Compare {
                 op,
@@ -1731,6 +1829,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+
         let then = self.operand(then)?;
         let otherwise = self.operand(otherwise)?;
         let (then_category, otherwise_category) =
@@ -1743,6 +1842,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 (Category::Integer { .. }, Category::Integer { .. }) => {
                     (then, otherwise, Ty::Exact)
                 }
+
                 (
                     Category::Float(_) | Category::Integer { .. },
                     Category::Float(_) | Category::Integer { .. },
@@ -1783,6 +1883,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 }
             }
         };
+
         self.node(
             Op::Choose {
                 condition: Box::new(condition),
@@ -1810,6 +1911,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         if matches!(target.op, Op::Register(_)) {
             return self.register_assignment(op, target, value, span);
         }
+
         let target = self.settle(target)?;
         if !target.is_place() || !matches!(target.ty, Ty::Program(_)) {
             return Err(Self::error(
@@ -1821,6 +1923,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let category = self.category(&target.ty);
         if !matches!(
             category,
@@ -1832,11 +1935,13 @@ impl<'a, S: Scope> Binder<'a, S> {
                 "cannot be assigned; only numbers, truth values, and pointers can",
             ));
         }
+
         let value = self.bind_beside(value, Some(&target))?;
         let value = match op {
             None => value,
             Some(op) => self.binary_bound(op, target.clone(), value, span)?,
         };
+
         let value = self.operand(value)?;
         let source = self.category(&value.ty);
         let compatible = match category {
@@ -1853,6 +1958,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 Category::Pointer(_) | Category::Null | Category::Integer { .. }
             ),
         };
+
         if !compatible {
             return Err(Self::error(
                 value.span,
@@ -1864,6 +1970,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let (ty, value_span) = (target.ty.clone(), value.span);
         let fitted = self.node(Op::Fit(Box::new(value)), ty.clone(), value_span)?;
         self.node(
@@ -1890,6 +1997,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             None => value,
             Some(op) => self.binary_bound(op, target.clone(), value, span)?,
         };
+
         let value = self.operand(value)?;
         if !matches!(
             self.category(&value.ty),
@@ -1908,6 +2016,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let (ty, value_span) = (target.ty.clone(), value.span);
         let fitted = self.node(Op::Fit(Box::new(value)), ty.clone(), value_span)?;
         self.node(
@@ -1937,9 +2046,11 @@ impl<'a, S: Scope> Binder<'a, S> {
         else {
             return Ok(None);
         };
+
         if !operand.is_place() || !matches!(self.category(&operand.ty), Category::Record) {
             return Ok(None);
         }
+
         match self.scope.plan(*from, StepKind::Base(*base)) {
             Ok(planned) => {
                 let ty = Self::reached(planned.result, span, || {
@@ -1974,16 +2085,19 @@ impl<'a, S: Scope> Binder<'a, S> {
             operand.span = span;
             return Ok(operand);
         }
+
         let target_category = self.category(&target);
         if let Some(base) = self.upcast(&operand, &target, &target_category, span)? {
             return Ok(base);
         }
+
         let operand = match target_category {
             Category::Pointer(_) | Category::Integer { .. } | Category::Bool => {
                 self.operand(operand)?
             }
             _ => self.value(operand)?,
         };
+
         let source = self.category(&operand.ty);
         let conversion = match (&source, &target_category) {
             (_, Category::Bool) => {
@@ -2049,6 +2163,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ));
             }
         };
+
         self.node(
             Op::Convert {
                 operand: Box::new(operand),
@@ -2084,6 +2199,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
             _ => base,
         };
+
         let base = self.settle(base)?;
         let category = self.category(&base.ty);
         if !matches!(category, Category::Record) {
@@ -2092,11 +2208,14 @@ impl<'a, S: Scope> Binder<'a, S> {
             } else {
                 "has no members"
             };
+
             return Err(self.type_error(&base, &category, what));
         }
+
         let Ty::Program(from) = base.ty else {
             return Err(Self::broken(base.span, "records are program types"));
         };
+
         if !base.is_place() {
             return Err(Self::error(
                 base.span,
@@ -2107,10 +2226,12 @@ impl<'a, S: Scope> Binder<'a, S> {
                 ),
             ));
         }
+
         let names = match field {
             Field::Named(name) => vec![name.clone()],
             Field::Index(index) => vec![format!("__{index}"), index.to_string()],
         };
+
         let mut planned = Err(Refusal::new(ErrorKind::Type, String::new()));
         for name in &names {
             planned = self.scope.plan(from, StepKind::Member(name));
@@ -2118,6 +2239,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 break;
             }
         }
+
         let planned = planned.map_err(|refusal| Self::refused(field_span, refusal))?;
         let ty = Self::reached(planned.result, field_span, || {
             format!(
@@ -2146,6 +2268,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             chain.push((*index, self.tree().span(current)));
             current = *base;
         }
+
         chain.reverse();
         let mut node = self.bind(current)?;
         let mut pending = chain.as_slice();
@@ -2173,6 +2296,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     node = self.deref_value(moved, &target, *span)?;
                     pending = &pending[1..];
                 }
+
                 // A record has no indexing of its own, nor has a value its
                 // language represents as a pointer; a view that presents it
                 // as a sequence may give it some, one index at a time.
@@ -2186,16 +2310,19 @@ impl<'a, S: Scope> Binder<'a, S> {
                     let Ty::Program(from) = node.ty else {
                         return Err(Self::broken(*span, "indexed places are program types"));
                     };
+
                     let native = matches!(
                         category,
                         Category::Array { .. } | Category::RuntimeArray | Category::Slice(_)
                     );
+
                     // A value a view presents as a map is indexed by key.
                     if !native && let Ok(planned) = self.scope.plan(from, StepKind::Entry) {
                         node = self.entry(node, planned, *first, *span)?;
                         pending = &pending[1..];
                         continue;
                     }
+
                     let available = pending.len();
                     let planned = self
                         .scope
@@ -2212,12 +2339,14 @@ impl<'a, S: Scope> Binder<'a, S> {
                     } else {
                         1
                     };
+
                     let (taken, rest) = pending.split_at(consumed);
                     let mut indices = Vec::new();
                     for (index, _) in taken {
                         let index = self.bind(*index)?;
                         indices.push(self.integer_value(index)?);
                     }
+
                     let span = taken.last().map_or(*span, |(_, span)| *span);
                     let ty = Self::reached(planned.result, span, || {
                         "the element has a type the debugger cannot compute with".to_owned()
@@ -2237,6 +2366,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 category => return Err(self.type_error(&node, &category, "cannot be indexed")),
             }
         }
+
         Ok(node)
     }
 
@@ -2313,6 +2443,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 if !self.records_capacity(&operand.ty) {
                     return Err(self.type_error(&operand, &category, "records no capacity"));
                 }
+
                 self.node(
                     Op::Capacity {
                         operand: Box::new(operand),
@@ -2322,6 +2453,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     span,
                 )
             }
+
             // A record, or a pointer that stands for a container, may have
             // a view that gives it a capacity.
             Category::Record if operand.is_place() => self.node(
@@ -2350,6 +2482,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         let Ty::Program(reference) = ty else {
             return false;
         };
+
         representation(self.scope, *reference).is_ok_and(|(_, info)| {
             matches!(info.kind, TypeKind::Slice { words, .. } if words.capacity.is_some())
         })
@@ -2361,6 +2494,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         let Ty::Program(reference) = ty else {
             return false;
         };
+
         representation(self.scope, *reference)
             .is_ok_and(|(_, info)| matches!(info.kind, TypeKind::Slice { text: true, .. }))
     }
@@ -2405,6 +2539,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                      the whole expression",
                 ));
             }
+
             let ty = base.ty.clone();
             return self.node(
                 Op::Range {
@@ -2416,6 +2551,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 span,
             );
         }
+
         let category = self.category(&base.ty);
         let text = match &category {
             Category::Text | Category::Record | Category::Slice(_) => true,
@@ -2424,9 +2560,11 @@ impl<'a, S: Scope> Binder<'a, S> {
             }
             _ => false,
         };
+
         if !text || !(base.is_place() || matches!(category, Category::Text)) {
             return Err(self.type_error(&base, &category, "is not an array, slice, or text"));
         }
+
         self.node(
             Op::TextSlice {
                 base: Box::new(base),

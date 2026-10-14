@@ -9,12 +9,15 @@ use uscope::{
 use super::protocol::{
     self, DisassembleArguments, ErrorBody, ReadMemoryArguments, WriteMemoryArguments,
 };
+
 use super::session::{Session, error, parse};
 
 /// The most bytes one `readMemory` request returns.
 const MAX_READ: u64 = 1024 * 1024;
+
 /// The most bytes the debugger reads at once.
 const READ_CHUNK: u64 = 64 * 1024;
+
 /// The most instructions one `disassemble` request returns.
 const MAX_INSTRUCTIONS: i64 = 16 * 1024;
 const PAGE_SIZE: u64 = 4096;
@@ -46,10 +49,12 @@ impl Session {
                 break;
             }
         }
+
         let mut body = json!({"address": format!("{address:#x}"), "data": base64(&bytes)});
         if unreadable != 0 {
             body["unreadableBytes"] = unreadable.into();
         }
+
         Ok(body)
     }
 
@@ -70,6 +75,7 @@ impl Session {
                 bytes.len()
             )));
         }
+
         self.forget_reads();
         if self.support().memory_events {
             self.client
@@ -79,6 +85,7 @@ impl Session {
                 )
                 .await?;
         }
+
         self.invalidate_values().await;
         Ok(json!({"offset": 0, "bytesWritten": written}))
     }
@@ -92,9 +99,11 @@ impl Session {
                 "the instruction count must be between 0 and {MAX_INSTRUCTIONS}"
             )));
         }
+
         if arguments.instruction_count == 0 {
             return Ok(json!({"instructions": []}));
         }
+
         let first = arguments.instruction_offset.unwrap_or(0);
         let plan = Plan::new(first, arguments.instruction_count);
         let context = stop.innermost();
@@ -117,11 +126,13 @@ impl Session {
                 }
                 Row::Instruction(instruction) => instruction,
             };
+
             let row = self
                 .instruction_row(instruction, program_counter, &modules, &mut previous_file)
                 .await;
             rows.push(row);
         }
+
         Ok(json!({"instructions": rows}))
     }
 
@@ -165,9 +176,11 @@ impl Session {
             InstructionContent::Invalid => "(bad)".to_owned(),
             InstructionContent::Truncated => "(truncated)".to_owned(),
         };
+
         if !matches!(instruction.content, InstructionContent::Decoded(_)) {
             body.insert("presentationHint".to_owned(), "invalid".into());
         }
+
         body.insert("instruction".to_owned(), text.into());
         if let Some(symbol) = instruction
             .location
@@ -180,6 +193,7 @@ impl Session {
                 .unwrap_or_else(|| symbol.name.to_string());
             body.insert("symbol".to_owned(), name.into());
         }
+
         if let (Some(source), Some(module)) = (&instruction.source, module)
             && let Some(image) = self.image(module).await
             && let Some(file) = image.source_file(source.file)
@@ -192,6 +206,7 @@ impl Session {
                 );
                 *previous_file = Some((module, source.file));
             }
+
             body.insert(
                 "line".to_owned(),
                 self.line_to_client(source.line.get()).into(),
@@ -205,6 +220,7 @@ impl Session {
         } else {
             *previous_file = None;
         }
+
         Value::Object(body)
     }
 
@@ -226,11 +242,13 @@ impl Session {
             },
             syntax: self.syntax(),
         };
+
         let mut decoded = Decoded {
             address: anchor,
             instructions: Vec::new(),
             anchor: 0,
         };
+
         let disassembly = view
             .disassemble(window(
                 anchor,
@@ -244,17 +262,20 @@ impl Session {
                 "internal: a window query returned no window",
             ));
         };
+
         decoded.anchor = block
             .instructions
             .iter()
             .position(|instruction| instruction.address.get() >= anchor)
             .unwrap_or(block.instructions.len());
         decoded.instructions = block.instructions.to_vec();
+
         // Later windows continue after the end, or before the beginning.
         while decoded.instructions.len() - decoded.anchor < plan.after {
             let Some(last) = decoded.instructions.last() else {
                 break;
             };
+
             let wanted = plan.after - (decoded.instructions.len() - decoded.anchor);
             let more = view
                 .disassemble(window(
@@ -269,17 +290,21 @@ impl Session {
                     "internal: a window query returned no window",
                 ));
             };
+
             if block.instructions.is_empty() {
                 break;
             }
+
             decoded
                 .instructions
                 .extend(block.instructions.iter().cloned());
         }
+
         while decoded.anchor < plan.before {
             let Some(first) = decoded.instructions.first() else {
                 break;
             };
+
             let wanted = window_size(plan.before - decoded.anchor, MAX_WINDOW_BEFORE);
             let more = view
                 .disassemble(window(first.address.get(), wanted, 0))
@@ -290,6 +315,7 @@ impl Session {
                     "internal: a window query returned no window",
                 ));
             };
+
             let earlier = block
                 .instructions
                 .iter()
@@ -299,9 +325,11 @@ impl Session {
             if earlier.is_empty() {
                 break;
             }
+
             decoded.anchor += earlier.len();
             decoded.instructions.splice(0..0, earlier);
         }
+
         Ok(decoded)
     }
 
@@ -317,6 +345,7 @@ struct Decoded {
     /// The anchor address.
     address: u64,
     instructions: Vec<uscope::DisassembledInstruction>,
+
     /// The index of the first instruction at or after the anchor.
     anchor: usize,
 }
@@ -327,6 +356,7 @@ struct Plan {
     /// The first row's offset from the anchor in instructions.
     first: i64,
     count: usize,
+
     /// Instructions needed before the anchor and from it onward.
     before: usize,
     after: usize,
@@ -334,6 +364,7 @@ struct Plan {
 
 enum Row<'a> {
     Instruction(&'a uscope::DisassembledInstruction),
+
     /// No proven instruction is known here; the address keeps rows in
     /// order, one byte beyond the nearest known edge.
     Padding(u64),
@@ -365,6 +396,7 @@ impl Plan {
             {
                 return Row::Instruction(instruction);
             }
+
             Row::Padding(padding_address(
                 instructions,
                 index,
@@ -419,12 +451,14 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
         b'/' => Some(63),
         _ => None,
     };
+
     let digits = text.trim().trim_end_matches('=').as_bytes();
     let mut bytes = Vec::with_capacity(digits.len() * 3 / 4);
     for chunk in digits.chunks(4) {
         if chunk.len() == 1 {
             return None;
         }
+
         let word = chunk
             .iter()
             .enumerate()
@@ -434,6 +468,7 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
         let decoded = word.to_be_bytes();
         bytes.extend_from_slice(&decoded[1..chunk.len()]);
     }
+
     Some(bytes)
 }
 
@@ -455,6 +490,7 @@ fn base64(bytes: &[u8]) -> String {
             }
         }
     }
+
     text
 }
 
@@ -475,6 +511,7 @@ mod tests {
             assert_eq!(base64(bytes), text);
             assert_eq!(unbase64(text).as_deref(), Some(bytes));
         }
+
         // Clients may leave out the padding.
         assert_eq!(unbase64("Zg"), Some(b"f".to_vec()));
         assert_eq!(unbase64("Z"), None);

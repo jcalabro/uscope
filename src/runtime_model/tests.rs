@@ -11,14 +11,17 @@ fn sources(directory: &Path) -> Vec<(PathBuf, String)> {
             pending.extend(entries.map(|entry| entry.expect("a directory entry").path()));
             continue;
         }
+
         let test_file = path.file_name().is_some_and(|name| name == "tests.rs");
         if test_file || path.extension().is_none_or(|extension| extension != "rs") {
             continue;
         }
+
         let source = std::fs::read_to_string(&path).expect("read a source file");
         let source = source.split("#[cfg(test)]").next().unwrap_or_default();
         sources.push((path, source.to_owned()));
     }
+
     sources.sort();
     sources
 }
@@ -47,8 +50,10 @@ fn code(source: &str) -> String {
                 (false, _, character) => code.push(character),
             }
         }
+
         code.push('\n');
     }
+
     code
 }
 
@@ -84,6 +89,7 @@ fn runtime_model_stays_pure() {
                 path.display()
             );
         }
+
         // The tokio model's own module is named for the runtime it reads.
         assert!(
             code.match_indices("tokio::")
@@ -92,7 +98,9 @@ fn runtime_model_stays_pure() {
             path.display()
         );
     }
+
     assert!(sources.len() >= 3, "the runtime models' sources were found");
+
     // The check sees through neither comments nor strings.
     assert!(code("let x = tokio::spawn(f);").contains("tokio::spawn"));
     assert!(!code("let x = \"tokio::spawn\"; // tokio::spawn").contains("tokio::"));
@@ -149,6 +157,7 @@ fn languages_stay_at_their_seams() {
                 .to_owned();
             vec![(path, source)]
         };
+
         for (path, source) in found {
             // Documentation may name a runtime as an example; code may not.
             let code = source
@@ -161,6 +170,7 @@ fn languages_stay_at_their_seams() {
                 if path.starts_with(root.join(home)) {
                     continue;
                 }
+
                 for name in names {
                     assert!(
                         !code.contains(name),

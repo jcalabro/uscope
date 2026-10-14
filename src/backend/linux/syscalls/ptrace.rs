@@ -46,10 +46,13 @@ use crate::syscalls::{
 pub struct TraceOptions {
     pub calls: CallSet,
     pub limits: Limits,
+
     /// Whole environments, which otherwise only count.
     pub verbose: bool,
+
     /// Reports calls of the processes the targets create, not only theirs.
     pub follow: bool,
+
     /// Unwinds each reported call's stack, when given.
     pub stacks: Option<super::stacks::SharedStacks>,
 }
@@ -58,6 +61,7 @@ pub struct TraceOptions {
 pub enum Target {
     /// A program to start, filtered from its first call.
     Launch(Command),
+
     /// Running processes, every call of which stops.
     Attach(Vec<u32>),
 }
@@ -66,8 +70,10 @@ pub enum Target {
 pub enum TraceError {
     #[error("starting the program failed: {0}")]
     Spawn(#[source] std::io::Error),
+
     #[error("could not attach to process {pid}: {errno}")]
     Attach { pid: u32, errno: Errno },
+
     #[error("tracing failed: {0}")]
     System(#[from] Errno),
 }
@@ -108,6 +114,7 @@ fn lineage(tid: u32) -> (Option<u32>, Option<u32>) {
     let Ok(status) = std::fs::read_to_string(format!("/proc/{tid}/status")) else {
         return (None, None);
     };
+
     let field = |name: &str| {
         status
             .lines()
@@ -116,12 +123,14 @@ fn lineage(tid: u32) -> (Option<u32>, Option<u32>) {
             .parse::<u32>()
             .ok()
     };
+
     let process = field("Tgid:");
     let parent = if process == Some(tid) {
         field("PPid:")
     } else {
         process
     };
+
     (process, parent)
 }
 
@@ -150,6 +159,7 @@ fn descriptor(process: u32, fd: i64, time: u64, made: bool) -> Option<TraceEvent
             made,
         });
     }
+
     let path = format!("/proc/{process}/fd/{fd}");
     let link = std::fs::read_link(&path).ok()?;
     let flags = std::fs::read_to_string(format!("/proc/{process}/fdinfo/{fd}")).ok();
@@ -211,6 +221,7 @@ fn made(
         }
         _ => {}
     }
+
     fds.into_iter()
         .filter_map(|fd| descriptor(process, fd, time, true))
         .collect()
@@ -226,6 +237,7 @@ struct Entry {
     args: [u64; 6],
     entered: u64,
     captured: Vec<Capture>,
+
     /// Whether the selection chose it; an attached thread stops at every
     /// call.
     chosen: bool,
@@ -244,8 +256,10 @@ struct Thread {
 struct Unannounced {
     /// Its process, read while it waited.
     process: Option<u32>,
+
     /// The process that made it, read while it waited.
     parent: Option<u32>,
+
     /// How it ended, if it did before it was announced.
     ended: Option<ProcessEnd>,
 }
@@ -254,6 +268,7 @@ struct Unannounced {
 enum Mode {
     /// Chosen calls stop at a seccomp stop.
     Filtered,
+
     /// Every call stops.
     EveryCall,
 }
@@ -262,10 +277,12 @@ struct Tracer<'a> {
     mode: Mode,
     options: &'a TraceOptions,
     threads: BTreeMap<u32, Thread>,
+
     /// The threads traced from the start; every other tracee is made by
     /// one traced.
     initial: BTreeSet<u32>,
     unannounced: BTreeMap<u32, Unannounced>,
+
     /// Processes whose calls are reported.
     reported: BTreeSet<u32>,
     first: u32,
@@ -285,6 +302,7 @@ impl Tracer<'_> {
         let Some(after) = self.sink.in_flight_after() else {
             return;
         };
+
         let now = monotonic();
         let calls: Vec<InFlight> = self
             .threads
@@ -314,11 +332,13 @@ impl Tracer<'_> {
         if self.detaching {
             return self.detach(tid, signal);
         }
+
         let request = match self.threads.get(&tid) {
             Some(thread) if thread.pending.is_some() => ptrace::Request::PTRACE_SYSCALL,
             _ if self.mode == Mode::EveryCall => ptrace::Request::PTRACE_SYSCALL,
             _ => ptrace::Request::PTRACE_CONT,
         };
+
         record!("syscalls ptrace: resume {tid} with {request:?} and {signal:?}");
         match ptrace_with_signal(request, pid, signal) {
             // A thread killed meanwhile reports its exit next.
@@ -332,6 +352,7 @@ impl Tracer<'_> {
         if let Some(thread) = self.threads.remove(&tid) {
             self.unfinished(tid, thread, Outcome::Unfinished);
         }
+
         match ptrace_with_signal(
             ptrace::Request::PTRACE_DETACH,
             Pid::from_raw(tid.cast_signed()),
@@ -347,9 +368,11 @@ impl Tracer<'_> {
         let Some(entry) = thread.pending.filter(|entry| entry.chosen) else {
             return;
         };
+
         if !self.reports(thread.process) {
             return;
         }
+
         let ends = entry
             .call
             .name()
@@ -359,6 +382,7 @@ impl Tracer<'_> {
         } else {
             outcome
         };
+
         self.emit(TraceEvent::Call(SyscallEvent {
             thread: syscalls::Tid::new(tid),
             process: syscalls::Pid::new(thread.process),
@@ -398,14 +422,17 @@ impl Tracer<'_> {
         } else {
             Vec::new()
         };
+
         let thread = self.thread(tid);
         if let Some(previous) = thread.pending.take() {
             let stale = Thread {
                 process: thread.process,
                 pending: Some(previous),
             };
+
             self.unfinished(tid, stale, Outcome::Unavailable);
         }
+
         self.thread(tid).pending = Some(Entry {
             call,
             args: info.args,
@@ -437,6 +464,7 @@ impl Tracer<'_> {
             let Ok(registers) = ptrace::getregs(Pid::from_raw(tid.cast_signed())) else {
                 return self.resume(tid, None);
             };
+
             #[expect(clippy::cast_possible_truncation, reason = "call numbers are small")]
             let number = registers.orig_rax as u32;
             let (call, args) = if registers.cs == 0x23 {
@@ -458,6 +486,7 @@ impl Tracer<'_> {
                 } else {
                     Abi::X32
                 };
+
                 let args = [
                     registers.rdi,
                     registers.rsi,
@@ -468,6 +497,7 @@ impl Tracer<'_> {
                 ];
                 (SyscallId::new(abi, number & !X32_SYSCALL_BIT), args)
             };
+
             let chosen = self.options.calls.contains(call);
             (
                 call,
@@ -478,6 +508,7 @@ impl Tracer<'_> {
                 chosen,
             )
         };
+
         if chosen && self.reports(process) {
             captured.extend(captures::capture(
                 call,
@@ -491,6 +522,7 @@ impl Tracer<'_> {
             for event in made(process, call, outcome, &captured, exited) {
                 self.emit(event);
             }
+
             let stack = self.stack(process, tid);
             self.emit(TraceEvent::Call(SyscallEvent {
                 thread: syscalls::Tid::new(tid),
@@ -505,6 +537,7 @@ impl Tracer<'_> {
                 flags,
             }));
         }
+
         self.resume(tid, None)
     }
 
@@ -544,6 +577,7 @@ impl Tracer<'_> {
             Err(Errno::ESRCH) => return Ok(()),
             Err(error) => return Err(error),
         };
+
         record!(
             "syscalls ptrace: {tid} stopped with op {} for {}",
             info.op,
@@ -591,6 +625,7 @@ impl Tracer<'_> {
                         if !thread {
                             self.reported.insert(process);
                         }
+
                         self.emit(TraceEvent::Spawn {
                             parent_thread: syscalls::Tid::new(tid),
                             parent: syscalls::Pid::new(parent),
@@ -599,6 +634,7 @@ impl Tracer<'_> {
                             time: monotonic(),
                         });
                     }
+
                     match early {
                         Some(Unannounced {
                             ended: Some(end), ..
@@ -607,6 +643,7 @@ impl Tracer<'_> {
                         None => {}
                     }
                 }
+
                 self.resume(tid, None)
             }
             libc::PTRACE_EVENT_EXEC => {
@@ -620,6 +657,7 @@ impl Tracer<'_> {
                 {
                     self.unfinished(tid, leader, Outcome::Unfinished);
                 }
+
                 let process = self.thread(tid).process;
                 if let Some(stacks) = &self.options.stacks {
                     stacks
@@ -627,6 +665,7 @@ impl Tracer<'_> {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .forget(syscalls::Pid::new(process));
                 }
+
                 if self.reports(process) {
                     let path = std::fs::read_link(format!("/proc/{tid}/exe"))
                         .map_or_else(|_| "?".into(), |path| path.to_string_lossy().into());
@@ -637,6 +676,7 @@ impl Tracer<'_> {
                         path,
                     });
                 }
+
                 self.resume(tid, None)
             }
             libc::PTRACE_EVENT_STOP => {
@@ -658,6 +698,7 @@ impl Tracer<'_> {
                     );
                     return Ok(());
                 }
+
                 self.thread(tid);
                 if is_stopping(signal) && !self.detaching {
                     // A group-stop: the thread stays stopped, as it would
@@ -668,6 +709,7 @@ impl Tracer<'_> {
                         Err(error) => Err(error),
                     };
                 }
+
                 self.resume(tid, None)
             }
             _ => self.resume(tid, None),
@@ -683,7 +725,9 @@ impl Tracer<'_> {
                     Some(i32::from_le_bytes(info.get(at..at + 4)?.try_into().ok()?))
                 })
             };
+
             let code = word(8);
+
             // Processes send with SI_USER, SI_QUEUE, SI_TKILL, and the like.
             let sender = code
                 .filter(|&code| code <= 0 && code != -2)
@@ -701,6 +745,7 @@ impl Tracer<'_> {
                 stack: self.stack(process, tid),
             });
         }
+
         self.resume(tid, Some(signal))
     }
 
@@ -717,8 +762,10 @@ impl Tracer<'_> {
                     })
                     .ended = Some(end);
             }
+
             return;
         };
+
         let process = thread.process;
         self.unfinished(tid, thread, Outcome::Unfinished);
         if tid != process {
@@ -730,8 +777,10 @@ impl Tracer<'_> {
                     end,
                 });
             }
+
             return;
         }
+
         // A leader's exit comes after every other thread's: the process is
         // gone.
         let orphans: Vec<u32> = self
@@ -745,9 +794,11 @@ impl Tracer<'_> {
                 self.unfinished(orphan, thread, Outcome::Unfinished);
             }
         }
+
         if process == self.first {
             self.end = Some(end);
         }
+
         // A process killed in the call that made a tracee never announces
         // it: it goes on unannounced.
         let orphans: Vec<u32> = self
@@ -761,6 +812,7 @@ impl Tracer<'_> {
             self.thread(orphan);
             let _ = self.resume(orphan, None);
         }
+
         if self.reports(process) {
             self.emit(TraceEvent::Exit {
                 process: syscalls::Pid::new(process),
@@ -809,6 +861,7 @@ impl Tracer<'_> {
             self.unannounced.remove(&tid);
             let _ = self.detach(tid, None);
         }
+
         let threads: Vec<u32> = self.threads.keys().copied().collect();
         for tid in threads {
             record!("syscalls ptrace: interrupt {tid} to detach");
@@ -827,14 +880,17 @@ const fn is_stopping(signal: Signal) -> bool {
 fn trace_options(launched: bool, follow: bool) -> Options {
     let mut options =
         Options::PTRACE_O_TRACESYSGOOD | Options::PTRACE_O_TRACECLONE | Options::PTRACE_O_TRACEEXEC;
+
     // A filtered process's children inherit its filter, so they stay
     // traced whether or not their calls are reported.
     if launched || follow {
         options |= Options::PTRACE_O_TRACEFORK | Options::PTRACE_O_TRACEVFORK;
     }
+
     if launched {
         options |= Options::PTRACE_O_TRACESECCOMP | Options::PTRACE_O_EXITKILL;
     }
+
     options
 }
 
@@ -856,9 +912,11 @@ fn seize_process(pid: u32, options: Options, seized: &mut BTreeSet<u32>) -> Resu
             else {
                 continue;
             };
+
             if !seized.insert(tid) {
                 continue;
             }
+
             new = true;
             record!("syscalls ptrace: seize {tid}");
             match ptrace::seize(Pid::from_raw(tid.cast_signed()), options) {
@@ -866,11 +924,13 @@ fn seize_process(pid: u32, options: Options, seized: &mut BTreeSet<u32>) -> Resu
                     // Every-call tracing starts at the thread's next stop.
                     let _ = ptrace::interrupt(Pid::from_raw(tid.cast_signed()));
                 }
+
                 // A thread that exited since it was listed.
                 Err(Errno::ESRCH) if tid != pid => {}
                 Err(errno) => return Err(TraceError::Attach { pid, errno }),
             }
         }
+
         if !new {
             return Ok(());
         }
@@ -916,9 +976,11 @@ pub fn trace(
                 seize_process(pid, trace_options(false, options.follow), &mut initial)?;
                 sink.attached(pid);
             }
+
             (Mode::EveryCall, pids.first().copied().unwrap_or(0))
         }
     };
+
     let mut tracer = Tracer {
         mode,
         options,
@@ -931,7 +993,9 @@ pub fn trace(
         detaching: false,
         sink,
     };
+
     let result = run(&mut tracer, stop, gate.is_some());
+
     // A launched program dies with its tracer; the filter would otherwise
     // fail its chosen calls.
     if gate.is_some() && result.is_err() {
@@ -942,6 +1006,7 @@ pub fn trace(
             );
         }
     }
+
     let spawn = gate.as_mut().map(Gate::finish);
     let finished = result?;
     if finished.end.is_none()
@@ -949,6 +1014,7 @@ pub fn trace(
     {
         return Err(TraceError::Spawn(error));
     }
+
     Ok(finished)
 }
 
@@ -973,16 +1039,19 @@ impl Ticker {
     )]
     fn start() -> Result<Self, TraceError> {
         use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal as Native};
+
         // Without SA_RESTART, the signal ends a blocked waitpid with EINTR.
         let action = SigAction::new(
             SigHandler::Handler(woken),
             SaFlags::empty(),
             SigSet::empty(),
         );
+
         // SAFETY: the handler does nothing, so it is async-signal-safe, and
         // nothing else in this process handles SIGURG.
         unsafe { nix::sys::signal::sigaction(Native::SIGURG, &action) }
             .map_err(TraceError::System)?;
+
         // The thread by its kernel id: a `pthread_t` is a pointer with musl,
         // which cannot move to the ticker thread.
         let (process, tracer) = (nix::unistd::getpid(), nix::unistd::gettid());
@@ -996,6 +1065,7 @@ impl Ticker {
                     if ended.load(Ordering::Relaxed) {
                         break;
                     }
+
                     let _ = tgkill(process, tracer, libc::SIGURG);
                 }
             })
@@ -1026,6 +1096,7 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
             tracer.report_in_flight();
             reported = monotonic();
         }
+
         if stop.load(Ordering::Relaxed) && !stopping {
             stopping = true;
             if launched {
@@ -1036,6 +1107,7 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
                         nix::sys::signal::Signal::SIGKILL,
                     );
                 }
+
                 let _ = nix::sys::signal::kill(
                     Pid::from_raw(tracer.first.cast_signed()),
                     nix::sys::signal::Signal::SIGKILL,
@@ -1047,6 +1119,7 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
                 }
             }
         }
+
         match wait_for(Pid::from_raw(-1), libc::__WALL) {
             Ok(Some(event)) => {
                 tracer.handle(event)?;
@@ -1054,17 +1127,20 @@ fn run(tracer: &mut Tracer<'_>, stop: &AtomicBool, launched: bool) -> Result<Fin
                     break;
                 }
             }
+
             // A tick.
             Ok(None) | Err(Errno::EINTR) => {}
             Err(Errno::ECHILD) => break,
             Err(error) => return Err(TraceError::System(error)),
         }
     }
+
     // Calls still in progress when the trace ended.
     let threads = std::mem::take(&mut tracer.threads);
     for (tid, thread) in threads {
         tracer.unfinished(tid, thread, Outcome::Unfinished);
     }
+
     Ok(Finished { end: tracer.end })
 }
 
@@ -1078,6 +1154,7 @@ pub fn seed_descriptors_as(process: u32, shown: u32, sink: &mut dyn Sink) {
     let Ok(entries) = std::fs::read_dir(format!("/proc/{process}/fd")) else {
         return;
     };
+
     let time = monotonic();
     let mut fds: Vec<i64> = entries
         .flatten()
@@ -1089,6 +1166,7 @@ pub fn seed_descriptors_as(process: u32, shown: u32, sink: &mut dyn Sink) {
             if let TraceEvent::Descriptor { process, .. } = &mut event {
                 *process = syscalls::Pid::new(shown);
             }
+
             sink.event(event);
         }
     }

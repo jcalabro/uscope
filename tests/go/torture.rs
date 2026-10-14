@@ -39,6 +39,7 @@ async fn integer_in(scenario: &Scenario, thread: ThreadId, text: &str) -> i128 {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         panic!("not stopped");
     };
+
     let expression = Expression::parse(text).expect("an expression");
     let at = scenario.handle().at(StopContext {
         stop: stop_id,
@@ -79,9 +80,11 @@ async fn record_hits(
         else {
             continue;
         };
+
         if !hit.iter().any(|hit| hit.breakpoint == breakpoint) {
             continue;
         }
+
         let id = integer_in(scenario, thread.id, "id").await;
         let round = integer_in(scenario, thread.id, "round").await;
         let rounds = hits.entry(id).or_default();
@@ -123,6 +126,7 @@ async fn steps_under_load_stay_with_their_goroutines_and_lose_no_hit() {
             })
             .await;
         let mut hits = BTreeMap::new();
+
         // The goroutine the last step began in, and the worker it runs.
         let mut stepping = None;
         let mut stops = 0;
@@ -133,6 +137,7 @@ async fn steps_under_load_stay_with_their_goroutines_and_lose_no_hit() {
                 assert_eq!(status, uscope::ExitStatus::Code(0), "{fixture}");
                 break;
             }
+
             // Other threads may hit the breakpoint as a step ends, too.
             record_hits(&scenario, breakpoint, &mut hits).await;
             let next = match &reason {
@@ -164,8 +169,10 @@ async fn steps_under_load_stay_with_their_goroutines_and_lose_no_hit() {
                 }
                 other => panic!("{fixture}: {other:?}"),
             };
+
             reason = scenario.step_to_stop(next).await;
         }
+
         scenario.shutdown().await;
 
         let every = (0..ROUNDS).step_by(EVERY as usize).collect::<Vec<_>>();
@@ -174,6 +181,7 @@ async fn steps_under_load_stay_with_their_goroutines_and_lose_no_hit() {
             rounds.sort_unstable();
             assert_eq!(rounds, every, "{fixture}: worker {id}");
         }
+
         assert_eq!(
             std::fs::read_to_string(&output).expect("read standard output"),
             "every worker's work is right\n",

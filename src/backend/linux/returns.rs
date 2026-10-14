@@ -57,10 +57,12 @@ impl<P: InspectionOps> Controller<P> {
         ) {
             return None;
         }
+
         let inferior = self.inferior.as_ref()?;
         let ActiveKind::Step { start, .. } = &inferior.active.as_ref()?.kind else {
             return None;
         };
+
         start
             .returned
             .clone()
@@ -87,6 +89,7 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return;
         };
+
         let returned = self.read_returned(pid, returning);
         if let Some(ActiveKind::Step { start, .. }) = self
             .inferior
@@ -111,6 +114,7 @@ impl<P: InspectionOps> Controller<P> {
         {
             return None;
         }
+
         let module = self.modules.get(&inferior.loaded_module.id)?;
         let frame = FrameRegisters::Thread(registers);
         let mut runtime = self.thread_runtime(inferior, module, pid, &frame);
@@ -134,6 +138,7 @@ impl<P: InspectionOps> Controller<P> {
                         value.name = Arc::from(function.name());
                     }
                 }
+
                 Some(Returned {
                     module: module.loaded.id,
                     thread: pid,
@@ -141,6 +146,7 @@ impl<P: InspectionOps> Controller<P> {
                 })
             }
             Ok(None) => None,
+
             #[cfg_attr(
                 not(debug_assertions),
                 expect(unused_variables, reason = "only recorded")
@@ -168,9 +174,11 @@ impl<P: InspectionOps> Controller<P> {
         if frame != StackFrameId::INNERMOST || root.thread() != Some(returned.thread) {
             return Ok(Vec::new());
         }
+
         let Some(module) = self.modules.get(&returned.module) else {
             return Ok(Vec::new());
         };
+
         let inferior = self.inferior.as_ref().ok_or(crate::Error::NotRunning)?;
         let registers = FrameRegisters::Thread(self.ptrace.registers(returned.thread)?);
         let mut runtime = self.thread_runtime(inferior, module, returned.thread, &registers);
@@ -198,6 +206,7 @@ impl<P: InspectionOps> Controller<P> {
                     state.clone(),
                 ),
             };
+
             variables.push(Variable {
                 kind: VariableKind::Returned,
                 global: None,
@@ -208,6 +217,7 @@ impl<P: InspectionOps> Controller<P> {
                 state,
             });
         }
+
         Ok(variables)
     }
 

@@ -22,12 +22,16 @@ use super::value;
 use super::{Cli, Control};
 
 const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
+
 /// The most breakpoints one `rbreak` sets, so that a pattern like `.` does
 /// not install thousands of traps.
 const MAX_RBREAK: usize = 200;
+
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
+
 /// How many tasks one request lists.
 const TASK_PAGE: usize = 1024;
+
 /// Instructions shown before and from a stop that no function contains.
 const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
 const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
@@ -97,10 +101,12 @@ pub struct CommandSpec {
     pub command: Command,
     pub name: &'static str,
     pub aliases: &'static [&'static str],
+
     /// The name followed by one word per argument: `<required>`,
     /// `[optional]`, or a bare `alternative|list` that is required.
     pub usage: &'static str,
     pub summary: &'static str,
+
     /// Whether an empty interactive line repeats this command.
     pub repeatable: bool,
 }
@@ -135,6 +141,7 @@ impl CommandSpec {
                 (minimum + 1, maximum.saturating_add(1))
             };
         }
+
         range
     }
 
@@ -578,6 +585,7 @@ pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
         Command::Task => nouns.map(|(singular, _)| *singular).collect(),
         _ => Vec::new(),
     };
+
     command
         .aliases
         .iter()
@@ -600,11 +608,13 @@ pub fn resolve_command(entered: &str) -> Result<&'static CommandSpec> {
     if let Some(spec) = command_named(entered) {
         return Ok(spec);
     }
+
     let names = || {
         COMMANDS
             .iter()
             .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()))
     };
+
     let mut matching = COMMANDS
         .iter()
         .filter(|spec| {
@@ -753,6 +763,7 @@ impl Cli {
             Command::Help => self.help(first)?,
             Command::Quit => return Ok(Control::Quit),
         };
+
         Ok(Control::Continue(output))
     }
 
@@ -783,6 +794,7 @@ impl Cli {
             Some(line) => self.frame_source(line).await?,
             None => parse_breakpoint_location(written)?.ok_or_else(|| spec.usage_error())?,
         };
+
         self.execute_until_stop(self.debugger.jump(location)).await
     }
 
@@ -834,6 +846,7 @@ impl Cli {
             }
             Err(error) => return Err(error.into()),
         };
+
         let mut modules = Vec::with_capacity(loaded.modules.len());
         for record in loaded.modules.iter() {
             modules.push(format::ModuleRow {
@@ -846,6 +859,7 @@ impl Cli {
                     .ok(),
             });
         }
+
         Ok(format::modules(&modules, self.renderers.stdout))
     }
 
@@ -858,6 +872,7 @@ impl Cli {
         let Some((spec, _)) = line_command(line) else {
             return Ok(None);
         };
+
         if matches!(
             spec.command,
             Command::Run
@@ -880,6 +895,7 @@ impl Cli {
                 spec.name
             );
         }
+
         match self.execute(line).await? {
             Control::Continue(output) => Ok(Some(output)),
             Control::ClearScreen | Control::Quit => bail!(
@@ -907,6 +923,7 @@ impl Cli {
         if words.is_empty() && !caught.is_empty() {
             return Ok(format::deleted(&caught.join(", "), renderer));
         }
+
         let words = words.as_slice();
         let Some(ids) = self.existing_ids(words, watches, spec).await? else {
             let what = if watches {
@@ -920,8 +937,10 @@ impl Cli {
                     "breakpoint",
                 )
             };
+
             return Ok(format::deleted(&what, renderer));
         };
+
         for &id in &ids {
             match id {
                 CountedId::Breakpoint(id) => {
@@ -932,6 +951,7 @@ impl Cli {
                 }
             }
         }
+
         Ok(format::deleted(&describe_ids(&ids, renderer), renderer))
     }
 
@@ -949,6 +969,7 @@ impl Cli {
         let Some(ids) = parse_ids(words, watches, most, spec)? else {
             return Ok(None);
         };
+
         let renderer = Renderer::new(false);
         for &id in &ids {
             let known = match id {
@@ -961,10 +982,12 @@ impl Cli {
                     .iter()
                     .any(|watchpoint| watchpoint.id == id),
             };
+
             if !known {
                 bail!("{} was not found", id.describe(renderer));
             }
         }
+
         Ok(Some(ids))
     }
 
@@ -983,6 +1006,7 @@ impl Cli {
             },
             None => self.frame_source(FrameLine::Offset(0)).await?,
         };
+
         let options = uscope::BreakpointOptions {
             hit_condition: parsed.hits.map(str::parse).transpose()?,
             condition: parsed.condition.map(uscope::Condition::parse).transpose()?,
@@ -995,11 +1019,13 @@ impl Cli {
             temporary,
             ..uscope::BreakpointOptions::default()
         };
+
         let address = matches!(location, BreakpointSpec::Address(_));
         let breakpoint = match self.debugger.add_breakpoint_with(location, options).await {
             Ok(breakpoint) => breakpoint,
             Err(error) => return Err(self.suggest(error).await),
         };
+
         let placed = self.placed(&breakpoint).await;
         let renderer = self.renderers.stdout;
         let mut output = format::breakpoint(&breakpoint, &placed, renderer);
@@ -1013,6 +1039,7 @@ impl Cli {
                 )
             );
         }
+
         Ok(output)
     }
 
@@ -1030,6 +1057,7 @@ impl Cli {
                     names.insert(function.name().to_string());
                 }
             }
+
             // Code without debug information is named by its symbol.
             for symbol in image.symbols() {
                 let shown = symbol
@@ -1044,6 +1072,7 @@ impl Cli {
                 }
             }
         }
+
         match names.len() {
             0 => bail!("no function matches '{pattern}'"),
             count if count > MAX_RBREAK => bail!(
@@ -1051,6 +1080,7 @@ impl Cli {
             ),
             _ => {}
         }
+
         let mut lines = Vec::new();
         for name in names {
             let breakpoint = self
@@ -1064,6 +1094,7 @@ impl Cli {
                 self.renderers.stdout,
             ));
         }
+
         Ok(lines.join("\n"))
     }
 
@@ -1086,15 +1117,18 @@ impl Cli {
         let Ok(loaded) = self.debugger.loaded_modules().await else {
             return vec![std::sync::Arc::clone(self.debugger.module_image())];
         };
+
         let mut images = Vec::new();
         for record in loaded.modules.iter() {
             if let Ok(image) = self.debugger.loaded_module_image(record.module.id).await {
                 images.push(image);
             }
         }
+
         if images.is_empty() {
             images.push(std::sync::Arc::clone(self.debugger.module_image()));
         }
+
         images
     }
 
@@ -1126,6 +1160,7 @@ impl Cli {
             }
             _ => None,
         };
+
         match hint {
             Some(hint) => anyhow!("{error}; {hint}"),
             None => error.into(),
@@ -1143,6 +1178,7 @@ impl Cli {
         ) else {
             bail!("the selected frame has no source line");
         };
+
         let file = image
             .source_file(source.file)
             .ok_or_else(|| anyhow!("the selected frame has no source file"))?;
@@ -1155,6 +1191,7 @@ impl Cli {
                 .filter(|line| *line > 0)
                 .ok_or_else(|| anyhow!("line {} {offset:+} is before the file", source.line))?,
         };
+
         Ok(BreakpointSpec::Source {
             path: file.path.as_ref().clone(),
             line: LineNumber::new(number)
@@ -1183,6 +1220,7 @@ impl Cli {
         for resolved in breakpoint.locations.iter() {
             placed.push(self.place(resolved.location, main).await);
         }
+
         placed
     }
 
@@ -1197,11 +1235,13 @@ impl Cli {
             source: None,
             module: None,
         };
+
         let (image, address) = match location {
             uscope::BreakpointLocation::Image(address) => {
                 if let Some(runtime) = main.and_then(|main| main.virtual_address(address).ok()) {
                     placed.location = uscope::BreakpointLocation::Virtual(runtime);
                 }
+
                 (
                     Some(std::sync::Arc::clone(self.debugger.module_image())),
                     address,
@@ -1211,26 +1251,32 @@ impl Cli {
                 let Ok(description) = self.debugger.describe_address(address).await else {
                     return placed;
                 };
+
                 let Some(module) = description.module else {
                     return placed;
                 };
+
                 if module.path.as_path() != self.debugger.module_image().path() {
                     placed.module = Some(std::sync::Arc::clone(&module.path));
                 }
+
                 (
                     self.debugger.loaded_module_image(module.module).await.ok(),
                     module.image.address,
                 )
             }
         };
+
         let Some(image) = image else {
             return placed;
         };
+
         let located = image.locate(address);
         let inline = match &located.inline_frames {
             uscope::InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
             _ => None,
         };
+
         placed.function = inline
             .and_then(|instance| image.code_instance(instance))
             .and_then(|instance| image.function(instance.function()))
@@ -1278,9 +1324,11 @@ impl Cli {
                 )
                 .collect()
         };
+
         if ids.is_empty() {
             return Ok("no breakpoints or watchpoints".to_owned());
         }
+
         for &id in &ids {
             match id {
                 CountedId::Breakpoint(id) => {
@@ -1291,6 +1339,7 @@ impl Cli {
                 }
             }
         }
+
         let renderer = self.renderers.stdout;
         Ok(format!(
             "{} {}",
@@ -1304,6 +1353,7 @@ impl Cli {
             "always" => None,
             condition => Some(condition.parse()?),
         };
+
         let renderer = self.renderers.stdout;
         Ok(match parse_counted_id(id, spec)? {
             CountedId::Breakpoint(id) => format::breakpoint_hit_condition(
@@ -1332,6 +1382,7 @@ impl Cli {
         } else {
             Some(uscope::Condition::parse(&words.join(" "))?)
         };
+
         let renderer = self.renderers.stdout;
         let id = match id {
             CountedId::Breakpoint(id) => id,
@@ -1345,6 +1396,7 @@ impl Cli {
                 ));
             }
         };
+
         let breakpoint = self
             .debugger
             .set_breakpoint_condition(id, condition)
@@ -1398,6 +1450,7 @@ impl Cli {
                 first_stop,
             )?)
         };
+
         match id {
             CountedId::Breakpoint(id) => {
                 self.debugger
@@ -1410,6 +1463,7 @@ impl Cli {
                     .await?;
             }
         }
+
         Ok(if count == 0 {
             format!("{} stops at its next hit", id.describe(renderer))
         } else {
@@ -1477,6 +1531,7 @@ impl Cli {
                 .await;
             traced.push((task, trace));
         }
+
         let images = self
             .source_images(
                 traced
@@ -1505,10 +1560,12 @@ impl Cli {
                 _ => return Err(spec.usage_error()),
             }
         }
+
         let name = line_command(line).map_or(spec.name, |(_, name)| name);
         let traces = self.task_traces().await?;
         let noun = traces.tasks.first().map_or("task", |(task, _)| task.noun);
         let renderer = self.renderers.stdout;
+
         // A runtime's lists keep its tasks in an order of their own, so
         // they are shown by number.
         let mut shown = traces
@@ -1523,6 +1580,7 @@ impl Cli {
                 gaps => bail!("{name} could not be read: {}", gaps.join("; ")),
             }
         }
+
         let mut lines = Vec::new();
         if grouped {
             let mut groups: Vec<(String, Vec<u64>)> = Vec::new();
@@ -1533,6 +1591,7 @@ impl Cli {
                     None => groups.push((place, vec![task.id.number])),
                 }
             }
+
             lines.extend(
                 groups
                     .iter()
@@ -1560,13 +1619,16 @@ impl Cli {
                         ),
                         Err(error) => error.to_string(),
                     };
+
                     lines.extend(stack.lines().map(|line| format!("    {line}")));
                 }
             }
         }
+
         for gap in &traces.gaps {
             lines.push(format!("some {name} could not be read: {gap}"));
         }
+
         let hidden = traces.tasks.len() - shown.len();
         if hidden > 0 {
             lines.push(
@@ -1581,6 +1643,7 @@ impl Cli {
                     .to_string(),
             );
         }
+
         Ok(lines.join("\n"))
     }
 
@@ -1596,6 +1659,7 @@ impl Cli {
                 .into_iter()
                 .find(|task| selects(selected, task))
                 .ok_or_else(|| anyhow!("no {name} is selected"))?;
+
             // Only the selected task's frames are read.
             let traces = self.traced(vec![task], Vec::new()).await?;
             let (task, trace) = &traces.tasks[0];
@@ -1608,6 +1672,7 @@ impl Cli {
                 },
             );
         };
+
         let number = argument
             .parse::<u64>()
             .map_err(|_| anyhow!("invalid {name} ID: {argument}"))?;
@@ -1619,6 +1684,7 @@ impl Cli {
         if found.next().is_some() {
             bail!("several runtimes have a {name} {number}");
         }
+
         let command = line
             .trim_start()
             .split_once(char::is_whitespace)
@@ -1632,6 +1698,7 @@ impl Cli {
                 renderer.paint(Role::Metadata, number)
             ));
         };
+
         let (spec, _) =
             line_command(command).ok_or_else(|| anyhow!("unknown command in `{command}`"))?;
         if !inspects(spec.command) {
@@ -1640,6 +1707,7 @@ impl Cli {
                 spec.name
             );
         }
+
         let snapshot = self.debugger.snapshot().await?;
         self.debugger.select_context(id).await?;
         let output = Box::pin(self.execute(command)).await;
@@ -1652,6 +1720,7 @@ impl Cli {
                 self.debugger.select_frame(frame).await?;
             }
         }
+
         match output? {
             Control::Continue(output) => Ok(output),
             _ => bail!("{name} {number} runs only commands that inspect"),
@@ -1675,11 +1744,13 @@ impl Cli {
         for module in modules {
             images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
+
         Ok(images)
     }
 
     async fn step(&self, kind: StepKind) -> Result<String> {
         let mut output = self.execute_until_stop(self.debugger.step(kind)).await?;
+
         // Finishing a function shows what it returned, as the stop's
         // variables list it.
         if kind == StepKind::Out
@@ -1694,6 +1765,7 @@ impl Cli {
                 output.push_str(&value::variable_summary(variable, self.renderers.stdout));
             }
         }
+
         Ok(output)
     }
 
@@ -1721,6 +1793,7 @@ impl Cli {
                     anyhow!("no call on this line calls {call}; `info calls` lists them")
                 })?
         };
+
         self.execute_until_stop(self.debugger.step_into(target.call))
             .await
     }
@@ -1752,6 +1825,7 @@ impl Cli {
             )),
             _ => {}
         };
+
         tokio::pin!(execution);
         let reason = loop {
             tokio::select! {
@@ -1760,10 +1834,12 @@ impl Cli {
                 reason = &mut execution => break reason?,
             }
         };
+
         let elapsed = started.elapsed();
         while let Ok(event) = events.try_recv() {
             record(Ok(event));
         }
+
         // What could not be used of a library's debug information, and what
         // kept its own views out, once, when it loads.
         for module in loaded {
@@ -1783,6 +1859,7 @@ impl Cli {
                 }));
             }
         }
+
         let stop = self.stop_report(&reason, elapsed).await;
         Ok(join_lines(&lines.join("\n"), &stop))
     }
@@ -1793,6 +1870,7 @@ impl Cli {
         for breakpoint in snapshot.breakpoints.iter() {
             rows.push((breakpoint, self.placed(breakpoint).await));
         }
+
         Ok(format::breakpoints(&rows, self.renderers.stdout))
     }
 
@@ -1831,6 +1909,7 @@ impl Cli {
             ),
             _ => return Err(spec.usage_error()),
         };
+
         if !self
             .debugger
             .watchpoint_capabilities()
@@ -1839,10 +1918,12 @@ impl Cli {
         {
             return Err(uscope::Error::UnsupportedWatchAccess(access).into());
         }
+
         let options = uscope::WatchpointOptions {
             condition,
             ..uscope::WatchpointOptions::default()
         };
+
         let watchpoint = if let Some(location) = parse_watch_location(argument, spec)? {
             self.debugger
                 .add_watchpoint_with(location, access, options)
@@ -1854,6 +1935,7 @@ impl Cli {
                 .await
                 .map_err(|error| expression_error(argument, error))?
         };
+
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }
 
@@ -1865,13 +1947,16 @@ impl Cli {
         if has('p') && has('l') {
             bail!("/p prints a value laid out and /l on one line; choose one");
         }
+
         if has('x') && has('d') {
             bail!("/x prints integers in hexadecimal and /d in decimal; choose one");
         }
+
         let width = match print.width {
             super::config::Width::Columns(columns) => usize::from(columns),
             super::config::Width::Terminal => self.columns(),
         };
+
         Ok(value::Layout {
             pretty: !has('l')
                 && (has('p') || command == Command::Pp || print.style == PrintStyle::Pretty),
@@ -1889,20 +1974,24 @@ impl Cli {
     async fn print_locals(&self, layout: value::Layout) -> Result<String> {
         let renderer = self.renderers.stdout;
         let snapshot = self.debugger.variables().await?;
+
         // Say so rather than print nothing, as for a program built without
         // variable debug information.
         if snapshot.variables.is_empty() && snapshot.completion.exhaustion().is_none() {
             return Ok("no variables in scope".to_owned());
         }
+
         if !layout.pretty {
             return Ok(value::variables(&snapshot, renderer));
         }
+
         let mut lines = Vec::new();
         let mut length = 0;
         for variable in snapshot.variables.iter() {
             if length > value::OUTPUT_LIMIT {
                 break;
             }
+
             let line = match &variable.type_info {
                 Some(type_info) => {
                     value::expanded(
@@ -1918,9 +2007,11 @@ impl Cli {
                 }
                 None => value::untyped(&variable.name, &variable.state, renderer),
             };
+
             length += line.len();
             lines.push(line);
         }
+
         lines.extend(snapshot.completion.exhaustion().map(value::exhaustion));
         Ok(lines.join("\n"))
     }
@@ -1944,6 +2035,7 @@ impl Cli {
             uscope::Evaluation::Value { value, cause } => (value, cause),
             _ => bail!("the evaluation produced an unknown kind of result"),
         };
+
         let mut output = match &inspected.type_info {
             Some(type_info) => {
                 value::expanded(
@@ -1959,6 +2051,7 @@ impl Cli {
             }
             None => value::untyped(text, &inspected.state, renderer),
         };
+
         // Say which operand the program could not provide, when it is not
         // the whole expression.
         if let Some(cause) = cause
@@ -1973,6 +2066,7 @@ impl Cli {
                 )
             );
         }
+
         Ok(output)
     }
 
@@ -2011,6 +2105,7 @@ impl Cli {
             Ok(expression) => self.debugger.expression_type(&expression).await,
             Err(error) => Err(uscope::Error::Expression(error)),
         };
+
         let type_info = match as_expression {
             Ok(type_info) => type_info,
             Err(expression_failure) => {
@@ -2021,9 +2116,11 @@ impl Cli {
                     Ok(expression) => self.debugger.expression_type(&expression).await.ok(),
                     Err(_) => None,
                 };
+
                 found.ok_or_else(|| expression_error(text, expression_failure))?
             }
         };
+
         let images = self.module_images().await?;
         Ok(value::type_definition(
             &type_info,
@@ -2038,6 +2135,7 @@ impl Cli {
         for module in modules.modules.iter() {
             images.push(self.debugger.loaded_module_image(module.module.id).await?);
         }
+
         Ok(images)
     }
 
@@ -2054,6 +2152,7 @@ impl Cli {
                 }
             ));
         }
+
         if let Some(setting @ ("on" | "off")) = text.strip_prefix("step-runtime ").map(str::trim) {
             self.debugger.set_step_into_runtime(setting == "on").await?;
             return Ok(if setting == "on" {
@@ -2062,11 +2161,13 @@ impl Cli {
                 "steps pass over runtime code".to_owned()
             });
         }
+
         let text = text.strip_prefix("var ").map_or(text, str::trim);
         let expression = parse_expression(text)?;
         let Some(target) = expression.assignment_target() else {
             return Err(spec.usage_error());
         };
+
         let evaluation = self
             .debugger
             .evaluate_with(
@@ -2082,6 +2183,7 @@ impl Cli {
         else {
             bail!("the assignment produced no value");
         };
+
         let renderer = self.renderers.stdout;
         Ok(match &assigned.type_info {
             Some(type_info) => format!(
@@ -2120,6 +2222,7 @@ impl Cli {
                             .map(|file| format!("  {}", file.name)),
                     );
                 }
+
                 lines.push("  the views each module carries for its own types".to_owned());
                 lines.push("  the built-in views".to_owned());
                 Ok(lines.join("\n"))
@@ -2137,9 +2240,11 @@ impl Cli {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     views.session.splice(0..0, files.into_iter().rev());
                 }
+
                 for warning in self.reload_views().await {
                     self.warn(&format!("views: {warning}"));
                 }
+
                 Ok(format!(
                     "loaded {}",
                     plural(paths.len() as u64, "view file")
@@ -2154,6 +2259,7 @@ impl Cli {
                 for warning in self.reload_views().await {
                     self.warn(&format!("views: {warning}"));
                 }
+
                 Ok("forgot the loaded view files".to_owned())
             }
             ["check"] => {
@@ -2176,6 +2282,7 @@ impl Cli {
                 if recordings.is_empty() {
                     return Ok(format!("no kernel ran presenting `{text}`"));
                 }
+
                 std::fs::write(path, recordings.concat())
                     .with_context(|| format!("failed to write {path}"))?;
                 Ok(format!(
@@ -2220,6 +2327,7 @@ impl Cli {
             Some(target) if target.starts_with("0x") => parse_address(target)?,
             Some(name) => self.debugger.runtime_address(name).await?,
         };
+
         let range = count.map_or(DisassemblyRange::Function(address), |after| {
             DisassemblyRange::Window {
                 address,
@@ -2245,6 +2353,7 @@ impl Cli {
             }
             result => result?,
         };
+
         self.render_disassembly(&disassembly, marked).await
     }
 
@@ -2258,6 +2367,7 @@ impl Cli {
         for module in format::disassembly_modules(disassembly) {
             images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
+
         let modules = self.debugger.loaded_modules().await?;
         Ok(format::disassembly(
             disassembly,
@@ -2292,6 +2402,7 @@ impl Cli {
             let program_counter = self.selected_instruction().await?;
             return Ok((program_counter, program_counter));
         }
+
         let location = match self.debugger.current_location().await {
             Ok(location) => location,
             Err(uscope::Error::AddressOutsideModule) => {
@@ -2300,6 +2411,7 @@ impl Cli {
             }
             Err(error) => return Err(error.into()),
         };
+
         let modules = self.debugger.loaded_modules().await?;
         let module = modules
             .modules
@@ -2326,6 +2438,7 @@ impl Cli {
                 .instruction
                 .ok_or_else(|| anyhow!("frame {level} is suspended, and runs no code"));
         }
+
         let registers = self.debugger.registers().await?;
         registers
             .registers
@@ -2375,6 +2488,7 @@ impl Cli {
             FrameTarget::Inward(_) if selected == 0 => bail!("the innermost frame is selected"),
             FrameTarget::Inward(count) => selected.saturating_sub(count),
         };
+
         let index = trace
             .frames
             .iter()
@@ -2408,6 +2522,7 @@ impl Cli {
                 }
             }
         }
+
         Ok(output)
     }
 
@@ -2436,6 +2551,7 @@ impl Cli {
             }
             Err(error) => return Err(error.into()),
         };
+
         self.describe(&location, with_address).await
     }
 
@@ -2459,6 +2575,7 @@ impl Cli {
                 .map(|file| renderer.location(&file.path, source.line)),
             None => None,
         };
+
         if let Some(source) = source {
             let mut text = format!(
                 "{} at {}",
@@ -2472,8 +2589,10 @@ impl Cli {
                     renderer.paint(Role::Metadata, location.address)
                 );
             }
+
             return Ok(text);
         }
+
         let modules = self.debugger.loaded_modules().await?;
         Ok(format!(
             "{} at {} from {}",
@@ -2517,6 +2636,7 @@ impl Cli {
         } else {
             None
         };
+
         // Source files are identified within their owning module's image.
         let images = self.source_images(trace.frames.iter()).await?;
         Ok(format::backtrace(
@@ -2555,6 +2675,7 @@ impl Cli {
         } else {
             template.replace("{path}", &quoted).replace("{line}", &line)
         };
+
         let status = tokio::task::spawn_blocking(move || {
             let mut editor = std::process::Command::new("sh")
                 .args(["-c", &command])
@@ -2567,6 +2688,7 @@ impl Cli {
         {
             bail!("the editor exited with {status}");
         }
+
         Ok(String::new())
     }
 
@@ -2618,6 +2740,7 @@ impl Cli {
                 }
             }
         }
+
         let renderer = self.renderers.stdout;
         let source = &self.settings.config.source;
         let lexed = (renderer.is_colored() && source.highlight)
@@ -2636,6 +2759,7 @@ impl Cli {
                 .map_or(&[][..], |(_, spans)| &spans[..]);
             super::highlight::render(&line.text, spans, tab_width, renderer)
         };
+
         format::source_context(context, &marks, located, &text, renderer)
     }
 
@@ -2654,6 +2778,7 @@ impl Cli {
         if cached.is_some() {
             return cached;
         }
+
         let text = std::fs::read_to_string(path).ok()?;
         let spans = super::highlight::lex(&text, language);
         let lexed = std::sync::Arc::new(
@@ -2675,10 +2800,13 @@ impl Cli {
 enum FrameTarget {
     /// The frame already selected.
     Selected,
+
     /// The frame at a backtrace level.
     Level(u64),
+
     /// A frame this many levels toward the callers, or the outermost.
     Outward(u64),
+
     /// A frame this many levels toward the stop, or the innermost.
     Inward(u64),
 }
@@ -2719,6 +2847,7 @@ fn parse_memory_byte_count(value: Option<&str>, spec: &CommandSpec) -> Result<u6
     let Some(value) = value else {
         return Ok(DEFAULT_HEX_DUMP_BYTES);
     };
+
     parse_count(value)
         .filter(|count| (1..=MAX_HEX_DUMP_BYTES).contains(count))
         .ok_or_else(|| spec.usage_error())
@@ -2780,6 +2909,7 @@ fn frame_line(written: &str) -> Result<Option<FrameLine>> {
             lines
         })));
     }
+
     if !written.is_empty() && written.bytes().all(|byte| byte.is_ascii_digit()) {
         let line = written
             .parse()
@@ -2787,8 +2917,10 @@ fn frame_line(written: &str) -> Result<Option<FrameLine>> {
         if line == 0 {
             bail!("source line numbers are one-based");
         }
+
         return Ok(Some(FrameLine::Number(line)));
     }
+
     Ok(None)
 }
 
@@ -2827,6 +2959,7 @@ fn parse_break<'a>(line: &'a str, spec: &CommandSpec) -> Result<BreakLine<'a>> {
         }
         _ => return Err(spec.usage_error()),
     }
+
     for (index, &start) in starts.iter().enumerate() {
         let (offset, keyword) = words[start];
         let end = starts
@@ -2836,6 +2969,7 @@ fn parse_break<'a>(line: &'a str, spec: &CommandSpec) -> Result<BreakLine<'a>> {
         if text.is_empty() != (keyword == "disabled") {
             return Err(spec.usage_error());
         }
+
         let twice = || anyhow!("`{keyword}` is given twice");
         match keyword {
             "disabled" if !parsed.disabled => parsed.disabled = true,
@@ -2845,6 +2979,7 @@ fn parse_break<'a>(line: &'a str, spec: &CommandSpec) -> Result<BreakLine<'a>> {
             _ => return Err(twice()),
         }
     }
+
     Ok(parsed)
 }
 
@@ -2862,14 +2997,18 @@ fn option_words(line: &str) -> Vec<(usize, &str)> {
                 '"' => quoted = false,
                 _ => {}
             }
+
             continue;
         }
+
         if character.is_whitespace() && depth == 0 {
             if let Some(begun) = start.take() {
                 words.push((begun, &line[begun..offset]));
             }
+
             continue;
         }
+
         start.get_or_insert(offset);
         match character {
             '"' => quoted = true,
@@ -2878,9 +3017,11 @@ fn option_words(line: &str) -> Vec<(usize, &str)> {
             _ => {}
         }
     }
+
     if let Some(begun) = start {
         words.push((begun, &line[begun..]));
     }
+
     words
 }
 
@@ -2889,6 +3030,7 @@ fn unquoted(text: &str) -> Result<String> {
     let Some(inner) = text.strip_prefix('"') else {
         return Ok(text.to_owned());
     };
+
     let mut message = String::new();
     let mut characters = inner.chars();
     while let Some(character) = characters.next() {
@@ -2906,6 +3048,7 @@ fn unquoted(text: &str) -> Result<String> {
             other => message.push(other),
         }
     }
+
     bail!("a log message in quotes needs its closing quote")
 }
 
@@ -2922,6 +3065,7 @@ fn parse_ids(
     if words == ["all"] {
         return Ok(None);
     }
+
     let mut ids = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for word in words {
@@ -2934,20 +3078,24 @@ fn parse_ids(
         if first > last {
             bail!("range {word} is empty");
         }
+
         for id in first..=last {
             if ids.len() > most {
                 break;
             }
+
             let id = if watch {
                 CountedId::Watchpoint(WatchpointId::new(id))
             } else {
                 CountedId::Breakpoint(BreakpointId::new(id))
             };
+
             if seen.insert(id) {
                 ids.push(id);
             }
         }
     }
+
     Ok(Some(ids))
 }
 
@@ -2980,6 +3128,7 @@ fn describe_ids(ids: &[CountedId], renderer: Renderer) -> String {
         if ids.is_empty() {
             return None;
         }
+
         let numbers = ids
             .iter()
             .map(|id| renderer.paint(Role::Metadata, id).to_string())
@@ -2990,6 +3139,7 @@ fn describe_ids(ids: &[CountedId], renderer: Renderer) -> String {
             if ids.len() == 1 { "" } else { "s" }
         ))
     };
+
     let breakpoints = ids
         .iter()
         .filter_map(|id| match id {
@@ -3020,6 +3170,7 @@ fn parse_watch_location(argument: &str, spec: &CommandSpec) -> Result<Option<Wat
     if !argument.starts_with("0x") {
         return Ok(None);
     }
+
     let (address, byte_count) = argument.split_once(':').ok_or_else(|| spec.usage_error())?;
     Ok(Some(WatchpointSpec::Location {
         address: parse_address(address).map_err(|_| spec.usage_error())?,
@@ -3034,6 +3185,7 @@ pub fn parse_breakpoint_location(argument: &str) -> Result<Option<BreakpointSpec
     if argument.starts_with("0x") {
         return Ok(Some(BreakpointSpec::Address(parse_address(argument)?)));
     }
+
     let bytes = argument.as_bytes();
     let separator = (0..bytes.len()).rev().find(|&index| {
         bytes[index] == b':'
@@ -3043,10 +3195,12 @@ pub fn parse_breakpoint_location(argument: &str) -> Result<Option<BreakpointSpec
     let Some(separator) = separator else {
         return Ok(Some(BreakpointSpec::Function(argument.to_owned())));
     };
+
     let (path, location) = (&argument[..separator], &argument[separator + 1..]);
     if path.is_empty() || location.is_empty() {
         return Ok(None);
     }
+
     let path = PathBuf::from(path);
     Ok(Some(match location.parse::<u64>() {
         Ok(line) => BreakpointSpec::Source {
@@ -3076,6 +3230,7 @@ impl Cli {
         for code in uscope::signal_codes() {
             policies.push((code, self.debugger.signal_policy(code).await?));
         }
+
         Ok(format::signal_policies(&policies, self.renderers.stdout))
     }
 
@@ -3088,9 +3243,11 @@ impl Cli {
         for action in &arguments[1..] {
             apply_signal_action(&mut policy, action)?;
         }
+
         if arguments.len() > 1 {
             self.debugger.set_signal_policy(code, policy).await?;
         }
+
         Ok(format::signal_policies(
             &[(code, policy)],
             self.renderers.stdout,
@@ -3110,15 +3267,18 @@ impl Cli {
                 .strip_prefix("if ")
                 .map_or((rest, None), |condition| ("", Some(condition.trim()))),
         };
+
         let mut words = words.split_whitespace().peekable();
         let phase = match words.peek().copied() {
             Some("entry") => uscope::CatchPhase::Entry,
             Some("exit") => uscope::CatchPhase::Exit,
             _ => uscope::CatchPhase::Both,
         };
+
         if phase != uscope::CatchPhase::Both {
             words.next();
         }
+
         let mut calls = Vec::new();
         for word in words {
             let named = uscope::syscalls::Abi::ALL
@@ -3136,8 +3296,10 @@ impl Cli {
             if named.is_empty() {
                 bail!("no system call is named {word}");
             }
+
             calls.extend(named);
         }
+
         let condition = condition
             .filter(|condition| !condition.is_empty())
             .map(uscope::Condition::parse)
@@ -3146,6 +3308,7 @@ impl Cli {
         if rest.trim() == "if" {
             return Err(spec.usage_error());
         }
+
         let catchpoint = self
             .debugger
             .add_catchpoint(calls.into(), phase, condition)
@@ -3175,6 +3338,7 @@ impl Cli {
                 renderer.paint(Role::Metadata, format!("c{id}"))
             ));
         }
+
         Ok((deleted, others))
     }
 
@@ -3184,6 +3348,7 @@ impl Cli {
         if arguments.first() == Some(&"syscall") {
             return self.catch_syscall(rest, spec).await;
         }
+
         let current = *self
             .exceptions
             .lock()
@@ -3218,9 +3383,11 @@ impl Cli {
                     }
                     _ => return Err(spec.usage_error()),
                 };
+
                 (vec![filter], stops)
             }
         };
+
         let width = shown
             .iter()
             .map(|filter| filter.id.len())
@@ -3261,6 +3428,7 @@ pub fn apply_signal_action(policy: &mut SignalPolicy, action: &str) -> Result<()
             "unknown signal action '{other}'; use stop, nostop, print, noprint, pass, or nopass"
         ),
     }
+
     Ok(())
 }
 
@@ -3285,13 +3453,16 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     {
         bail!("unknown format '/{format}'; {} takes none", spec.name);
     }
+
     if let Some(letter) = format.chars().find(|letter| !"xdrpl".contains(*letter)) {
         bail!("unknown format '/{letter}'; print takes /x, /d, /r, /p, and /l");
     }
+
     let (minimum, maximum) = spec.arity();
     if !(minimum..=maximum).contains(&arguments.len()) {
         return Err(spec.usage_error());
     }
+
     Ok((spec, format, rest, arguments))
 }
 
@@ -3299,6 +3470,7 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
 struct TaskTraces {
     selected: Option<ExecutionContext>,
     tasks: Vec<(TaskSnapshot, uscope::Result<Backtrace>)>,
+
     /// Why some tasks could not be read.
     gaps: Vec<Arc<str>>,
     images: BTreeMap<ModuleId, Arc<ModuleImage>>,
@@ -3369,6 +3541,7 @@ mod tests {
                     Some(command.name)
                 );
             }
+
             assert!(
                 command
                     .usage
@@ -3378,6 +3551,7 @@ mod tests {
                 command.usage
             );
         }
+
         assert_eq!(spec(Command::Run).arity(), (0, 0));
         assert_eq!(spec(Command::Break).arity(), (0, usize::MAX));
         assert_eq!(spec(Command::Info).arity(), (1, usize::MAX));
@@ -3435,6 +3609,7 @@ mod tests {
                 BreakpointSpec::Function(name.to_owned())
             );
         }
+
         assert!(parse("0xzz").is_none());
         assert!(matches!(
             parse("main.c:12").expect("source"),
@@ -3446,6 +3621,7 @@ mod tests {
         ));
         assert!(parse("main.c:0").is_none());
         assert!(parse(":12").is_none());
+
         // Qualified names are functions, also within a file.
         assert_eq!(
             parse("ns::Type::run").expect("qualified function"),
@@ -3471,6 +3647,7 @@ mod tests {
         for expression in ["counter", "one.c::duplicate", "ns::value"] {
             assert_eq!(parse_watch_location(expression, spec).expect("name"), None);
         }
+
         for invalid in ["0x10:", "0x10", "0x10:-1", "0xzz:8", "0x10:many"] {
             assert!(parse_watch_location(invalid, spec).is_err(), "{invalid}");
         }

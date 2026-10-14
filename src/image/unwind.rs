@@ -22,17 +22,20 @@ pub struct UnwindRecord {
     pub eh_frame_base: U64,
     pub text_base: U64,
     pub got_base: U64,
+
     /// Where each section's first malformed entry is, [`WHOLE_SECTION`]
     /// when the section cannot be enumerated, and why, or [`NONE`].
     pub eh_frame_error_offset: U64,
     pub debug_frame_error_offset: U64,
     pub eh_frame_error: U32,
     pub debug_frame_error: U32,
+
     /// Where Go's table is, where its code starts, and where `go:func.*`
     /// is, as Go's table parser reads them.
     pub go_table: U64,
     pub go_text: U64,
     pub go_func: U64,
+
     /// The Go release that built the image.
     pub go_major: U32,
     pub go_minor: U32,
@@ -47,13 +50,20 @@ impl Record for UnwindRecord {
 /// [`UnwindRecord::flags`].
 pub mod unwind_flags {
     pub const EH_FRAME_BASE: u8 = 1 << 0;
+
     pub const TEXT_BASE: u8 = 1 << 1;
+
     pub const GOT_BASE: u8 = 1 << 2;
+
     pub const BIG_ENDIAN: u8 = 1 << 3;
+
     /// The image has Go's table, in [`super::TableKind::GoTable`].
     pub const GO_TABLE: u8 = 1 << 4;
+
     pub const GO_FUNC: u8 = 1 << 5;
+
     pub const GO_RELEASE: u8 = 1 << 6;
+
     pub const ALL: u8 = (1 << 7) - 1;
 }
 
@@ -97,10 +107,13 @@ pub struct FdeIndex {
 pub struct GoTableFacts {
     /// The table's image address.
     pub address: u64,
+
     /// The address function offsets are relative to.
     pub text: u64,
+
     /// The image address of `go:func.*`, when known.
     pub go_func: Option<u64>,
+
     /// The Go release that built the image, as (major, minor).
     pub release: Option<(u32, u32)>,
 }
@@ -110,6 +123,7 @@ pub struct GoTableFacts {
 pub struct GoTableData {
     pub bytes: std::sync::Arc<[u8]>,
     pub facts: GoTableFacts,
+
     /// Where each function keeps its caller's frame pointer saved, by the
     /// function's index in the table.
     pub frame_saves: Vec<Option<std::ops::Range<u64>>>,
@@ -133,9 +147,11 @@ pub struct Unwind {
     pub bases: Bases,
     pub big_endian: bool,
     pub address_size: u8,
+
     /// Code the Go toolchain compiled.
     pub go_code: Vec<AddressRange<ImageAddress>>,
     pub go: Option<GoTableData>,
+
     /// Each PLT stub instruction, by how many words the stub has pushed
     /// before it.
     pub stub_frames: Vec<(AddressRange<ImageAddress>, u32)>,
@@ -158,6 +174,7 @@ pub fn add_to<'a>(
             None => (0, NONE),
         })
     };
+
     // Each entry's offset is an interval's 32-bit value.
     if [&unwind.eh_frame, &unwind.debug_frame]
         .iter()
@@ -165,6 +182,7 @@ pub fn add_to<'a>(
     {
         return Err(TooLarge);
     }
+
     let (eh_frame_error_offset, eh_frame_error) = error(&unwind.eh_frame_index)?;
     let (debug_frame_error_offset, debug_frame_error) = error(&unwind.debug_frame_index)?;
     let mut flags = 0;
@@ -193,6 +211,7 @@ pub fn add_to<'a>(
             flags |= flag;
         }
     }
+
     let go = unwind.go.as_ref();
     let facts = go.map(|go| go.facts);
     let release = facts.and_then(|facts| facts.release).unwrap_or_default();
@@ -212,6 +231,7 @@ pub fn add_to<'a>(
         flags,
         address_size: unwind.address_size,
     };
+
     let go_code = index::intervals(unwind.go_code.iter().map(|range| (*range, 0)));
     builder
         .owned_table(vec![record])
@@ -246,6 +266,7 @@ pub fn add_to<'a>(
             .bytes(TableKind::GoTable, go.bytes.to_vec())
             .owned_table(saves);
     }
+
     Ok(())
 }
 
@@ -254,6 +275,7 @@ pub fn add_to<'a>(
 pub enum FdeMiss<'a> {
     /// No entry covers it.
     NoEntry,
+
     /// The section is malformed before any entry covering it: the
     /// description of the first problem.
     Malformed(&'a str),
@@ -442,6 +464,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             Err("unwinding tables without their facts".into())
         };
     };
+
     let flag = |flag| record.flags & flag != 0;
     let error = |offset: U64, text: U32, section: usize| {
         if text.get() == NONE {
@@ -451,6 +474,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
                 && (offset.get() == WHOLE_SECTION || offset.get() < section as u64)
         }
     };
+
     let unset = |present: bool, value: U64| present || value.get() == 0;
     let eh_frame = image.bytes(TableKind::EhFrame).len();
     let debug_frame = image.bytes(TableKind::DebugFrame).len();
@@ -484,6 +508,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("the unwinding facts are malformed".into());
     }
+
     if !index::valid_intervals(image.shared(TableKind::EhFrameIndex), eh_frame)
         || !index::valid_intervals(image.shared(TableKind::DebugFrameIndex), debug_frame)
         || !index::valid_intervals(image.shared(TableKind::GoCode), 1)
@@ -494,6 +519,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("an unwinding index is malformed".into());
     }
+
     if !image
         .table::<FrameSaveRecord>()
         .iter()
@@ -505,5 +531,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a Go frame save is malformed".into());
     }
+
     Ok(())
 }

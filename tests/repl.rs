@@ -59,8 +59,10 @@ fn contains_sgr(bytes: &[u8]) -> bool {
         {
             return true;
         }
+
         offset += start + 2;
     }
+
     false
 }
 
@@ -255,6 +257,7 @@ fn kept_session(project: &Path, state: &Path, said: &[&str]) -> OsSession {
             .expect(*text)
             .unwrap_or_else(|error| panic!("expected {text:?}: {error}"));
     }
+
     session.expect("(uscope) ").expect("initial prompt");
     session
 }
@@ -301,6 +304,7 @@ fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
         "display/x last_call",
         "display 1: /x last_call",
     );
+
     // Temporary breakpoints belong to one stop, and are not kept.
     run(&mut session, "tbreak caller", "temporary breakpoint 2 set");
     quit(session);
@@ -385,6 +389,7 @@ fn interactive_pp_lays_values_out_to_the_terminal_width() {
         "pp record->inner",
         "(inner_record) record->inner = {\r\n  signed_value = -7,\r\n  unsigned_value = 9,\r\n}\r\n",
     );
+
     // The width is measured again for each line.
     session
         .get_process_mut()
@@ -436,6 +441,7 @@ fn interactive_output_taller_than_the_terminal_goes_through_the_pager() {
         .set_window_size(80, 10)
         .expect("shorten the terminal");
     run(&mut session, "help", "paged:   quit");
+
     // Output that fits is printed as it is.
     run(&mut session, "breakpoints", "\r\nno breakpoints\r\n");
     quit(session);
@@ -445,6 +451,7 @@ fn interactive_output_taller_than_the_terminal_goes_through_the_pager() {
 fn interactive_tab_completes_commands_locations_and_members() {
     let state = support::ScratchDir::new("repl-complete");
     let mut session = repl(&fixture("records-c-gcc-o0"), state.path());
+
     // A command, then a function, each the only candidate.
     session.send("tbrea").expect("type a prefix");
     session.send("\t").expect("complete the command");
@@ -456,6 +463,7 @@ fn interactive_tab_completes_commands_locations_and_members() {
         .expect("the completed breakpoint");
     session.expect("(uscope) ").expect("prompt");
     run(&mut session, "run", "stopped at breakpoint 1");
+
     // A member of what a pointer points to, which the debugger reads.
     session.send("p record->in").expect("type a member prefix");
     session.send("\t").expect("complete the member");

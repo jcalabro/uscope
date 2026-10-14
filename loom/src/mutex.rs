@@ -41,6 +41,7 @@ use loom::thread::ThreadId;
 struct Waiters {
     /// Each thread's `Notify`, made the first time it waits.
     notifies: std::sync::Mutex<Vec<(ThreadId, Arc<Notify>)>>,
+
     /// Those waiting now.
     waiting: std::sync::Mutex<Vec<Arc<Notify>>>,
 }
@@ -75,6 +76,7 @@ impl Waiters {
         if !waiting.iter().any(|listed| Arc::ptr_eq(listed, &notify)) {
             waiting.push(Arc::clone(&notify));
         }
+
         notify
     }
 
@@ -100,6 +102,7 @@ impl Waiters {
 pub struct Mutex<T> {
     locked: AtomicBool,
     waiters: Waiters,
+
     /// Only the holder of `locked` locks it, so it never waits.
     data: std::sync::Mutex<T>,
 }
@@ -124,6 +127,7 @@ impl<T> Mutex<T> {
         while !self.take() {
             self.waiters.enlist().wait();
         }
+
         Ok(self.guard())
     }
 

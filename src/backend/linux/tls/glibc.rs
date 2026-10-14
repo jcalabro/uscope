@@ -22,17 +22,23 @@ use super::{ProcessServices, TlsError, dtv, failed, read_word, thread_pointer};
 /// The C library, where glibc since 2.34 defines the descriptors. Lookups
 /// fall back to any module that defines them, as libpthread does before.
 const C_LIBRARY: &str = "libc.so.6";
+
 /// The dynamic loader, which exports its own state.
 const LOADER: &str = "ld-linux-x86-64.so.2";
+
 /// A loader with more TLS slotinfo lists than this is corrupt.
 const MAX_SLOTINFO_LISTS: usize = 1 << 16;
+
 /// `TLS_DTV_UNALLOCATED` and every other odd DTV pointer mark a block the
 /// thread has not allocated.
 const UNALLOCATED_BIT: u64 = 1;
+
 /// The size of a DTV slot: a block's address and the allocation to free.
 const DTV_SLOT_SIZE: u64 = 16;
+
 /// The TLS module number glibc gives a statically linked executable.
 const EXECUTABLE_MODULE: u64 = 1;
+
 /// `l_tls_offset` values that name no static TLS block.
 const NO_TLS_OFFSET: u64 = 0;
 const FORCED_DYNAMIC_TLS_OFFSET: u64 = u64::MAX;
@@ -42,6 +48,7 @@ const FORCED_DYNAMIC_TLS_OFFSET: u64 = u64::MAX;
 struct Field {
     name: &'static str,
     bits: u32,
+
     /// The element count of an array field; zero for a flexible array.
     count: u32,
     offset: i32,
@@ -57,6 +64,7 @@ impl Field {
                 self.name, self.count
             )));
         }
+
         index
             .checked_mul(u64::from(self.bits / 8))
             .and_then(|element| {
@@ -95,6 +103,7 @@ impl Glibc<'_> {
                  libpthread"
             )));
         };
+
         let mut bytes = [0; 12];
         self.read(address, &mut bytes)?;
         let (words, _) = bytes.as_chunks::<4>();
@@ -104,12 +113,14 @@ impl Glibc<'_> {
                 .ok_or_else(|| failed("a TLS field descriptor is truncated"))?;
             Ok(u32::from_le_bytes(*word))
         };
+
         let field = Field {
             name,
             bits: word(0)?,
             count: word(1)?,
             offset: i32::from_le_bytes(word(2)?.to_le_bytes()),
         };
+
         // A zero width marks a field this C library does not have. Element
         // widths are whole bytes, and x86-64 descriptors are never
         // byte-swapped.
@@ -119,6 +130,7 @@ impl Glibc<'_> {
                 field.bits
             )));
         }
+
         Ok(field)
     }
 
@@ -132,6 +144,7 @@ impl Glibc<'_> {
                 field.name, field.bits
             )));
         }
+
         let address = field.address(base, index)?;
         let mut bytes = [0; 8];
         let width = (field.bits / 8) as usize;
@@ -152,6 +165,7 @@ impl Glibc<'_> {
             Ok(pointer) => Some(self.fetch_named("_thread_db___nptl_rtld_global", pointer, 0)?),
             Err(_) => self.symbol(LOADER, "_rtld_global").ok(),
         };
+
         if let Some(rtld_global) = rtld_global {
             return self.fetch_named(
                 "_thread_db_rtld_global__dl_tls_dtv_slotinfo_list",
@@ -159,6 +173,7 @@ impl Glibc<'_> {
                 0,
             );
         }
+
         let variable = self.symbol(C_LIBRARY, "_dl_tls_dtv_slotinfo_list")?;
         self.fetch_named("_thread_db__dl_tls_dtv_slotinfo_list", variable, 0)
     }
@@ -175,6 +190,7 @@ impl Glibc<'_> {
             if visited.len() == MAX_SLOTINFO_LISTS || !visited.insert(list) {
                 return Err(failed("the loader's TLS slotinfo lists form a cycle"));
             }
+
             let entries_here = self.fetch(length, list, 0)?;
             let end = first
                 .checked_add(entries_here)
@@ -182,9 +198,11 @@ impl Glibc<'_> {
             if module < end {
                 return entries.address(list, module - first);
             }
+
             first = end;
             list = self.fetch(next, list, 0)?;
         }
+
         Err(failed(format!(
             "the loader has no TLS slot for module {module}"
         )))
@@ -196,6 +214,7 @@ impl Glibc<'_> {
         if offset == NO_TLS_OFFSET || offset == FORCED_DYNAMIC_TLS_OFFSET {
             return Err(TlsError::Deferred);
         }
+
         // x86-64 places static blocks below the thread pointer.
         thread_pointer.checked_sub(offset).ok_or_else(|| {
             failed(format!(
@@ -213,20 +232,24 @@ impl Glibc<'_> {
         if map == 0 {
             return Err(failed(format!("TLS module {module} is not loaded")));
         }
+
         let generation = self.fetch_named("_thread_db_dtv_slotinfo_gen", entry, 0)?;
         let dtv = self.fetch_named("_thread_db_pthread_dtvp", thread_pointer, 0)?;
         let slots = self.field("_thread_db_dtv_dtv")?;
         let counter = slots.address(dtv, 0)?;
         let dtv_generation = self.fetch_named("_thread_db_dtv_t_counter", counter, 0)?;
+
         // A DTV older than the module may not have its slot at all.
         if dtv_generation < generation {
             return self.static_block(thread_pointer, map);
         }
+
         let slot = slots.address(dtv, module)?;
         let block = self.fetch_named("_thread_db_dtv_t_pointer_val", slot, 0)?;
         if block & UNALLOCATED_BIT != 0 {
             return self.static_block(thread_pointer, map);
         }
+
         Ok(block)
     }
 }
@@ -244,6 +267,7 @@ pub(super) fn tls_address(
     if module == 0 {
         return Err(TlsError::NoTls);
     }
+
     // x86-64 glibc keeps the thread descriptor at the thread pointer.
     let thread_pointer = services
         .registers(thread)
@@ -252,6 +276,7 @@ pub(super) fn tls_address(
     if thread_pointer == 0 {
         return Err(TlsError::Deferred);
     }
+
     glibc
         .block(thread_pointer, module)?
         .checked_add(offset)
@@ -277,6 +302,7 @@ pub(super) fn static_executable_tls_address(
     if block == 0 || block & UNALLOCATED_BIT != 0 {
         return Err(TlsError::Deferred);
     }
+
     // The executable's block is static, so it lies below the thread pointer.
     if block >= thread_pointer {
         return Err(failed(format!(
@@ -284,6 +310,7 @@ pub(super) fn static_executable_tls_address(
              {thread_pointer:#x}"
         )));
     }
+
     block
         .checked_add(offset)
         .ok_or_else(|| failed("the TLS address overflows"))
@@ -317,6 +344,7 @@ pub(super) fn fuzz(data: &[u8]) {
         "_thread_db_dtv_t_counter",
         "_thread_db_dtv_t_pointer_val",
     ];
+
     // Where in the memory each symbol is, the thread pointer, the link map,
     // and the offset, each a 16-bit place; 0xffff names nothing.
     const HEADER: usize = (SYMBOLS.len() + 3) * 2;
@@ -360,6 +388,7 @@ pub(super) fn fuzz(data: &[u8]) {
     let Some((header, bytes)) = data.split_at_checked(HEADER) else {
         return;
     };
+
     let memory = Memory { header, bytes };
     let link_map = memory.place(SYMBOLS.len() + 1).unwrap_or(0);
     let offset = memory
@@ -446,6 +475,7 @@ mod tests {
                 symbols: BTreeMap::new(),
                 thread_pointer: THREAD_POINTER,
             };
+
             process.word(THREAD_POINTER, THREAD_POINTER);
             process.descriptor("_thread_db_link_map_l_tls_modid", 64, 1, 0x430);
             process.descriptor("_thread_db_link_map_l_tls_offset", 64, 1, 0x428);
@@ -489,6 +519,7 @@ mod tests {
             } else {
                 (SECOND_LIST, module - FIRST_LIST_LENGTH)
             };
+
             let entry = list + 0x20 + 24 * index;
             self.word(entry + 0x10, generation);
             self.word(entry, map);
@@ -574,6 +605,7 @@ mod tests {
         let mut unloaded = Process::new(3, 0x5555_0000, 0x80);
         unloaded.slotinfo(3, 2, 0);
         assert!(failure(&unloaded).contains("TLS module 3 is not loaded"));
+
         // The module's DTV slot must exist in the described array.
         let mut short = Process::new(3, 0x5555_0000, 0x80);
         short.descriptor("_thread_db_dtv_dtv", 128, 3, 0x10);
@@ -607,11 +639,13 @@ mod tests {
                 symbols: BTreeMap::new(),
                 thread_pointer: THREAD_POINTER,
             };
+
             process.word(THREAD_POINTER, THREAD_POINTER);
             process.word(THREAD_POINTER + 8, DTV);
             process.word(DTV + 16, block);
             static_executable_tls_address(&process, Pid::from_raw(1), 0x24)
         };
+
         let block = THREAD_POINTER - 0x80;
         assert_eq!(address(block), Ok(block + 0x24));
         assert_eq!(address(0), Err(TlsError::Deferred));
@@ -627,8 +661,10 @@ mod tests {
     enum Loader {
         /// glibc since 2.34: libc points at the loader's state.
         Pointer,
+
         /// glibc before 2.34: the loader exports its state.
         Exported,
+
         /// A statically linked C library holds the lists' head itself.
         Static,
     }
@@ -638,19 +674,26 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Model {
         loader: Loader,
+
         /// `l_tls_modid` and `l_tls_offset` in the module's link map.
         link_map: [u32; 2],
+
         /// The DTV pointer in the thread descriptor.
         dtv_pointer: u32,
+
         /// The slotinfo lists' head in the loader's state.
         head: u32,
+
         /// A slotinfo list's length and next list, then its entries.
         list: [u32; 3],
+
         /// An entry's size, then its generation and link map.
         entry: [u32; 3],
+
         /// A DTV slot's size, its counter and block, which may share a word
         /// as in glibc's union, and where the slots start in the DTV.
         slot: [u32; 4],
+
         /// The widths of the module number, list lengths, generations, and
         /// the DTV's counter, in bits.
         widths: [u32; 4],
@@ -658,6 +701,7 @@ mod tests {
         module: u64,
         module_generation: u64,
         dtv_generation: u64,
+
         /// The module's DTV slot: its block, or an odd value when the
         /// thread has not allocated it.
         block: u64,
@@ -777,6 +821,7 @@ mod tests {
                 symbols: BTreeMap::new(),
                 thread_pointer: self.thread_pointer,
             };
+
             let [module_bits, ..] = self.widths;
             let [modid, tls_offset] = self.link_map;
             process.descriptor(
@@ -804,6 +849,7 @@ mod tests {
                         .insert("__nptl_rtld_global", NPTL_RTLD_GLOBAL);
                     process.descriptor("_thread_db___nptl_rtld_global", 64, 1, 0);
                     process.word(NPTL_RTLD_GLOBAL, RTLD_GLOBAL);
+
                     // The loader exports its state too, which the pointer
                     // in libc takes precedence over, as in glibc.
                     process.symbols.insert("_rtld_global", 0x2200_0000);
@@ -820,6 +866,7 @@ mod tests {
                     return HEAD;
                 }
             };
+
             process.descriptor(
                 "_thread_db_rtld_global__dl_tls_dtv_slotinfo_list",
                 64,
@@ -866,6 +913,7 @@ mod tests {
                 } else {
                     list + LIST_SPACING
                 };
+
                 process.value(at(list, length), length_bits, count);
                 process.word(at(list, next), following);
                 if (first..first + count).contains(&self.module) {
@@ -878,6 +926,7 @@ mod tests {
                     );
                     process.word(at(entry, map), LINK_MAP);
                 }
+
                 first += count;
                 list = following;
             }
@@ -903,18 +952,22 @@ mod tests {
             if self.module == 0 {
                 return Err(TlsError::NoTls);
             }
+
             if self.thread_pointer == 0 {
                 return Err(TlsError::Deferred);
             }
+
             let allocated = self.block & UNALLOCATED_BIT == 0;
             if self.dtv_generation >= self.module_generation && allocated {
                 return Ok(self.block + 0x24);
             }
+
             if self.static_offset == NO_TLS_OFFSET
                 || self.static_offset == FORCED_DYNAMIC_TLS_OFFSET
             {
                 return Err(TlsError::Deferred);
             }
+
             Ok(self.thread_pointer - self.static_offset + 0x24)
         }
     }
@@ -947,6 +1000,7 @@ mod tests {
             for (index, byte) in damage {
                 process.memory.insert(*index.get(&addresses), byte);
             }
+
             let _ = process.address();
         }
     }

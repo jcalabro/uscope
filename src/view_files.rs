@@ -50,6 +50,7 @@ pub fn discover(project_root: &Path) -> (Vec<ViewFile>, Vec<String>) {
         files.extend(found);
         errors.extend(failed);
     }
+
     (files, errors)
 }
 
@@ -89,12 +90,14 @@ pub fn read(path: &Path) -> Result<ViewFile, String> {
         if !path.exists() {
             continue;
         }
+
         kernels.push(KernelFile {
             name: kernel,
             path: path.display().to_string(),
             module: read_at_most(&path, crate::view::kernel::MAX_MODULE_BYTES)?,
         });
     }
+
     let mut drawn = file
         .views
         .iter()
@@ -109,6 +112,7 @@ pub fn read(path: &Path) -> Result<ViewFile, String> {
         if !path.exists() {
             continue;
         }
+
         let source = read_at_most(&path, crate::view::MAX_RENDERER_BYTES)?;
         let name = path.display().to_string();
         renderers.push(RendererFile {
@@ -118,6 +122,7 @@ pub fn read(path: &Path) -> Result<ViewFile, String> {
             path: name,
         });
     }
+
     Ok(ViewFile {
         name,
         text,
@@ -152,6 +157,7 @@ fn read_directory(directory: &Path) -> (Vec<ViewFile>, Vec<String>) {
             );
         }
     };
+
     let mut paths = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -169,5 +175,6 @@ fn read_directory(directory: &Path) -> (Vec<ViewFile>, Vec<String>) {
             Err(error) => errors.push(error),
         }
     }
+
     (files, errors)
 }

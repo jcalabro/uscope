@@ -29,6 +29,7 @@ use super::{
     RuntimeStop, StartedTask, StoredValue, TaskContext, TaskPage, TaskRef, TaskStarter,
     ThreadActivity,
 };
+
 use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{
     ExceptionFilter, ImageAddress, LanguageExceptionKind, StackSegment, ThreadId, VirtualAddress,
@@ -51,8 +52,10 @@ const PANIC: ExceptionFilter = ExceptionFilter {
 /// `Display::fmt` for a payload, `type_id` for an `Any`.
 const VTABLE_SIZE: u64 = 8;
 const VTABLE_FIRST_METHOD: u64 = 24;
+
 /// `None` of an `Option<String>`: a capacity above `isize::MAX`.
 const NO_STRING: u64 = 1 << 63;
+
 /// The longest message read; a longer one is refused rather than cut.
 const MAX_MESSAGE: u64 = 1 << 16;
 
@@ -67,6 +70,7 @@ pub fn detect(image: &Arc<dyn RuntimeImage + Send + Sync>) -> Option<Arc<dyn Run
     if !rust {
         return None;
     }
+
     let panic = image.function_answering("__rustc::rust_panic")?;
     Some(Arc::new(RustRuntime {
         image: Arc::clone(image),
@@ -115,10 +119,12 @@ impl Payload<'_> {
         if length > MAX_MESSAGE {
             return Err(format!("the message is {length} bytes long").into());
         }
+
         let mut bytes = vec![0; usize::try_from(length).map_err(|_| "a long message")?];
         if !self.stop.read(VirtualAddress::new(pointer), &mut bytes) {
             return Err(format!("the message at {pointer:#x} is unreadable").into());
         }
+
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -133,6 +139,7 @@ impl Payload<'_> {
         if capacity == NO_STRING {
             return Ok(None);
         }
+
         self.text(self.word(at + 8)?, self.word(at + 16)?).map(Some)
     }
 
@@ -153,6 +160,7 @@ impl Payload<'_> {
             message: format!("panicked: {text}").into(),
             value: None,
         };
+
         let path = ty.split('<').next().unwrap_or(ty);
         match path.rsplit("::").next() {
             Some("FormatStringPayload") => self
@@ -162,6 +170,7 @@ impl Payload<'_> {
             Some("StaticStrPayload") => self.str(data).map(message),
             Some("Payload") => {
                 let held = argument(ty).ok_or_else(|| format!("the payload is a `{ty}`"))?;
+
                 // `Option<&str>` and `Option<String>` keep their tag in a
                 // niche; any other `A` keeps one before the value.
                 Ok(self.message(held, data)?.map_or_else(
@@ -205,6 +214,7 @@ fn implementer(method: &str) -> Option<&str> {
             _ => {}
         }
     }
+
     None
 }
 
@@ -289,16 +299,20 @@ impl RuntimeModel for RustRuntime {
                 .get(register)
                 .ok_or_else(|| Arc::<str>::from("the panic's payload is unavailable"))
         };
+
         let payload = Payload {
             stop,
             image: self.image.as_ref(),
         };
+
         let (data, vtable) = (argument(RDI)?, argument(RSI)?);
+
         // A payload's size bounds every read of it.
         let size = payload.word(vtable + VTABLE_SIZE)?;
         if size > 1 << 12 {
             return Err(format!("the payload claims to be {size} bytes").into());
         }
+
         payload.report(data, vtable)
     }
 

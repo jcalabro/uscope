@@ -49,6 +49,7 @@ impl Images {
         {
             return Some(Arc::clone(image));
         }
+
         let image = self.handle.loaded_module_image(module).await.ok()?;
         self.cache
             .lock()
@@ -72,9 +73,11 @@ impl Images {
                 loaded.push((record.module.load_bias, image));
             }
         }
+
         if loaded.is_empty() {
             loaded.push((LoadBias::default(), Arc::clone(self.handle.module_image())));
         }
+
         loaded
     }
 
@@ -87,6 +90,7 @@ impl Images {
                 images.push(image);
             }
         }
+
         images
     }
 
@@ -96,6 +100,7 @@ impl Images {
             Some(module) => self.get(module).await,
             None => None,
         };
+
         let path = frame.source.as_ref().and_then(|location| {
             let file = image.as_ref()?.source_file(location.file)?;
             Some(file.path.display().to_string())
@@ -125,9 +130,11 @@ pub fn frame_name(frame: &StackFrame, image: Option<&ModuleImage>) -> String {
     if let Some(awaited) = format::awaited_frame(image, frame) {
         return awaited;
     }
+
     if frame.function.is_some() || frame.symbol.is_some() {
         return format::code_name(frame.function.as_ref(), frame.symbol.as_ref());
     }
+
     let module = image
         .and_then(|image| image.path().file_name())
         .map(|name| format!(" in {}", name.to_string_lossy()))
@@ -185,12 +192,15 @@ pub struct Describer {
     pub target: protocol::Target,
     pub images: Arc<Images>,
     pub handle: DebuggerHandle,
+
     /// Set as a tab runs the program; taken by the stop that ends the run.
     pub cause: Arc<Mutex<Option<Cause>>>,
     stops: Vec<StopEntry>,
     pub ended: Ended,
+
     /// Counts the changes tabs make to the program's values.
     pub writes: Arc<AtomicU64>,
+
     /// Counts changes to settings that publish no event, such as signal
     /// policies.
     pub settings: Arc<AtomicU64>,
@@ -246,10 +256,12 @@ impl Describer {
                 }
             }
         };
+
         let mut breakpoints = Vec::with_capacity(snapshot.breakpoints.len());
         for breakpoint in snapshot.breakpoints.iter() {
             breakpoints.push(self.breakpoint(breakpoint).await);
         }
+
         State {
             session: Some(self.id.clone()),
             target: Some(self.target.clone()),
@@ -278,11 +290,13 @@ impl Describer {
         if let Some(entry) = self.stops.iter().rev().find(|entry| entry.stop == stop) {
             return entry.clone();
         }
+
         let context = StopContext {
             stop: uscope::StopId::new(stop),
             execution: uscope::ThreadId::new(thread).into(),
             frame: StackFrameId::INNERMOST,
         };
+
         let place = match self.handle.at(context).backtrace().await {
             Ok(trace) => match trace.frames.first() {
                 Some(frame) => Some(self.images.place_of_frame(frame).await),
@@ -290,6 +304,7 @@ impl Describer {
             },
             Err(_) => None,
         };
+
         let cause = self
             .cause
             .lock()
@@ -306,10 +321,12 @@ impl Describer {
             by: cause.as_ref().map(|cause| cause.name.clone()),
             action: cause.map(|cause| cause.action),
         };
+
         self.stops.push(entry.clone());
         if self.stops.len() > STOP_HISTORY {
             self.stops.remove(0);
         }
+
         entry
     }
 
@@ -318,6 +335,7 @@ impl Describer {
         for location in breakpoint.locations.iter() {
             places.push(self.breakpoint_place(breakpoint, location).await);
         }
+
         protocol::Breakpoint {
             id: breakpoint.id.get(),
             location: breakpoint.spec.to_string(),
@@ -360,15 +378,18 @@ impl Describer {
                 return self.place_of_address(address).await;
             }
         };
+
         let mut place = Place {
             address: hex(shown),
             function: None,
             path: None,
             line: None,
         };
+
         let Some(image) = image else {
             return place;
         };
+
         let located = image.locate(address);
         place.function = located
             .function
@@ -385,9 +406,11 @@ impl Describer {
                     .map_or((file, location.line), |(named, line)| (named, line)),
                 _ => (file, location.line),
             };
+
             place.path = Some(path.path.display().to_string());
             place.line = Some(line.get());
         }
+
         place
     }
 
@@ -398,13 +421,16 @@ impl Describer {
             path: None,
             line: None,
         };
+
         for (bias, image) in self.images.loaded().await {
             let Some(image_address) = bias.unload(address) else {
                 continue;
             };
+
             if !image.contains_address(image_address) {
                 continue;
             }
+
             let located = image.locate(image_address);
             place.function = located
                 .function
@@ -416,8 +442,10 @@ impl Describer {
                 place.path = Some(file.path.display().to_string());
                 place.line = Some(location.line.get());
             }
+
             break;
         }
+
         place
     }
 

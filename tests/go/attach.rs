@@ -63,6 +63,7 @@ async fn an_attached_server_stops_for_a_request_and_serves_on_once_detached() {
         let address = address.clone();
         std::thread::spawn(move || get(&address, "/count"))
     };
+
     let reason = scenario.resume_to_stop().await;
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),

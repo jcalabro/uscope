@@ -33,6 +33,7 @@ pub async fn segments(scenario: &Scenario) -> Vec<(StackSegment, Vec<String>)> {
             _ => segments.push((frame.segment, vec![name])),
         }
     }
+
     segments
 }
 
@@ -45,6 +46,7 @@ fn unhashed(name: &str) -> String {
             return format!("{prefix}#_{function}");
         }
     }
+
     name.to_owned()
 }
 
@@ -63,6 +65,7 @@ async fn stopped_at(fixture: &str, location: &str) -> Scenario {
         }
         None => scenario.add_breakpoint(location).await,
     };
+
     let reason = scenario
         .run_with_to_stop(LaunchOptions {
             stdout: Some(Stdio::null()),
@@ -118,6 +121,7 @@ async fn a_backtrace_from_go_that_c_called_shows_the_c_between() {
         else {
             panic!("{context}");
         };
+
         // Optimized, the export inlines the callback.
         assert!(
             callback.starts_with(&names(&["main.callback"])),
@@ -170,6 +174,7 @@ async fn steps_go_from_go_into_c_and_back() {
             ("leaf".to_owned(), c("leaf")),
             "{fixture}"
         );
+
         // Out of C, through cgo's code and the runtime's, to the Go after
         // the call.
         let mut function = String::new();
@@ -180,6 +185,7 @@ async fn steps_go_from_go_into_c_and_back() {
                 break;
             }
         }
+
         assert_eq!(
             place(&scenario).await,
             ("main.main".to_owned(), go("calls")),
@@ -195,12 +201,14 @@ async fn steps_c_into_the_go_it_calls() {
     for fixture in BUILDS {
         let mut scenario = stopped_at(fixture, &format!("main.go:{line}")).await;
         scenario.step_to_stop(StepKind::IntoSource).await;
+
         // Unoptimized, Go enters a function on its declaration's line.
         let marker = if fixture.ends_with("gcc") {
             "// GO: entered"
         } else {
             "// GO: callback"
         };
+
         let callback = support::source_line(CALLBACK, marker);
         assert_eq!(
             place(&scenario).await,
@@ -223,6 +231,7 @@ async fn finishing_go_that_c_called_returns_to_the_c() {
             },
             "{fixture}"
         );
+
         // Optimized, the instruction after the call may begin the next line.
         let line = support::source_line(SOURCE, "// CGO: calls");
         let (function, at) = place(&scenario).await;
@@ -256,6 +265,7 @@ async fn a_fault_in_c_is_fatal_where_it_faulted() {
         let StopReason::LanguageException(exception) = &reason else {
             panic!("{fixture}: {reason:?}");
         };
+
         assert_eq!(exception.kind, LanguageExceptionKind::Fatal, "{fixture}");
         let line = support::source_line(SOURCE, "// CGO: fault");
         assert_eq!(

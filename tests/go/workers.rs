@@ -17,6 +17,7 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
     for fixture in BUILDS {
         let mut session = GoSession::launch(fixture).await;
         let truth = session.checkpoint("parked");
+
         // Small pages cross from one page to the next mid-list.
         let (tasks, gaps) = session.tasks(3).await;
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
@@ -28,6 +29,7 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
             tasks.iter().any(|task| task.internal),
             "{fixture}: the runtime's own goroutines are listed too"
         );
+
         // The check fails on a goroutine left out, or in another state.
         let mut sabotaged = tasks.clone();
         let dropped = sabotaged
@@ -55,6 +57,7 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
             let Some(dumped) = truth.tasks.get(&task.id.number) else {
                 continue;
             };
+
             // Only a goroutine on a thread has one, and a parked one says
             // where it resumes.
             assert_eq!(
@@ -72,6 +75,7 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
                 assert_eq!(task.thread, Some(ThreadId::new(truth.main.1)), "{context}");
             } else {
                 assert_eq!(created_by, Some("main.main"), "{context}");
+
                 // `go worker(...)` begins in a wrapper the compiler writes
                 // to pass the arguments; a closure begins in itself.
                 let outermost = dumped.frames.last().map(|frame| frame.0.as_str());
@@ -80,9 +84,11 @@ async fn goroutines_are_listed_as_the_runtime_lists_them() {
                 } else {
                     outermost.expect(&context)
                 };
+
                 assert_eq!(entry, started, "{context}");
             }
         }
+
         check_threads(&mut session, &tasks, truth.main.0).await;
         session.scenario.shutdown().await;
     }
@@ -104,6 +110,7 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
                     if task.number == main {
                         assert_eq!(*stack, StackSegment::Task, "{context}");
                     }
+
                     let listed = tasks.iter().find(|listed| listed.id == *task);
                     assert_eq!(
                         listed.and_then(|listed| listed.thread),
@@ -117,6 +124,7 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
                 ThreadActivity::Outside => panic!("{context}: outside the runtime"),
             }
         }
+
         let on_threads = tasks
             .iter()
             .filter(|task| task.thread.is_some())
@@ -137,6 +145,7 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
         else {
             panic!("{fixture}: not stopped");
         };
+
         let image = session.scenario.handle().module_image();
         let mut workers = 0;
         let mut compared = 0;
@@ -144,12 +153,14 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
             let Some(dumped) = truth.tasks.get(&task.id.number) else {
                 continue;
             };
+
             let context = ExecutionContext::Task(task.id);
             let view = |frame| StopContext {
                 stop: stop_id,
                 execution: context,
                 frame,
             };
+
             let trace = session
                 .scenario
                 .operation(
@@ -176,6 +187,7 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
             dumped
                 .check_frames(&shown)
                 .unwrap_or_else(|problem| panic!("{fixture}: {problem}: {task:#?}\n{trace:#?}"));
+
             // The check fails on a frame left out.
             assert!(dumped.check_frames(&shown[1..]).is_err(), "{fixture}");
             compared += 1;
@@ -194,6 +206,7 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
                 workers += 1;
             }
         }
+
         let parked = truth
             .tasks
             .values()
@@ -203,6 +216,7 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
         if fixture.ends_with("o0") {
             assert_eq!(workers, 4, "{fixture}");
         }
+
         session.scenario.shutdown().await;
     }
 }
@@ -278,6 +292,7 @@ async fn a_parked_goroutine_can_be_selected() {
         matches!(jobs.state, VariableState::Available { .. }),
         "{jobs:#?}"
     );
+
     // Registers are the selected frame's, and memory is the process's
     // whichever context is selected.
     let registers = session
@@ -324,6 +339,7 @@ async fn a_condition_on_the_task_stops_only_in_that_goroutine() {
     let truth = session.checkpoint("parked");
     let (tasks, _) = session.tasks(64).await;
     let handle = session.scenario.handle().clone();
+
     // The stopped thread runs main.
     let main = truth.main.0;
     assert_eq!(
@@ -387,6 +403,7 @@ async fn a_condition_on_the_task_stops_only_in_that_goroutine() {
     else {
         panic!("{fixture}: not stopped");
     };
+
     let activity = session
         .scenario
         .snapshot()
@@ -413,6 +430,7 @@ async fn evaluate(session: &GoSession, text: &str) -> Option<bool> {
     else {
         panic!("{text}: not a value");
     };
+
     match value.state {
         VariableState::Available {
             value: VariableValue::Scalar(ScalarValue::Boolean(holds)),
@@ -443,6 +461,7 @@ async fn check_saved_registers(session: &GoSession, view: StopContext, trace: &B
             .and_then(|register| register.bytes.as_deref())
             .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("a word")))
     };
+
     assert_eq!(
         register("rip"),
         Some(

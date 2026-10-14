@@ -26,6 +26,7 @@ pub fn packaged_name(
     if syntax != NameSyntax::Go {
         return None;
     }
+
     // The package's path precedes any receiver or type argument, which may
     // themselves name packages.
     let qualified = &name[..name.find(['(', '[']).unwrap_or(name.len())];
@@ -58,6 +59,7 @@ pub fn plain_location(location: &str) -> Option<String> {
     if location.contains('[') {
         return None;
     }
+
     plain_parts(location, false)
 }
 
@@ -76,11 +78,14 @@ fn plain_parts(name: &str, instances: bool) -> Option<String> {
         } else {
             receiver
         };
+
         if base.is_empty() {
             return None;
         }
+
         plain.push(base);
     }
+
     Some(plain.join("."))
 }
 
@@ -104,6 +109,7 @@ mod tests {
             packaged_name(name, NameSyntax::Go, |path| packages.contains(&path))
                 .map(|(package, local)| (package.to_owned(), local))
         };
+
         for (name, package, local) in [
             ("main.main", "main", "main"),
             ("main.main.func1", "main", "main.func1"),
@@ -132,6 +138,7 @@ mod tests {
                 "{name}"
             );
         }
+
         assert_eq!(split("type:.eq.main.T"), None);
         assert_eq!(packaged_name("ns::run", NameSyntax::Angle, |_| true), None);
 

@@ -31,6 +31,7 @@ use super::modules::{
     ModuleMapping, ProcessMappings, identify_mapped_module, load_bias, process_mappings_in,
     read_maps,
 };
+
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
 use super::{
@@ -42,6 +43,7 @@ use super::{
 /// storage. Live tracing and post-mortem targets share every inspection path.
 pub(super) trait InspectionOps {
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
+
     fn read_memory_word(
         &self,
         pid: Pid,
@@ -50,15 +52,19 @@ pub(super) trait InspectionOps {
         self.read_word(pid, address)
             .map_err(MemoryAccessError::Fatal)
     }
+
     /// Reads `size` bytes at `address` at once, or `None` when this
     /// target reads only a word at a time or cannot read all of them.
     fn read_block(&self, _pid: Pid, _address: u64, _size: usize) -> Option<Vec<u8>> {
         None
     }
+
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
+
     fn floating_registers(&self, _pid: Pid) -> Result<Fxsave> {
         Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
     }
+
     /// Resolves a module's thread-local block for one thread.
     fn tls_address(
         &self,
@@ -72,47 +78,64 @@ pub(super) trait InspectionOps {
 
 pub(super) trait LinuxTraceOps: InspectionOps {
     fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid>;
+
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
+
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
+
     /// The children `thread` of `process` forked that this tracer still
     /// traces. A child whose fork event was lost is found here while its
     /// parent thread exits.
     fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid>;
+
     /// Reads the name a thread gave itself, if it is still readable.
     fn thread_name(&self, _process: Pid, _thread: Pid) -> Option<Arc<str>> {
         None
     }
+
     /// Seizes a thread, killing it with the tracer when `exit_kill` is set.
     fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool>;
+
     fn interrupt(&self, pid: Pid) -> Result<bool>;
+
     /// Releases a stopped thread, returning whether it was still in its
     /// stop. One SIGKILL took out of it stays traced until it exits.
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool>;
+
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()>;
+
     fn reap(&self, pid: Pid) -> Result<()>;
+
     /// Waits for the next status of one tracee, as `waitpid(pid, __WALL)`.
     fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno>;
+
     /// Takes a status one tracee already has, without waiting, as
     /// `waitpid(pid, __WALL | WNOHANG)`. Only a controller whose waiter has
     /// stopped may take one.
     fn poll_status(&self, _pid: Pid) -> Option<WaitEvent> {
         None
     }
+
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
+
     /// A process's start time in clock ticks since boot, which tells it
     /// apart from a later process given the same identifier.
     fn process_start_time(&self, process: Pid) -> Option<u64>;
+
     /// The process identifier signals this debugger sends carry as their
     /// sender.
     fn tracer_process(&self) -> i32;
+
     /// Allocates the identifier of a new stop. A live edge draws from a
     /// process-wide counter so no two sessions in a process share one; an
     /// edge whose sessions share nothing, as a simulation's, may count its
     /// own so that a session's identifiers do not depend on the others.
     fn allocate_stop_id(&self) -> Result<StopId>;
+
     /// Resolves the file behind a module mapping and its load bias, or
     /// `None` when the file cannot be proven to be the mapped one.
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, crate::LoadBias)>;
+
     /// Loads the debug information of module files, each from a separate
     /// debug file that `search` finds when the module's own has none: all
     /// at once, with each result where its module is in `modules`.
@@ -131,41 +154,58 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn module_mappings(&self, _pid: Pid) -> Result<ProcessMappings> {
         Ok(ProcessMappings::default())
     }
+
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
+
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
+
     fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+
     /// Resumes a stopped thread until its next system call's entry or
     /// exit, as `PTRACE_SYSCALL` does.
     fn continue_to_syscall(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+
     /// What a thread stopped at a system call reports of it.
     fn syscall_info(
         &self,
         pid: Pid,
     ) -> std::result::Result<super::syscalls::info::SyscallInfo, Errno>;
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
+
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()>;
+
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
+
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno>;
+
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()>;
+
     /// The signals a stopped thread blocks, bit `n - 1` for signal `n`.
     fn signal_mask(&self, pid: Pid) -> Result<u64>;
+
     /// Replaces the signals a stopped thread blocks.
     fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()>;
+
     /// What lets a child this edge held run, for the [`crate::HeldChild`]
     /// that owns it, or none where processes are not the host's.
     fn held_release(&self) -> Option<fn(&crate::HeldProcess) -> Result<bool>>;
+
     /// Whether resuming a stopped thread would have it dequeue `signal`
     /// before running an instruction: the signal is pending in `queue`, and
     /// the thread does not block it.
     fn queued_signal(&self, _pid: Pid, _signal: Signal, _queue: SignalQueue) -> Result<bool> {
         Ok(false)
     }
+
     /// Whether `address` lies in memory the process may execute, where a
     /// trap byte replaces code rather than data.
     fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool>;
+
     /// Reads one x86-64 debug register from a stopped thread's user area.
     fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno>;
+
     /// Writes one x86-64 debug register in a stopped thread's user area.
     fn write_debug_register(
         &self,
@@ -173,6 +213,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         index: usize,
         value: u64,
     ) -> std::result::Result<(), Errno>;
+
     /// Adds `owner` to the site at `address`, writing a trap there if no
     /// site exists yet. Every backend shares this through its word access.
     fn install_breakpoint(
@@ -186,6 +227,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
             site.owners.insert(owner);
             return Ok(());
         }
+
         let word = self.read_word(pid, address.get())?;
         let original_byte = word.to_ne_bytes()[0];
         self.write_word(
@@ -203,6 +245,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         );
         Ok(())
     }
+
     /// Restores the original byte of an installed site, keeping the site.
     fn remove_breakpoint(
         &self,
@@ -216,6 +259,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         if !site.installed {
             return Ok(());
         }
+
         let word = self.read_word(pid, address.get())?;
         self.write_word(
             pid,
@@ -225,6 +269,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         site.installed = false;
         Ok(())
     }
+
     /// Writes the trap of a site its removal lifted back in place.
     fn reinstall_breakpoint(
         &self,
@@ -238,6 +283,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         if site.installed {
             return Ok(());
         }
+
         let word = self.read_word(pid, address.get())?;
         self.write_word(
             pid,
@@ -253,6 +299,7 @@ pub(super) trait LinuxTraceOps: InspectionOps {
 pub(super) struct LinuxPtrace {
     owner: ThreadId,
     not_send: PhantomData<Rc<()>>,
+
     /// The current inferior's waiter, woken by every request that makes a
     /// tracee report a new wait status.
     waiter: RefCell<Option<Thread>>,
@@ -337,6 +384,7 @@ impl InspectionOps for LinuxPtrace {
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.assert_owner_thread();
+
         // The address space is read through the thread, since the leader
         // may have exited before the rest of its process.
         tls::tls_address(&tls::LiveProcess { pid: thread }, thread, module, offset)
@@ -361,12 +409,14 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid> {
         self.assert_owner_thread();
+
         // The tracer is this thread, the one that traced the parent.
         let tracer = nix::unistd::gettid();
         let Ok(children) = fs::read_to_string(format!("/proc/{process}/task/{thread}/children"))
         else {
             return Vec::new();
         };
+
         children
             .split_whitespace()
             .filter_map(|child| child.parse().ok().map(Pid::from_raw))
@@ -396,6 +446,7 @@ impl LinuxTraceOps for LinuxPtrace {
         if interrupted {
             self.wake_waiter();
         }
+
         Ok(interrupted)
     }
 
@@ -501,18 +552,23 @@ impl LinuxTraceOps for LinuxPtrace {
                 None => command.env_remove(name),
             };
         }
+
         if let Some(directory) = options.working_directory {
             command.current_dir(directory);
         }
+
         if let Some(stdin) = options.stdin {
             command.stdin(stdin);
         }
+
         if let Some(stdout) = options.stdout {
             command.stdout(stdout);
         }
+
         if let Some(stderr) = options.stderr {
             command.stderr(stderr);
         }
+
         trace_child(&mut command);
         let child = command.spawn()?;
         Ok(Pid::from_raw(
@@ -619,6 +675,7 @@ impl LinuxTraceOps for LinuxPtrace {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
+
         Ok(queued_in_status(&status, signal, queue))
     }
 
@@ -666,13 +723,16 @@ pub(super) fn maps_executable(maps: &str, address: VirtualAddress) -> bool {
         let (Some(range), Some(permissions)) = (fields.next(), fields.next()) else {
             return false;
         };
+
         let Some((start, end)) = range.split_once('-') else {
             return false;
         };
+
         let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
         else {
             return false;
         };
+
         (start..end).contains(&address.get()) && permissions.as_bytes().get(2) == Some(&b'x')
     })
 }
@@ -682,6 +742,7 @@ pub(super) fn maps_executable(maps: &str, address: VirtualAddress) -> bool {
 pub(super) enum SignalQueue {
     /// The thread's own, as for a signal its instruction raised.
     Thread,
+
     /// Its process's, as for a signal sent with `kill`.
     Process,
 }
@@ -696,11 +757,13 @@ pub(super) fn queued_in_status(status: &str, signal: Signal, queue: SignalQueue)
             .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
             .unwrap_or(0)
     };
+
     let bit = 1 << (signal.number() - 1);
     let pending = match queue {
         SignalQueue::Thread => mask("SigPnd:"),
         SignalQueue::Process => mask("ShdPnd:"),
     };
+
     pending & bit != 0 && mask("SigBlk:") & bit == 0
 }
 
@@ -716,6 +779,7 @@ fn debug_register_offset(index: usize) -> ptrace::AddressType {
 /// breakpoint repairs complete within microseconds, so their stops are
 /// collected almost at once.
 const WAITER_MIN_POLL: Duration = Duration::from_micros(20);
+
 /// The longest poll interval while the inferior runs without reporting.
 const WAITER_MAX_POLL: Duration = Duration::from_millis(5);
 
@@ -738,17 +802,20 @@ fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
                     Ok(None) => {
                         let parked = Instant::now();
                         thread::park_timeout(interval);
+
                         // Returning early means the controller woke the waiter.
                         interval = if parked.elapsed() < interval {
                             WAITER_MIN_POLL
                         } else {
                             interval.saturating_mul(2).min(WAITER_MAX_POLL)
                         };
+
                         continue;
                     }
                     Err(Errno::EINTR) => continue,
                     Err(_) => break,
                 };
+
                 interval = WAITER_MIN_POLL;
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
@@ -757,6 +824,7 @@ fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
                     break;
                 }
             }
+
             record!("exited");
         })?;
     Ok(Waiter {
@@ -799,12 +867,15 @@ pub(super) fn process_held(process: Pid, start_time: u64) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(Error::from(error)),
     };
+
     let Some(status) = read("status")? else {
         return Ok(false);
     };
+
     let Some(stat) = read("stat")? else {
         return Ok(false);
     };
+
     // Read after both, the start time proves that they described the
     // process that was held.
     let same = crate::backend::process_start_time(process.as_raw()) == Some(start_time);
@@ -822,9 +893,11 @@ pub(super) fn continue_held(process: Pid, start_time: u64) -> Result<bool> {
         Err(Errno::ESRCH) => return Ok(false),
         Err(error) => return Err(backend_error(LinuxError::System(error))),
     };
+
     if !process_held(process, start_time)? {
         return Ok(false);
     }
+
     match pidfd_send_signal(&handle, Signal::SIGCONT) {
         Ok(()) => Ok(true),
         Err(Errno::ESRCH) => Ok(false),
@@ -913,6 +986,7 @@ pub(super) fn decode_siginfo(bytes: &[u8; 128]) -> (i32, SignalMetadata) {
         fault_address: siginfo_has_fault_address(number, code)
             .then(|| u64::from_ne_bytes([u0, u1, u2, u3, u4, u5, u6, u7])),
     };
+
     (number, metadata)
 }
 
@@ -941,6 +1015,7 @@ pub(super) fn wait_for(
     options: libc::c_int,
 ) -> std::result::Result<Option<WaitEvent>, Errno> {
     let options = rustix::process::WaitOptions::from_bits_retain(options.cast_unsigned());
+
     // rustix's `waitpid` without a pid waits for the caller's process
     // group; `wait` is waitpid's -1, any child.
     let waited = match pid.as_raw() {
@@ -949,6 +1024,7 @@ pub(super) fn wait_for(
             rustix::process::waitpid(Some(child), options)
         }),
     };
+
     let event = match waited {
         Ok(None) => return Ok(None),
         Ok(Some((child, status))) => {
@@ -956,12 +1032,14 @@ pub(super) fn wait_for(
         }
         Err(error) => Err(errno(error)),
     };
+
     // Every status is recorded where it is consumed, whichever thread waits.
     #[cfg(debug_assertions)]
     match &event {
         Ok(event) => record!("{}", super::recorded::Described(event)),
         Err(error) => record!("waitpid {pid} -> error {error}"),
     }
+
     event.map(Some)
 }
 
@@ -1068,9 +1146,11 @@ fn in_process_root(pid: Pid, files: &mut [ModuleMapping]) {
         if mapping.deleted || same(&mapping.path) {
             continue;
         }
+
         let Ok(relative) = mapping.path.strip_prefix("/") else {
             continue;
         };
+
         let rooted = Path::new("/proc")
             .join(pid.as_raw().to_string())
             .join("root")

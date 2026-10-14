@@ -26,6 +26,7 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
         for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
             assert_whole_in_memory(variable, value, size, fixture);
         }
+
         assert_eq!(
             scenario
                 .operation(
@@ -411,6 +412,7 @@ async fn zig_scalars_cover_optimized_partial_locations() {
             .unwrap_or_else(|| panic!("{fixture} did not expose {name}: {snapshot:?}"));
         assert_variable_value(variable, expected);
     }
+
     // The remaining locals have no location at the stop.
     let unavailable = snapshot
         .variables
@@ -491,6 +493,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
             .iter()
             .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
     );
+
     // Each worker's value is a parameter of its worker frame, which a
     // worker still spinning on the release flag shows below an inline frame.
     let stop = snapshot.stop_id.expect("stopped");
@@ -515,6 +518,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         }) else {
             continue;
         };
+
         let variables = scenario
             .operation(
                 "Zig worker variables",
@@ -538,9 +542,12 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         else {
             panic!("Zig worker value was not available: {value:?}");
         };
+
         values.insert(*value);
     }
+
     assert_eq!(values, BTreeSet::from([101, 202]));
+
     // Shutting down kills and reaps every thread.
     assert!(matches!(
         scenario.shutdown().await,
@@ -784,6 +791,7 @@ async fn a_line_breakpoint_inside_an_inline_body_presents_the_inline_frame() {
         "inline line stop",
         Scenario::fixture("variables-inline-gcc-o0"),
     );
+
     // The line is the inline instance's code, as gdb presents it, not also
     // its caller's.
     scenario
@@ -850,12 +858,14 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
                 else {
                     panic!("thread_value was not a signed available scalar: {variable:?}");
                 };
+
                 values.insert(*value);
             }
             Err(Error::LocationUnavailable | Error::VariableNotFound(_)) => {}
             Err(error) => panic!("unexpected thread variable error: {error}"),
         }
     }
+
     assert_eq!(values, BTreeSet::from([101, 202]));
     scenario.shutdown().await;
 }
@@ -868,6 +878,7 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
             fixture,
         );
     }
+
     let nil_pointer = scenario
         .operation(
             "inspect Go nil pointer",
@@ -916,6 +927,7 @@ async fn step_to_source_line(scenario: &mut Scenario, line: u32) {
             return;
         }
     }
+
     panic!("did not reach source line {line} within the step budget");
 }
 
@@ -994,6 +1006,7 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
     for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
         assert_whole_in_memory(variable, value, size, fixture);
     }
+
     assert_whole_in_memory(&snapshot.variables[15], ScalarValue::Signed(99), 4, fixture);
 }
 
@@ -1021,6 +1034,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             for (variable, value) in snapshot.variables[..14].iter().zip(&expected) {
                 assert_variable_value(variable, value.clone());
             }
+
             for (index, register) in [
                 (0, "rdi"),
                 (1, "rsi"),
@@ -1033,9 +1047,11 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             ] {
                 assert_register_source(&snapshot.variables[index], register, fixture);
             }
+
             for variable in &snapshot.variables[6..12] {
                 assert_memory_source(variable, fixture);
             }
+
             assert_variable_value(&snapshot.variables[14], expected[14].clone());
             assert_memory_source(&snapshot.variables[14], fixture);
         }
@@ -1047,6 +1063,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             {
                 assert_variable_value(&snapshot.variables[index], value);
             }
+
             assert!(
                 matches!(
                     snapshot.variables[0].state,
@@ -1058,6 +1075,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                 "{fixture}: {:?}",
                 snapshot.variables[0]
             );
+
             // Their values on entry are all Clang keeps, and `main`'s call
             // does not say what it passed.
             for index in 1..4 {
@@ -1070,13 +1088,16 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                     snapshot.variables[index]
                 );
             }
+
             assert_register_source(&snapshot.variables[4], "r8", fixture);
             assert_register_source(&snapshot.variables[5], "r9", fixture);
             for variable in &snapshot.variables[6..12] {
                 assert_memory_source(variable, fixture);
             }
+
             assert_register_source(&snapshot.variables[12], "xmm0", fixture);
             assert_register_source(&snapshot.variables[13], "xmm1", fixture);
+
             // Its one piece holds, in memory, the 80 bits x87 precision
             // uses, not the padding after them.
             assert_variable_value(&snapshot.variables[14], expected[14].clone());
@@ -1095,6 +1116,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
         }
         _ => panic!("unexpected optimized parameter fixture {fixture}"),
     }
+
     assert_variable_value(&snapshot.variables[15], ScalarValue::Signed(99));
     assert!(
         matches!(
@@ -1165,9 +1187,11 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
         "variables-rust-o2" => vec![0, 1, 2, 3, 4, 5, 6, 7],
         _ => panic!("unexpected optimized language fixture {fixture}"),
     };
+
     for index in available {
         assert_variable_value(&snapshot.variables[index], expected[index].clone());
     }
+
     if fixture == "variables-cpp-clang-o2" {
         assert_eq!(
             snapshot.variables[1].state,
@@ -1178,6 +1202,7 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
             snapshot.variables[1]
         );
     }
+
     if fixture != "variables-cpp-gcc-o2" {
         for index in 8..10 {
             assert_eq!(

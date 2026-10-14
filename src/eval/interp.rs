@@ -28,6 +28,7 @@ pub enum Outcome<P> {
         value: InspectedValue,
         cause: Option<Span>,
     },
+
     /// A value to store: the target's place, the bytes of the value in the
     /// target's type, and whether the place is a whole variable rather
     /// than part of one.
@@ -37,12 +38,14 @@ pub enum Outcome<P> {
         whole: bool,
         span: Span,
     },
+
     /// A value to store in a register: its bytes, as wide as the register.
     AssignRegister {
         register: Register,
         bytes: Vec<u8>,
         span: Span,
     },
+
     /// `base[start..end]`: the array or slice, and the range to page through.
     Range {
         base: InspectedValue,
@@ -63,6 +66,7 @@ pub enum Failure {
 pub enum Value<P> {
     /// Storage of a program type, read only when a value is needed.
     Place(P),
+
     /// A language-typed value in memory.
     Raw(u64),
     Int(Integer),
@@ -98,6 +102,7 @@ pub fn run<M: Machine>(
             .and_then(|value| interpreter.present(root, value))
             .map(|value| Outcome::Value { value, cause: None })
     };
+
     match result {
         Ok(outcome) => Ok(outcome),
         Err(Halt::Missing { state, cause }) => Ok(Outcome::Value {
@@ -254,6 +259,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 for index in indices {
                     values.push(self.index(index)?);
                 }
+
                 Self::at(span, self.machine.check_indices(step, &values))?;
                 let base = self.place(base)?;
                 Value::Place(Self::at(span, self.machine.step(&base, step, &values))?)
@@ -274,6 +280,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     }
                     Err(stop) => return Self::at(span, Err(stop)),
                 };
+
                 Value::Bool(holds != *negate)
             }
             Op::Entry { base, step, key } => {
@@ -315,6 +322,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 let Ty::Int(int) = node.ty else {
                     return Self::invariant("registers are unsigned integers");
                 };
+
                 Value::Int(Integer::Typed(Bits::from_raw(int, raw)))
             }
             Op::Constant(constant) => match constant {
@@ -354,6 +362,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     BinaryOp::Div => left.div(right),
                     _ => left.rem(right),
                 };
+
                 Value::Int(Integer::Exact(
                     result.map_err(|error| Self::arithmetic(span, error))?,
                 ))
@@ -373,10 +382,12 @@ impl<M: Machine> Interpreter<'_, M> {
                     } else {
                         right.span
                     };
+
                     Self::arithmetic(culprit, error)
                 })?;
                 Value::Int(self.retype(&node.ty, combined))
             }
+
             Op::Shift {
                 left,
                 value,
@@ -389,8 +400,10 @@ impl<M: Machine> Interpreter<'_, M> {
                 } else {
                     shifted.shr(amount)
                 };
+
                 Value::Int(result.map_err(|error| Self::arithmetic(span, error))?)
             }
+
             Op::Compare {
                 op,
                 how,
@@ -405,6 +418,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     Value::Bool(left)
                 }
             }
+
             Op::Choose {
                 condition,
                 then,
@@ -417,6 +431,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     self.eval(otherwise)?
                 }
             }
+
             Op::Convert {
                 operand,
                 conversion,
@@ -457,12 +472,14 @@ impl<M: Machine> Interpreter<'_, M> {
                         "the pointers are not a whole number of elements apart",
                     ));
                 }
+
                 Value::Int(Integer::Exact(
                     bytes
                         .div(scale)
                         .map_err(|error| Self::arithmetic(span, error))?,
                 ))
             }
+
             Op::Length {
                 operand,
                 how: Length::Bytes,
@@ -470,6 +487,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 let Value::Text(bytes) = self.eval(operand)? else {
                     return Self::invariant("the binder measures strings as strings");
                 };
+
                 Value::Int(Integer::Exact(Exact::from(bytes.len() as u128)))
             }
             Op::Length { operand, how } => {
@@ -478,6 +496,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     Length::Slice => Self::at(span, self.machine.length(&place))?,
                     _ => self.text_length(&place, operand.span)?,
                 };
+
                 Value::Int(Integer::Exact(Exact::from(u128::from(length))))
             }
             Op::Capacity { operand, how } => {
@@ -498,6 +517,7 @@ impl<M: Machine> Interpreter<'_, M> {
                             })?
                     }
                 };
+
                 Value::Int(Integer::Exact(Exact::from(u128::from(capacity))))
             }
             Op::TextSlice { base, start, end } => {
@@ -583,6 +603,7 @@ impl<M: Machine> Interpreter<'_, M> {
         let Some(size) = size else {
             return Err(Self::error(span, ErrorKind::Type, "the value has no size"));
         };
+
         let bytes = Self::at(span, self.machine.read(address, size))?;
         Self::at(span, self.decode(ty, &bytes))
     }
@@ -593,6 +614,7 @@ impl<M: Machine> Interpreter<'_, M> {
         if self.machine.byte_order() == ByteOrder::Big {
             ordered.reverse();
         }
+
         let mut wide = [0_u8; 16];
         let length = ordered.len().min(16);
         wide[..length].copy_from_slice(&ordered[..length]);
@@ -623,6 +645,7 @@ impl<M: Machine> Interpreter<'_, M> {
                         sign_exponent: u16::try_from((raw >> 64) & 0xffff).unwrap_or_default(),
                     },
                 };
+
                 Value::Float(Float::from_value(value))
             }
             _ => return Err(Stop::missing(malformed("the value is not a scalar"))),
@@ -675,6 +698,7 @@ impl<M: Machine> Interpreter<'_, M> {
                         format!("a {width}-bit address is not a width uscope computes with"),
                     ));
                 };
+
                 let bits = Bits::truncate(int, value);
                 Value::Pointer(u64::try_from(bits.raw()).unwrap_or(u64::MAX))
             }
@@ -729,6 +753,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 else {
                     return Self::invariant("the binder compares strings with strings");
                 };
+
                 Some(if left == right {
                     Ordering::Equal
                 } else {
@@ -740,6 +765,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 let Value::Text(literal) = self.eval(right)? else {
                     return Self::invariant("the binder compares text with a string");
                 };
+
                 let equal = self.text_equals(&place, &literal, left.span)?;
                 Some(if equal {
                     Ordering::Equal
@@ -748,6 +774,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 })
             }
         };
+
         Ok(match (op, ordering) {
             (BinaryOp::Ne, None) => true,
             (_, None) => false,
@@ -778,6 +805,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 "the value holds no text",
             ));
         };
+
         let read = text.bytes.as_ref();
         match text.completion {
             TextCompletion::Complete => Ok(read == literal),
@@ -794,6 +822,7 @@ impl<M: Machine> Interpreter<'_, M> {
         if let Some(length) = Self::at(span, self.machine.presented_length(place))? {
             return Ok(length);
         }
+
         let Some(text) = Self::at(span, self.machine.text(place))? else {
             return Err(Self::error(
                 span,
@@ -801,6 +830,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 "the value holds no text",
             ));
         };
+
         match text.completion {
             TextCompletion::Complete => Ok(u64::try_from(text.bytes.len()).unwrap_or(u64::MAX)),
             TextCompletion::Truncated {
@@ -848,6 +878,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 span,
             });
         }
+
         let place = self.place(target)?;
         let size = size_of(self.machine, &target.ty)
             .and_then(|size| usize::try_from(size).ok())
@@ -871,6 +902,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Value::Pointer(address) => format!("{address:#x}"),
             _ => "the value".to_owned(),
         };
+
         let refuse = |interpreter: &Self| {
             Self::error(
                 span,
@@ -881,6 +913,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 ),
             )
         };
+
         let exact_integer = |value: &Value<M::Place>| match value {
             Value::Int(integer) => Some(integer.value()),
             Value::Bool(value) => Some(Exact::from(u128::from(*value))),
@@ -891,6 +924,7 @@ impl<M: Machine> Interpreter<'_, M> {
             }),
             _ => None,
         };
+
         Ok(match category(self.machine, ty) {
             Category::Integer { int: Some(int), .. } => {
                 let bits = exact_integer(&value)
@@ -915,6 +949,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     }
                     _ => None,
                 };
+
                 Value::Float(fitted.ok_or_else(|| refuse(self))?)
             }
             Category::Bool => match exact_integer(&value) {
@@ -957,6 +992,7 @@ impl<M: Machine> Interpreter<'_, M> {
             } => Some((0, *length)),
             _ => None,
         };
+
         let (start, end) = match bounds {
             Some((lower, count)) => {
                 let upper = lower + i128::from(count);
@@ -968,12 +1004,15 @@ impl<M: Machine> Interpreter<'_, M> {
                         format!("{start}..{end} is outside {lower}..{upper}"),
                     ));
                 }
+
                 (start, end)
             }
+
             // A value that could not be read, or is not one dimension, is
             // the page's to report.
             None => (start.unwrap_or(0), end.unwrap_or(0)),
         };
+
         Ok(Outcome::Range {
             base: presented,
             start,
@@ -992,6 +1031,7 @@ impl<M: Machine> Interpreter<'_, M> {
     ) -> Evaluated<M::Place> {
         let start = start.map(|start| self.index(start)).transpose()?;
         let end = end.map(|end| self.index(end)).transpose()?;
+
         // A string the expression computed is sliced as it is; the
         // program's text is read where it is.
         let (computed, stored) = match self.eval(base)? {
@@ -1005,11 +1045,13 @@ impl<M: Machine> Interpreter<'_, M> {
             }
             _ => return Self::invariant("the binder slices text and places only"),
         };
+
         let length = match (&computed, &stored) {
             (Some(bytes), _) => bytes.len() as u64,
             (_, Some(stored)) => stored.length,
             _ => return Self::invariant("text is computed or stored"),
         };
+
         let (start, end) = (
             start.unwrap_or(0),
             end.unwrap_or_else(|| i128::from(length)),
@@ -1021,6 +1063,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 format!("{start}..{end} is outside the text's {length} bytes"),
             ));
         }
+
         let (first, last) = (
             usize::try_from(start).unwrap_or(usize::MAX),
             usize::try_from(end).unwrap_or(usize::MAX),
@@ -1056,12 +1099,14 @@ impl<M: Machine> Interpreter<'_, M> {
                         "the key holds no text, and is no number, truth value, or pointer",
                     ));
                 };
+
                 if text.completion != TextCompletion::Complete {
                     return Err(Halt::Missing {
                         state: Box::new(unavailable(Self::incomplete(text.completion))),
                         cause: node.span,
                     });
                 }
+
                 Key::Text(text.bytes.to_vec())
             }
             Value::Raw(_) => return Self::invariant("the binder loads raw keys"),
@@ -1085,6 +1130,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Value::Text(bytes) => return Ok(self.present_text(ty, bytes)),
             value => value,
         };
+
         self.present_computed(ty, &value, None, span)
     }
 
@@ -1100,14 +1146,17 @@ impl<M: Machine> Interpreter<'_, M> {
             let bytes = self.encode(value, size);
             return Self::at(span, self.machine.present_bytes(*reference, &bytes));
         }
+
         if let (Ty::Pointer(pointee), Value::Pointer(address)) = (ty, value) {
             let pointee = match pointee.as_ref() {
                 Ty::Program(reference) => Some(*reference),
                 _ => None,
             };
+
             let info = type_info(self.machine, ty);
             return Self::at(span, self.machine.present_pointer(*address, pointee, info));
         }
+
         let scalar = match value {
             Value::Int(integer) => {
                 let integer = *integer;
@@ -1131,6 +1180,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 return Self::invariant("places and strings are presented elsewhere");
             }
         };
+
         let raw = size.map(|size| std::sync::Arc::from(self.encode_scalar(&scalar, size)));
         let state = VariableState::Available {
             source: address.map_or(VariableValueSource::Computed, |address| {
@@ -1143,6 +1193,7 @@ impl<M: Machine> Interpreter<'_, M> {
             text: None,
             presentation: None,
         };
+
         Ok(self
             .machine
             .finish(Some(type_info(self.machine, ty)), state))
@@ -1154,6 +1205,7 @@ impl<M: Machine> Interpreter<'_, M> {
             bytes: bytes.clone().into(),
             completion: TextCompletion::Complete,
         };
+
         let state = VariableState::Available {
             source: VariableValueSource::Computed,
             value: VariableValue::Slice {
@@ -1166,6 +1218,7 @@ impl<M: Machine> Interpreter<'_, M> {
             text: Some(std::sync::Arc::new(text)),
             presentation: None,
         };
+
         self.machine
             .finish(Some(type_info(self.machine, ty)), state)
     }
@@ -1186,6 +1239,7 @@ impl<M: Machine> Interpreter<'_, M> {
             Value::Float(value) => float_bits(value.to_value()),
             Value::Place(_) | Value::Raw(_) | Value::Text(_) => 0,
         };
+
         self.ordered(raw, size)
     }
 
@@ -1198,6 +1252,7 @@ impl<M: Machine> Interpreter<'_, M> {
             VariableValue::Scalar(ScalarValue::Floating(value)) => float_bits(*value),
             _ => 0,
         };
+
         self.ordered(raw, size)
     }
 
@@ -1207,6 +1262,7 @@ impl<M: Machine> Interpreter<'_, M> {
         if self.machine.byte_order() == ByteOrder::Big {
             bytes.reverse();
         }
+
         bytes
     }
 }

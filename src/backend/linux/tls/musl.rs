@@ -32,6 +32,7 @@ pub(super) fn tls_address(
     if module.get() > read_word(services, Some(dtv))? {
         return Err(TlsError::Deferred);
     }
+
     let block = read_word(
         services,
         module
@@ -42,6 +43,7 @@ pub(super) fn tls_address(
     if block == 0 {
         return Err(TlsError::Deferred);
     }
+
     block
         .checked_add(offset)
         .ok_or_else(|| failed("the TLS address overflows"))
@@ -69,6 +71,7 @@ mod tests {
             let Some(word) = self.words.get(&address) else {
                 return false;
             };
+
             output.copy_from_slice(&word.to_le_bytes()[..output.len()]);
             true
         }
@@ -95,6 +98,7 @@ mod tests {
             for (slot, block) in (1..).zip(blocks) {
                 words.insert(DTV + 8 * slot, *block);
             }
+
             Self {
                 words,
                 thread_pointer: THREAD_POINTER,
@@ -128,6 +132,7 @@ mod tests {
             Err(TlsError::Failed(message)) => message,
             result => panic!("expected a failure, got {result:?}"),
         };
+
         // A thread pointer that does not address a descriptor of its own is
         // not musl's.
         let mut foreign = Process::new(&[0x1000]);

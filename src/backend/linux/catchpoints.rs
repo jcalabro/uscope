@@ -36,6 +36,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             condition,
             hit_count: 0,
         };
+
         self.catchpoints.insert(id, catchpoint.clone());
         self.publish_catchpoints_changed();
         catchpoint
@@ -66,6 +67,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if thread.syscall.is_some() || thread.inside_call {
             return Ok(true);
         }
+
         let pc = self.ptrace.registers(pid)?.rip;
         let read = read_logical_memory(
             &self.ptrace,
@@ -98,15 +100,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                     Err(nix::errno::Errno::ESRCH) => Err(nix::errno::Errno::ESRCH),
                     _ => self.ptrace.signal_metadata(pid),
                 };
+
                 if is_superseded(&metadata) {
                     return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
                 }
+
                 let description = match other {
                     Ok(info) => format!("a system-call stop of unknown kind {}", info.op),
                     Err(error) => {
                         format!("a system-call stop whose call could not be read: {error}")
                     }
                 };
+
                 return self.begin_visible_stop(
                     pid,
                     StopReason::Unclassifiable {
@@ -115,6 +120,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 );
             }
         };
+
         let entered = self.stopped_call(pid, &info, exit)?;
         let (call, args) = (entered.call, entered.args);
         let caught: Vec<CatchpointId> = self
@@ -126,12 +132,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         if caught.is_empty() {
             return self.resume_uncaught(pid, in_step, exit);
         }
+
         let returned = exit.then_some(info.value);
         let mut captured = entered.captured;
         if exit {
             captured.extend(self.capture(pid, call, &args, ReadAt::Exit, returned));
             captured.sort_by_key(|capture| capture.arg);
         }
+
         let path = path_of(call, &captured);
         let captured: Arc<[Capture]> = captured.into();
         let stop = |catchpoints: Arc<[CatchpointId]>| {
@@ -144,6 +152,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 catchpoints,
             }))
         };
+
         let mut stopping = Vec::new();
         for id in caught {
             let catchpoint = self.catchpoints.get_mut(&id);
@@ -154,8 +163,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(catchpoint) = catchpoint else {
                 continue;
             };
+
             catchpoint.hit_count += 1;
             let condition = catchpoint.condition.clone();
+
             // A condition that cannot be judged stops, as a breakpoint's
             // does.
             if let Some(condition) = condition
@@ -168,11 +179,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             {
                 continue;
             }
+
             stopping.push(id);
         }
+
         if stopping.is_empty() {
             return self.resume_uncaught(pid, in_step, exit);
         }
+
         // A step over a breakpoint's trap that made the call is past the
         // trap, which the stop puts back.
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -182,6 +196,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.finish_current_repair(pid, address)?;
             self.note_step_progress(pid);
         }
+
         self.begin_visible_stop(pid, stop(stopping.into()))
     }
 
@@ -206,6 +221,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         }
+
         self.restart_after_internal(pid)
     }
 
@@ -217,6 +233,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn stopped_call(&mut self, pid: Pid, info: &info::SyscallInfo, exit: bool) -> Result<Entered> {
         if !exit {
             let call = info::call_id(info);
+
             // Only a caught call's memory is read.
             let captured =
                 if self.catchpoints.values().any(|catchpoint| {
@@ -231,14 +248,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 args: info.args,
                 captured,
             };
+
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             inferior.thread_mut(pid)?.syscall = Some(entered.clone());
             return Ok(entered);
         }
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if let Some(entered) = inferior.thread_mut(pid)?.syscall.take() {
             return Ok(entered);
         }
+
         let registers = self.ptrace.registers(pid)?;
         let (call, args) = info::from_registers(info.arch, &registers);
         Ok(Entered {
@@ -261,11 +281,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Vec::new();
         };
+
         let mut memory = StopMemory {
             ptrace: &self.ptrace,
             pid,
             breakpoints: &inferior.breakpoints,
         };
+
         captures::capture(
             call,
             args,
@@ -321,6 +343,7 @@ fn path_of(call: SyscallId, captured: &[Capture]) -> Option<Arc<str>> {
     if !matches!(capture.state, CaptureState::Complete) {
         return None;
     }
+
     let bytes = capture.bytes.split(|&byte| byte == 0).next()?;
     Some(String::from_utf8_lossy(bytes).into())
 }

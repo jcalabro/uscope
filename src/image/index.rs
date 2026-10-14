@@ -19,6 +19,7 @@ pub struct Interval {
     pub start: U64,
     pub end: U64,
     pub prefix_max_end: U64,
+
     /// The record the interval belongs to.
     pub value: U32,
 }
@@ -48,6 +49,7 @@ pub fn intervals(
             interval.value.get(),
         )
     });
+
     // A record may name one range twice.
     intervals.dedup();
     let mut prefix_max_end = 0;
@@ -55,6 +57,7 @@ pub fn intervals(
         prefix_max_end = prefix_max_end.max(interval.end.get());
         interval.prefix_max_end = prefix_max_end.into();
     }
+
     intervals
 }
 
@@ -69,10 +72,12 @@ pub fn containing(intervals: &[Interval], address: ImageAddress) -> impl Iterato
             if interval.prefix_max_end.get() <= address {
                 return None;
             }
+
             if address < interval.end.get() {
                 return Some(interval.value.get());
             }
         }
+
         None
     })
 }

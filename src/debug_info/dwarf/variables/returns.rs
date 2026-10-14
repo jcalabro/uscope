@@ -48,22 +48,28 @@ use crate::unwind::DwarfRegister;
 /// The DWARF numbers of x86-64's integer result registers, in order: rax,
 /// rbx, rcx, rdi, rsi, and r8 through r11.
 const INTEGER: [DwarfRegister; 9] = DwarfRegister::each([0, 3, 2, 5, 4, 8, 9, 10, 11]);
+
 /// The DWARF numbers of x86-64's floating-point result registers, xmm0
 /// through xmm14.
 const FLOATING: [DwarfRegister; 15] =
     DwarfRegister::each([17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+
 /// x86-64's stack pointer.
 const STACK_POINTER: DwarfRegister = crate::unwind::RSP;
+
 /// The size of a word, and the stack's alignment between arguments and
 /// results.
 const WORD: u64 = 8;
 
 /// System V's integer result registers, rax and rdx.
 const SYSTEM_V_INTEGER: [DwarfRegister; 2] = DwarfRegister::each([0, 1]);
+
 /// System V's floating-point result registers, xmm0 and xmm1.
 const SYSTEM_V_FLOATING: [DwarfRegister; 2] = DwarfRegister::each([17, 18]);
+
 /// The x87 register stack's top, which returns a `long double`.
 const ST0: DwarfRegister = DwarfRegister::new(33);
+
 /// The size of an eightbyte, the unit System V classifies.
 const EIGHTBYTE: u64 = 8;
 
@@ -74,8 +80,10 @@ pub(super) use crate::image::variables::{ReturnConvention, SystemV};
 enum Source {
     /// The low bytes of a register.
     Register(DwarfRegister),
+
     /// The stack, this far past the caller's stack pointer.
     Stack(u64),
+
     /// Memory at the address a register holds.
     Indirect(DwarfRegister),
 }
@@ -93,10 +101,13 @@ struct Part {
 enum Unassigned {
     /// It does not fit those left, so it is on the stack.
     Stack,
+
     /// Its type is one the convention does not describe.
     Unsupported,
+
     /// Its language does not say where it is returned.
     Unspecified,
+
     /// Its type's debug information is malformed.
     Malformed(Arc<str>),
 }
@@ -119,6 +130,7 @@ impl DwarfVariableInfo {
         let Some(catalog) = self.function_at(function) else {
             return Ok(None);
         };
+
         match catalog.returns() {
             Some(ReturnConvention::GoRegisters) => {}
             Some(ReturnConvention::SystemV(returned)) => {
@@ -126,12 +138,15 @@ impl DwarfVariableInfo {
             }
             None => return Ok(None),
         }
+
         let own = |kind: VariableKind| {
             catalog.objects().filter(move |object| {
                 object.kind() == kind && object.instance().is_none() && object.lexical_depth() == 0
             })
         };
+
         let results = own(VariableKind::Result).collect::<Vec<_>>();
+
         // The stack-assigned results follow the stack-assigned arguments,
         // so where they are depends on every argument.
         let mut arguments = Assignment::default();
@@ -143,10 +158,12 @@ impl DwarfVariableInfo {
                 return Self::all_missing(&results, &error).map(Some);
             }
         }
+
         let mut assignment = Assignment {
             stack: arguments.stack.next_multiple_of(WORD),
             ..Assignment::default()
         };
+
         let mut returned = Vec::with_capacity(results.len());
         for (index, &result) in results.iter().enumerate() {
             // So does where each result is on every one before it.
@@ -156,6 +173,7 @@ impl DwarfVariableInfo {
                 returned.extend(missing);
                 break;
             };
+
             let mut parts = Vec::new();
             let captured = assignment
                 .assign(self, ty, &mut parts)
@@ -167,12 +185,14 @@ impl DwarfVariableInfo {
                     VariableMalformedKind::InvalidTypeGraph,
                 )?),
             };
+
             // A generic result's shape is laid out as its type is, but its
             // type is in a dictionary the returned call took away.
             let unresolved_shape = match self.generic_type(ty, None, None, runtime, budget)? {
                 Generic::Unresolved(_, reason) => Some(reason),
                 Generic::Plain | Generic::Resolved(_) => None,
             };
+
             returned.push(ReturnedValue {
                 name: result.name().into(),
                 ty: Some(ty),
@@ -180,6 +200,7 @@ impl DwarfVariableInfo {
                 unresolved_shape,
             });
         }
+
         Ok(Some(returned))
     }
 
@@ -220,6 +241,7 @@ impl DwarfVariableInfo {
                             *stack_pointer.insert(word(&runtime.register(STACK_POINTER)?.bytes))
                         }
                     };
+
                     let address = VirtualAddress::new(base.wrapping_add(offset));
                     in_memory = Some(address);
                     budget.consume_memory(length)?;
@@ -232,6 +254,7 @@ impl DwarfVariableInfo {
                     runtime.read_memory(address, length)?
                 }
             };
+
             let start = to_usize(part.offset);
             let (Some(target), Some(source)) = (
                 raw.get_mut(start..start.saturating_add(length)),
@@ -239,12 +262,15 @@ impl DwarfVariableInfo {
             ) else {
                 return Err("a returned value's part lies outside it".into());
             };
+
             target.copy_from_slice(source);
         }
+
         let source = match (parts, in_memory) {
             ([_], Some(address)) => VariableValueSource::Memory(address),
             _ => VariableValueSource::Composite,
         };
+
         Ok(Located {
             ty,
             storage: ValueStorage::Bytes {
@@ -272,6 +298,7 @@ impl DwarfVariableInfo {
             let Some(TypeNode::Resolved(info)) = self.types.node(id) else {
                 return Err(Unassigned::Malformed("a type is malformed".into()));
             };
+
             match &info.kind {
                 TypeKind::Named {
                     target: Some(target),
@@ -281,6 +308,7 @@ impl DwarfVariableInfo {
                 _ => return Ok((id, info)),
             }
         }
+
         Err(Unassigned::Malformed("a type names itself".into()))
     }
 
@@ -306,6 +334,7 @@ impl DwarfVariableInfo {
                 for member in members.iter() {
                     alignment = alignment.max(self.alignment(member.type_ref.id)?);
                 }
+
                 alignment
             }
             _ => return Err(Unassigned::Unsupported),
@@ -319,6 +348,7 @@ impl DwarfVariableInfo {
 enum Class {
     Integer,
     Floating,
+
     /// A `long double`, which only the x87 registers hold.
     X87,
 }
@@ -354,15 +384,18 @@ impl DwarfVariableInfo {
                 }]));
             }
         };
+
         // A value of no size, as Rust's `()`, is nothing to show.
         if self.size(ty).is_ok_and(|size| size == 0) {
             return Ok(None);
         }
+
         let parts = if returned.rewritten {
             Err(Unassigned::Unspecified)
         } else {
             self.system_v_parts(ty, returned.language)
         };
+
         let captured = parts
             .map_err(placed)
             .and_then(|parts| self.capture(ty, &parts, runtime, budget));
@@ -373,6 +406,7 @@ impl DwarfVariableInfo {
                 VariableMalformedKind::InvalidTypeGraph,
             )?),
         };
+
         Ok(Some(vec![ReturnedValue {
             name: Arc::clone(&returned.name),
             ty: Some(ty),
@@ -423,6 +457,7 @@ impl DwarfVariableInfo {
             // hold.
             _ => return Err(Unassigned::Unsupported),
         };
+
         if size > 2 * EIGHTBYTE {
             return if aggregate {
                 Ok(memory)
@@ -430,6 +465,7 @@ impl DwarfVariableInfo {
                 Err(Unassigned::Unsupported)
             };
         }
+
         let mut leaves = Vec::new();
         self.leaves(ty, 0, &mut leaves)?;
         if let [
@@ -447,11 +483,13 @@ impl DwarfVariableInfo {
                 source: Source::Register(ST0),
             }]);
         }
+
         // An unaligned field puts a value in memory, though producers
         // disagree on packed records.
         if leaves.iter().any(|leaf| leaf.offset % leaf.size != 0) {
             return Err(Unassigned::Unsupported);
         }
+
         let (mut integers, mut floats) = (SYSTEM_V_INTEGER.iter(), SYSTEM_V_FLOATING.iter());
         let mut parts = Vec::new();
         let mut start = 0;
@@ -480,6 +518,7 @@ impl DwarfVariableInfo {
             });
             start = end;
         }
+
         Ok(parts)
     }
 
@@ -504,6 +543,7 @@ impl DwarfVariableInfo {
         {
             return Err(Unassigned::Unspecified);
         }
+
         let (mut integers, mut floats) = (SYSTEM_V_INTEGER.iter(), SYSTEM_V_FLOATING.iter());
         leaves
             .iter()
@@ -540,6 +580,7 @@ impl DwarfVariableInfo {
                 _ => Err(Unassigned::Unspecified),
             })
         };
+
         match &self.underlying(ty)?.kind {
             TypeKind::Record {
                 members: fields,
@@ -559,10 +600,12 @@ impl DwarfVariableInfo {
                 if let crate::VariantDiscriminant::Stored(tag) = discriminant.as_ref() {
                     members(std::slice::from_ref(tag), leaves)?;
                 }
+
                 variants
                     .iter()
                     .try_for_each(|variant| members(&variant.members, leaves))
             }
+
             TypeKind::Base(_)
             | TypeKind::Enumeration { .. }
             | TypeKind::Pointer { .. }
@@ -586,6 +629,7 @@ impl DwarfVariableInfo {
                 class,
             });
         };
+
         match &self.underlying(ty)?.kind {
             TypeKind::Base(base) => {
                 let size = base.byte_size;
@@ -618,6 +662,7 @@ impl DwarfVariableInfo {
             TypeKind::Pointer { .. } | TypeKind::Reference { .. } | TypeKind::Function => {
                 leaf(offset, WORD, Class::Integer);
             }
+
             TypeKind::Array {
                 element,
                 dimensions,
@@ -633,6 +678,7 @@ impl DwarfVariableInfo {
                     self.leaves(element.id, offset + index * stride, leaves)?;
                 }
             }
+
             TypeKind::Record {
                 members,
                 bases,
@@ -643,12 +689,15 @@ impl DwarfVariableInfo {
                     let RecordMemberLayout::ByteOffset(at) = base.layout else {
                         return Err(Unassigned::Unsupported);
                     };
+
                     self.leaves(base.type_ref.id, offset + at, leaves)?;
                 }
+
                 for member in members.iter() {
                     self.member_leaves(member, offset, leaves)?;
                 }
             }
+
             TypeKind::Union {
                 members,
                 incomplete: false,
@@ -659,6 +708,7 @@ impl DwarfVariableInfo {
             }
             _ => return Err(Unassigned::Unsupported),
         }
+
         Ok(())
     }
 
@@ -674,6 +724,7 @@ impl DwarfVariableInfo {
             RecordMemberLayout::ByteOffset(at) => {
                 self.leaves(member.type_ref.id, offset + at, leaves)
             }
+
             RecordMemberLayout::BitRange {
                 bit_offset,
                 bit_size,
@@ -686,6 +737,7 @@ impl DwarfVariableInfo {
                         class: Class::Integer,
                     }));
                 }
+
                 Ok(())
             }
             RecordMemberLayout::Runtime => Err(Unassigned::Unsupported),
@@ -752,6 +804,7 @@ impl Assignment {
                 let words = resolved.byte_size.ok_or(Unassigned::Stack)? / WORD;
                 (0..words).try_for_each(|word| self.integer(offset + word * WORD, WORD, parts))
             }
+
             TypeKind::Array {
                 element,
                 dimensions,
@@ -775,6 +828,7 @@ impl Assignment {
                         "a struct's field has no byte offset".into(),
                     ));
                 };
+
                 self.registers(info, member.type_ref.id, offset + at, parts)
             }),
             _ => Err(Unassigned::Unsupported),
@@ -790,6 +844,7 @@ impl Assignment {
         if size > WORD {
             return Err(Unassigned::Unsupported);
         }
+
         let register = *INTEGER.get(self.integers).ok_or(Unassigned::Stack)?;
         self.integers += 1;
         parts.push(Part {
@@ -809,6 +864,7 @@ impl Assignment {
         if size > WORD {
             return Err(Unassigned::Unsupported);
         }
+
         let register = *FLOATING.get(self.floats).ok_or(Unassigned::Stack)?;
         self.floats += 1;
         parts.push(Part {
@@ -848,6 +904,7 @@ fn word(bytes: &[u8]) -> u64 {
     for (target, source) in word.iter_mut().zip(bytes) {
         *target = *source;
     }
+
     u64::from_le_bytes(word)
 }
 

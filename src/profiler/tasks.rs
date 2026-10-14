@@ -40,10 +40,13 @@ pub struct Waiting {
     /// What its runtime calls a task, and its number.
     pub noun: &'static str,
     pub number: u64,
+
     /// The runtime's words for what it waits for, or its state.
     pub state: String,
+
     /// Its labels, as `key=value` lines.
     pub labels: Option<String>,
+
     /// Its stack, innermost first.
     pub frames: Vec<WaitFrame>,
 }
@@ -54,8 +57,10 @@ pub enum WaitFrame {
     /// Code, by the address that names its line as a sample's would: a
     /// caller's is one byte before its return address.
     Code { address: u64, role: u8 },
+
     /// The future a suspended task awaits, by what it waits for.
     Awaited(String),
+
     /// Where its stack ends early.
     Truncated(Truncation),
 }
@@ -75,9 +80,11 @@ pub struct Snapshot {
     /// Every task the runtime keeps somewhere, running or not.
     pub located: Vec<Located>,
     pub waiting: Vec<Waiting>,
+
     /// Each task it could not read, or part of the runtime's tasks, and
     /// why.
     pub problems: Vec<String>,
+
     /// How many waiting tasks a live snapshot left out because they
     /// changed while it read them.
     pub changed: u64,
@@ -87,6 +94,7 @@ pub struct Snapshot {
 pub struct Snapshotter {
     pid: u32,
     program: Program,
+
     /// Each thread's thread pointer, by its id and when it started, as
     /// stopped snapshots that learned them read.
     thread_pointers: BTreeMap<(u32, u64), u64>,
@@ -134,6 +142,7 @@ impl Snapshotter {
                 }
             }
         }
+
         Ok(snapshot)
     }
 
@@ -153,6 +162,7 @@ impl Snapshotter {
             },
             Err(error) => Err(error),
         };
+
         // The process goes on whether or not reading it failed.
         let detached = debugger.shutdown().await;
         let read = read?;
@@ -174,6 +184,7 @@ async fn thread_pointers(
             execution: ExecutionContext::Thread(thread.id),
             frame: StackFrameId::INNERMOST,
         };
+
         let registers = handle.at(context).registers().await?;
         let pointer = registers
             .registers
@@ -184,6 +195,7 @@ async fn thread_pointers(
             learned.push((tid, pointer));
         }
     }
+
     Ok(learned)
 }
 
@@ -191,6 +203,7 @@ async fn thread_pointers(
 /// which tells it from a later thread given its id.
 fn thread_start(pid: u32, tid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).ok()?;
+
     // The name, in parentheses, may hold anything; the fields after it
     // begin with the state, the third.
     let after = &stat[stat.rfind(')')? + 2..];
@@ -224,6 +237,7 @@ async fn read(handle: &DebuggerHandle, stop: StopId) -> Result<Snapshot, crate::
                 execution: ExecutionContext::Task(task.id),
                 frame: StackFrameId::INNERMOST,
             };
+
             match handle.at(context).backtrace().await {
                 Ok(backtrace) => {
                     let mut futures = Vec::new();
@@ -232,6 +246,7 @@ async fn read(handle: &DebuggerHandle, stop: StopId) -> Result<Snapshot, crate::
                             futures.push(future_name(handle, &mut images, frame.module, ty).await);
                         }
                     }
+
                     snapshot.waiting.push(Waiting {
                         noun: task.noun,
                         number: task.id.number,
@@ -245,6 +260,7 @@ async fn read(handle: &DebuggerHandle, stop: StopId) -> Result<Snapshot, crate::
                     .push(format!("{} {}: {error}", task.noun, task.id)),
             }
         }
+
         seen += page.tasks.len();
         match page.next {
             Some(next) if seen < MOST_TASKS => cursor = Some(next),
@@ -273,10 +289,12 @@ async fn future_name(
             if let std::collections::btree_map::Entry::Vacant(entry) = images.entry(module) {
                 entry.insert(handle.loaded_module_image(module).await.ok());
             }
+
             images.get(&module).cloned().flatten()
         }
         None => None,
     };
+
     let name = image
         .filter(|image| image.id() == ty.image)
         .and_then(|image| image.type_info(ty).map(TypeInfo::qualified_name))
@@ -338,6 +356,7 @@ fn label_text(labels: &[(Arc<str>, Arc<str>)]) -> Option<String> {
 fn frames(backtrace: &crate::Backtrace, futures: Vec<String>) -> Vec<WaitFrame> {
     let mut futures = futures.into_iter();
     let mut frames = Vec::with_capacity(backtrace.frames.len() + 1);
+
     // The innermost frame, and one a signal interrupted, are where their
     // code is; a caller's address returns past its call.
     let mut exact = true;
@@ -353,8 +372,10 @@ fn frames(backtrace: &crate::Backtrace, futures: Vec<String>) -> Vec<WaitFrame> 
                     } else {
                         address.wrapping_sub(1)
                     };
+
                     frames.push(WaitFrame::Code { address, role });
                 }
+
                 exact = false;
             }
             FrameKind::Signal => {
@@ -364,6 +385,7 @@ fn frames(backtrace: &crate::Backtrace, futures: Vec<String>) -> Vec<WaitFrame> 
                         role,
                     });
                 }
+
                 exact = true;
             }
             FrameKind::Async { .. } => {
@@ -380,9 +402,11 @@ fn frames(backtrace: &crate::Backtrace, futures: Vec<String>) -> Vec<WaitFrame> 
             }
         }
     }
+
     if let Some(reason) = truncation(&backtrace.termination) {
         frames.push(WaitFrame::Truncated(reason));
     }
+
     frames
 }
 
@@ -407,6 +431,7 @@ const fn truncation(termination: &UnwindTermination) -> Option<Truncation> {
 
 /// The most bytes of a parked task's stack a live snapshot reads.
 const LIVE_STACK_BYTES: u64 = 1 << 20;
+
 /// The deepest stack a live snapshot unwinds.
 const LIVE_FRAMES: usize = 512;
 
@@ -414,9 +439,11 @@ const LIVE_FRAMES: usize = 512;
 #[derive(Debug)]
 pub enum Live {
     Taken(Snapshot),
+
     /// A runtime needs a thread's thread pointer that no stopped snapshot
     /// has learned.
     Unlearned,
+
     /// The process exited, before or while it was read, so it has no
     /// tasks, and what was read of it may show it partly gone.
     Exited,
@@ -434,11 +461,13 @@ impl Snapshotter {
             if exited(self.pid) {
                 return Live::Exited;
             }
+
             snapshot
                 .problems
                 .push("the program's mapping cannot be read".to_owned());
             return Live::Taken(snapshot);
         };
+
         let threads = threads(self.pid);
         let pointers = threads
             .iter()
@@ -455,6 +484,7 @@ impl Snapshotter {
             pointers,
             unlearned: AtomicBool::new(false),
         };
+
         let modules = [crate::unwind::UnwindModule {
             loaded: crate::LoadedModule {
                 id: ModuleId::new(0),
@@ -475,11 +505,13 @@ impl Snapshotter {
                         modules: &modules,
                         model: model.as_ref(),
                     };
+
                     live.read(&mut snapshot);
                 }
                 Err(unbound) => snapshot.problems.push(unbound.reason.to_string()),
             }
         }
+
         if exited(self.pid) {
             Live::Exited
         } else if stop.unlearned.load(Ordering::Relaxed) {
@@ -503,6 +535,7 @@ fn stat_exited(stat: &str) -> bool {
     let Some(fields) = stat.rfind(')').and_then(|end| stat.get(end + 2..)) else {
         return false;
     };
+
     // State, parent, group, session, terminal, foreground group, flags.
     let mut fields = fields.split_ascii_whitespace();
     let reaped = fields
@@ -535,6 +568,7 @@ struct LiveStop {
     bias: crate::LoadBias,
     threads: Vec<crate::ThreadId>,
     pointers: BTreeMap<u32, u64>,
+
     /// Whether a model asked for a thread pointer not learned.
     unlearned: AtomicBool,
 }
@@ -552,6 +586,7 @@ impl RuntimeStop for LiveStop {
         if pointer.is_none() {
             self.unlearned.store(true, Ordering::Relaxed);
         }
+
         pointer
     }
 
@@ -572,6 +607,7 @@ impl RuntimeStop for LiveStop {
 /// so that the pages read can be read again and compared.
 struct LivePages<'a> {
     stop: &'a LiveStop,
+
     /// Where reading may begin, and the most bytes past it.
     start: u64,
     pages: BTreeMap<u64, Option<Box<[u8; PAGE]>>>,
@@ -611,12 +647,14 @@ impl crate::unwind::MemoryReader for LivePages<'_> {
         if address < self.start || end > self.start.saturating_add(LIVE_STACK_BYTES) {
             return None;
         }
+
         let mut word = [0; 8];
         for (index, byte) in word.iter_mut().enumerate() {
             let at = address + index as u64;
             let page = at & !(PAGE as u64 - 1);
             *byte = self.page(page)?[usize::try_from(at - page).ok()?];
         }
+
         Some(u64::from_le_bytes(word))
     }
 }
@@ -650,9 +688,11 @@ impl LiveRuntime<'_> {
                         labels: labels.clone(),
                     });
                 }
+
                 if !live_waits(task) {
                     continue;
                 }
+
                 match self.frames(task) {
                     Ok(Some(frames)) => snapshot.waiting.push(Waiting {
                         noun,
@@ -667,6 +707,7 @@ impl LiveRuntime<'_> {
                         .push(format!("{noun} {}: {error}", task.number)),
                 }
             }
+
             match page.value.next {
                 Some(next) if snapshot.located.len() < MOST_TASKS => start = next,
                 Some(_) => {
@@ -686,6 +727,7 @@ impl LiveRuntime<'_> {
             number: task.number,
             locator: (task.locator != 0).then_some(task.locator),
         };
+
         let context = || self.model.task_context(self.stop, task_ref);
         let first = context().map_err(|error| error.to_string())?;
         let frames = match &first {
@@ -697,9 +739,11 @@ impl LiveRuntime<'_> {
                 let Some((frames, pages)) = self.parked(registers, *after_call) else {
                     return Ok(None);
                 };
+
                 if !pages.unchanged() {
                     return Ok(None);
                 }
+
                 frames
             }
             Some(runtime_model::TaskContext::Suspended { future, ty }) => {
@@ -709,9 +753,11 @@ impl LiveRuntime<'_> {
                 if walk() != chain {
                     return Ok(None);
                 }
+
                 self.awaits(&chain)
             }
         };
+
         let again = context().map_err(|error| error.to_string())?;
         Ok(same_context(first.as_ref(), again.as_ref()).then_some(frames))
     }
@@ -728,6 +774,7 @@ impl LiveRuntime<'_> {
             start: registers.get(crate::unwind::RSP)?,
             pages: BTreeMap::new(),
         };
+
         let registers: Vec<_> = registers.iter().collect();
         let (unwound, end) =
             crate::unwind::sample::unwind_memory(self.modules, &registers, &mut pages, LIVE_FRAMES);
@@ -746,6 +793,7 @@ impl LiveRuntime<'_> {
         if let crate::unwind::sample::StackEnd::Truncated(reason, _) = end {
             frames.push(WaitFrame::Truncated(reason));
         }
+
         Some((frames, pages))
     }
 
@@ -780,12 +828,14 @@ impl LiveRuntime<'_> {
                 }
             }
         }
+
         let reason = match chain.end {
             ChainEnd::Leaf | ChainEnd::Unresumed | ChainEnd::Finished => None,
             ChainEnd::NoAwaitee | ChainEnd::Broken(_) => Some(Truncation::AwaitChainEnded),
             ChainEnd::TooDeep => Some(Truncation::DepthLimit),
             ChainEnd::Cycle => Some(Truncation::InvalidCaller),
         };
+
         frames.extend(reason.map(WaitFrame::Truncated));
         frames
     }
@@ -875,6 +925,7 @@ mod tests {
             assert!(Instant::now() < deadline, "the program never exited");
             std::thread::yield_now();
         }
+
         let live = snapshotter.take_live();
         child.wait().expect("reap the program");
         assert!(matches!(live, Live::Exited), "{live:?}");

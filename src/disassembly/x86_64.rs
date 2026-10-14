@@ -12,6 +12,7 @@ use super::{
     AssemblySyntax, ControlFlow, InstructionReferenceKind, InstructionToken, InstructionTokenKind,
     RawDecode, RawIndirect,
 };
+
 use crate::ByteOrder;
 use crate::unwind::{DwarfRegister, FS_BASE, GS_BASE, RegisterFile};
 
@@ -20,6 +21,7 @@ const MAX_INSTRUCTION_LENGTH: usize = 15;
 
 pub struct Decoder {
     formatter: Box<dyn Formatter>,
+
     /// The mnemonics, registers, and punctuation rendered so far, which
     /// nearly every instruction repeats, so that its tokens share them.
     texts: HashSet<Arc<str>>,
@@ -31,11 +33,13 @@ impl Decoder {
             AssemblySyntax::Intel => Box::new(IntelFormatter::new()),
             AssemblySyntax::Att => Box::new(GasFormatter::new()),
         };
+
         let options = formatter.options_mut();
         options.set_hex_prefix("0x");
         options.set_hex_suffix("");
         options.set_uppercase_hex(false);
         options.set_space_after_operand_separator(true);
+
         // Program-counter-relative operands keep their encoded form; the
         // absolute address they name is reported as a reference instead.
         options.set_rip_relative_addresses(true);
@@ -71,10 +75,12 @@ impl super::InstructionDecoder for Decoder {
                 _ => RawDecode::Invalid,
             };
         }
+
         let mut tokens = Tokens {
             tokens: Vec::with_capacity(16),
             texts: &mut self.texts,
         };
+
         self.formatter.format(&instruction, &mut tokens);
         RawDecode::Instruction {
             length: instruction.len(),
@@ -111,6 +117,7 @@ impl FormatterOutput for Tokens<'_> {
             }
             _ => InstructionTokenKind::Text,
         };
+
         // Numbers and addresses rarely repeat, so sharing them saves nothing.
         let text = if matches!(
             kind,
@@ -124,6 +131,7 @@ impl FormatterOutput for Tokens<'_> {
             self.texts.insert(Arc::clone(&shared));
             shared
         };
+
         self.tokens.push(InstructionToken { kind, text });
     }
 }
@@ -162,6 +170,7 @@ fn references(instruction: &Instruction) -> Vec<(InstructionReferenceKind, u64)>
                 if matches!(instruction.segment_prefix(), Register::FS | Register::GS) {
                     continue;
                 }
+
                 if instruction.is_ip_rel_memory_operand() {
                     references.push((
                         InstructionReferenceKind::MemoryOperand,
@@ -179,6 +188,7 @@ fn references(instruction: &Instruction) -> Vec<(InstructionReferenceKind, u64)>
             _ => {}
         }
     }
+
     references
 }
 
@@ -210,6 +220,7 @@ fn register_value(registers: &RegisterFile, register: Register) -> Option<u64> {
             _ => return None,
         },
     };
+
     let value = registers.get(DwarfRegister::new(dwarf))?;
     Some(match register.size() {
         8 => value,
@@ -231,6 +242,7 @@ fn indirect(
     ) {
         return None;
     }
+
     // In 64-bit mode Intel processors ignore an operand-size prefix on a near
     // branch, while AMD processors narrow its target to 16 bits.
     let amd = iced_x86::Decoder::with_ip(
@@ -243,12 +255,14 @@ fn indirect(
     if amd.code() != instruction.code() {
         return Some(RawIndirect::Unsupported);
     }
+
     Some(match (instruction.code(), instruction.op0_kind()) {
         (Code::Jmp_rm64 | Code::Call_rm64, OpKind::Register) => registers
             .and_then(|registers| register_value(registers, instruction.op0_register()))
             .map_or(RawIndirect::NeedsRegisters, RawIndirect::Value),
         (Code::Jmp_rm64 | Code::Call_rm64, OpKind::Memory) => {
             let size = instruction.memory_size().size();
+
             // An address without registers holds at every instruction.
             let static_address = instruction.virtual_address(0, 0, |register, _, _| {
                 matches!(

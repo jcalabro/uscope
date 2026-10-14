@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::process::{
     Child, ChildStdin, ChildStdout, Command, ExitStatus as ProcessExitStatus, Stdio,
 };
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -34,11 +35,14 @@ use uscope::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
 // Event delivery depends on waiter and controller OS threads being scheduled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// How long a scenario's check of a stop may take, all its requests
 /// together.
 const STOP_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// How long an attach may take. It reads the executable's debug
 /// information, which a launched scenario reads before any deadline, and
 /// which takes several times as long under `just stress` as idle.
@@ -134,11 +138,13 @@ impl ExternalProcess {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {command:?}: {error}"));
+
         // Owned before reading, so a failed handshake still kills the child.
         let mut process = Self {
             child: Some(child),
             ready: String::new(),
         };
+
         let stdout = process
             .child
             .as_mut()
@@ -162,6 +168,7 @@ impl ExternalProcess {
             child: Some(child),
             ready: String::new(),
         };
+
         // `posix_spawn` returns once the exec releases the test's memory,
         // before the exec finishes, so an attach could find the test's own
         // executable or stop at the exec. Nothing shows the exec's end but
@@ -181,6 +188,7 @@ impl ExternalProcess {
             );
             std::thread::yield_now();
         }
+
         process
     }
 
@@ -276,11 +284,13 @@ fn loaded_fixture(path: &Path) -> Program {
         loaded.push(entry);
         return program;
     }
+
     let program = Program::load(path, &uscope::DebugFileOptions::default())
         .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
     if loaded.len() == LOADED_FIXTURES {
         loaded.remove(0);
     }
+
     loaded.push((path.to_owned(), program.clone()));
     program
 }
@@ -291,6 +301,7 @@ pub struct Scenario {
     handle: DebuggerHandle,
     events: broadcast::Receiver<DebuggerEvent>,
     transcript: Vec<String>,
+
     /// Every inferior launched, the latest last.
     process_ids: Vec<ProcessId>,
     last_revision: u64,
@@ -523,11 +534,13 @@ impl Scenario {
             ) else {
                 return Err(uscope::Error::NotStopped);
             };
+
             let frame = if kind == StepKind::Out {
                 frame
             } else {
                 StackFrameId::INNERMOST
             };
+
             let mut events = handle.subscribe();
             let execution = handle
                 .start_step(
@@ -615,14 +628,17 @@ impl Scenario {
         let mut task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
             handle.step(kind).await
         });
+
         // A step refused never continues the inferior.
         let refused = tokio::select! {
             _ = self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. })) => None,
             ended = &mut task => Some(ended),
         };
+
         if let Some(ended) = refused {
             self.fail(&format!("step {kind:?} ended unstarted: {ended:?}"));
         }
+
         task
     }
 
@@ -678,6 +694,7 @@ impl Scenario {
                 DebuggerEvent::InferiorStopped { .. } | DebuggerEvent::InferiorExited { .. }
             )
         };
+
         let (event, reply) = tokio::select! {
             event = self.wait_for(is_terminal) => (event, join_request(task).await),
             joined = &mut task => {
@@ -685,9 +702,11 @@ impl Scenario {
                 if let Err(error) = &reply {
                     self.fail(&format!("{operation} request failed: {error}"));
                 }
+
                 (self.wait_for(is_terminal).await, reply)
             }
         };
+
         let reply = reply
             .unwrap_or_else(|error| self.fail(&format!("{operation} request failed: {error}")));
         self.transcript.push(format!("reply: {reply:?}"));
@@ -704,6 +723,7 @@ impl Scenario {
                 self.fail(&format!("after {operation}: {problem}"));
             }
         }
+
         reply
     }
 
@@ -780,10 +800,12 @@ impl Scenario {
                 self.last_revision
             ));
         }
+
         self.last_revision = revision;
         if let DebuggerEvent::InferiorLaunched { process_id, .. } = event {
             self.process_ids.push(*process_id);
         }
+
         if let DebuggerEvent::InferiorExited { status, .. } = event {
             self.last_exit = Some(status.clone());
         }
@@ -850,6 +872,7 @@ pub fn signal_thread(process: ProcessId, thread: uscope::ThreadId, signal: nix::
     ) else {
         panic!("{process} or {thread} is no Linux process id");
     };
+
     #[allow(unsafe_code, reason = "the C library has no wrapper for tgkill")]
     // SAFETY: tgkill takes three integers and touches no memory of ours.
     let sent = unsafe { nix::libc::syscall(nix::libc::SYS_tgkill, process, thread, signal) };
@@ -1026,12 +1049,14 @@ pub async fn assert_tls_modules(
     if plugin {
         variables.push(("plugin_tls", "plugin", 400));
     }
+
     let snapshot = scenario.snapshot().await;
     let mut indices = Vec::new();
     for thread in snapshot.threads.iter() {
         scenario
             .operation("select thread", scenario.handle().select_context(thread.id))
             .await;
+
         // Each thread adds its index to every variable's initial value.
         let index = evaluate_value(scenario, "main_tls").await.signed() - 100;
         for &(name, field, initial) in &variables {
@@ -1051,8 +1076,10 @@ pub async fn assert_tls_modules(
                 "{context}"
             );
         }
+
         indices.push(index);
     }
+
     indices.sort_unstable();
     assert_eq!(indices, (0..threads).collect::<Vec<_>>(), "{fixture}");
 }

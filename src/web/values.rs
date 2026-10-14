@@ -24,10 +24,13 @@ use crate::present::{self, Code, Expand, Item, ListError, Listed, Presenter, Win
 
 /// The most rows one `children` request returns.
 const MOST_CHILDREN: u64 = 500;
+
 /// The most statics a scope lists.
 const MOST_STATICS: u64 = 500;
+
 /// The most handles one connection holds at one stop.
 const MOST_HANDLES: usize = 100_000;
+
 /// The most completions one request offers.
 const MOST_COMPLETIONS: usize = 1000;
 
@@ -87,6 +90,7 @@ impl Handles {
             stop,
             nodes: HashMap::new(),
         });
+
         // A new stop, or a new session, makes the old handles stale.
         if table.session != session || table.stop != stop {
             *table = Table {
@@ -95,12 +99,14 @@ impl Handles {
                 nodes: HashMap::new(),
             };
         }
+
         if table.nodes.len() >= MOST_HANDLES {
             return Err(Failure::new(
                 ErrorKind::Failed,
                 "too many values are open at this stop; collapse some",
             ));
         }
+
         let handle = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         table.nodes.insert(handle, node);
         drop(tables);
@@ -130,6 +136,7 @@ pub struct Reader<'a> {
     pub code: Code,
     pub handles: &'a Handles,
     pub connection: u32,
+
     /// The session whose stops the handles belong to.
     pub session: String,
 }
@@ -178,6 +185,7 @@ impl Reader<'_> {
                 ),
                 None => (None, present::Counts::default()),
             };
+
             if let Some(node) = node {
                 children = Some(protocol::Children {
                     handle: self.handles.insert(
@@ -191,6 +199,7 @@ impl Reader<'_> {
                 });
             }
         }
+
         Ok(Row {
             name: row.name,
             text: row.text,
@@ -252,6 +261,7 @@ impl Reader<'_> {
                             self.add_pointee_drawings(row).await;
                         }
                     }
+
                     scopes.push(Scope {
                         key,
                         name: name.to_owned(),
@@ -268,6 +278,7 @@ impl Reader<'_> {
                 problem: Some(error.to_string()),
             }),
         }
+
         if let (Some(module), Some(file)) = (module, file)
             && let Some(image) = self.images.get(module).await
         {
@@ -275,6 +286,7 @@ impl Reader<'_> {
                 count: MOST_STATICS,
                 ..Window::ALL
             };
+
             let (rows, problem) = match self
                 .presenter()
                 .statics(context, &image, module, file, window)
@@ -283,6 +295,7 @@ impl Reader<'_> {
                 Ok(listed) => (self.rows(context, listed)?, None),
                 Err(failure) => (Vec::new(), Some(list_failure(failure).body().message)),
             };
+
             scopes.push(Scope {
                 key: ScopeKey::Statics,
                 name: "Statics".to_owned(),
@@ -290,6 +303,7 @@ impl Reader<'_> {
                 problem,
             });
         }
+
         Ok(Scopes { scopes })
     }
 
@@ -302,6 +316,7 @@ impl Reader<'_> {
             count: request.count.min(MOST_CHILDREN),
             filter: None,
         };
+
         let presenter = self.presenter();
         let (context, listed) = match node {
             Node::Children {
@@ -330,6 +345,7 @@ impl Reader<'_> {
                 expression,
             } => (context, presenter.range(context, &expression, window).await),
         };
+
         self.rows(context, listed.map_err(list_failure)?)
     }
 
@@ -374,6 +390,7 @@ impl Reader<'_> {
             self.add_pointee_drawings(&mut row).await;
             return self.row(context, row);
         }
+
         self.present(context, text, expression, evaluation)
     }
 
@@ -384,12 +401,15 @@ impl Reader<'_> {
         let Some(details) = row.details.as_mut() else {
             return;
         };
+
         if !details.drawings.is_empty() {
             return;
         }
+
         let Some(Expand::Pointee(reference)) = &details.expand else {
             return;
         };
+
         if let Ok(pointee) = self.handle.dereference(reference.clone()).await
             && let VariableState::Available {
                 presentation: Some(presentation),
@@ -467,6 +487,7 @@ impl Reader<'_> {
                 "a value's path names it; it does not assign",
             ));
         }
+
         let context = inspect::context(&self.handle, at.stop, at.execution(), at.frame).await?;
         let assignment =
             Expression::parse(&format!("{target} = {value}")).map_err(expression_failure)?;
@@ -489,6 +510,7 @@ impl Reader<'_> {
             }
             None => None,
         };
+
         let (completing, partial, start) = complete::completing(text);
         let command = text.split_whitespace().next().unwrap_or_default();
         let variables = match (context, completing) {
@@ -497,6 +519,7 @@ impl Reader<'_> {
             }
             _ => None,
         };
+
         let candidates = complete::candidates(
             &self.presenter(),
             completing,

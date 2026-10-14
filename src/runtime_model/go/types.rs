@@ -11,6 +11,7 @@ use crate::{ImageAddress, VirtualAddress};
 
 /// The most modules a type descriptor is looked for in.
 const MAX_MODULES: usize = 256;
+
 /// The records an empty interface and one with methods are represented by.
 const EMPTY: &str = "runtime.eface";
 const METHODS: &str = "runtime.iface";
@@ -44,18 +45,22 @@ impl TypeTables {
             word(stop, VirtualAddress::new(address))
                 .ok_or_else(|| Arc::<str>::from("a module's type table is unreadable"))
         };
+
         let mut module = stop.load_bias().wrapping_load(self.first_module).get();
         for _ in 0..MAX_MODULES {
             if module == 0 {
                 break;
             }
+
             let types = read(module.wrapping_add(self.types))?;
             let end = read(module.wrapping_add(self.end_types))?;
             if (types..end).contains(&ty) {
                 return Ok(types);
             }
+
             module = read(module.wrapping_add(self.next_module))?;
         }
+
         Err(format!("the type at {ty:#x} is in no module's types").into())
     }
 }
@@ -64,13 +69,16 @@ impl TypeTables {
 #[derive(Debug, Clone)]
 pub struct Interfaces {
     tables: TypeTables,
+
     /// `eface._type`, `iface.tab`, and each one's `data`.
     empty_type: u64,
     empty_data: u64,
     methods_table: u64,
     methods_data: u64,
+
     /// The type an `itab` is for.
     table_type: u64,
+
     /// The byte of a type descriptor that says whether a value of the type
     /// is stored in the data word itself, and the bit that says it.
     direct: u64,
@@ -90,6 +98,7 @@ impl Interfaces {
                 constant(image, "internal/abi.KindDirectIface")?,
             ),
         };
+
         // Go 1.22 moved `runtime.itab` to `internal/abi.ITab`.
         let table_type = offset(image, "internal/abi.ITab", &["Type"], 8)
             .or_else(|_| offset(image, "runtime.itab", &["_type"], 8))?;
@@ -118,6 +127,7 @@ impl Interfaces {
             word(stop, VirtualAddress::new(at))
                 .ok_or_else(|| Arc::<str>::from(format!("{what} is unreadable")))
         };
+
         // A word of the interface itself.
         let field = |offset: u64, what: &str| match value {
             StoredValue::Memory(address) => read(address.get().wrapping_add(offset), what),
@@ -127,6 +137,7 @@ impl Interfaces {
                 .map(u64::from_le_bytes)
                 .ok_or_else(|| format!("{what} is past the interface's bytes").into()),
         };
+
         let (descriptor, data) = match representation {
             EMPTY => (
                 field(self.empty_type, "an interface's type"),
@@ -144,11 +155,13 @@ impl Interfaces {
             ),
             _ => return None,
         };
+
         Some((|| {
             let descriptor = descriptor?;
             if descriptor == 0 {
                 return Ok(DynamicValue::Nil);
             }
+
             let base = self.tables.base(stop, descriptor)?;
             let flags = read_unsigned(
                 stop,
@@ -156,6 +169,7 @@ impl Interfaces {
                 1,
             )
             .ok_or("a type's flags are unreadable")?;
+
             // A type stored directly is the data word itself; any other
             // is where the word points.
             let place = match (flags & self.direct_bit != 0, value) {
@@ -167,6 +181,7 @@ impl Interfaces {
                     HeldPlace::Memory(VirtualAddress::new(field(data, "an interface's data")?))
                 }
             };
+
             Ok(DynamicValue::Held {
                 descriptor: VirtualAddress::new(descriptor),
                 offset: descriptor - base,

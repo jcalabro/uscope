@@ -18,6 +18,7 @@ async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
             .unwrap()
             .start
     };
+
     let breakpoint = scenario.add_breakpoint("no_prologue").await;
     assert_eq!(
         single_image_breakpoint_address(&breakpoint),
@@ -76,6 +77,7 @@ async fn source_line_and_file_qualified_function_breakpoints_stop_where_they_nam
         assert_eq!(context.location.line.get(), expected);
         assert!(context.file.path.ends_with("tests/fixtures/c/basic.c"));
     }
+
     scenario.shutdown().await;
 }
 
@@ -102,6 +104,7 @@ async fn breakpoint_edits_publish_one_revision_or_change_nothing() {
         path: path.into(),
         line: uscope::LineNumber::new(line).unwrap(),
     };
+
     assert!(matches!(
         scenario
             .handle()
@@ -436,6 +439,7 @@ async fn inline_function_breakpoints_resolve_every_concrete_instance() {
                 .map(uscope::CodeInstance::id)
                 .collect::<BTreeSet<_>>()
         };
+
         let breakpoint = scenario.add_breakpoint("leaf").await;
         let resolved_instances = breakpoint
             .locations
@@ -500,6 +504,7 @@ async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
             else {
                 panic!("{fixture} did not select an inline frame: {snapshot:?}")
             };
+
             let resolved = breakpoint
                 .locations
                 .iter()
@@ -536,6 +541,7 @@ async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
                 })
                 .count()
         };
+
         assert_eq!(same_line_instances, 2, "{fixture}");
         scenario.shutdown().await;
     }
@@ -648,6 +654,7 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
         assert_eq!(backtrace.context, thread.id.into());
         assert!(!backtrace.frames.is_empty());
     }
+
     scenario
         .operation(
             "restore selected worker",
@@ -673,6 +680,7 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
             Err(Error::UnknownThread(thread)) if thread == unknown
         ));
     }
+
     assert_eq!(scenario.snapshot().await.stop_id, Some(stop_id));
 
     finish_worker_hits(&mut scenario, breakpoint.id).await;
@@ -694,6 +702,7 @@ async fn finish_worker_hits(scenario: &mut Scenario, breakpoint: uscope::Breakpo
         );
         reason = scenario.resume_to_stop().await;
     }
+
     assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
     let hits = scenario
         .snapshot()
@@ -725,6 +734,7 @@ async fn repeated_thread_creation_and_exit_loses_no_breakpoint_events() {
             "missing breakpoint for iteration {iteration}"
         );
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -757,6 +767,7 @@ async fn a_thread_scoped_continue_stops_cleanly_when_its_thread_exits() {
         } => (process_id, stop_id, thread_id),
         other => panic!("expected stopped inferior, got {other:?}"),
     };
+
     let mut events = scenario.handle().subscribe();
     let execution = scenario
         .operation(
@@ -869,6 +880,7 @@ async fn forked_children_are_released_without_inherited_breakpoints() {
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
+
     // The child also runs shared_work; an inherited trap would kill it with
     // SIGTRAP and the parent would exit 5. Its SIGCHLD does not stop the
     // parent.
@@ -911,6 +923,7 @@ async fn job_control_stops_are_classified_without_inventing_a_pending_signal() {
         InferiorState::Stopped { process_id, .. } => process_id,
         other => panic!("expected stopped inferior, got {other:?}"),
     };
+
     kill(
         Pid::from_raw(i32::try_from(process.get()).expect("process ID fits i32")),
         Signal::SIGCONT,
@@ -984,6 +997,7 @@ async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
         } => (process_id, stop_id),
         other => panic!("expected stopped inferior, got {other:?}"),
     };
+
     let first = scenario.handle().clone();
     let second = scenario.handle().clone();
     let (first, second) = tokio::join!(
@@ -1041,6 +1055,7 @@ async fn launch_options_start_the_program_with_its_arguments_environment_directo
             stop_at_entry: false,
         })
         .await;
+
     // argc counts the program name and both arguments.
     assert_eq!(reason, StopReason::Exited(ExitStatus::Code(3)));
     scenario.shutdown().await;
@@ -1083,12 +1098,14 @@ async fn launched_programs_run_at_the_same_addresses_every_time() {
         let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
             panic!("the program stopped in main");
         };
+
         layouts.push(
             fs::read_to_string(format!("/proc/{}/maps", process_id.get()))
                 .expect("read the program's mappings"),
         );
         scenario.shutdown().await;
     }
+
     assert_eq!(layouts[0], layouts[1]);
 }
 
@@ -1191,11 +1208,13 @@ async fn pause_stops_a_process_whose_main_thread_exited() {
     let InferiorState::Running { process_id, .. } = scenario.snapshot().await.inferior else {
         panic!("the inferior is not running");
     };
+
     // Linux reports the main thread's exit only after the worker's, so the
     // stop cannot wait for it.
     wait_for_zombie(process_id);
     let reason = scenario.operation("pause", scenario.handle().pause()).await;
     assert_eq!(reason, StopReason::Pause);
+
     // As after attaching, the exited main thread is not listed.
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.threads.len(), 1, "{:?}", snapshot.threads);
@@ -1206,6 +1225,7 @@ async fn pause_stops_a_process_whose_main_thread_exited() {
     scenario
         .operation("read the worker's registers", scenario.handle().registers())
         .await;
+
     // A breakpoint added at the stop is in place when the worker resumes.
     let breakpoint = scenario.add_source_breakpoint("exited-leader.c", 9).await;
     let reason = scenario.resume_to_stop().await;
@@ -1221,6 +1241,7 @@ async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;
     scenario.run_to_stop().await;
+
     // The breakpoint is in the loop body, where it would end the finish
     // before the pause could.
     scenario.remove_all_breakpoints().await;
@@ -1235,6 +1256,7 @@ async fn pause_cancels_an_active_source_execution_plan() {
         } => (process_id, stop_id, thread_id),
         other => panic!("expected stopped inferior, got {other:?}"),
     };
+
     scenario
         .operation(
             "start nonterminating finish",
@@ -1304,6 +1326,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
         for (from, to) in rules {
             map.push(from, to).unwrap();
         }
+
         scenario.handle().clone().with_source_paths(map)
     };
 
@@ -1396,6 +1419,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
 async fn function_breakpoints_stop_at_every_function_with_the_name() {
     let mut scenario = Scenario::launch("same-names");
     let image = scenario.handle().module_image().clone();
+
     // A file that only calls shared_entry describes it by a declaration,
     // which never competes with its definition.
     assert!(image.function_named("shared_entry").is_ok());
@@ -1437,6 +1461,7 @@ async fn function_breakpoints_stop_at_every_function_with_the_name() {
             .clone();
         assert!(path.ends_with(file), "{path:?} is not {file}");
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1459,10 +1484,12 @@ async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() 
         .source_file_matching(std::path::Path::new("line-sliding.c"))
         .expect("source file")
         .id;
+
     // Resolving a moved line again leaves it where it is.
     for requested in [comment, blank, code] {
         assert_eq!(image.breakpoint_line(file, requested), Some(code));
     }
+
     assert_eq!(image.breakpoint_line(file, between), None);
     let last = uscope::LineNumber::new(u64::MAX).expect("line");
     let lines = image
@@ -1521,6 +1548,7 @@ async fn killing_ends_the_inferior_but_keeps_the_session() {
         InferiorState::Stopped { process_id, .. } => process_id,
         other => panic!("not stopped: {other:?}"),
     };
+
     scenario
         .operation("kill a stopped inferior", scenario.handle().kill())
         .await;
@@ -1586,6 +1614,7 @@ async fn killing_a_running_or_attached_process_ends_it() {
         ))
     );
     debugger.shutdown().await.expect("shut down");
+
     // The test spawned the process, so the debugger's wait reaped it.
     assert!(!std::path::Path::new(&format!("/proc/{process}")).exists());
 }
@@ -1601,6 +1630,7 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
             .stop,
         "SIGTERM stops by default"
     );
+
     // While running, once the program handles the signal.
     scenario.add_breakpoint("terminate_tick").await;
     assert!(matches!(
@@ -1648,6 +1678,7 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
             _ => {}
         }
     }
+
     scenario.shutdown().await;
 }
 
@@ -1655,6 +1686,7 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
 async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statements() {
     let line_of = |marker| source_line("tests/fixtures/c/reexec.c", marker);
     let mut scenario = Scenario::launch("reexec");
+
     // The loop's header has statements for its start and for each test of
     // its condition; only its start is a place to stop.
     let header = line_of("for (int index = 1;");
@@ -1666,6 +1698,7 @@ async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statemen
     assert!(image.statement_addresses(file.id, line).count() > 1);
     let loop_start = scenario.add_source_breakpoint("reexec.c", header).await;
     assert_eq!(loop_start.locations.len(), 1);
+
     // Its body runs once per argument, stopping each time.
     let body = scenario
         .add_source_breakpoint("reexec.c", line_of("puts(argv[index]);"))
@@ -1680,6 +1713,7 @@ async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statemen
             other => panic!("stopped for {other:?}"),
         }
     }
+
     assert_eq!(hits, [loop_start.id, body.id]);
     scenario.shutdown().await;
 }

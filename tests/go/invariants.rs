@@ -43,10 +43,12 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
     let InferiorState::Stopped { stop_id, .. } = snapshot.inferior else {
         return Ok(());
     };
+
     // Before a library carrying the runtime loads, no image is checked.
     let Some(main) = go_module(handle).await? else {
         return Ok(());
     };
+
     for thread in snapshot.threads.iter() {
         if let Some(ThreadActivity::Unknown(reason)) = &thread.activity {
             return Err(format!(
@@ -54,10 +56,12 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
                 thread.id
             ));
         }
+
         let context = ExecutionContext::Thread(thread.id);
         let trace = backtrace(handle, stop_id, context).await?;
         check_backtrace(&trace, main).map_err(|problem| format!("{context:?}: {problem}"))?;
     }
+
     // A goroutine on a thread was checked as its thread's.
     let mut from = None;
     let mut read = 0;
@@ -69,11 +73,13 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
         if let Some(gap) = page.gaps.first() {
             return Err(format!("the tasks are incomplete: {gap}"));
         }
+
         for task in page.tasks.iter().filter(|task| task.thread.is_none()) {
             let context = ExecutionContext::Task(task.id);
             let trace = backtrace(handle, stop_id, context).await?;
             check_backtrace(&trace, main).map_err(|problem| format!("{context:?}: {problem}"))?;
         }
+
         read += page.tasks.len();
         match page.next {
             Some(next) if read < MAX_TASKS => from = Some(next),
@@ -97,6 +103,7 @@ async fn go_module(handle: &DebuggerHandle) -> Result<Option<ModuleId>, String> 
             return Ok(Some(module.module.id));
         }
     }
+
     Ok(None)
 }
 
@@ -121,6 +128,7 @@ async fn backtrace(
 /// the runtime switches them.
 pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> {
     let role = |index: usize| Some(trace.frames[index].role);
+
     // A runtime's stack may also end where it switched from a task that
     // has since gone elsewhere, as an idle thread's does at `mcall`, and a
     // thread the kernel just started, before its runtime gives it a stack,
@@ -144,6 +152,7 @@ pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> 
             ));
         }
     }
+
     for (index, frame) in trace.frames.iter().enumerate() {
         if frame.module == Some(main) && frame.function.is_none() {
             return Err(format!(
@@ -151,10 +160,12 @@ pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> 
             ));
         }
     }
+
     for (index, pair) in trace.frames.windows(2).enumerate() {
         let [inner, outer] = pair else {
             unreachable!("windows of two");
         };
+
         let switched = role(index) == Some(CodeRole::StackSwitch)
             || inner.kind == FrameKind::Signal
             || outer.kind == FrameKind::Signal;
@@ -164,6 +175,7 @@ pub fn check_backtrace(trace: &Backtrace, main: ModuleId) -> Result<(), String> 
             ));
         }
     }
+
     Ok(())
 }
 
@@ -193,6 +205,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
             ..trace.clone()
         }
     };
+
     let switch = trace
         .frames
         .iter()
@@ -215,6 +228,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
         frames: unnamed.into(),
         ..trace.clone()
     };
+
     assert!(check_backtrace(&unnamed, main).is_err());
     scenario.shutdown().await;
 }

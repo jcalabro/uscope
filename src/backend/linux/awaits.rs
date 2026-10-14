@@ -46,6 +46,7 @@ use crate::protocol::{
     ExceptionDisposition, ExecutionId, ProcessId, ResumeScope, StepKind, StopId, StopReason,
     TaskEnding,
 };
+
 use crate::runtime_model::futures::{self, AsyncFrameKind};
 use crate::runtime_model::{TaskEnd, TaskEntries};
 use crate::unwind::DEFAULT_MAX_FRAMES;
@@ -66,24 +67,31 @@ pub(super) struct AwaitStep {
     /// The future whose poll runs the step's body: the body's own, or the
     /// future of the function the body is inlined into.
     future: RunningFuture,
+
     /// For a body inlined into another's, where the step goes on.
     inlined: Option<Inlined>,
+
     /// The line the step began on, which it goes on past once the future
     /// resumes.
     source: Option<SourceLocation>,
+
     /// Where the future resumes, once a poll of it returned `Pending` and
     /// the step waits for the next.
     waiting: BTreeSet<VirtualAddress>,
+
     /// Where each copy of the function that drops the future begins,
     /// which the step watches while it waits.
     drop_glue: BTreeSet<VirtualAddress>,
+
     /// Where copies of the code that drops the future, inlined into other
     /// code and passed no place the step can check, begin: a thread of the
     /// step's task at one drops the task's future of that type.
     inlined_drops: BTreeSet<VirtualAddress>,
+
     /// The code of the step's runtime that takes up its task again, which
     /// the step watches while it waits, to see the task end.
     task_entries: Option<(crate::TaskId, TaskEntries)>,
+
     /// Where the runtime's code that runs the task returns, while it does.
     task_return: Option<TaskReturn>,
 }
@@ -101,13 +109,17 @@ struct TaskReturn {
 pub(super) struct Inlined {
     /// The future whose poll runs the body.
     poll: RunningFuture,
+
     /// Whether the step follows the body's own future.
     own: bool,
+
     /// The body's function, which the future must await once only when the
     /// body names no future of its own.
     function: FunctionId,
+
     /// The body's code.
     instances: BTreeSet<CodeInstanceId>,
+
     /// Where the step goes on once its future is polled again: the body's
     /// statements, and those on another line of the code the body is
     /// inlined into, but none that only resuming runs.
@@ -165,6 +177,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !matches!(kind, StepKind::OverSource | StepKind::Out) {
             return None;
         }
+
         let inline = start
             .code_instance
             .and_then(|instance| self.module_image.code_instance(instance))
@@ -174,6 +187,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             (self.running_future(pid, start.code_instance)?, None)
         };
+
         record!(
             "the step follows the future at {}{}",
             future.object,
@@ -212,6 +226,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return None;
         }
+
         // The body may be inlined into a function no future runs, such as
         // a combinator's, and then must name its own.
         let own = self.running_future(pid, Some(instance));
@@ -222,7 +237,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
             return None;
         };
+
         let depth = chain.instances.iter().position(|id| *id == instance)?;
+
         // The body's own statements, and those on another line of each
         // async function it is inlined into, out to the one that runs, but
         // none of a combinator's around it, such as `select!`'s.
@@ -243,6 +260,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 super::frames::source_for_code_instance(&self.module_image, &location, outer)?;
             statements.extend(self.other_lines(outer, &line).ok()?);
         }
+
         Some((
             future,
             Some(Inlined {
@@ -307,6 +325,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return statements;
         };
+
         statements
             .into_iter()
             .filter(|address| {
@@ -324,9 +343,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return false;
         };
+
         let Some(module) = self.module_of(future.ty) else {
             return false;
         };
+
         let chain = self.with_module_stop(inferior, &module.loaded, pid, |stop| {
             futures::walk(module.image.as_ref(), stop, future.object, future.ty)
         });
@@ -367,11 +388,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return Err(parked());
         }
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let root = self.stack_root(stop_id, ExecutionContext::Task(task))?;
         let super::frames::RootOrigin::Suspended { reader, .. } = root.origin else {
             return Err(parked());
         };
+
         let stack = self.async_stack(inferior, &root)?.ok_or_else(parked)?;
         let level = frame.get() as usize;
         let selected = (level..stack.futures.len())
@@ -384,7 +407,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 "the async function is in a library, whose awaits steps do not follow".into(),
             ));
         }
+
         let own = self.named_by_body(&stack.futures[selected]);
+
         // The function may run out of line in one place and be inlined in
         // another, as an optimized build may make of a function some code
         // awaits and some polls, and either may be the copy that resumes
@@ -398,6 +423,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             (Some(resumes), Err(_)) => (own, None, BTreeSet::from([resumes])),
             (None, inline) => inline?,
         };
+
         let (drop_glue, inlined_drops) = self.drop_glue(future.ty);
         let task_entries = self.task_entries(reader, task);
         record!(
@@ -409,6 +435,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             StepKind::IntoSource => StepKind::OverSource,
             kind => kind,
         };
+
         let awaiting = AwaitStep {
             future,
             inlined,
@@ -419,11 +446,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             task_entries,
             task_return: None,
         };
+
         let start = StepStart {
             plan_addresses: awaiting.watched().collect(),
             awaiting: Some(awaiting),
             ..StepStart::default()
         };
+
         self.begin_execution(
             process_id,
             stop_id,
@@ -477,6 +506,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 "the async function waits at no await whose resumption is known".into(),
             )
         };
+
         // A coroutine's function may have a copy in each unit that uses
         // it, and any copy may be the one that runs, or is inlined.
         let functions_of = |index: usize| {
@@ -486,6 +516,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .map(|function| function.id())
                 .collect::<Vec<_>>()
         };
+
         let out_of_line = |functions: &[FunctionId]| {
             functions
                 .iter()
@@ -493,6 +524,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
                 .collect::<Vec<_>>()
         };
+
         // The innermost future out from the selected one whose function
         // runs out of line, which the inlined bodies run in.
         let (running, physical) = (selected + 1..stack.futures.len())
@@ -515,6 +547,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .map(crate::image::functions::CodeInstance::id)
                 .collect::<BTreeSet<_>>()
         };
+
         let selected_functions = functions_of(selected);
         let function = *selected_functions.first().ok_or_else(unknown)?;
         let instances = inlined_in(&selected_functions);
@@ -522,23 +555,28 @@ impl<P: LinuxTraceOps> Controller<P> {
         for instance in &instances {
             statements.extend(self.body_statements(*instance)?);
         }
+
         for index in selected + 1..=running {
             let Some(line) = &stack.frames[index].source else {
                 continue;
             };
+
             let outers = if index == running {
                 physical.iter().map(|instance| instance.id()).collect()
             } else {
                 inlined_in(&functions_of(index))
             };
+
             for instance in outers {
                 statements.extend(self.other_lines(instance, line)?);
             }
         }
+
         let statements = self.without_resume_code(statements);
         if instances.is_empty() || statements.is_empty() {
             return Err(unknown());
         }
+
         Ok((
             self.named_by_body(&stack.futures[selected]),
             Some(Inlined {
@@ -587,6 +625,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             activation: 0,
             below_stack_pointer: self.below_stack_pointer(inferior, &root, innermost),
         };
+
         let key = module
             .variables
             .visible_object(
@@ -606,6 +645,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let crate::model::ValueStorage::Memory(object) = located.storage else {
             return None;
         };
+
         (located.ty == coroutine).then_some(RunningFuture {
             object,
             ty: TypeReference {
@@ -619,6 +659,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn future_state(&self, pid: Pid, future: RunningFuture) -> Option<(u64, CoroutineStateKind)> {
         let inferior = self.inferior.as_ref()?;
         let module = self.module_of(future.ty)?;
+
         // The walk lists the future it began at last.
         let chain = self.with_module_stop(inferior, &module.loaded, pid, |stop| {
             futures::walk(module.image.as_ref(), stop, future.object, future.ty)
@@ -636,6 +677,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let (state, CoroutineStateKind::Suspended { .. }) = self.future_state(pid, future)? else {
             return None;
         };
+
         let module = self.module_of(future.ty)?;
         let functions = module.image.coroutine_functions(future.ty.id);
         let address = super::async_frames::resume_address(&module.image, &functions, state)?;
@@ -656,6 +698,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             kind,
             description: description.into(),
         };
+
         // Only a future known to have returned lets the step go on as any
         // other does; one whose state is unknown leaves it nowhere to wait.
         let state = self.future_state(pid, future).map(|(_, state)| state);
@@ -669,6 +712,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if !inlined.own && self.awaits_twice(pid, future, inlined.function) {
                     return Err(incomplete(TWICE));
                 }
+
                 Ok(inlined.statements.clone())
             }
             (Some(CoroutineStateKind::Unresumed), _) => Err(incomplete(
@@ -712,6 +756,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         );
                         return None;
                     }
+
                     Some((active.id, owner.task, awaiting.clone(), start.activation?))
                 }
                 _ => None,
@@ -719,16 +764,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(None);
         };
+
         let future = awaiting.future;
         let registers = self.ptrace.registers(pid)?;
         if !activation.has_returned(self.stack_position(pid, &registers)) {
             record!("the poll of the future at {} runs on", future.object);
             return Ok(None);
         }
+
         let waiting = match self.waits_at(pid, kind, &awaiting) {
             Ok(waiting) => waiting,
             Err(reason) => return Ok(Some(Followed::Ended(reason))),
         };
+
         if waiting.is_empty() {
             let ended = task.filter(|_| self.returned_to_runtime(pid, &registers));
             return Ok(ended.map(|task| {
@@ -740,6 +788,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 })
             }));
         }
+
         record!(
             "the poll of the future at {} returned pending; the step waits at {waiting:?}",
             future.object
@@ -750,7 +799,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             BTreeSet::new()
         };
+
         let task_entries = task.and_then(|task| self.task_entries(pid, task));
+
         // The poll that returned `Pending` runs within the runtime's, which
         // may yet end the task before it returns: its state is read there
         // only where what frees the task would have stopped a thread first.
@@ -770,6 +821,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         awaiting.inlined_drops = inlined_drops;
         awaiting.task_entries = task_entries;
         awaiting.task_return = task_return;
+
         // An advance's targets end it wherever its task reaches them, and
         // a step into a new task still watches for one.
         let waits = StepStart {
@@ -779,6 +831,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             new_task: start.new_task.take(),
             ..StepStart::default()
         };
+
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(execution, &waits.plan_sites())?;
         *self.active_step_mut().ok_or_else(|| {
@@ -808,6 +861,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Err(reason) = &entries {
             record!("task {task}'s entries are unreadable: {reason}");
         }
+
         entries.ok().flatten().map(|entries| (task, entries))
     }
 
@@ -856,6 +910,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     &super::registers::x86_64_registers(&registers),
                 ))
             }) == Ok(true);
+
         // Whatever frees the task stops a thread first, so the task's
         // memory still holds it as the code that ran it returns.
         let ends = returned || entered && entries.frees.contains(&address);
@@ -882,11 +937,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .into(),
                 }),
             };
+
             if let Some(reason) = reason {
                 self.follow_step(pid);
                 return self.begin_visible_stop(pid, reason);
             }
         }
+
         if entered && entries.runs.contains(&address) && !entries.frees.is_empty() {
             // Entered, the return address is the word the stack pointer
             // points at, which the return pops.
@@ -896,6 +953,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 stack_pointer: registers.rsp + 8,
             })?;
         }
+
         self.pass_by(pid, address)
     }
 
@@ -919,6 +977,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(awaiting) = start.awaiting.as_mut() else {
             return Ok(());
         };
+
         awaiting.task_return = Some(task_return);
         start.plan_addresses.insert(task_return.address);
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([task_return.address]))
@@ -955,6 +1014,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(module) = self.module_of(ty) else {
             return (named, inlined);
         };
+
         let Some(identity) = module
             .image
             .type_info(ty)
@@ -962,11 +1022,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return (named, inlined);
         };
+
         let mut name = String::from("drop_glue<");
         for segment in identity.0.iter() {
             name.push_str(segment);
             name.push_str("::");
         }
+
         name.push_str(&identity.1);
         name.push('>');
         let entry = |instance: crate::CodeInstance<'_>| {
@@ -976,6 +1038,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .or_else(|| instance.ranges().map(|range| range.start).min())
                 .and_then(|address| module.loaded.virtual_address(address).ok())
         };
+
         // Each codegen unit may have a copy of its own.
         for function in module.image.functions_called(&name) {
             for instance in module.image.instances_for_function(function.id()) {
@@ -984,9 +1047,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 } else {
                     &mut inlined
                 };
+
                 copies.extend(entry(instance));
             }
         }
+
         (named, inlined)
     }
 
@@ -1009,6 +1074,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let stack =
             self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)?;
+
         // The future is dropped by the code that drops what holds it, as
         // the drop glue of each value around it passes it on, whether as a
         // function of its own or inlined into the dropper's.
@@ -1019,6 +1085,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .code_instance(location.physical_instance?)?;
             self.module_image.function(instance.function())
         };
+
         let dropper = (0..stack.frames.len())
             .find(|&level| physical(level).is_none_or(|function| !is_drop_glue(function.name())))
             .filter(|&level| {
@@ -1046,8 +1113,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .into(),
                 },
             };
+
             return self.begin_visible_stop(pid, reason);
         };
+
         #[cfg(debug_assertions)]
         record!(
             "frame {dropper} drops it, in {}",
@@ -1068,6 +1137,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             );
         };
+
         let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(
@@ -1093,6 +1163,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             *running = StepKind::OverSource;
             **active = start;
         }
+
         self.go_on_without_plan(pid, address, None)
     }
 
@@ -1111,17 +1182,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(None);
         };
+
         let Some(location) = self.image_location(lookup) else {
             return Ok(None);
         };
+
         let Some(instance) = location.physical_instance else {
             return Ok(None);
         };
+
         let Some(source) =
             super::frames::source_for_code_instance(&self.module_image, &location, instance)
         else {
             return Ok(None);
         };
+
         let modules = self.unwind_modules(inferior);
         let code = inferior
             .loaded_module
@@ -1131,10 +1206,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(cfa) = self.frame_cfa(pid, &modules, code, &frame.registers) else {
             return Ok(None);
         };
+
         let mut plan = self.other_lines(instance, &source)?;
         if let Some(caller) = stack.frames.get(level + 1) {
             plan.insert(self.executable_return_address(pid, caller.context.instruction)?);
         }
+
         let registers = self.ptrace.registers(pid)?;
         Ok(Some(StepStart {
             source: Some(source),
@@ -1178,14 +1255,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return false;
         }
+
         let Some(inferior) = self.inferior.as_ref() else {
             return false;
         };
+
         let Ok(stack) =
             self.physical_stack(inferior, &StackRoot::of_thread(pid), DEFAULT_MAX_FRAMES)
         else {
             return false;
         };
+
         let dispatch = (0..stack.frames.len())
             .find(|&level| {
                 stack
@@ -1236,6 +1316,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
+
         if let Some(entries) = awaiting
             .task_entries
             .clone()
@@ -1244,6 +1325,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.task_code_reached(pid, address, kind, entries, awaiting.task_return)?;
             return Ok(true);
         }
+
         // Drop glue is passed the place it drops; a copy of it inlined
         // elsewhere drops one in the task that runs it.
         if awaiting.drop_glue.contains(&address) || awaiting.inlined_drops.contains(&address) {
@@ -1252,13 +1334,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             } else {
                 self.runs_step(owner, pid)
             };
+
             if ours {
                 self.future_dropped(pid, address, kind, awaiting.future)?;
             } else {
                 self.pass_by(pid, address)?;
             }
+
             return Ok(true);
         }
+
         // A step that waits in both copies of a function, out of line and
         // inlined, goes on from its resume point as from any out of line.
         let awaiting = match &awaiting.inlined {
@@ -1268,11 +1353,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             },
             _ => awaiting,
         };
+
         let ours = self.resumes_step(pid, address, owner, &awaiting);
         if !ours {
             self.pass_by(pid, address)?;
             return Ok(true);
         }
+
         record!(
             "the future at {} resumed on thread {pid}",
             awaiting.future.object
@@ -1282,12 +1369,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.reach_advance_target(pid, address)?;
             return Ok(true);
         }
+
         let presentation = match &awaiting.inlined {
             None => self.presentation_for_thread(pid, None)?,
             Some(inlined) => match self.reentered(address, inlined, awaiting.source.as_ref()) {
                 Reentry::Body(presentation) if kind == StepKind::Out || !presentation.1 => {
                     presentation.0
                 }
+
                 // A statement on another line than the step's of the body
                 // or of the code it is inlined into is where the step
                 // ends.
@@ -1297,12 +1386,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             },
         };
+
         let mut resumed = self.innermost_step_start(pid, kind, || Ok(presentation))?;
+
         // The step goes on past the line it began on, which the await is
         // on, or past the frame it began in.
         if kind == StepKind::OverSource {
             resumed.source.clone_from(&awaiting.source);
         }
+
         resumed.awaiting = Some(AwaitStep {
             waiting: BTreeSet::new(),
             ..awaiting
@@ -1311,6 +1403,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             resumed.targets = std::mem::take(&mut waited.targets);
             resumed.new_task = waited.new_task.take();
         }
+
         let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
         self.install_additional_plan_breakpoints(execution, &resumed.plan_sites())?;
@@ -1351,6 +1444,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .running_future(pid, None)
                 .is_some_and(|running| self.same_future(running, awaiting.future));
         };
+
         let body = self
             .image_location(address)
             .and_then(|location| match location.inline_frames {
@@ -1367,6 +1461,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else {
             None
         };
+
         named
             .or_else(|| {
                 (inlined.poll != awaiting.future || !inlined.own)
@@ -1383,6 +1478,7 @@ enum Reentry {
     /// The body, presented as the step's frame, and whether on another line
     /// than the step's.
     Body((crate::FramePresentation, bool)),
+
     /// The code the body is inlined into, having returned meanwhile.
     Outside,
 }
@@ -1399,9 +1495,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(location) = self.image_location(address) else {
             return Reentry::Outside;
         };
+
         let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
             return Reentry::Outside;
         };
+
         let Some(depth) = chain
             .instances
             .iter()
@@ -1409,6 +1507,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Reentry::Outside;
         };
+
         let instance = chain.instances[depth];
         let moved =
             super::frames::source_for_code_instance(&self.module_image, &location, instance)
@@ -1448,6 +1547,7 @@ fn is_drop_glue(name: &str) -> bool {
 pub(super) enum Followed {
     /// It waits for the future to be polled again.
     Waits,
+
     /// It ends, for this reason.
     Ended(StopReason),
 }

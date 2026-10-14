@@ -16,6 +16,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use super::functions::{
     FunctionRecord, GenericRecord, LocationRecord, language_code, language_of, valid_language,
 };
+
 use super::index::{self, NameEntry};
 use super::strings::{StrId, Strings, StringsBuilder};
 use super::{Builder, Image, NONE, Record, SharedRecord, Span, TableKind};
@@ -41,33 +42,44 @@ pub enum TypeParts {}
 pub struct TypeRecord {
     /// The type's name; a malformed type's description.
     pub name: U32,
+
     /// A base type's or an enumeration's source name, or an opaque type's
     /// description.
     pub text: U32,
+
     /// A base type's or an enumeration's underlying base-type name.
     pub base_name: U32,
+
     /// The type's identity, or [`NONE`].
     pub identity: U32,
+
     /// The type a pointer, reference, array, slice, modifier or name
     /// stands for; an enumeration's underlying type; what a signature
     /// returns; a variant type's tag type. [`NONE`] when absent.
     pub target: U32,
+
     /// Members, enumerators, dimensions, or parameters.
     pub parts: Span<TypeParts>,
+
     /// Base classes.
     pub bases: Span<BaseRecord>,
+
     /// A variant type's variants.
     pub variants: Span<VariantRecord>,
+
     /// A variant type's stored discriminant member, or [`NONE`].
     pub discriminant: U32,
     pub byte_size: U64,
+
     /// A base type's or an enumeration's storage size, or a pointer's or
     /// reference's address class.
     pub value: U64,
+
     /// A base type's or an enumeration's bit size.
     pub bit_size: U64,
     pub flags: U16,
     pub kind: u8,
+
     /// The kind's own category: an encoding, modifier, relationship, or
     /// record, reference, or storage kind.
     pub detail: u8,
@@ -86,38 +98,63 @@ impl TypeRecord {
 /// [`TypeRecord::kind`].
 pub mod kinds {
     pub const MALFORMED: u8 = 0;
+
     pub const BASE: u8 = 1;
+
     pub const ENUMERATION: u8 = 2;
+
     pub const POINTER: u8 = 3;
+
     pub const REFERENCE: u8 = 4;
+
     pub const ARRAY: u8 = 5;
+
     pub const SLICE: u8 = 6;
+
     pub const RECORD: u8 = 7;
+
     pub const UNION: u8 = 8;
+
     pub const VARIANT: u8 = 9;
+
     pub const MODIFIED: u8 = 10;
+
     pub const NAMED: u8 = 11;
+
     pub const UNSPECIFIED: u8 = 12;
+
     pub const FUNCTION: u8 = 13;
+
     pub const SIGNATURE: u8 = 14;
+
     pub const OPAQUE: u8 = 15;
+
     pub const RUNTIME_ARRAY: u8 = 16;
 }
 
 /// [`TypeRecord::flags`].
 pub mod type_flags {
     pub const SIZED: u16 = 1 << 0;
+
     pub const BIT_SIZED: u16 = 1 << 1;
+
     pub const INCOMPLETE: u16 = 1 << 2;
+
     pub const SCOPED: u16 = 1 << 3;
+
     /// An enumeration of a named integer's associated constants.
     pub const NAMED_CONSTANTS: u16 = 1 << 4;
+
     pub const TEXT: u16 = 1 << 6;
+
     pub const VARIADIC: u16 = 1 << 7;
+
     pub const PROTOTYPED: u16 = 1 << 8;
+
     /// A variant type's discriminant is stored; with [`TAG_TYPE`], only
     /// its type is described; with neither, it is absent.
     pub const STORED: u16 = 1 << 9;
+
     pub const TAG_TYPE: u16 = 1 << 10;
 }
 
@@ -168,6 +205,7 @@ pub struct MemberRecord {
     /// The member's name, or [`NONE`] when anonymous.
     pub name: U32,
     pub ty: U32,
+
     /// The byte offset, or the bit offset of a bit range.
     pub offset: U64,
     pub bit_size: U64,
@@ -184,7 +222,9 @@ impl Record for MemberRecord {
 /// [`MemberRecord::flags`].
 pub mod member_flags {
     pub const ARTIFICIAL: u8 = 1 << 0;
+
     pub const EMBEDDED: u8 = 1 << 1;
+
     pub const ALL: u8 = ARTIFICIAL | EMBEDDED;
 }
 
@@ -220,6 +260,7 @@ pub struct VariantRecord {
     pub name: U32,
     pub selectors: Span<SelectorRecord>,
     pub members: Span<MemberRecord>,
+
     /// Whether the variant is the default, which has no selectors.
     pub default: u8,
 }
@@ -235,6 +276,7 @@ impl Record for VariantRecord {
 )]
 pub struct SelectorRecord {
     pub low: IntegerRecord,
+
     /// A range's last value; zero for one value.
     pub high: IntegerRecord,
     pub range: u8,
@@ -280,8 +322,10 @@ impl Record for DimensionRecord {
 pub struct BoundRecord {
     /// A constant's value, or a variable's offset in `.debug_info`.
     pub value: I128,
+
     /// What [`bound_kinds`] says the bound is.
     pub kind: u8,
+
     /// How many bytes a computed or stored bound has.
     pub byte_size: u8,
     pub signed: u8,
@@ -290,16 +334,22 @@ pub struct BoundRecord {
 /// [`BoundRecord::kind`].
 pub mod bound_kinds {
     pub const NONE: u8 = 0;
+
     pub const CONSTANT: u8 = 1;
+
     pub const COMPUTED: u8 = 2;
+
     pub const STORED: u8 = 3;
+
     pub const VARIABLE: u8 = 4;
 }
 
 /// [`RuntimeDimensionRecord::ends`].
 pub mod ends {
     pub const UPPER: u8 = 0;
+
     pub const COUNT: u8 = 1;
+
     pub const UNKNOWN: u8 = 2;
 }
 
@@ -311,8 +361,10 @@ pub mod ends {
 pub struct RuntimeDimensionRecord {
     pub lower: BoundRecord,
     pub extent: BoundRecord,
+
     /// The byte stride, or [`bound_kinds::NONE`].
     pub stride: BoundRecord,
+
     /// What [`ends`] says the extent is.
     pub ends: u8,
 }
@@ -336,6 +388,7 @@ impl BoundRecord {
             byte_size,
             signed: u8::from(signed),
         };
+
         match bound {
             ArrayBound::Constant(value) => Self {
                 value: value.into(),
@@ -392,6 +445,7 @@ impl RuntimeDimensionRecord {
             ArrayExtent::Count(bound) => (ends::COUNT, BoundRecord::of(bound)),
             ArrayExtent::Unknown => (ends::UNKNOWN, BoundRecord::ABSENT),
         };
+
         Self {
             lower: BoundRecord::of(dimension.lower_bound),
             extent,
@@ -410,11 +464,13 @@ impl RuntimeDimensionRecord {
             ends::UNKNOWN if self.extent.absent() => ArrayExtent::Unknown,
             _ => return None,
         };
+
         let byte_stride = if self.stride.absent() {
             None
         } else {
             Some(self.stride.bound()?)
         };
+
         Some(RuntimeDimension {
             lower_bound: self.lower.bound()?,
             extent,
@@ -449,6 +505,7 @@ pub struct IdentityRecord {
     pub inline: Span<Item>,
     pub base: U32,
     pub arguments: Span<ArgumentRecord>,
+
     /// Where a template parameter pack begins among the arguments, or
     /// [`NONE`].
     pub pack: U32,
@@ -456,6 +513,7 @@ pub struct IdentityRecord {
     pub other_language: U16,
     pub language: u8,
     pub origin: u8,
+
     /// Go's kind by `internal/abi.Kind`'s number.
     pub go_kind: u8,
     pub flags: u8,
@@ -468,7 +526,9 @@ impl Record for IdentityRecord {
 /// [`IdentityRecord::flags`].
 pub mod identity_flags {
     pub const GO: u8 = 1 << 0;
+
     pub const RUNTIME_TYPE: u8 = 1 << 1;
+
     pub const ALL: u8 = GO | RUNTIME_TYPE;
 }
 
@@ -479,6 +539,7 @@ pub mod identity_flags {
 )]
 pub struct ArgumentRecord {
     pub value: IntegerRecord,
+
     /// A type argument's type, or an unknown argument's text.
     pub reference: U32,
     pub kind: u8,
@@ -559,6 +620,7 @@ fn code<T: PartialEq>(known: &[T], value: &T) -> Result<u8, TooMany> {
 pub struct Types<'a> {
     /// Every type, each at its identifier's index.
     pub nodes: &'a [TypeNode],
+
     /// Each type's identity class: two types have one class when they are
     /// the same type, as one type defined in several units is.
     pub classes: &'a [u32],
@@ -614,9 +676,11 @@ impl Encoder {
         if member.artificial {
             flags |= member_flags::ARTIFICIAL;
         }
+
         if member.embedded {
             flags |= member_flags::EMBEDDED;
         }
+
         self.members.push(MemberRecord {
             name: match &member.name {
                 Some(name) => Self::text(strings, name)?,
@@ -643,6 +707,7 @@ impl Encoder {
         for member in members {
             self.member(strings, member)?;
         }
+
         Ok(Span::new(first, number(members.len())?))
     }
 
@@ -659,6 +724,7 @@ impl Encoder {
                 virtual_base: u8::from(base.virtuality == BaseClassVirtuality::Virtual),
             });
         }
+
         Ok(Span::new(first, number(bases.len())?))
     }
 
@@ -675,6 +741,7 @@ impl Encoder {
             record.bit_size = bits.into();
             record.set(type_flags::BIT_SIZED);
         }
+
         Ok(())
     }
 
@@ -691,6 +758,7 @@ impl Encoder {
                         value: Self::text(strings, segment)?,
                     });
                 }
+
                 Ok(Span::new(first, number(segments.len())?))
             };
         let path = segments(&identity.path, self)?;
@@ -715,6 +783,7 @@ impl Encoder {
                 },
             });
         }
+
         let (language, other_language) = language_code(identity.language).ok_or(TooMany)?;
         let mut flags = 0;
         let (go_kind, runtime_type) = match identity.go {
@@ -723,10 +792,12 @@ impl Encoder {
                 if go.runtime_type.is_some() {
                     flags |= identity_flags::RUNTIME_TYPE;
                 }
+
                 (go_kind_code(go.kind)?, go.runtime_type.unwrap_or(0))
             }
             None => (0, 0),
         };
+
         let index = number(self.identities.len())?;
         self.identities.push(IdentityRecord {
             path,
@@ -767,6 +838,7 @@ impl Encoder {
             kind: kinds::MALFORMED,
             detail: 0,
         };
+
         let info = match node {
             TypeNode::Malformed { description, .. } => {
                 record.name = Self::text(strings, description)?;
@@ -775,22 +847,26 @@ impl Encoder {
             }
             TypeNode::Resolved(info) => info,
         };
+
         record.name = Self::text(strings, &info.name)?;
         if let Some(size) = info.byte_size {
             record.byte_size = size.into();
             record.set(type_flags::SIZED);
         }
+
         // A list starts where the previous type's ended, even when empty.
         let flag = |record: &mut TypeRecord, set: bool, flag: u16| {
             if set {
                 record.set(flag);
             }
         };
+
         match &info.kind {
             TypeKind::Base(base) => {
                 record.kind = kinds::BASE;
                 Self::base_type(&mut record, strings, base)?;
             }
+
             TypeKind::Enumeration {
                 representation,
                 underlying,
@@ -809,6 +885,7 @@ impl Encoder {
                         value: IntegerRecord::of(enumerator.value),
                     });
                 }
+
                 flag(
                     &mut record,
                     *origin == EnumerationOrigin::NamedConstants,
@@ -816,6 +893,7 @@ impl Encoder {
                 );
                 flag(&mut record, *scoped, type_flags::SCOPED);
             }
+
             TypeKind::Pointer {
                 target,
                 address_class,
@@ -824,6 +902,7 @@ impl Encoder {
                 record.target = reference(*target);
                 record.value = (*address_class).into();
             }
+
             TypeKind::Reference {
                 kind,
                 target,
@@ -834,6 +913,7 @@ impl Encoder {
                 record.target = reference(Some(*target));
                 record.value = (*address_class).into();
             }
+
             TypeKind::Array {
                 element,
                 dimensions,
@@ -849,6 +929,7 @@ impl Encoder {
                         count: dimension.count.into(),
                     }));
             }
+
             TypeKind::RuntimeArray {
                 element,
                 dimensions,
@@ -864,6 +945,7 @@ impl Encoder {
                 self.runtime_dimensions
                     .extend(dimensions.iter().map(RuntimeDimensionRecord::of));
             }
+
             TypeKind::Slice {
                 element,
                 words,
@@ -874,6 +956,7 @@ impl Encoder {
                 record.value = slice_words(*words).into();
                 flag(&mut record, *text, type_flags::TEXT);
             }
+
             TypeKind::Record {
                 kind,
                 members,
@@ -886,6 +969,7 @@ impl Encoder {
                 record.bases = self.bases(bases)?;
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
             }
+
             TypeKind::Union {
                 members,
                 incomplete,
@@ -894,6 +978,7 @@ impl Encoder {
                 record.parts = self.members(strings, members)?.cast();
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
             }
+
             TypeKind::Variant {
                 storage,
                 common_members,
@@ -926,9 +1011,11 @@ impl Encoder {
                                     },
                                 });
                             }
+
                             (0, number(selectors.len())?)
                         }
                     };
+
                     // A variant's members follow the previous variant's.
                     let members = self.members(strings, &variant.members)?;
                     self.variants.push(VariantRecord {
@@ -941,6 +1028,7 @@ impl Encoder {
                         default,
                     });
                 }
+
                 match discriminant.as_ref() {
                     VariantDiscriminant::Stored(member) => {
                         record.discriminant = number(self.members.len())?.into();
@@ -953,6 +1041,7 @@ impl Encoder {
                     }
                     VariantDiscriminant::Absent => {}
                 }
+
                 flag(&mut record, *incomplete, type_flags::INCOMPLETE);
             }
             TypeKind::Modified { modifier, target } => {
@@ -960,6 +1049,7 @@ impl Encoder {
                 record.detail = code(&MODIFIERS, modifier)?;
                 record.target = reference(Some(*target));
             }
+
             TypeKind::Named {
                 target,
                 relationship,
@@ -991,9 +1081,11 @@ impl Encoder {
                 record.text = Self::text(strings, description)?;
             }
         }
+
         if let Some(identity) = &info.identity {
             record.identity = self.identity(strings, identity)?.into();
         }
+
         self.types.push(record);
         Ok(())
     }
@@ -1046,6 +1138,7 @@ fn go_kind_code(kind: GoKind) -> Result<u8, TooMany> {
             .find(|code| GoKind::from_abi(*code) == kind)
             .ok_or(TooMany)?,
     };
+
     // An unknown kind's number decodes to it again.
     (GoKind::from_abi(code) == kind)
         .then_some(code)
@@ -1068,6 +1161,7 @@ pub fn add_to(
     for node in types.nodes {
         encoder.add(strings, node)?;
     }
+
     let mut names = Vec::new();
     let mut bases = Vec::new();
     let mut enumerators = Vec::new();
@@ -1077,6 +1171,7 @@ pub fn add_to(
         let TypeNode::Resolved(info) = node else {
             continue;
         };
+
         let id = number(index)?;
         let record = &encoder.types[index];
         names.push((&*info.name, StrId(record.name.get()), id));
@@ -1088,6 +1183,7 @@ pub fn add_to(
             {
                 base_keys.push((key, id));
             }
+
             if let Some(offset) = identity.go.and_then(|go| go.runtime_type) {
                 runtime_types.push(RuntimeTypeRecord {
                     offset: offset.into(),
@@ -1095,6 +1191,7 @@ pub fn add_to(
                 });
             }
         }
+
         if let TypeKind::Enumeration {
             enumerators: listed,
             ..
@@ -1109,11 +1206,13 @@ pub fn add_to(
             }
         }
     }
+
     let base_keys = base_keys
         .iter()
         .map(|(key, id)| Ok((key.as_str(), StrId(Encoder::text(strings, key)?.get()), *id)))
         .collect::<Result<Vec<_>, TooMany>>()?;
     bases.extend(base_keys);
+
     // The first type for each offset, in identifier order.
     runtime_types.sort_by_key(|record| record.offset.get());
     runtime_types.dedup_by_key(|record| record.offset.get());
@@ -1270,6 +1369,7 @@ impl<'a> TypeView<'a> {
                 description: self.text(record.name),
             });
         }
+
         let Some(kind) = self.kind(image, record) else {
             debug_assert!(
                 false,
@@ -1280,6 +1380,7 @@ impl<'a> TypeView<'a> {
                 description: "the image's record of the type does not decode".into(),
             });
         };
+
         Some(TypeNode::Resolved(TypeInfo {
             reference,
             name: self.text(record.name),
@@ -1460,6 +1561,7 @@ impl<'a> TypeView<'a> {
                 } else {
                     VariantDiscriminant::Absent
                 };
+
                 TypeKind::Variant {
                     storage: STORAGE[usize::from(record.detail)],
                     common_members: self.members(image, record.parts.cast()),
@@ -1505,6 +1607,7 @@ impl<'a> TypeView<'a> {
                 .map(|segment| self.text(segment.value))
                 .collect()
         };
+
         TypeIdentity {
             language: language_of(record.language, record.other_language.get()),
             path: segments(record.path),
@@ -1555,6 +1658,7 @@ pub struct TypeTable {
     image: Arc<Image>,
     id: ModuleImageId,
     decoded: Box<[OnceLock<Box<TypeNode>>]>,
+
     /// The coroutines, read from their types on the first question.
     coroutines:
         OnceLock<std::collections::BTreeMap<TypeId, Result<crate::CoroutineInfo, Arc<str>>>>,
@@ -1613,6 +1717,7 @@ impl TypeTable {
         if reference.image != self.id {
             return None;
         }
+
         match self.node(reference.id)? {
             TypeNode::Resolved(info) => Some(info),
             TypeNode::Malformed { .. } => None,
@@ -1703,6 +1808,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                 && usize::from(record.detail) < ENCODINGS.len()
                 && (flags & f::BIT_SIZED != 0 || none(record.bit_size))
         };
+
         let plain = no_text
             && none(record.value)
             && none(record.bit_size)
@@ -1713,6 +1819,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
         if !text(record.name) {
             return Err("a type is malformed".into());
         }
+
         let valid = match record.kind {
             kinds::MALFORMED => {
                 plain
@@ -1835,6 +1942,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
                     && follows(&mut cursors.members, record.parts)
                     && follows(&mut cursors.bases, record.bases)
                     && follows(&mut cursors.variants, record.variants);
+
                 // Each variant's selectors and members follow the last's,
                 // then the stored discriminant.
                 ok && record.variants.within(variants.len())
@@ -1904,7 +2012,9 @@ fn validate_types(image: &Image) -> Result<(), String> {
             }
             _ => false,
         };
+
         let sized = flags & f::SIZED != 0 || none(record.byte_size);
+
         // Identities follow in type order too.
         let identity = unused(record.identity)
             || follows(
@@ -1915,6 +2025,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
             return Err("a type is malformed".into());
         }
     }
+
     // The lists hold exactly what the types name.
     let lengths = [
         (cursors.members, members.len()),
@@ -1936,6 +2047,7 @@ fn validate_types(image: &Image) -> Result<(), String> {
     {
         return Err("the type lists do not match their types".into());
     }
+
     Ok(())
 }
 
@@ -1988,6 +2100,7 @@ fn validate_lists(image: &Image) -> Result<(), String> {
     {
         return Err("a type's member, base, selector, enumerator or parameter is malformed".into());
     }
+
     let identity_strings = image.shared::<Item>(TableKind::IdentityStrings);
     let arguments = image.table::<ArgumentRecord>();
     let mut strings_cursor = 0;
@@ -2010,6 +2123,7 @@ fn validate_lists(image: &Image) -> Result<(), String> {
             return Err("a type identity is malformed".into());
         }
     }
+
     if strings_cursor as usize != identity_strings.len()
         || arguments_cursor as usize != arguments.len()
         || !identity_strings.iter().all(|segment| text(segment.value))
@@ -2030,6 +2144,7 @@ fn validate_lists(image: &Image) -> Result<(), String> {
     {
         return Err("a type identity's segments or arguments are malformed".into());
     }
+
     // What functions say of types names types there are.
     if !image
         .table::<GenericRecord>()
@@ -2042,6 +2157,7 @@ fn validate_lists(image: &Image) -> Result<(), String> {
     {
         return Err("a function names a type the image lacks".into());
     }
+
     Ok(())
 }
 
@@ -2083,6 +2199,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
     {
         return Err("the type name index disagrees with the types".into());
     }
+
     // Each identity's base names its type, and so does C's spelling of
     // it where that differs: every entry is one of these, no two are the
     // same, and there are as many as these.
@@ -2098,14 +2215,17 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
             expected += 1 + usize::from(key.is_some());
             Some((base, key))
         };
+
         keys.push(key);
     }
+
     let names_its_type = |entry: &NameEntry| {
         let name = strings.get(StrId(entry.name.get()));
         keys[entry.value.get() as usize]
             .as_ref()
             .is_some_and(|(base, key)| *base == name || key.as_deref() == Some(name))
     };
+
     if !index::valid_names(&strings, base_names, types.len())
         || base_names.len() != expected
         || !base_names.iter().all(names_its_type)
@@ -2113,6 +2233,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
     {
         return Err("the type base index disagrees with the types".into());
     }
+
     // Classes are numbered in the order their first types come.
     let classes = image.shared::<Item>(TableKind::TypeClasses);
     let mut next_class = 0;
@@ -2129,6 +2250,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
     {
         return Err("the type classes are malformed".into());
     }
+
     // Each enumeration is under each of its enumerators' names once.
     let enumerator_names = image.shared::<NameEntry>(TableKind::EnumeratorNames);
     let mut expected = 0;
@@ -2137,6 +2259,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
         if record.kind != kinds::ENUMERATION {
             continue;
         }
+
         let mut names = enumerators[record.parts.range()]
             .iter()
             .map(|enumerator| enumerator.name.get())
@@ -2146,6 +2269,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
         expected += names.len();
         listed[index] = names;
     }
+
     if !index::valid_names(&strings, enumerator_names, types.len())
         || enumerator_names.len() != expected
         || !enumerator_names.iter().all(|entry| {
@@ -2157,6 +2281,7 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
     {
         return Err("the enumerator index disagrees with the types".into());
     }
+
     // The first type with each runtime descriptor, by offset.
     let runtime_types = image.table::<RuntimeTypeRecord>();
     let mut first = std::collections::BTreeMap::new();
@@ -2164,11 +2289,13 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
         if record.kind == kinds::MALFORMED || record.identity.get() == NONE {
             continue;
         }
+
         let identity = &identities[record.identity.get() as usize];
         if identity.flags & identity_flags::RUNTIME_TYPE != 0 {
             first.entry(identity.runtime_type.get()).or_insert(index);
         }
     }
+
     if runtime_types.len() != first.len()
         || !runtime_types
             .iter()
@@ -2179,5 +2306,6 @@ fn validate_indexes(image: &Image) -> Result<(), String> {
     {
         return Err("the Go runtime type index disagrees with the types".into());
     }
+
     Ok(())
 }

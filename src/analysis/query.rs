@@ -25,6 +25,7 @@ pub enum Source {
     /// CPU samples, or a breakpoint's.
     #[default]
     Samples,
+
     /// Where task snapshots found tasks waiting, each weighted by the time
     /// it stands for.
     Waits,
@@ -34,26 +35,34 @@ pub enum Source {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Query {
     pub source: Source,
+
     /// Samples taken in `[start, end)`, or all.
     pub range: Option<(i64, i64)>,
+
     /// Samples of these threads, by their rows in the capture, or of all.
     /// Waits are of no thread, so this selects samples only.
     pub threads: Option<Vec<u32>>,
+
     /// Samples or waits of these tasks, by their rows, or of any: [`NONE`]
     /// is a sample no task snapshot named.
     pub tasks: Option<Vec<u32>>,
+
     /// Samples or waits that carry every one of these labels, each a key
     /// and value.
     pub labels: Vec<(String, String)>,
     pub transforms: Vec<Transform>,
+
     /// Paths from the innermost frame out, so that the tree is of callers.
     pub invert: bool,
+
     /// Each async task's frames as a stack of their own (see [`logical`]),
     /// before any transform.
     pub logical: bool,
+
     /// Roots each path, after its transforms, at the task it ran or waited
     /// in.
     pub by_task: bool,
+
     /// Roots each path, after its transforms and outside any task, at its
     /// label of this key, or at the key's absence.
     pub by_label: Option<String>,
@@ -65,10 +74,13 @@ pub enum Transform {
     /// Keeps samples whose path has the key, from its first occurrence on:
     /// the key becomes the root, and its calls from everywhere merge.
     Focus(u32),
+
     /// Removes the key from every path, giving its cost to its caller.
     Merge(u32),
+
     /// Removes every sample whose path has the key.
     Drop(u32),
+
     /// Merges each run of the key calling itself into its first call.
     CollapseRecursion(u32),
 }
@@ -79,15 +91,20 @@ pub enum Transform {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallTree {
     pub key: Vec<u32>,
+
     /// The caller's node, or [`NONE`] for a root.
     pub parent: Vec<u32>,
     pub depth: Vec<u32>,
+
     /// The weight of samples whose path ends at the node.
     pub own: Vec<u64>,
+
     /// The weight of samples whose path passes through the node.
     pub total: Vec<u64>,
+
     /// One past the node's last descendant.
     pub end: Vec<u32>,
+
     /// The weight of every sample selected and kept.
     pub weight: u64,
     pub samples: u64,
@@ -122,6 +139,7 @@ impl CallTree {
                 roots += self.total[position];
                 continue;
             }
+
             let caller = parent as usize;
             debug_assert!(
                 caller < position && end <= self.end[caller] as usize,
@@ -134,6 +152,7 @@ impl CallTree {
             );
             children[caller] += self.total[position];
         }
+
         for (position, ((&total, &own), &children)) in
             self.total.iter().zip(&self.own).zip(&children).enumerate()
         {
@@ -143,6 +162,7 @@ impl CallTree {
                 "node {position}'s total is not its own weight and its children's"
             );
         }
+
         debug_assert!(
             roots <= self.weight,
             "the roots total {roots}, more than the {} the query kept",
@@ -155,8 +175,10 @@ impl CallTree {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cost {
     pub key: u32,
+
     /// Weight of samples whose path ends with it.
     pub own: u64,
+
     /// Weight of samples whose path has it, counted once per sample.
     pub total: u64,
 }
@@ -165,9 +187,11 @@ pub struct Cost {
 #[derive(Debug, Clone, Copy)]
 struct Selected {
     time: i64,
+
     /// Its thread's row, or [`NONE`] for a wait.
     thread: u32,
     task: u32,
+
     /// The key of its label a query by label roots it at, or [`NONE`].
     label: u32,
     stack: u32,
@@ -179,6 +203,7 @@ struct Selected {
 struct LabelQuery<'a> {
     required: Vec<u32>,
     by: Option<&'a str>,
+
     /// The labels a sample carries.
     carried: Vec<u32>,
 }
@@ -213,6 +238,7 @@ impl<'a> LabelQuery<'a> {
         {
             return None;
         }
+
         Some(self.by.map_or(NONE, |by| {
             let label = self
                 .carried
@@ -231,12 +257,14 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
     let Some(mut labels) = LabelQuery::new(keys, query) else {
         return;
     };
+
     let task_kept = |task: u32| {
         query
             .tasks
             .as_ref()
             .is_none_or(|tasks| tasks.contains(&task))
     };
+
     match query.source {
         Source::Samples => {
             for range in &capture.sample_ranges {
@@ -248,6 +276,7 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
                 {
                     continue;
                 }
+
                 // The thread's label spans that began by a sample's time
                 // and have not ended.
                 let spans = keys.spans(thread);
@@ -259,6 +288,7 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
                     if stack == NONE || !task_kept(task) {
                         continue;
                     }
+
                     let label = if labels.active() {
                         while let Some(&(start, end, label)) = spans.get(next)
                             && start <= time
@@ -266,6 +296,7 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
                             open.push((end, label));
                             next += 1;
                         }
+
                         open.retain(|(end, _)| *end > time);
                         labels.carried.clear();
                         labels.carried.extend_from_slice(keys.task_labels(task));
@@ -273,10 +304,12 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
                         let Some(judged) = labels.judge(keys) else {
                             continue;
                         };
+
                         judged
                     } else {
                         NONE
                     };
+
                     take(Selected {
                         time,
                         thread,
@@ -295,16 +328,19 @@ fn each(capture: &Capture, keys: &Keys<'_>, query: &Query, mut take: impl FnMut(
                 if stack == NONE || !task_kept(task) {
                     continue;
                 }
+
                 let label = if labels.active() {
                     labels.carried.clear();
                     labels.carried.extend_from_slice(keys.task_labels(task));
                     let Some(judged) = labels.judge(keys) else {
                         continue;
                     };
+
                     judged
                 } else {
                     NONE
                 };
+
                 take(Selected {
                     time: wait.time.get(),
                     thread: NONE,
@@ -355,6 +391,7 @@ fn select(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Vec<Group> {
         selected.sort_unstable();
         return selected;
     }
+
     let mut weights = vec![0_u64; capture.stacks.len()];
     let mut counts = vec![0_u32; capture.stacks.len()];
     each(capture, keys, query, |selected| {
@@ -385,6 +422,7 @@ fn in_range<T>(
     let Some((start, end)) = range else {
         return 0..rows.len();
     };
+
     let first = rows.partition_point(|row| time(row) < start);
     let last = rows.partition_point(|row| time(row) < end);
     first..last.max(first)
@@ -416,14 +454,17 @@ impl<'a> Paths<'a> {
         for frame in self.capture.stack_frames(stack) {
             path.extend_from_slice(self.keys.frame(frame));
         }
+
         if self.query.logical {
             logical(self.keys, path);
         }
+
         // Innermost first, as stacks are; a tree from the roots starts
         // with the outermost.
         if !self.query.invert {
             path.reverse();
         }
+
         for transform in &self.query.transforms {
             match *transform {
                 Transform::Focus(key) => {
@@ -446,10 +487,12 @@ impl<'a> Paths<'a> {
                 }
             }
         }
+
         let groups = [
             self.query.by_task.then(|| self.keys.group(task)),
             (label != NONE).then_some(label),
         ];
+
         // The label outermost, then the task.
         for group in groups.into_iter().flatten() {
             if self.query.invert {
@@ -458,6 +501,7 @@ impl<'a> Paths<'a> {
                 path.insert(0, group);
             }
         }
+
         Some(path)
     }
 }
@@ -482,12 +526,14 @@ fn logical(keys: &Keys<'_>, path: &mut Vec<u32>) {
                 CodeRole::RuntimeInternal | CodeRole::Wrapper
             )
         };
+
         if let Some(root) = path[..dispatch].iter().rposition(|key| !machinery(key))
             && let Some(task) = keys.task(path[root])
         {
             path.splice(root + 1..dispatch, [task]);
         }
     }
+
     path.retain(|key| keys.role(*key) != CodeRole::Wrapper);
 }
 
@@ -495,6 +541,7 @@ fn logical(keys: &Keys<'_>, path: &mut Vec<u32>) {
 pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree {
     let selected = select(capture, keys, query);
     let mut paths = Paths::new(capture, keys, query);
+
     // The tree in the order nodes are first reached.
     let mut key = Vec::new();
     let mut parent = Vec::new();
@@ -505,6 +552,7 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
         let Some(path) = paths.of(group.stack, group.task, group.label) else {
             continue;
         };
+
         let (weight, count) = (group.weight, group.count);
         tree.weight += weight;
         tree.samples += u64::from(count);
@@ -517,10 +565,12 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
                 index(key.len() - 1)
             });
         }
+
         if node != NONE {
             own[node as usize] += weight;
         }
     }
+
     // A node is reached after its parent, so a reverse pass totals it.
     let mut total = own.clone();
     for node in (0..key.len()).rev() {
@@ -528,6 +578,7 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
             total[parent[node] as usize] += total[node];
         }
     }
+
     // Lay the tree out depth first, largest child first.
     let mut kids: Vec<Vec<u32>> = vec![Vec::new(); key.len()];
     let mut roots = Vec::new();
@@ -537,6 +588,7 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
             caller => kids[caller as usize].push(index(node)),
         }
     }
+
     let largest_first = |nodes: &mut Vec<u32>| {
         nodes.sort_by(|a, b| {
             total[*b as usize]
@@ -544,10 +596,12 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
                 .then(key[*a as usize].cmp(&key[*b as usize]))
         });
     };
+
     largest_first(&mut roots);
     for list in &mut kids {
         largest_first(list);
     }
+
     let mut placed = vec![NONE; key.len()];
     let mut pending: Vec<(u32, u32)> = roots.iter().rev().map(|root| (*root, 0)).collect();
     while let Some((node, depth)) = pending.pop() {
@@ -569,6 +623,7 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
                 .map(|kid| (*kid, depth + 1)),
         );
     }
+
     // Each subtree ends where the next node of its depth or less begins.
     for position in (0..tree.len()).rev() {
         let caller = tree.parent[position];
@@ -578,9 +633,11 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
             *caller_end = (*caller_end).max(end);
         }
     }
+
     if cfg!(debug_assertions) {
         tree.check_invariants();
     }
+
     tree
 }
 
@@ -588,6 +645,7 @@ pub fn aggregate(capture: &Capture, keys: &Keys<'_>, query: &Query) -> CallTree 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Costs {
     pub rows: Vec<Cost>,
+
     /// The weight of every sample selected and kept.
     pub weight: u64,
 }
@@ -598,6 +656,7 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
     let mut paths = Paths::new(capture, keys, query);
     let mut own = vec![0_u64; keys.count()];
     let mut total = vec![0_u64; keys.count()];
+
     // The entry that last counted a key, so recursion counts once.
     let mut counted = vec![u32::MAX; keys.count()];
     let mut kept = 0;
@@ -605,6 +664,7 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
         let Some(path) = paths.of(group.stack, group.task, group.label) else {
             continue;
         };
+
         let weight = group.weight;
         kept += weight;
         let innermost = if query.invert {
@@ -612,9 +672,11 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
         } else {
             path.last()
         };
+
         if let Some(&innermost) = innermost {
             own[innermost as usize] += weight;
         }
+
         for &key in path {
             if counted[key as usize] != index(entry) {
                 counted[key as usize] = index(entry);
@@ -622,6 +684,7 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
             }
         }
     }
+
     let mut costs: Vec<Cost> = (0..keys.count())
         .filter(|&key| total[key] > 0)
         .map(|key| Cost {
@@ -639,6 +702,7 @@ pub fn functions(capture: &Capture, keys: &Keys<'_>, query: &Query) -> Costs {
             cost.total
         );
     }
+
     costs.sort_by(|a, b| (b.own, b.total, a.key).cmp(&(a.own, a.total, b.key)));
     Costs {
         rows: costs,
@@ -664,12 +728,15 @@ pub fn off_cpu(capture: &Capture, query: &Query, buckets: usize) -> Vec<OffCpuLa
     else {
         return Vec::new();
     };
+
     let span = u128::try_from(end - start).unwrap_or(1);
     let count = buckets as u128;
+
     // Slice `i` is [edge(i), edge(i + 1)).
     let edge = |slice: usize| {
         start + i64::try_from(slice as u128 * span / count).unwrap_or(i64::MAX - start)
     };
+
     let mut lanes = Vec::new();
     for range in &capture.off_cpu_ranges {
         let thread = range.thread.get();
@@ -680,11 +747,13 @@ pub fn off_cpu(capture: &Capture, query: &Query, buckets: usize) -> Vec<OffCpuLa
         {
             continue;
         }
+
         let mut lane = OffCpuLane {
             thread,
             blocked: vec![0; buckets],
             preempted: vec![0; buckets],
         };
+
         let mut any = false;
         for interval in capture.thread_off_cpu(range) {
             let left = interval.time.get();
@@ -693,11 +762,13 @@ pub fn off_cpu(capture: &Capture, query: &Query, buckets: usize) -> Vec<OffCpuLa
             if from >= to {
                 continue;
             }
+
             let totals = if interval.preempted == 0 {
                 &mut lane.blocked
             } else {
                 &mut lane.preempted
             };
+
             let offset = u128::try_from(from - start).unwrap_or(0);
             let mut slice = usize::try_from(offset * count / span)
                 .unwrap_or(0)
@@ -707,12 +778,15 @@ pub fn off_cpu(capture: &Capture, query: &Query, buckets: usize) -> Vec<OffCpuLa
                 totals[slice] += u64::try_from(overlap).unwrap_or(0);
                 slice += 1;
             }
+
             any = true;
         }
+
         if any {
             lanes.push(lane);
         }
     }
+
     lanes
 }
 
@@ -722,6 +796,7 @@ pub enum Lanes {
     /// A lane per thread, by its row.
     #[default]
     Threads,
+
     /// A lane per task, by its row, and one, [`NONE`], for what no task
     /// snapshot named.
     Tasks,
@@ -743,9 +818,11 @@ pub fn density(
     else {
         return Vec::new();
     };
+
     let by_task = lanes == Lanes::Tasks || query.source == Source::Waits;
     let span = u128::try_from(end - start).unwrap_or(1);
     let mut paths = Paths::new(capture, keys, query);
+
     // Whether each stack's samples are kept, decided once per stack and
     // task, and each lane, the last for no task.
     let mut kept: HashMap<(u32, u32, u32), bool> = HashMap::default();
@@ -754,6 +831,7 @@ pub fn density(
     } else {
         capture.threads.len()
     };
+
     let mut slices: Vec<Option<Vec<u64>>> = vec![None; count];
     each(capture, keys, query, |selected| {
         let task = if query.by_task { selected.task } else { NONE };
@@ -763,11 +841,13 @@ pub fn density(
         if !keep {
             return;
         }
+
         let lane = match (by_task, selected.task) {
             (true, NONE) => capture.tasks.len(),
             (true, task) => task as usize,
             (false, _) => selected.thread as usize,
         };
+
         let offset = u128::try_from(selected.time - start).unwrap_or(0);
         let bucket = usize::try_from(offset * buckets as u128 / span).unwrap_or(0);
         slices[lane].get_or_insert_with(|| vec![0; buckets])[bucket.min(buckets - 1)] +=
@@ -781,6 +861,7 @@ pub fn density(
                 (true, true) => NONE,
                 _ => index(lane),
             };
+
             Some((lane, slices?))
         })
         .collect()

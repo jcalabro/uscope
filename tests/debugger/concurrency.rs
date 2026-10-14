@@ -76,6 +76,7 @@ async fn thread_steps_at(fixture: &str, arguments: &[&str], needle: &str) -> (Sc
 async fn next_over_a_join_runs_the_thread_it_waits_for() {
     for fixture in THREAD_STEPS {
         let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the gated worker").await;
+
         // The worker waits at a gate this line opens, so it is still alive
         // here, and the step completes only because it runs while it does.
         assert_eq!(scenario.snapshot().await.threads.len(), 2, "{fixture}");
@@ -108,6 +109,7 @@ async fn next_over_a_join_runs_the_thread_it_waits_for() {
 async fn another_threads_breakpoint_ends_a_step_and_retracts_its_plan() {
     for fixture in THREAD_STEPS {
         let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the gated worker").await;
+
         // The worker cannot reach its breakpoint before this line opens its
         // gate.
         let worker = scenario.add_breakpoint("worker_reached").await;
@@ -125,6 +127,7 @@ async fn another_threads_breakpoint_ends_a_step_and_retracts_its_plan() {
             Some("worker_reached"),
             "{fixture}"
         );
+
         // The interrupted step's internal breakpoints are gone, so the join
         // completes and the program exits without another stop.
         assert_eq!(
@@ -140,6 +143,7 @@ async fn another_threads_breakpoint_ends_a_step_and_retracts_its_plan() {
 async fn steps_complete_on_their_thread_while_another_runs_the_same_code() {
     for fixture in THREAD_STEPS {
         let (mut scenario, main) = thread_steps_at(fixture, &["race"], "main's shared call").await;
+
         // The racer keeps calling the functions the main thread steps
         // through, reaching every internal breakpoint of its steps.
         for function in ["shared_caller", "shared_work"] {
@@ -158,8 +162,10 @@ async fn steps_complete_on_their_thread_while_another_runs_the_same_code() {
                     break;
                 }
             }
+
             assert!(entered, "{fixture}: never stepped into {function}");
         }
+
         // Optimized code may fold the lines, so `next` can return early.
         let optimized = !fixture.ends_with("-o0");
         let lines = ["value += 3;", "thread_steps_sink = value;"].map(thread_steps_line);
@@ -176,15 +182,18 @@ async fn steps_complete_on_their_thread_while_another_runs_the_same_code() {
             if optimized && function.as_deref() != Some("shared_work") {
                 break;
             }
+
             assert_eq!(function.as_deref(), Some("shared_work"), "{fixture}");
             if !optimized {
                 assert_eq!(stopped_line, Some(line), "{fixture}");
             }
         }
+
         for caller in ["shared_caller", "main"] {
             if optimized && position(&scenario).await.0.as_deref() == Some(caller) {
                 continue;
             }
+
             assert_eq!(
                 scenario.step_to_stop(StepKind::Out).await,
                 StopReason::Step {
@@ -199,6 +208,7 @@ async fn steps_complete_on_their_thread_while_another_runs_the_same_code() {
                 "{fixture}"
             );
         }
+
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0)),
@@ -229,6 +239,7 @@ async fn a_single_thread_step_keeps_every_other_thread_stopped() {
             );
             assert_eq!(stopped_thread(&mut scenario).await, main, "{fixture}");
         }
+
         // The racer never sleeps, so it would have counted rounds had it run.
         assert_eq!(
             scenario
@@ -283,6 +294,7 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
     else {
         panic!("the inferior is not running");
     };
+
     let mut events = handle.subscribe();
 
     let removed = scenario
@@ -317,6 +329,7 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
     while let Ok(event) = events.try_recv() {
         published.push(event);
     }
+
     assert!(
         !published
             .iter()
@@ -367,6 +380,7 @@ async fn resume_from_hit(
         else {
             continue;
         };
+
         assert!(
             matches!(&reason, StopReason::Breakpoint { hits, .. } if hits.iter().map(|hit| hit.breakpoint).eq([breakpoint])),
             "{context}: {reason:?}"
@@ -403,6 +417,7 @@ async fn breakpoints_edited_while_threads_hit_them_report_only_current_breakpoin
             // Four threads call the function continuously, so it is hit.
             resume_from_hit(&scenario, &mut events, breakpoint.id, &context).await;
         }
+
         // Removing races with the threads' traps: a hit before the removal
         // stops the program, and one the removal overtakes is dropped.
         let removed = scenario
@@ -419,6 +434,7 @@ async fn breakpoints_edited_while_threads_hit_them_report_only_current_breakpoin
                 Ok(uscope::DebuggerEvent::BreakpointsChanged { revision }) => {
                     removal = Some(revision);
                 }
+
                 Ok(uscope::DebuggerEvent::InferiorStopped {
                     revision,
                     process_id,
@@ -437,6 +453,7 @@ async fn breakpoints_edited_while_threads_hit_them_report_only_current_breakpoin
                 Err(error) => panic!("{context}: event stream failed: {error}"),
             }
         }
+
         if let Some((revision, process_id, stop_id)) = stop {
             let removal = removal.expect("the removal is published");
             assert!(
@@ -528,6 +545,7 @@ async fn watchpoints_are_armed_and_disarmed_while_running() {
         )
         .await;
     let resumed = scenario.start_resuming().await;
+
     // A target resolved at an earlier stop is armed only at that stop.
     assert!(matches!(
         handle
@@ -567,6 +585,7 @@ async fn a_named_threads_start_routine_finishes_when_the_thread_exits() {
     for fixture in THREAD_STEPS {
         let (mut scenario, worker) =
             thread_steps_at(fixture, &["spin"], "thread_steps_sink += 1;").await;
+
         // Threads are named as they name themselves; Linux keeps the first 15
         // bytes of a name.
         let names = scenario
@@ -598,6 +617,7 @@ async fn a_named_threads_start_routine_finishes_when_the_thread_exits() {
             Some("gated_worker"),
             "{fixture}"
         );
+
         // The start routine returns into the C library, which has no source
         // to stop in, and the thread exits while the main thread runs.
         assert_eq!(
@@ -640,6 +660,7 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/golden/threads/threads.c"
     );
+
     // The main thread's call, the last of the two.
     let main_exits = fs::read_to_string(source)
         .expect("read the golden program")
@@ -654,6 +675,7 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
             format!("main thread exits alone, then the process {ending}"),
             &program,
         );
+
         // Every worker must call `share` before it can exit.
         scenario.add_breakpoint("share").await;
         let exit = scenario
@@ -672,6 +694,7 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
         let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
             panic!("expected a stop");
         };
+
         let main = ThreadId::new(process_id.get());
         let at_exit = |snapshot: &uscope::StateSnapshot| {
             snapshot.threads.iter().any(|thread| {
@@ -681,10 +704,12 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
                     } if hits.iter().any(|hit| hit.breakpoint == exit.id))
             })
         };
+
         if !at_exit(&scenario.snapshot().await) {
             let reason = scenario.continue_alone_to_stop(main).await;
             assert!(at_exit(&scenario.snapshot().await), "{reason:?}");
         }
+
         scenario.remove_all_breakpoints().await;
 
         assert_eq!(
@@ -710,6 +735,7 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
             }
             _ => {}
         }
+
         scenario.shutdown().await;
     }
 }

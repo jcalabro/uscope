@@ -28,9 +28,11 @@ pub trait Add<W> {
 pub struct InOrder<'g, W, A> {
     /// The groups, named by their first units, in the order claimed.
     order: &'g [usize],
+
     /// Each group's units, by the group.
     members: &'g [Vec<usize>],
     adding: Mutex<Adding<A>>,
+
     /// Units walked but not yet added, by unit.
     finished: Mutex<BTreeMap<usize, Option<W>>>,
     abandoned: AtomicBool,
@@ -78,6 +80,7 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
             } else {
                 walk(group, units)
             };
+
             self.finished
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -89,6 +92,7 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
     /// Stops walking the units left, and wakes every worker waiting to.
     fn abandon(&self) {
         self.abandoned.store(true, Ordering::Relaxed);
+
         // Under the lock, so that no worker sees the walk held and then
         // waits past the wake.
         drop(
@@ -123,11 +127,13 @@ impl<'g, W, A: Add<W>> InOrder<'g, W, A> {
                 else {
                     break;
                 };
+
                 adding.next += 1;
                 if !adding.adder.add(walk) {
                     self.abandoned.store(true, Ordering::Relaxed);
                 }
             }
+
             let next = adding.next;
             self.window.advance(next);
             drop(adding);
@@ -175,6 +181,7 @@ impl Window {
                 .wait(added)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+
         drop(added);
     }
 

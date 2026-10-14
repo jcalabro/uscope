@@ -18,6 +18,7 @@ mod allocator {
     /// system's `free` would not.
     #[cfg(not(miri))]
     type Blocks = std::alloc::System;
+
     #[cfg(miri)]
     type Blocks = Rust;
 
@@ -84,6 +85,7 @@ mod allocator {
     #[test]
     fn totals_follow_blocks_across_threads_and_failed_growth() {
         let allocator = Counting::new(NoGrowth);
+
         // A block that moves the peak by more than a thread's step, so the
         // harness's own allocations cannot hide it.
         let size = 2 * usize::try_from(PEAK_GRANULARITY).expect("a small size");
@@ -91,6 +93,7 @@ mod allocator {
         let layout = Layout::from_size_align(size, 8).expect("a layout");
         start_totals();
         let before = totals();
+
         // Another thread allocates while this one measures the process's
         // totals, as the test harness's own threads may.
         let other_layout = Layout::from_size_align(48, 8).expect("a layout");
@@ -102,6 +105,7 @@ mod allocator {
                 .expect("the other thread")
         });
         let (allocated, live) = own();
+
         // SAFETY: the layout is non-zero; the block is freed below.
         let block = unsafe { allocator.alloc(layout) };
         assert!(!block.is_null());
@@ -130,6 +134,7 @@ mod allocator {
             scope
                 .spawn(|| {
                     let start = own();
+
                     // SAFETY: the block came from `allocator` with `layout`
                     // and is freed once.
                     unsafe { allocator.dealloc(block.load(Ordering::Relaxed), layout) };
@@ -146,6 +151,7 @@ mod allocator {
             after.since(&before).peak_bytes >= PEAK_GRANULARITY,
             "{after:?}"
         );
+
         // SAFETY: the other thread's block came from `allocator` with
         // `other_layout` and is freed once.
         unsafe { allocator.dealloc(other.load(Ordering::Relaxed), other_layout) };
@@ -157,10 +163,12 @@ mod allocator {
         let pattern: [u8; 16] = *b"0123456789abcdef";
         let layout = |size| Layout::from_size_align(size, 8).expect("a layout");
         let start = own();
+
         // SAFETY: the layout is non-zero; the block is freed below.
         let block = unsafe { allocator.alloc_zeroed(layout(16)) };
         assert!(!block.is_null());
         let zeroed = own();
+
         // SAFETY: the block holds 16 initialized bytes that nothing else
         // refers to.
         let contents = unsafe { std::slice::from_raw_parts_mut(block, 16) };
@@ -171,6 +179,7 @@ mod allocator {
         let block = unsafe { allocator.realloc(block, layout(16), 64) };
         assert!(!block.is_null());
         let grown = own();
+
         // SAFETY: growth kept the block's first 16 bytes, which nothing
         // else refers to.
         let contents = unsafe { std::slice::from_raw_parts(block, 16) };
@@ -180,6 +189,7 @@ mod allocator {
         let block = unsafe { allocator.realloc(block, layout(64), 8) };
         assert!(!block.is_null());
         let shrunk = own();
+
         // SAFETY: shrinking kept the block's first 8 bytes.
         let contents = unsafe { std::slice::from_raw_parts(block, 8) };
         assert_eq!(contents, &pattern[..8]);
@@ -236,6 +246,7 @@ mod ring {
             assert!(self.head + bytes.len() as u64 - self.tail() <= self.size);
             for &byte in bytes {
                 let at = HEAP_DATA + usize::try_from(self.head % self.size).expect("small");
+
                 // SAFETY: the byte lies in the ring's data, which the
                 // reader does not read until the head is published.
                 unsafe { self.base.as_ptr().add(at).write(byte) };
@@ -255,6 +266,7 @@ mod ring {
             size: size as u64,
             head: 0,
         };
+
         (memory, kernel)
     }
 
@@ -281,6 +293,7 @@ mod ring {
         kernel.publish();
         assert_eq!(memory.drain(&mut out), 48);
         assert_eq!(kernel.tail(), 48);
+
         // 16 bytes to the end, then 24 from the start.
         kernel.write(&bytes(48, 40));
         kernel.publish();
@@ -326,6 +339,7 @@ mod ring {
                 while kernel.head + 8 - kernel.tail() > kernel.size {
                     std::thread::yield_now();
                 }
+
                 kernel.write(&[record; 8]);
                 kernel.publish();
             }
@@ -336,6 +350,7 @@ mod ring {
                 std::thread::yield_now();
             }
         }
+
         writer.join().expect("the kernel's side");
         let expected: Vec<u8> = (0..RECORDS).flat_map(|record| [record; 8]).collect();
         assert_eq!(out, expected);

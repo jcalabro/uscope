@@ -59,8 +59,10 @@ impl Record for RowAddress {
 pub struct LineRow {
     /// The file, or [`NONE`].
     pub file: U32,
+
     /// The line, zero for none.
     pub line: U32,
+
     /// The column, zero for the line's left edge.
     pub column: U16,
     pub flags: u8,
@@ -73,18 +75,24 @@ impl Record for LineRow {
 
 /// A line too wide for [`LineRow::line`].
 pub const WIDE_LINE: u32 = u32::MAX;
+
 /// A column too wide for [`LineRow::column`].
 pub const WIDE_COLUMN: u16 = u16::MAX;
 
 /// [`LineRow::flags`].
 pub mod row_flags {
     pub const STATEMENT: u8 = 1 << 0;
+
     pub const PROLOGUE_END: u8 = 1 << 1;
+
     pub const EPILOGUE_BEGIN: u8 = 1 << 2;
+
     /// The row ends its sequence and describes no code of its own.
     pub const END_SEQUENCE: u8 = 1 << 3;
+
     /// The row has an entry in the extras table.
     pub const EXTRA: u8 = 1 << 4;
+
     pub const ALL: u8 = STATEMENT | PROLOGUE_END | EPILOGUE_BEGIN | END_SEQUENCE | EXTRA;
 }
 
@@ -98,8 +106,10 @@ pub struct LineExtra {
     pub operation_index: U64,
     pub discriminator: U64,
     pub isa: U64,
+
     /// The whole line, when the row's is [`WIDE_LINE`].
     pub line: U64,
+
     /// The whole column, when the row's is [`WIDE_COLUMN`].
     pub column: U64,
 }
@@ -131,10 +141,12 @@ impl Record for LineSequence {
 pub struct LineRange {
     pub start: U64,
     pub end: U64,
+
     /// The greatest end of this range and every range before it, which
     /// ends a backward search for the ranges containing an address.
     pub prefix_max_end: U64,
     pub row: U32,
+
     /// Whether the range begins at a recommended breakpoint location.
     pub statement: u8,
 }
@@ -185,8 +197,10 @@ const _: () = assert!(size_of::<LineRange>() == 29);
 pub struct Row {
     pub address: u64,
     pub file: Option<SourceFileId>,
+
     /// Zero when the row names no line.
     pub line: u64,
+
     /// Zero for the line's left edge.
     pub column: u64,
     pub operation_index: u64,
@@ -269,6 +283,7 @@ impl LineTables {
             self.begin_sequence()?;
             return self.push_row(row);
         };
+
         sequence.rows = (sequence.rows.get() + 1).into();
         let line = u32::try_from(row.line)
             .ok()
@@ -293,6 +308,7 @@ impl LineTables {
                 flags |= flag;
             }
         }
+
         let file = row.file.map_or(NONE, SourceFileId::get);
         self.addresses.push(RowAddress {
             address: row.address.into(),
@@ -314,6 +330,7 @@ impl LineTables {
                 column: row.column.into(),
             });
         }
+
         Ok(at)
     }
 
@@ -424,6 +441,7 @@ impl LineTables {
                     .map(move |index| (index, sequence))
             })
             .collect::<Vec<_>>();
+
         // Stable, so rows at one address keep line-program order.
         order.sort_by_key(|(index, _)| self.addresses[*index as usize].address.get());
         StatementsByAddress {
@@ -450,6 +468,7 @@ impl LineTables {
 #[derive(Debug)]
 pub struct StatementsByAddress<'a> {
     tables: &'a LineTables,
+
     /// Each public row's index and its sequence's.
     order: Vec<(u32, u32)>,
 }
@@ -522,6 +541,7 @@ pub(super) fn decode_row(
     let extra = (flags & row_flags::EXTRA != 0)
         .then(|| {
             let found = extras.binary_search_by_key(&index, |extra| extra.row.get() as usize);
+
             // Validation pairs every flagged row with an extra.
             debug_assert!(found.is_ok(), "row {index} is flagged, but has no extra");
             found.ok().map(|found| &extras[found])
@@ -531,10 +551,12 @@ pub(super) fn decode_row(
         (WIDE_LINE, Some(extra)) => extra.line.get(),
         (line, _) => u64::from(line),
     };
+
     let column = match (row.column.get(), extra) {
         (WIDE_COLUMN, Some(extra)) => extra.column.get(),
         (column, _) => u64::from(column),
     };
+
     Row {
         address: addresses[index].address.get(),
         file: (row.file.get() != NONE).then(|| SourceFileId::new(row.file.get())),
@@ -636,6 +658,7 @@ pub(super) fn build_indexes(tables: &LineTables) -> LineIndexes {
         if !row.is_public() {
             continue;
         }
+
         if row.statement
             && let Some(location) = row.location()
         {
@@ -645,10 +668,12 @@ pub(super) fn build_indexes(tables: &LineTables) -> LineIndexes {
                 row: at.into(),
             });
         }
+
         if row.prologue_end || row.epilogue_begin {
             boundaries.push(ControlBoundary { row: at.into() });
         }
     }
+
     statements.sort_unstable_by_key(|key| (key.file.get(), key.line.get(), key.row.get()));
     boundaries.sort_unstable_by_key(|boundary| {
         (
@@ -676,6 +701,7 @@ impl Files {
         if let Some(&id) = self.ids.get(&path) {
             return id;
         }
+
         // Past `u32::MAX` files, ids repeat, but the image cannot seal: the
         // paths, each distinct and NUL-terminated, then outgrow the pool's
         // `u32` offsets.
@@ -695,6 +721,7 @@ impl Files {
         for path in self.paths.drain(len.min(self.paths.len())..) {
             self.ids.remove(&path);
         }
+
         debug_assert_eq!(
             self.ids.len(),
             self.paths.len(),
@@ -718,6 +745,7 @@ impl Files {
                 return SourceFileId::new(index);
             }
         }
+
         self.intern(path)
     }
 
@@ -740,6 +768,7 @@ pub fn from_statement_rows(statements: &[StatementRow]) -> LineTables {
             current = Some(statement.sequence);
             next = 0;
         }
+
         while next < statement.ordinal {
             tables
                 .push_row(&Row {
@@ -749,6 +778,7 @@ pub fn from_statement_rows(statements: &[StatementRow]) -> LineTables {
                 .expect("few rows");
             next += 1;
         }
+
         let location = statement.location.as_ref();
         tables
             .push_row(&Row {
@@ -769,6 +799,7 @@ pub fn from_statement_rows(statements: &[StatementRow]) -> LineTables {
             .expect("few rows");
         next += 1;
     }
+
     tables
 }
 
@@ -891,12 +922,14 @@ impl<'a> LineView<'a> {
             if range.prefix_max_end.get() <= address {
                 break;
             }
+
             if address < range.end.get()
                 && first.is_none_or(|first| range.row.get() < first.row.get())
             {
                 first = Some(range);
             }
         }
+
         first.and_then(|range| line_entry(self.addresses, self.rows, self.extras, range))
     }
 
@@ -916,6 +949,7 @@ impl<'a> LineView<'a> {
                 .partition_point(|entry| entry.start.get() < range.end.get());
             indexes.extend(first..end.max(first));
         }
+
         indexes.sort_unstable();
         indexes.dedup();
         self.entries_in_order(indexes)

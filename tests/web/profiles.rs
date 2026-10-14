@@ -28,6 +28,7 @@ fn record_calls_of(scratch: &ScratchDir, symbol: &str, name: &str) -> std::path:
         },
         ..RecordOptions::default()
     };
+
     let recording = record(command, &options).expect("record");
     let path = scratch.path().join(name);
     recording.profile.write(&path).expect("write the profile");
@@ -50,6 +51,7 @@ fn diff_nodes(tree: &Value, bytes: &[u8]) -> Vec<(Vec<String>, u64, u64)> {
         let weight = f64::from_le_bytes(*word) as u64;
         node.2 = weight;
     }
+
     nodes
 }
 
@@ -84,6 +86,7 @@ async fn a_profile_diffs_against_another_and_against_itself() {
             .expect("an id")
             .to_owned()
     };
+
     let (leaf, middle) = (id("calls.usprof"), id("middle.usprof"));
 
     // Against itself, nothing changed anywhere.
@@ -119,6 +122,7 @@ async fn a_profile_diffs_against_another_and_against_itself() {
         assert!(*own == 0 || last == Some("leaf"), "{path:?}");
         assert!(*base == 0 || last == Some("middle"), "{path:?}");
     }
+
     assert!(diff.iter().any(|(path, own, base)| *own == 0
         && *base > 0
         && path.last().is_some_and(|name| name == "middle")));
@@ -141,6 +145,7 @@ async fn a_profile_diffs_against_another_and_against_itself() {
             .cloned()
             .unwrap_or_else(|| panic!("{name} in {functions}"))
     };
+
     assert_eq!(
         (&row("leaf")["own"], &row("leaf")["baseOwn"]),
         (&json!(6), &json!(0))
@@ -192,6 +197,7 @@ fn nodes(tree: &Value, bytes: &[u8]) -> Vec<(Vec<String>, u64, u64)> {
             .map(|word| f64::from_le_bytes(*word))
             .collect::<Vec<_>>()
     };
+
     let u32s = |offset: usize| {
         bytes[offset..][..count * 4]
             .as_chunks::<4>()
@@ -200,6 +206,7 @@ fn nodes(tree: &Value, bytes: &[u8]) -> Vec<(Vec<String>, u64, u64)> {
             .map(|word| u32::from_le_bytes(*word) as usize)
             .collect::<Vec<_>>()
     };
+
     let (own, total) = (f64s(0), f64s(1));
     let (keys, depths) = (u32s(count * 16), u32s(count * 20));
     let mut path: Vec<String> = Vec::new();
@@ -246,6 +253,7 @@ async fn a_directory_of_segments_is_served_as_one_profile() {
             .write_segment(&directory, Duration::from_hours(1))
             .expect("write a segment");
     }
+
     let web = Web::start("profile", &[directory.to_str().expect("a path")]);
     let mut tab = web.control("tab").await;
     let listed = tab
@@ -314,6 +322,7 @@ async fn a_profile_is_served_as_trees_functions_and_a_timeline() {
     .await;
     assert_eq!(callers[0], (vec!["middle".to_owned()], 0, 6));
     assert_eq!(callers[1].0, ["middle", "outer"]);
+
     // One thread's samples only.
     let worker = threads
         .iter()
@@ -382,6 +391,7 @@ fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
         task_snapshots: Some(Duration::from_millis(50)),
         ..RecordOptions::default()
     };
+
     let (stop, mut released, mut labeled) = (AtomicBool::new(false), false, None);
     let recording = record_watched(
         command,
@@ -400,9 +410,11 @@ fn record_waits(scratch: &ScratchDir) -> std::path::PathBuf {
                         .iter()
                         .any(|task| task.labels == [("phase".to_owned(), "spin".to_owned())])
                 };
+
                 if labeled.is_none() && spins() {
                     labeled = Some(found);
                 }
+
                 if !released && labeled.is_some_and(|seen| found >= 6.max(seen + 3)) {
                     writer.write_all(b"x").expect("release the program");
                     released = true;
@@ -543,6 +555,7 @@ async fn a_recording_grows_live_stops_when_asked_and_downloads_whole() {
             .await;
         samples = summary["samples"].as_u64().expect("samples");
     }
+
     let summary = tab.ok("profile", json!({"profile": id})).await;
     let pid: u64 = summary["settings"]
         .as_array()
@@ -660,6 +673,7 @@ fn blocks(answer: &Value, bytes: &[u8]) -> Vec<(u64, u32, String, u32)> {
         let offset = count * 16 + (column * count + at) * 4;
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
     };
+
     let names = answer["names"].as_array().expect("names");
     (0..count)
         .map(|at| {
@@ -730,9 +744,11 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
             .map(|(_, depth, _, _)| *depth)
             .collect::<Vec<_>>()
     };
+
     assert_eq!(depth_of("round=1"), [0]);
     assert_eq!(depth_of("leaf"), [3, 3, 3], "{drawn:?}");
     assert_eq!(answer["marks"].as_array().map(Vec::len), Some(7));
+
     // Each round's plotted value, in a bin of its own.
     let plots = answer["plots"].as_array().expect("plots");
     assert_eq!(plots.len(), 1, "{plots:?}");
@@ -747,6 +763,7 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
         .map(|bin| bin[3].as_f64().expect("a value"))
         .collect();
     assert_eq!(lows, [0.0, 1.0, 2.0]);
+
     // Ten pixels wide, each thread's track folds into a block per depth.
     let (answer, bytes) = tab
         .with_bytes("profileZones", json!({"profile": id, "width": 10}))
@@ -775,6 +792,7 @@ async fn a_profile_serves_its_zones_folded_to_a_width_and_measured() {
     for value in ["0", "1", "2"] {
         assert!(values.contains(&value), "{values:?}");
     }
+
     // A label is a query's filter too: one no sample carries keeps none.
     let filtered = tree(&mut tab, json!({"profile": id, "labels": ["round=9"]})).await;
     assert!(filtered.is_empty());

@@ -18,6 +18,7 @@ use crate::capture::builder::LineInput;
 use crate::capture::records::{
     AccountKind, FrameKind, GapReason, Mapping, MarkerKind, NONE, Truncation, role_number,
 };
+
 use crate::capture::{Capture, CaptureBuilder};
 use crate::debug_info::{DebugFileSearch, DebugInfo};
 use crate::model::{Pid, Tid};
@@ -32,6 +33,7 @@ use crate::{
 pub enum Sites {
     /// It is linked dynamically, so its code is not all in its file.
     Dynamic,
+
     /// Its own file's, with the function of its first call that does not.
     Static(CallSites, Option<String>),
 }
@@ -42,8 +44,10 @@ struct Image {
     /// are known by address only.
     info: Option<DebugInfo>,
     id: ModuleImageId,
+
     /// The capture's module.
     module: u32,
+
     /// Its instrumentation, if its file has any.
     probes: Option<Arc<probes::Table>>,
 }
@@ -82,6 +86,7 @@ pub struct Processor {
     search: DebugFileSearch,
     images: Vec<Image>,
     image_index: HashMap<(PathBuf, u64), usize>,
+
     /// Whether the vDSO's image has been read, and if it could be, the
     /// image and the address it links at.
     vdso_read: bool,
@@ -89,41 +94,51 @@ pub struct Processor {
     processes: BTreeMap<Pid, ProcessState>,
     next_module: u32,
     limit: usize,
+
     /// Records held back for the next batch, past its watermark.
     carry: Vec<u8>,
+
     /// The latest time processed.
     latest: u64,
     first: Option<u64>,
     order: Vec<(u64, usize, usize)>,
     registers: Vec<(crate::unwind::DwarfRegister, u64)>,
+
     /// A breakpoint's instruction and the branch that makes its samples
     /// repeats, not calls.
     repeats: Option<(u64, Branch)>,
     chain: Vec<u64>,
     frames: Vec<u32>,
+
     /// Each thread off its CPU since a switch: its row, when it left, and
     /// whether it was preempted.
     switched_out: BTreeMap<Tid, (u32, u64, bool)>,
+
     /// Each gap in sampling, in time order and apart, and where the last
     /// one ended: a recording that ends paused ends there.
     gaps: Vec<(u64, u64)>,
     gaps_end: u64,
+
     /// The CPU time of this thread when the processor began, and what
     /// loading images has taken of it since.
     began: std::time::Duration,
     loading: std::time::Duration,
+
     /// The time every record up to has been processed.
     processed: u64,
     window: Option<Window>,
+
     /// Where the segment being recorded starts, and the counts there, once
     /// the recording has been cut into segments.
     segment: Option<(u64, BTreeMap<u32, u64>)>,
+
     /// The process task snapshots read, the last few snapshots, and each
     /// sample no snapshot after it has claimed yet whose code kept its task
     /// in a register: its thread, time, and the register's value.
     tasks_of: Option<Pid>,
     located: std::collections::VecDeque<Located>,
     unclaimed: Vec<(u32, i64, u64)>,
+
     /// Each process's modules with instrumentation, once mapped since it
     /// last executed a program, those the collector has not taken yet, and
     /// the processes that executed one since the collector last asked.
@@ -132,6 +147,7 @@ pub struct Processor {
     probes_executed: BTreeSet<Pid>,
     stacks: Stacks,
     triggered: bool,
+
     /// Whether frames are left for a viewer to symbolize.
     symbols_later: bool,
 }
@@ -200,6 +216,7 @@ impl Processor {
         if object::Object::section_by_name(&file, ".interp").is_some() {
             return Some(Sites::Dynamic);
         }
+
         let inode = std::fs::metadata(path).ok()?.ino();
         let image = self.image(path.to_owned(), path, Some(inode));
         let info = self.images[image].info.as_ref()?;
@@ -235,10 +252,12 @@ impl Processor {
                 .ok()
                 .map(|name| name.trim_end().to_owned())
         };
+
         let process = self.builder.process(pid, at);
         if let Some(name) = name(format!("/proc/{pid}/comm")) {
             self.builder.process_name(process, &name);
         }
+
         if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
             let mut tids: Vec<Tid> = tasks
                 .filter_map(|task| task.ok()?.file_name().to_str()?.parse().ok())
@@ -252,6 +271,7 @@ impl Processor {
                 }
             }
         }
+
         for mapped in perf::mappings(pid.get()).unwrap_or_default() {
             self.mmap(&decode::Mmap {
                 pid,
@@ -294,10 +314,12 @@ impl Processor {
                 self.builder.count(AccountKind::Malformed as u32, 1);
                 break;
             };
+
             let time = record.time().unwrap_or(self.latest);
             self.order.push((time, offset, length));
             offset += length;
         }
+
         self.order.sort_by_key(|(time, offset, _)| (*time, *offset));
         let order = std::mem::take(&mut self.order);
         for &(time, offset, length) in &order {
@@ -306,10 +328,12 @@ impl Processor {
                 self.carry.extend_from_slice(record);
                 continue;
             }
+
             if let Some(Ok((record, _))) = decode::next(record) {
                 self.process(record);
             }
         }
+
         self.order = order;
         self.processed = watermark.unwrap_or(self.latest).max(self.processed);
     }
@@ -330,6 +354,7 @@ impl Processor {
         let Some(window) = &mut self.window else {
             return;
         };
+
         let now = self.processed;
         window
             .marks
@@ -338,6 +363,7 @@ impl Processor {
         while window.marks.get(1).is_some_and(|(time, _)| *time <= passed) {
             window.marks.pop_front();
         }
+
         if let Some(&(start, _)) = window.marks.front().filter(|(time, _)| *time <= passed) {
             self.builder.forget_before(start.cast_signed());
             self.first = Some(start);
@@ -356,6 +382,7 @@ impl Processor {
         if time < self.latest {
             self.builder.count(AccountKind::LateRecords as u32, 1);
         }
+
         self.latest = self.latest.max(time);
         self.first.get_or_insert(time);
         let at = time.cast_signed();
@@ -375,6 +402,7 @@ impl Processor {
                 if exec {
                     // A new program replaces the address space.
                     self.processes.entry(pid).or_default().mapped.clear();
+
                     // Its instrumentation went with it; the new program's
                     // is found as it maps.
                     self.probes_mapped.retain(|(process, _)| *process != pid);
@@ -394,8 +422,10 @@ impl Processor {
                         .unwrap_or_default();
                     self.processes.entry(pid).or_default().mapped = mapped;
                 }
+
                 self.thread(pid, tid, at);
             }
+
             decode::Record::Switch {
                 pid,
                 tid,
@@ -415,6 +445,7 @@ impl Processor {
                         preempted,
                     );
                 }
+
                 // A thread that comes back unseen leaving left before the
                 // recording could see it, so when is unknown.
             }
@@ -430,6 +461,7 @@ impl Processor {
                     self.builder.process_exit(pid, at);
                 }
             }
+
             // A loss record says only what its ring lost since it last had
             // room, and a ring that never has room again never says: the
             // events' own counts are exact, and `lost` takes them.
@@ -459,7 +491,9 @@ impl Processor {
                 (self.image(path, &file, mmap.inode), bias)
             })
         };
+
         let state = self.processes.entry(mmap.pid).or_default();
+
         // A mapping replaces whatever it overlaps.
         state
             .mapped
@@ -467,6 +501,7 @@ impl Processor {
         let Some((image, bias)) = image else {
             return;
         };
+
         if let Some(table) = &self.images[image].probes
             && self.probes_mapped.insert((mmap.pid, image))
         {
@@ -475,13 +510,16 @@ impl Processor {
                 bias,
                 table: Arc::clone(table),
             };
+
             self.probes_found.push((mmap.pid, found));
         }
+
         let loaded = LoadedModule {
             id: ModuleId::new(self.next_module),
             image: self.images[image].id,
             load_bias: bias,
         };
+
         self.next_module += 1;
         state.mapped.push(Mapped {
             start: mmap.start,
@@ -505,6 +543,7 @@ impl Processor {
         if self.vdso_read {
             return self.vdso;
         }
+
         self.vdso_read = true;
         let vdso = perf::own_vdso().map(|(data, link)| {
             (
@@ -522,6 +561,7 @@ impl Processor {
         if let Some(&image) = self.image_index.get(&key) {
             return image;
         }
+
         let data = crate::image::backing::read_input(file)
             .ok()
             .map(|(data, _)| data);
@@ -572,6 +612,7 @@ impl Processor {
             }
             None => None,
         };
+
         let image = self.images.len();
         self.images.push(Image {
             info,
@@ -598,12 +639,14 @@ impl Processor {
                     .iter()
                     .find_map(|(register, value)| (*register == number).then_some(*value))
             };
+
             let at = register(crate::unwind::RETURN_ADDRESS) == Some(address);
             if at && register(decode::DWARF_FLAGS).is_some_and(|flags| branch.taken(flags)) {
                 self.builder.count(AccountKind::Repeats as u32, 1);
                 return;
             }
         }
+
         self.chain.clear();
         self.chain.extend(sample.user_chain());
         self.builder
@@ -639,6 +682,7 @@ impl Processor {
         if let Some(leaf) = frames.first() {
             self.note_task(sample.pid, thread, time, leaf, &owners);
         }
+
         self.frames.clear();
         for frame in &frames {
             let id = match frame.module.map(|module| owners[module]) {
@@ -652,8 +696,10 @@ impl Processor {
                     .builder
                     .frame(FrameKind::Native, NONE, frame.address.get(), 0),
             };
+
             self.frames.push(id);
         }
+
         if let StackEnd::Truncated(reason, module) = end {
             let module = module.map_or(NONE, |module| self.images[owners[module].image].module);
             let frame = self.builder.truncation(reason, module);
@@ -661,6 +707,7 @@ impl Processor {
             self.builder
                 .count(AccountKind::Truncated as u32 + reason as u32, 1);
         }
+
         let stack = self.builder.stack(&self.frames);
         self.builder
             .sample(thread, time, sample.period, stack, NONE);
@@ -721,6 +768,7 @@ impl Processor {
                 preempted,
             );
         }
+
         let nanoseconds = |time: std::time::Duration| u64::try_from(time.as_nanos()).unwrap_or(0);
         for (kind, total) in [
             (
@@ -814,6 +862,7 @@ impl Processor {
         if end <= start {
             return;
         }
+
         let first = self.gaps.partition_point(|&(_, earlier)| earlier <= start);
         let last = self.gaps.partition_point(|&(later, _)| later < end);
         let mut from = start;
@@ -822,15 +871,19 @@ impl Processor {
             if from < covered {
                 pieces.push((from, covered));
             }
+
             from = from.max(until);
         }
+
         if from < end {
             pieces.push((from, end));
         }
+
         for &(start, end) in &pieces {
             self.builder
                 .gap(start.cast_signed(), end.cast_signed(), reason);
         }
+
         let mut merged = self.gaps[first..last].to_vec();
         merged.extend_from_slice(&pieces);
         merged.sort_unstable();
@@ -856,9 +909,11 @@ impl Processor {
         if self.tasks_of != Some(pid) {
             return;
         }
+
         let Some(owner) = leaf.module.map(|module| owners[module]) else {
             return;
         };
+
         let address = owner.loaded.load_bias.wrapping_unload(leaf.address);
         let register = self.images[owner.image]
             .info
@@ -914,11 +969,13 @@ impl Processor {
                 0 => first.clone(),
                 _ => format!("{first}, and {more} more"),
             };
+
             self.snapshot_failed(start, &text);
             let more = u64::try_from(more).unwrap_or(u64::MAX);
             self.builder
                 .count(AccountKind::SnapshotFailures as u32, more);
         }
+
         let time = start.cast_signed();
         self.claim(pid, (time, end.cast_signed()), snapshot);
         for task in &snapshot.waiting {
@@ -929,14 +986,17 @@ impl Processor {
                     WaitFrame::Awaited(text) => self.builder.awaited(text),
                     WaitFrame::Truncated(reason) => self.builder.truncation(*reason, NONE),
                 };
+
                 self.frames.push(id);
             }
+
             let stack = self.builder.stack(&self.frames);
             let row = self.builder.task(task.noun, task.number, time);
             if task.labels.is_some() {
                 self.builder
                     .describe_task(row, NONE, task.labels.as_deref());
             }
+
             self.builder
                 .task_wait(row, time, weight, stack, &task.state);
         }
@@ -955,11 +1015,14 @@ impl Processor {
                 self.builder
                     .describe_task(row, NONE, task.labels.as_deref());
             }
+
             tasks.insert(task.object, row);
         }
+
         if self.located.len() == LOCATED_KEPT {
             self.located.pop_front();
         }
+
         self.located.push_back(Located { start, end, tasks });
         self.tasks_of = Some(pid);
         let mut claimed = 0;
@@ -969,6 +1032,7 @@ impl Processor {
                 waiting.push((thread, at, object));
                 continue;
             }
+
             // A sample older than every snapshot kept is never claimed.
             let before = self.located.iter().rev().find(|located| located.end <= at);
             let after = self.located.iter().find(|located| located.start > at);
@@ -979,6 +1043,7 @@ impl Processor {
                 claimed += self.builder.claim(thread, at, task);
             }
         }
+
         self.unclaimed = waiting;
         self.builder.count(AccountKind::TaskSamples as u32, claimed);
     }
@@ -1038,12 +1103,14 @@ impl Processor {
     fn symbolize_new(&mut self) {
         let start = self.first.unwrap_or(0);
         self.builder.setting("start", &start.to_string());
+
         // A segment cut after the last record ends no earlier than it began.
         let end = self.latest.max(self.gaps_end).max(start);
         self.builder.setting("end", &end.to_string());
         if self.symbols_later {
             return;
         }
+
         let images: BTreeMap<u32, usize> = self
             .images
             .iter()
@@ -1077,6 +1144,7 @@ impl Processor {
             else {
                 continue;
             };
+
             let lines = symbolize(&info.image, ImageAddress::new(address));
             let inputs: Vec<LineInput<'_>> = lines.iter().map(OwnedLine::input).collect();
             self.builder.symbolize(frame, module, &inputs);
@@ -1119,6 +1187,7 @@ pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
             .source_file(file)
             .map(|file: &crate::SourceFile| file.path.display().to_string())
     };
+
     let line = |function: Arc<str>,
                 role: CodeRole,
                 declaration: Option<&crate::SourceLocation>,
@@ -1139,6 +1208,7 @@ pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
             ))
         }),
     };
+
     let mut lines = Vec::new();
     let mut source = location.source.clone();
     if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
@@ -1146,6 +1216,7 @@ pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
             let Some(instance) = image.code_instance(instance) else {
                 continue;
             };
+
             if let Some(function) = image.function(instance.function()) {
                 let function = function.info();
                 lines.push(line(
@@ -1155,12 +1226,14 @@ pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
                     source.as_ref(),
                 ));
             }
+
             source = match instance.kind() {
                 CodeInstanceKind::Inline { call_site } => call_site,
                 CodeInstanceKind::OutOfLine => None,
             };
         }
     }
+
     let physical = location
         .physical_instance
         .and_then(|instance| image.code_instance(instance))
@@ -1181,6 +1254,7 @@ pub fn symbolize(image: &ModuleImage, address: ImageAddress) -> Vec<OwnedLine> {
         let role = found.map_or(CodeRole::Ordinary, crate::Symbol::role);
         lines.push(line(name, role, None, source.as_ref()));
     }
+
     lines
 }
 
@@ -1303,10 +1377,12 @@ mod tests {
         ] {
             processor.process(record);
         }
+
         processor.exited(exited);
         let profile = super::super::Profile {
             capture: processor.finish(),
         };
+
         let intervals: Vec<_> = profile
             .off_cpu()
             .iter()

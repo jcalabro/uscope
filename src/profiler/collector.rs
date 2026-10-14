@@ -19,9 +19,11 @@ use crate::model::{Pid, Tid};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ProbeSelection {
     Off,
+
     /// Every site of every module.
     #[default]
     All,
+
     /// The sites of these names; a name that ends in `*` is a prefix.
     Named(Vec<String>),
 }
@@ -63,11 +65,14 @@ pub struct Found {
 struct Ring {
     /// The first position not yet read.
     tail: u64,
+
     /// The thread that writes it, and its row.
     thread: Option<(Tid, u32)>,
     interrupted: u64,
+
     /// Whether the thread wrote records before uscope began to read them.
     before: bool,
+
     /// Whether the ring broke the ABI, which is counted once.
     broken: bool,
 }
@@ -75,8 +80,10 @@ struct Ring {
 /// One module's instrumentation in the recorded process.
 struct Instance {
     control: u64,
+
     /// Each key's site row.
     sites: HashMap<u32, u32>,
+
     /// The state bytes switched on.
     states: Vec<u64>,
     rings: BTreeMap<u64, Ring>,
@@ -93,6 +100,7 @@ pub struct Collector {
     clock: u16,
     decoder: Decoder,
     buffer: Vec<u8>,
+
     /// Whether the process can no longer be read.
     gone: bool,
 }
@@ -128,12 +136,15 @@ impl Collector {
         if executed {
             self.executed(processor);
         }
+
         for found in found {
             self.adopt(processor, &found);
         }
+
         if self.gone {
             return;
         }
+
         self.anchors.push(perf::tsc_anchor());
         let heartbeat = monotonic().to_le_bytes();
         for index in 0..self.instances.len() {
@@ -153,12 +164,15 @@ impl Collector {
         if !alive || self.gone {
             return;
         }
+
         for instance in &self.instances {
             for &state in &instance.states {
                 let _ = perf::write_memory(self.pid, state, &[0]);
             }
+
             let _ = perf::write_memory(self.pid, instance.control + 12, &0_u32.to_le_bytes());
         }
+
         self.drain(processor);
     }
 
@@ -174,6 +188,7 @@ impl Collector {
                 }
             }
         }
+
         // The new program may be read even if the old one could not be.
         self.gone = false;
     }
@@ -190,6 +205,7 @@ impl Collector {
             rings: BTreeMap::new(),
             dropped: 0,
         };
+
         for site in &found.table.sites {
             let row = processor.probe_site(found.module, site);
             instance.sites.insert(site.key, row);
@@ -199,13 +215,16 @@ impl Collector {
                     .push(found.bias.wrapping_load(image(site.state)).get());
             }
         }
+
         if instance.states.is_empty() {
             return;
         }
+
         let Some(registry) = self.registry(control) else {
             self.gone = true;
             return;
         };
+
         instance.dropped = registry.0.dropped;
         for address in registry.1 {
             if let Ok(Some(header)) = self.header(address) {
@@ -213,6 +232,7 @@ impl Collector {
                     let _ =
                         perf::write_memory(self.pid, address + 12, &abi::RING_FREE.to_le_bytes());
                 }
+
                 instance.rings.insert(
                     address,
                     Ring {
@@ -225,6 +245,7 @@ impl Collector {
                 );
             }
         }
+
         // The sites are on before the control block says so, so that a
         // program that asks whether uscope listens may rely on them.
         let writes = [
@@ -290,6 +311,7 @@ impl Collector {
         let Some((block, rings)) = self.registry(control) else {
             return false;
         };
+
         let instance = &mut self.instances[index];
         let dropped = block.dropped.saturating_sub(instance.dropped);
         instance.dropped = instance.dropped.max(block.dropped);
@@ -302,10 +324,12 @@ impl Collector {
                 return false;
             }
         }
+
         if block.exiting {
             record!("probes: the program is exiting; every ring is read");
             let _ = perf::write_memory(self.pid, control + 48, &1_u32.to_le_bytes());
         }
+
         true
     }
 
@@ -317,6 +341,7 @@ impl Collector {
             self.gone = true;
             return;
         };
+
         let ring = self.instances[index].rings.entry(address).or_default();
         let Some(header) = header else {
             if !std::mem::replace(&mut ring.broken, true) {
@@ -324,12 +349,15 @@ impl Collector {
                     .builder()
                     .count(AccountKind::ProbeMalformed as u32, 1);
             }
+
             return;
         };
+
         if !matches!(header.state, abi::RING_ACTIVE | abi::RING_RETIRED) {
             ring.tail = header.head;
             return;
         }
+
         // A ring a new thread took ends the zones of the thread before.
         let thread = match ring.thread {
             Some((tid, row)) if tid == header.thread => row,
@@ -337,11 +365,13 @@ impl Collector {
                 if let Some((_, row)) = previous {
                     processor.probe_thread_ended(row);
                 }
+
                 let row = processor.probe_thread(Pid::new(pid), header.thread);
                 ring.thread = Some((header.thread, row));
                 row
             }
         };
+
         processor.builder().count(
             AccountKind::ProbeInterrupted as u32,
             header.interrupted.saturating_sub(ring.interrupted),
@@ -358,6 +388,7 @@ impl Collector {
             if length == 0 {
                 continue;
             }
+
             match perf::read_memory(
                 pid,
                 base + slots.start as u64,
@@ -372,6 +403,7 @@ impl Collector {
                 _ => {}
             }
         }
+
         // What the thread may have written over while it was copied.
         let mut head = [0; 8];
         let moved = perf::read_memory(pid, address + 64, &mut head)
@@ -391,6 +423,7 @@ impl Collector {
             if overwritten > 0 || before {
                 processor.probe_lost(thread);
             }
+
             processor
                 .builder()
                 .count(AccountKind::ProbeOverwritten as u32, overwritten);
@@ -398,6 +431,7 @@ impl Collector {
             self.decoder.decode(&records[skip..]);
             self.apply(processor, index, thread, header.clock);
         }
+
         self.buffer = records;
         if header.state == abi::RING_RETIRED {
             let _ = perf::write_memory(pid, address + 12, &abi::RING_FREE.to_le_bytes());
@@ -421,11 +455,13 @@ impl Collector {
                 unknown += 1;
                 continue;
             };
+
             let time = if clock == abi::CLOCK_TSC {
                 self.anchors.monotonic(decoded.time)
             } else {
                 decoded.time
             };
+
             processor.probe_event(
                 thread,
                 &Event {
@@ -437,6 +473,7 @@ impl Collector {
                 },
             );
         }
+
         processor
             .builder()
             .count(AccountKind::ProbeMalformed as u32, unknown);
@@ -490,6 +527,7 @@ mod tests {
         for ring in [0x2000, 0x3000] {
             collector.read_ring(&mut processor, 0, ring);
         }
+
         assert!(collector.gone);
         assert_eq!(
             processor

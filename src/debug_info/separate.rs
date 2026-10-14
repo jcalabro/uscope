@@ -31,9 +31,11 @@ use crate::DebugFileOptions;
 
 /// The debug directory every system has.
 const SYSTEM_DEBUG_DIRECTORY: &str = "/usr/lib/debug";
+
 /// How long a debuginfod download may take unless `DEBUGINFOD_TIMEOUT`
 /// says otherwise, as debuginfod's own client allows.
 const DEFAULT_DEBUGINFOD_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// The largest debug file a server may send.
 const DOWNLOAD_LIMIT: u64 = 4 << 30;
 
@@ -57,6 +59,7 @@ pub struct DebugFile {
 pub struct Search {
     /// The file that describes the module.
     pub found: Option<DebugFile>,
+
     /// When none does, the first file where one was looked for that
     /// describes another, such as one left from an older build, and why.
     pub rejected: Option<(DebugFile, String)>,
@@ -67,6 +70,7 @@ pub enum Supplementary {
     /// The debug information names none.
     None,
     Found(DebugFile),
+
     /// One is named but cannot be read, for the reason given.
     Missing(String),
 }
@@ -84,8 +88,10 @@ impl DebugFileSearch {
             if let Some(listed) = std::env::var_os("NIX_DEBUG_INFO_DIRS") {
                 directories.extend(std::env::split_paths(&listed));
             }
+
             directories.push(PathBuf::from(SYSTEM_DEBUG_DIRECTORY));
         }
+
         let mut seen = std::collections::BTreeSet::new();
         directories.retain(|directory| {
             !directory.as_os_str().is_empty() && seen.insert(directory.clone())
@@ -101,6 +107,7 @@ impl DebugFileSearch {
         } else {
             Vec::new()
         };
+
         let timeout = std::env::var("DEBUGINFOD_TIMEOUT")
             .ok()
             .and_then(|seconds| seconds.trim().parse().ok())
@@ -123,9 +130,11 @@ impl DebugFileSearch {
         if has_dwarf(object) {
             return Search::default();
         }
+
         let build_id = object.build_id().ok().flatten().filter(|id| id.len() > 1);
         let describes = |data: &[u8]| mismatch(object, data, build_id, None).is_none();
         let rejected = std::cell::RefCell::new(None);
+
         // A file where the module's build-id or debug link names one, which
         // is rejected, with why, unless it describes the module.
         let consider = |candidate: &Path, checksum: Option<u32>| {
@@ -134,6 +143,7 @@ impl DebugFileSearch {
                 path: candidate.to_path_buf(),
                 data,
             };
+
             match mismatch(object, &file.data, build_id, checksum) {
                 None => Some(file),
                 Some(reason) => {
@@ -142,6 +152,7 @@ impl DebugFileSearch {
                 }
             }
         };
+
         let found = self.find_named(path, object, build_id, consider);
         let found = found.or_else(|| build_id.and_then(|id| self.download(id, describes)));
         Search {
@@ -157,6 +168,7 @@ impl DebugFileSearch {
         if build_id.len() < 2 {
             return None;
         }
+
         let describes = |data: &[u8]| {
             object::File::parse(data)
                 .ok()
@@ -164,6 +176,7 @@ impl DebugFileSearch {
                 .as_deref()
                 == Some(build_id)
         };
+
         self.by_build_id(build_id, describes)
             .or_else(|| self.download(build_id, describes))
     }
@@ -192,8 +205,10 @@ impl DebugFileSearch {
                 return found;
             }
         }
+
         if let Ok(Some((name, checksum))) = object.gnu_debuglink() {
             let name = Path::new(OsStr::from_bytes(name));
+
             // A link names a file, never a path elsewhere.
             if name.file_name() == Some(name.as_os_str())
                 && let Some(directory) = path.parent()
@@ -210,12 +225,14 @@ impl DebugFileSearch {
                     if candidate == path {
                         continue;
                     }
+
                     if let Some(file) = consider(&candidate, Some(checksum)) {
                         return Some(file);
                     }
                 }
             }
         }
+
         None
     }
 
@@ -227,6 +244,7 @@ impl DebugFileSearch {
             Ok(None) => return Supplementary::None,
             Err(reason) => return Supplementary::Missing(reason),
         };
+
         let name = Path::new(OsStr::from_bytes(&link.name));
         let build_id = link.id.as_slice();
         let named = if link.standard {
@@ -242,9 +260,11 @@ impl DebugFileSearch {
                 hex(build_id)
             )
         };
+
         if build_id.len() < 2 {
             return Supplementary::Missing(format!("{named} has no identifier to check"));
         }
+
         let describes = |data: &[u8]| supplementary_file_of(object, data, &link);
         let named_path = if name.as_os_str().is_empty() {
             None
@@ -257,6 +277,7 @@ impl DebugFileSearch {
                 .ok()
                 .and_then(|path| Some(path.parent()?.join(name)))
         };
+
         let found = named_path
             .and_then(|path| read_if(&path, describes))
             .or_else(|| self.by_build_id(build_id, describes))
@@ -303,6 +324,7 @@ impl DebugFileSearch {
         if self.servers.is_empty() {
             return None;
         }
+
         let hex = hex(build_id);
         let cached = self
             .cache
@@ -314,6 +336,7 @@ impl DebugFileSearch {
         {
             return Some(file);
         }
+
         let agent = ureq::Agent::config_builder()
             .timeout_global(self.timeout)
             .build()
@@ -323,6 +346,7 @@ impl DebugFileSearch {
             let Ok(mut response) = agent.get(&url).call() else {
                 continue;
             };
+
             let Ok(data) = response
                 .body_mut()
                 .with_config()
@@ -331,15 +355,18 @@ impl DebugFileSearch {
             else {
                 continue;
             };
+
             if !describes(&data) {
                 continue;
             }
+
             let path = cached
                 .as_deref()
                 .filter(|cached| keep(cached, &data))
                 .map_or_else(|| PathBuf::from(&url), Path::to_path_buf);
             return Some(DebugFile { path, data });
         }
+
         None
     }
 }
@@ -350,6 +377,7 @@ fn default_cache() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("DEBUGINFOD_CACHE_PATH") {
         return Some(PathBuf::from(path));
     }
+
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|base| base.is_absolute())
@@ -363,6 +391,7 @@ fn keep(path: &Path, data: &[u8]) -> bool {
     let Some(directory) = path.parent() else {
         return false;
     };
+
     let partial = directory.join(format!(".debuginfo.{}.partial", std::process::id()));
     let kept = fs::create_dir_all(directory)
         .and_then(|()| fs::write(&partial, data))
@@ -370,6 +399,7 @@ fn keep(path: &Path, data: &[u8]) -> bool {
     if kept.is_err() {
         let _ = fs::remove_file(&partial);
     }
+
     kept.is_ok()
 }
 
@@ -400,12 +430,15 @@ fn mismatch(
             ));
         }
     }
+
     let Ok(debug) = object::File::parse(data) else {
         return Some("it is not an ELF file".to_owned());
     };
+
     if debug.architecture() != object.architecture() {
         return Some("it describes another architecture's code".to_owned());
     }
+
     let actual = debug.build_id().ok().flatten();
     match build_id {
         Some(id) if checksum.is_none() && actual != Some(id) => Some(format!(
@@ -422,6 +455,7 @@ fn mismatch(
 struct SupplementaryLink {
     name: Vec<u8>,
     id: Vec<u8>,
+
     /// Whether DWARF 5's `.debug_sup` names it, by a checksum the file's
     /// own `.debug_sup` records, rather than `.gnu_debugaltlink` by its
     /// build-id.
@@ -441,6 +475,7 @@ fn supplementary_link(object: &object::File<'_>) -> Result<Option<SupplementaryL
             standard: false,
         }));
     }
+
     // A supplementary file names none.
     Ok(debug_sup(object)?
         .filter(|sup| !sup.supplementary)
@@ -455,8 +490,10 @@ fn supplementary_link(object: &object::File<'_>) -> Result<Option<SupplementaryL
 struct DebugSup {
     /// Whether the file holding it is itself a supplementary file.
     supplementary: bool,
+
     /// The supplementary file's name, empty in a supplementary file.
     name: Vec<u8>,
+
     /// What identifies the supplementary file.
     checksum: Vec<u8>,
 }
@@ -464,6 +501,7 @@ struct DebugSup {
 /// The object's `.debug_sup`, if it has one.
 fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
     use gimli::Reader as _;
+
     // By its exact name: looking one up by name that is missing builds the
     // name of its `.zdebug` form, an allocation in every load.
     let Some(section) = object
@@ -472,6 +510,7 @@ fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
     else {
         return Ok(None);
     };
+
     let malformed = |error: &dyn std::fmt::Display| format!("its .debug_sup is malformed: {error}");
     let data = section
         .uncompressed_data()
@@ -481,6 +520,7 @@ fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
     } else {
         gimli::RunTimeEndian::Big
     };
+
     let mut reader = gimli::EndianSlice::new(&data, endian);
     let read = |reader: &mut gimli::EndianSlice<'_, gimli::RunTimeEndian>| {
         let version = reader.read_u16()?;
@@ -496,6 +536,7 @@ fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
             checksum.slice().to_vec(),
         ))
     };
+
     let (version, supplementary, name, checksum) =
         read(&mut reader).map_err(|error| malformed(&error))?;
     if version != 5 {
@@ -503,6 +544,7 @@ fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
             "its .debug_sup has version {version}, which uscope does not read"
         ));
     }
+
     Ok(Some(DebugSup {
         supplementary: supplementary != 0,
         name,
@@ -518,13 +560,16 @@ fn supplementary_file_of(object: &object::File<'_>, data: &[u8], link: &Suppleme
     let Ok(candidate) = object::File::parse(data) else {
         return false;
     };
+
     if candidate.architecture() != object.architecture() {
         return false;
     }
+
     let build_id = candidate.build_id().ok().flatten();
     if !link.standard {
         return build_id == Some(link.id.as_slice());
     }
+
     build_id == Some(link.id.as_slice())
         || debug_sup(&candidate)
             .ok()
@@ -567,6 +612,7 @@ mod tests {
             crc32(b"The quick brown fox jumps over the lazy dog"),
             0x414f_a339
         );
+
         // Long enough for the vectorized path a large debug file takes.
         let long = (0..=250_u8).cycle().take(1 << 16).collect::<Vec<_>>();
         assert_eq!(crc32(&long), 0x7faa_50d3);

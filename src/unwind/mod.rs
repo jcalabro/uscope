@@ -42,8 +42,10 @@ pub fn unwind_module_for<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FramePointerRule {
     Kept,
+
     /// The function's rules find its frame some other way.
     NotKept,
+
     /// The frame has no caller.
     Outermost,
     NoUnwindInfo,
@@ -60,12 +62,15 @@ pub fn frame_pointer_rule<U: UnwindInfo + ?Sized>(
 ) -> FramePointerRule {
     /// A frame pointer no real frame has.
     const FRAME: u64 = 0x4000_0000_0000_0000;
+
     struct Named;
+
     impl MemoryReader for Named {
         fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
             Some(!address.get())
         }
     }
+
     let registers = RegisterFile::new([(RBP, FRAME)]);
     match unwind.unwind(address, &registers, &mut Named) {
         Ok(step) => match step.registers.get(RETURN_ADDRESS) {
@@ -103,6 +108,7 @@ pub fn interrupted_registers(context: u64, memory: &mut dyn MemoryReader) -> Opt
         let address = context.checked_add(UCONTEXT_MCONTEXT + 8 * slot as u64)?;
         registers.set(*register, memory.read_u64(VirtualAddress::new(address))?);
     }
+
     Some(registers)
 }
 
@@ -131,6 +137,7 @@ impl DwarfRegister {
             registers[at] = Self(numbers[at]);
             at += 1;
         }
+
         registers
     }
 }
@@ -148,17 +155,26 @@ impl std::fmt::Display for DwarfRegister {
 }
 
 pub const RAX: DwarfRegister = DwarfRegister(0);
+
 pub const RBX: DwarfRegister = DwarfRegister(3);
+
 pub const RSI: DwarfRegister = DwarfRegister(4);
+
 pub const RDI: DwarfRegister = DwarfRegister(5);
+
 pub const RBP: DwarfRegister = DwarfRegister(6);
+
 pub const RSP: DwarfRegister = DwarfRegister(7);
+
 pub const R12: DwarfRegister = DwarfRegister(12);
+
 /// The return address column, which in a frame's own registers holds its
 /// instruction pointer.
 pub const RETURN_ADDRESS: DwarfRegister = DwarfRegister(16);
+
 /// The bases of FS and GS.
 pub const FS_BASE: DwarfRegister = DwarfRegister(58);
+
 pub const GS_BASE: DwarfRegister = DwarfRegister(59);
 
 /// What the unwinder knows about one frame.
@@ -242,19 +258,23 @@ pub fn collect_frames<P: CallerProvider, F>(
         if !visited.insert((current.cfa, current.instruction)) {
             break UnwindTermination::CycleDetected;
         }
+
         // Levels are numbered in 32 bits, so a stack deeper than that stops here.
         let Ok(level) = u32::try_from(frames.len()) else {
             break UnwindTermination::DepthLimit;
         };
+
         frames.push(make_frame(level, &current, provider));
         if frames.len() >= max_frames {
             break UnwindTermination::DepthLimit;
         }
+
         match provider.caller(&current) {
             CallerResult::Caller(caller) => current = caller,
             CallerResult::Finished(termination) => break termination,
         }
     };
+
     // No frame state repeats in a stack.
     debug_assert_eq!(
         visited.len(),
@@ -302,6 +322,7 @@ mod tests {
                 max_frames,
             )
         };
+
         let callers = || vec![context(1, 10), context(2, 20)];
         assert_eq!(
             collect(context(3, 30), callers(), 16),

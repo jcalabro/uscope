@@ -15,6 +15,7 @@ use super::tasks::{self, Live, Snapshot, Snapshotter};
 use super::{
     DEEP_STACK_COPY, Profile, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource, StackCopy,
 };
+
 use crate::backend::perf;
 use crate::backend::syscall_engines::bpf::{self, BpfOptions};
 use crate::backend::syscall_engines::capture::SyscallCapture;
@@ -36,6 +37,7 @@ pub struct Recording {
 #[derive(Debug)]
 pub struct Attachment {
     pub profile: Profile,
+
     /// Whether the process exited, rather than the recording being stopped.
     pub exited: bool,
 }
@@ -60,12 +62,15 @@ pub struct Watch<'a> {
     /// How often the profile so far is published, at most: the first
     /// comes within a quarter second, and each wait doubles up to this.
     pub every: Duration,
+
     /// Takes the profile so far: once when the program has started, when
     /// it holds nothing yet, and every `every` after.
     pub publish: &'a mut dyn FnMut(Profile),
+
     /// Ends the recording once set: a program the recording started is
     /// killed, and one it attached to goes on without it.
     pub stop: &'a AtomicBool,
+
     /// Saves the profile so far when triggered, as the recording goes on.
     pub save: Option<Save<'a>>,
 }
@@ -97,9 +102,11 @@ pub fn record_watched(
         ring_pages: options.ring_pages,
         switches: options.off_cpu,
     };
+
     let launch = perf::LaunchOptions {
         no_address_randomization: breakpoint.is_some(),
     };
+
     let mut syscalls = None;
     let perf::Launched {
         pid,
@@ -111,6 +118,7 @@ pub fn record_watched(
         if let Some(calls) = &options.syscalls {
             syscalls = Some(SyscallTrace::start(pid, calls, options)?);
         }
+
         Ok(())
     })?;
     settings(
@@ -122,6 +130,7 @@ pub fn record_watched(
         stack_bytes,
         stack_copy,
     );
+
     // A program that failed to execute ends the recording with why, below,
     // without having been published as started.
     let started = executed.recv().is_ok().then_some(pid);
@@ -149,10 +158,12 @@ pub fn record_watched(
     if let Some(syscalls) = syscalls {
         capture = syscalls.merge(&capture).map_err(RecordError::Syscalls)?;
     }
+
     let profile = Profile { capture };
     if let Some(calls) = breakpoint {
         profile.check_bias(&program, calls.bias)?;
     }
+
     Ok(Recording { profile, status })
 }
 
@@ -177,6 +188,7 @@ pub fn record_attached(
         ring_pages: options.ring_pages,
         switches: options.off_cpu,
     };
+
     let perf::Attached {
         mut events,
         process,
@@ -212,6 +224,7 @@ pub fn record_attached(
     if !stopped {
         processor.exited(Pid::new(pid));
     }
+
     Ok(Attachment {
         profile: Profile {
             capture: processor.finish(),
@@ -230,11 +243,13 @@ fn processor(options: &RecordOptions, breakpoint: Option<Calls>) -> record::Proc
     if options.symbols_later {
         processor.symbols_later();
     }
+
     if let Some(calls) = breakpoint
         && let Some(branch) = calls.repeats_when
     {
         processor.repeats_when(calls.loaded().get(), branch);
     }
+
     processor
 }
 
@@ -285,6 +300,7 @@ fn settings(
                     } else {
                         ""
                     };
+
                     format!("every {:.3} s{live}", every.as_secs_f64())
                 },
             ),
@@ -329,6 +345,7 @@ fn drive(
         .filter(|_| options.probes != ProbeSelection::Off)
         .map(|pid| Collector::new(pid, options.probes.clone(), options.probe_timeout));
     let started = started.is_some();
+
     // A window moves by eighths of itself.
     let marks = options.window.map(|window| {
         processor.keep_window(window);
@@ -342,6 +359,7 @@ fn drive(
             capture: processor.snapshot(),
         });
     }
+
     let mut published = std::time::Instant::now();
     let mut wait = watch.every.min(Duration::from_millis(250));
     let mut stopping = false;
@@ -352,7 +370,9 @@ fn drive(
             stopping = true;
             now = stop();
         }
+
         let finished = now || ended();
+
         // Every record stamped before this has been written by the time
         // the next drain begins, but for a stalled CPU.
         let watermark = monotonic().saturating_sub(WATERMARK_DELAY);
@@ -361,8 +381,10 @@ fn drive(
             if let Some(pacer) = &mut pacer {
                 wait = wait.min(pacer.pace(monotonic(), events, processor));
             }
+
             events.wait(wait);
         }
+
         buffer.clear();
         events.drain(&mut buffer);
         record!(
@@ -377,13 +399,16 @@ fn drive(
                 probes.drain(processor);
             }
         }
+
         if finished {
             break;
         }
+
         if let Some(snapshots) = &mut snapshots {
             let sampling = pacer.as_ref().is_none_or(Pacer::sampling);
             snapshots.when_due(processor, events, sampling);
         }
+
         if let Some(every) = marks
             && marked.elapsed() >= every
         {
@@ -391,6 +416,7 @@ fn drive(
             processor.mark();
             marked = std::time::Instant::now();
         }
+
         // A program's trigger saves the window as uscope's does.
         let triggered = processor.take_triggered();
         if let Some(save) = &mut watch.save {
@@ -404,11 +430,13 @@ fn drive(
                 } else {
                     processor.snapshot()
                 };
+
                 // The calls of the same span, on the same clock.
                 let capture = syscalls.map_or_else(|| capture.clone(), |trace| trace.cut(&capture));
                 (save.to)(Profile { capture });
             }
         }
+
         if started && published.elapsed() >= wait {
             processor.counts(events.counts());
             (watch.publish)(Profile {
@@ -418,10 +446,12 @@ fn drive(
             wait = (wait * 2).min(watch.every);
         }
     }
+
     events.enable(false);
     if let Some(pacer) = pacer {
         pacer.finish(monotonic(), processor);
     }
+
     processor.counts(events.counts());
 }
 
@@ -435,6 +465,7 @@ struct Snapshots {
     loading: Option<std::thread::JoinHandle<Result<Snapshotter, RecordError>>>,
     snapshotter: Option<Snapshotter>,
     next: std::time::Instant,
+
     /// When the last snapshot, or the recording, began.
     previous: u64,
 }
@@ -445,6 +476,7 @@ impl Snapshots {
             directories: options.debug_directories.clone(),
             ..crate::DebugFileOptions::default()
         };
+
         // Read beside the recording, which drains on meanwhile.
         let program = PathBuf::from(format!("/proc/{pid}/exe"));
         let loading = std::thread::Builder::new()
@@ -473,6 +505,7 @@ impl Snapshots {
         if std::time::Instant::now() < self.next {
             return;
         }
+
         if let Some(loading) = self.loading.take_if(|loading| loading.is_finished()) {
             match loading.join() {
                 Ok(Ok(snapshotter)) => self.snapshotter = Some(snapshotter),
@@ -488,9 +521,11 @@ impl Snapshots {
                 ),
             }
         }
+
         let Some(snapshotter) = &mut self.snapshotter else {
             return;
         };
+
         if self.live {
             // The program runs on, and the samples it writes meanwhile
             // arrive as any do.
@@ -509,6 +544,7 @@ impl Snapshots {
                     self.previous = start;
                     return;
                 }
+
                 // The recording ends with the program, which has no tasks.
                 Live::Exited => {
                     self.next = std::time::Instant::now() + self.every;
@@ -517,12 +553,15 @@ impl Snapshots {
                 Live::Unlearned => {}
             }
         }
+
         if sampling {
             events.enable(false);
         }
+
         let start = monotonic();
         let taken = snapshotter.take(self.live);
         let end = monotonic();
+
         // With the events off, every record from before the pause is in
         // the rings, and the snapshot claims each sample before it.
         let mut records = Vec::new();
@@ -531,6 +570,7 @@ impl Snapshots {
         if sampling {
             events.enable(true);
         }
+
         self.next = std::time::Instant::now() + self.every;
         match taken {
             Ok(snapshot) => {
@@ -538,6 +578,7 @@ impl Snapshots {
                 processor.task_snapshot(Pid::new(self.pid), (start, end), weight, &snapshot);
                 self.previous = start;
             }
+
             // A program that exited is not attached to, and has no tasks.
             Err(_) if tasks::exited(self.pid) => {}
             Err(error) => {
@@ -554,12 +595,15 @@ impl Snapshots {
 struct Pacer {
     budget: Budget,
     controller: Controller,
+
     /// When the period began, and the span of it to sample.
     period: u64,
     window: (u64, u64),
+
     /// Since when sampling has been on, or off.
     on_since: Option<u64>,
     paused_since: Option<u64>,
+
     /// What the period has sampled and cost so far.
     sampled: u64,
     cpu: Duration,
@@ -602,6 +646,7 @@ impl Pacer {
         if now >= self.period.saturating_add(length) {
             self.next_period(now, length, processor);
         }
+
         let (from, until) = self.window;
         let wanted = from <= now && now < until;
         if wanted && let Some(paused) = self.paused_since.take() {
@@ -614,6 +659,7 @@ impl Pacer {
             self.sampled += off.saturating_sub(on);
             self.paused_since = Some(off);
         }
+
         let next = [from, until, self.period.saturating_add(length)]
             .into_iter()
             .find(|edge| *edge > now)
@@ -628,6 +674,7 @@ impl Pacer {
             self.sampled += now.saturating_sub(*on);
             *on = now;
         }
+
         let cpu = record::thread_cpu();
         let loading = processor.loading();
         let observed = Observation {
@@ -637,6 +684,7 @@ impl Pacer {
             sampled: Duration::from_nanos(self.sampled),
             period: Duration::from_nanos(now.saturating_sub(self.period)),
         };
+
         (self.cpu, self.loading, self.sampled, self.period) = (cpu, loading, 0, now);
         if let Some(decision) = self.controller.step(self.budget, observed) {
             let text = format!(
@@ -650,7 +698,9 @@ impl Pacer {
                 .builder()
                 .marker(now.cast_signed(), MarkerKind::Budget, &text);
         }
+
         let span = length / u64::from(STEPS) * u64::from(self.controller.steps());
+
         // xorshift: a period's offset needs only to be unpredictable.
         self.random ^= self.random << 13;
         self.random ^= self.random >> 7;
@@ -704,9 +754,11 @@ fn stack_copy(
         StackCopy::Bytes(bytes) => return (bytes.next_multiple_of(8), "as asked".into()),
         StackCopy::Auto => DEEP_STACK_COPY,
     };
+
     let Some(path) = which(program).and_then(|path| std::fs::canonicalize(path).ok()) else {
         return (bytes, "auto: the program was not found".into());
     };
+
     match processor.call_sites(&path) {
         None => (bytes, "auto: the program's code could not be read".into()),
         Some(Sites::Dynamic) => (
@@ -742,6 +794,7 @@ pub(super) fn which(program: &Path) -> Option<PathBuf> {
     if program.components().count() > 1 {
         return Some(program.to_owned());
     }
+
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|directory| directory.join(program))
@@ -762,8 +815,10 @@ struct SyscallTrace {
 enum Kept {
     /// Every call, for a profile of the whole recording.
     All(Box<SyscallCapture>),
+
     /// The calls since the last segment.
     Since(std::collections::VecDeque<crate::syscalls::TraceEvent>),
+
     /// The calls of the last span of this many nanoseconds.
     Window(u64, std::collections::VecDeque<crate::syscalls::TraceEvent>),
 }
@@ -855,6 +910,7 @@ impl SyscallTrace {
             follow: true,
             stacks: Some(SharedStacks::default()),
         };
+
         let stacks = options.stacks.clone();
         let kept = match (recording.window, recording.segment) {
             (Some(window), _) => Kept::Window(
@@ -868,6 +924,7 @@ impl SyscallTrace {
                 Kept::All(Box::new(capture))
             }
         };
+
         let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared {
             kept,
             settings: vec![("syscalls".into(), "bpf".into())],
@@ -879,6 +936,7 @@ impl SyscallTrace {
             shared: std::sync::Arc::clone(&shared),
             ready: Some(ready),
         };
+
         let thread = std::thread::Builder::new()
             .name("uscope-record-syscalls".into())
             .spawn(move || {
@@ -895,6 +953,7 @@ impl SyscallTrace {
                 stacks,
             });
         }
+
         // The trace ended before it saw the process: why is its error.
         Err(match thread.join() {
             Ok(Err(why)) => why,
@@ -933,6 +992,7 @@ impl SyscallTrace {
                 Kept::Since(std::collections::VecDeque::new()),
             )
         };
+
         match kept {
             Kept::All(capture) => {
                 let mut builder = CaptureBuilder::new();
@@ -965,6 +1025,7 @@ fn cut(
         for (key, value) in &shared.settings {
             capture.setting(key, value);
         }
+
         match &mut shared.kept {
             Kept::All(_) => return samples.clone(),
             Kept::Since(events) => {
@@ -980,6 +1041,7 @@ fn cut(
             }
         }
     }
+
     let mut builder = CaptureBuilder::new();
     builder.absorb(samples);
     builder.absorb(&capture.finish().capture);

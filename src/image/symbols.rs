@@ -25,11 +25,14 @@ use crate::{
 pub struct SymbolRecord {
     pub name: U32,
     pub address: U64,
+
     /// Where the symbol's extent or storage ends; its address when it has
     /// neither.
     pub end: U64,
+
     /// The symbol's place among code symbols by preference, or [`NONE`].
     pub extent_rank: U32,
+
     /// The symbol's place among data symbols by preference, or [`NONE`].
     pub storage_rank: U32,
     pub kind: u8,
@@ -45,10 +48,14 @@ impl Record for SymbolRecord {
 /// [`SymbolRecord::flags`].
 pub mod symbol_flags {
     pub const EXPORTED: u8 = 1 << 0;
+
     pub const EXTENT: u8 = 1 << 1;
+
     /// The extent was inferred, not declared.
     pub const INFERRED: u8 = 1 << 2;
+
     pub const STORAGE: u8 = 1 << 3;
+
     pub const ALL: u8 = EXPORTED | EXTENT | INFERRED | STORAGE;
 }
 
@@ -71,7 +78,9 @@ impl Record for SectionRecord {
 /// [`SectionRecord::flags`].
 pub mod section_flags {
     pub const EXECUTABLE: u8 = 1 << 0;
+
     pub const WRITABLE: u8 = 1 << 1;
+
     pub const ALL: u8 = EXECUTABLE | WRITABLE;
 }
 
@@ -82,8 +91,10 @@ pub mod section_flags {
 )]
 pub struct GotRecord {
     pub address: U64,
+
     /// The resolver's address, for an indirect function.
     pub target: U64,
+
     /// The imported name, or [`NONE`].
     pub name: U32,
     pub kind: u8,
@@ -209,12 +220,14 @@ fn add_symbols(
         if symbol.exported {
             flags |= symbol_flags::EXPORTED;
         }
+
         let end = match (symbol.extent, symbol.storage) {
             (Some(extent), _) => {
                 flags |= symbol_flags::EXTENT;
                 if extent.provenance == SymbolExtentProvenance::Inferred {
                     flags |= symbol_flags::INFERRED;
                 }
+
                 extent.range.end
             }
             (None, Some(storage)) => {
@@ -223,6 +236,7 @@ fn add_symbols(
             }
             (None, None) => symbol.address,
         };
+
         records.push(SymbolRecord {
             name: name.0.into(),
             address: symbol.address.get().into(),
@@ -235,6 +249,7 @@ fn add_symbols(
             flags,
         });
     }
+
     let names = index::names(names);
     let extents = index::intervals(
         symbols
@@ -276,9 +291,11 @@ fn add_sections(
         if section.executable {
             flags |= section_flags::EXECUTABLE;
         }
+
         if section.writable {
             flags |= section_flags::WRITABLE;
         }
+
         section_records.push(SectionRecord {
             name: strings.push(&section.name).ok_or(BadName)?.0.into(),
             start: section.range.start.get().into(),
@@ -286,6 +303,7 @@ fn add_sections(
             flags,
         });
     }
+
     let section_ranges = index::intervals(
         sections
             .iter()
@@ -341,6 +359,7 @@ fn ranks<K: Ord>(symbols: &[SymbolInfo], key: impl Fn(&SymbolInfo) -> Option<K>)
     for (rank, (_, index)) in (0u32..).zip(keyed) {
         ranks[index] = rank;
     }
+
     ranks
 }
 
@@ -409,6 +428,7 @@ impl<'a> Symbol<'a> {
         if self.record.flags & symbol_flags::EXTENT == 0 {
             return None;
         }
+
         Some(SymbolExtent {
             range: self.range(),
             provenance: if self.record.flags & symbol_flags::INFERRED == 0 {
@@ -425,6 +445,7 @@ impl<'a> Symbol<'a> {
         if self.record.flags & symbol_flags::STORAGE == 0 {
             return None;
         }
+
         Some(self.range())
     }
 
@@ -631,6 +652,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
             .filter(|symbol| symbol.flags & flag != 0)
             .count()
     };
+
     // Each of the symbols with a rank holds a different one below their
     // count, so together they hold every rank.
     let mut extent_ranks = vec![false; count(symbol_flags::EXTENT)];
@@ -652,6 +674,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
             (false, false) => kind.is_some() && end == start,
             (true, true) => false,
         };
+
         if !shape
             || flags & !symbol_flags::ALL != 0
             || (!extent && flags & symbol_flags::INFERRED != 0)
@@ -661,6 +684,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
         {
             return Err("a symbol is malformed".into());
         }
+
         for (has, rank, seen) in [
             (extent, symbol.extent_rank.get(), &mut extent_ranks),
             (storage, symbol.storage_rank.get(), &mut storage_ranks),
@@ -675,6 +699,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
             }
         }
     }
+
     // Each entry is its symbol's own interval, so with as many entries as
     // indexed symbols, and no entry twice, each symbol is indexed once.
     let index = |kind, flag: fn(&SymbolRecord) -> bool| {
@@ -688,9 +713,11 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
                 } else {
                     Some(symbol.end.get())
                 };
+
                 flag(symbol) && interval.start == symbol.address && Some(interval.end.get()) == end
             })
     };
+
     if !index(TableKind::SymbolExtents, |symbol| {
         symbol.flags & symbol_flags::EXTENT != 0
     }) || !index(TableKind::SymbolStorage, |symbol| {
@@ -702,6 +729,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
     }) {
         return Err("the symbol indexes disagree with the symbols".into());
     }
+
     let names = image.shared::<NameEntry>(TableKind::SymbolNames);
     if names.len() != symbols.len()
         || !index::valid_names(&strings, names, symbols.len())
@@ -711,6 +739,7 @@ fn validate_symbols(image: &Image) -> Result<(), String> {
     {
         return Err("the symbol name index disagrees with the symbols".into());
     }
+
     Ok(())
 }
 
@@ -724,6 +753,7 @@ fn validate_sections(image: &Image) -> Result<(), String> {
     }) {
         return Err("a section is malformed".into());
     }
+
     let ranges = image.shared::<Interval>(TableKind::SectionRanges);
     if ranges.len() != sections.len()
         || !index::valid_intervals(ranges, sections.len())
@@ -746,5 +776,6 @@ fn validate_sections(image: &Image) -> Result<(), String> {
     {
         return Err("a GOT slot is malformed".into());
     }
+
     Ok(())
 }

@@ -51,8 +51,10 @@ const fn ascending(table: &[(u32, &str)]) -> bool {
         if table[index - 1].0 >= table[index].0 {
             return false;
         }
+
         index += 1;
     }
+
     true
 }
 
@@ -64,6 +66,7 @@ pub(super) fn kernel_function(id: SyscallId) -> Option<String> {
             .ok()
             .map(|index| table[index].1)
     };
+
     match id.abi {
         // x32's own calls are compat entries, which x86-64 kernels also
         // name `__x64_`.
@@ -153,6 +156,7 @@ mod tests {
             ),
         ] {
             assert!(numbers.is_sorted(), "{abi:?}");
+
             // x32 shares x86-64's numbers below its own calls.
             let newer = limit(if abi == Abi::X32 { Abi::X86_64 } else { abi });
             for number in numbers {
@@ -163,6 +167,7 @@ mod tests {
                 );
             }
         }
+
         let function = |abi, name| SyscallId::named(abi, name).and_then(SyscallId::kernel_function);
         assert_eq!(
             function(Abi::X86_64, "fstat").as_deref(),
@@ -238,8 +243,10 @@ mod tests {
             for (number, name) in calls {
                 writeln!(text, "    ({number}, {name:?}),").expect("write");
             }
+
             text.push_str("];\n");
         }
+
         text
     }
 
@@ -252,6 +259,7 @@ mod tests {
             std::fs::write(GENERATED, &expected).expect("write the generated tables");
             return;
         }
+
         let actual = std::fs::read_to_string(GENERATED).unwrap_or_default();
         assert!(
             actual == expected,

@@ -23,10 +23,13 @@ pub struct Adopter {
     pub handle: DebuggerHandle,
     pub choices: Rc<RefCell<Choices>>,
     pub marks: Rc<RefCell<Marks>>,
+
     /// What the session did, for the trace.
     pub notes: Rc<RefCell<Vec<String>>>,
+
     /// The child the session adopts.
     pub child: HeldProcess,
+
     /// The most requests the session makes before it shuts down.
     pub requests: u64,
 }
@@ -67,6 +70,7 @@ impl Adopter {
                     if self.draw(4) == 0 {
                         break;
                     }
+
                     let execution = self
                         .handle
                         .continue_execution(
@@ -84,11 +88,13 @@ impl Adopter {
                 }
             }
         }
+
         if !continued {
             self.marks
                 .borrow_mut()
                 .hit(Mark::AdoptedChildDetachedAtOnce);
         }
+
         self.shutdown().await
     }
 
@@ -124,6 +130,7 @@ impl Adopter {
             Err(Error::AlreadyStopped | Error::NotRunning | Error::EventStreamLagged(_)) => {}
             Err(error) => return Err(protocol(format!("pause failed: {error}"))),
         }
+
         Ok(())
     }
 

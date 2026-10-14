@@ -11,10 +11,12 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 pub const PAGE_SIZE: u64 = PAGE_BYTES as u64;
+
 pub const PAGE_BYTES: usize = 4096;
 
 /// `si_code` of a fault on unmapped memory.
 pub const SEGV_MAPERR: i32 = 1;
+
 /// `si_code` of a fault on memory mapped without the needed permission.
 pub const SEGV_ACCERR: i32 = 2;
 
@@ -34,11 +36,13 @@ impl Protection {
         write: false,
         execute: false,
     };
+
     pub const READ_WRITE: Self = Self {
         read: true,
         write: true,
         execute: false,
     };
+
     pub const READ_EXECUTE: Self = Self {
         read: true,
         write: false,
@@ -69,6 +73,7 @@ struct Region {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryFault {
     pub address: u64,
+
     /// [`SEGV_MAPERR`] or [`SEGV_ACCERR`].
     pub code: i32,
 }
@@ -85,6 +90,7 @@ pub enum Access {
 pub struct AddressSpace {
     /// Mapped regions by start address. Regions never overlap.
     regions: BTreeMap<u64, Region>,
+
     /// Page contents by page number. A mapped page absent here reads as
     /// zeros.
     pages: BTreeMap<u64, Arc<Page>>,
@@ -151,19 +157,23 @@ impl AddressSpace {
                     code: SEGV_MAPERR,
                 });
             };
+
             let allowed = match access {
                 Access::Read => region.protection.read,
                 Access::Write => region.protection.write,
                 Access::Execute => region.protection.execute,
             };
+
             if !allowed {
                 return Err(MemoryFault {
                     address: current,
                     code: SEGV_ACCERR,
                 });
             }
+
             current = region.end;
         }
+
         Ok(())
     }
 
@@ -173,12 +183,14 @@ impl AddressSpace {
         let Some(end) = address.checked_add(length) else {
             return false;
         };
+
         while current < end {
             match self.region(current) {
                 Some(region) => current = region.end,
                 None => return false,
             }
         }
+
         true
     }
 
@@ -196,6 +208,7 @@ impl AddressSpace {
                 }
                 None => bytes[done..done + count].fill(0),
             }
+
             done += count;
             current += count as u64;
         }
@@ -245,8 +258,10 @@ impl AddressSpace {
                 if count == 0 {
                     return Err(fault);
                 }
+
                 break;
             }
+
             let page_end = (current / PAGE_SIZE + 1) * PAGE_SIZE;
             let take = usize::try_from(page_end - current)
                 .expect("page offset fits usize")
@@ -254,6 +269,7 @@ impl AddressSpace {
             self.copy_out(current, &mut bytes[count..count + take]);
             count += take;
         }
+
         Ok(count)
     }
 
@@ -277,6 +293,7 @@ impl AddressSpace {
         if mapped {
             self.copy_in(address, bytes);
         }
+
         mapped
     }
 
@@ -322,8 +339,10 @@ impl AddressSpace {
             if !readable || self.page(current).is_none() {
                 break;
             }
+
             current = (current / PAGE_SIZE + 1) * PAGE_SIZE;
         }
+
         current.min(end) - address
     }
 
@@ -372,6 +391,7 @@ impl AddressSpace {
                 Backing::Anonymous => (0, 0, ""),
                 Backing::Stack => (0, 0, "[stack]"),
             };
+
             let device = if inode == 0 { "00:00" } else { "00:2a" };
             let line_start = text.len();
             let _ = write!(
@@ -385,8 +405,10 @@ impl AddressSpace {
                 text.extend(std::iter::repeat_n(' ', 73_usize.saturating_sub(width)));
                 text.push_str(name);
             }
+
             text.push('\n');
         }
+
         text
     }
 }

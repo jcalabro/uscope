@@ -19,6 +19,7 @@ pub(super) struct FutureLayout {
     /// The cell's stage, from its header.
     stage: u64,
     stages: Sum,
+
     /// The future, from the stage.
     future: u64,
     ty: TypeReference,
@@ -76,6 +77,7 @@ pub(super) fn driven_future(function: &crate::FunctionInfo) -> Option<&'static s
     if function.role != crate::CodeRole::RuntimeInternal {
         return None;
     }
+
     let demangled = crate::demangle::demangle(function.linkage_name.as_deref()?)?;
     let path = crate::demangle::rust_path(&demangled)?;
     DRIVERS
@@ -128,6 +130,7 @@ impl TokioRuntime {
         let AsyncFrameKind::Coroutine { .. } = outermost.kind else {
             return None;
         };
+
         let body = *self
             .bodies
             .lock()

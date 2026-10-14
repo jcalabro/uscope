@@ -14,18 +14,22 @@ use crate::runtime_model::{
     ImageSymbol, Member, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask, TaskRef,
     ThreadActivity,
 };
+
 use crate::{
     ImageAddress, IntegerValue, ModuleImage, TaskState, ThreadId, ThreadLocal, TypeInfo,
     TypeReference, VirtualAddress,
 };
 
 const FIXTURE: &str = "tokio-workers-o0";
+
 /// Where the tests place what they write.
 const HEAP: u64 = 0x7000_0000_0000;
+
 /// Where each task's id and trailer are within its cell, as the tests'
 /// vtables say.
 const ID: u64 = 0x28;
 const TRAILER: u64 = 0x40;
+
 /// The bits of a task's state that are not its lifecycle, and one
 /// reference.
 const JOIN_INTEREST: u64 = 0b1000;
@@ -113,6 +117,7 @@ impl RuntimeImage for Image {
         if self.hidden.contains(&name) {
             return Vec::new();
         }
+
         RuntimeImage::types_named(self.module.as_ref(), name)
     }
 
@@ -165,6 +170,7 @@ impl RuntimeStop for Memory {
             };
             *byte = *read;
         }
+
         true
     }
 
@@ -202,6 +208,7 @@ struct World {
     model: TokioRuntime,
     memory: Memory,
     next: u64,
+
     /// A task vtable's poll function, and a worker's launch closure's.
     poll: u64,
     launch: u64,
@@ -232,12 +239,14 @@ impl World {
                 .expect("a task's poll function")
                 .1
         };
+
         let (poll, launch) = (find(false), find(true));
         let image = Image {
             module,
             hidden: hidden.to_vec(),
             source,
         };
+
         Self {
             model: TokioRuntime::bind(Arc::new(image)),
             memory: Memory::default(),
@@ -338,6 +347,7 @@ impl World {
             self.link(shard, &cells);
             headers.push(cells);
         }
+
         self.pool(flavor, handle, &[]);
         Written {
             flavor,
@@ -383,6 +393,7 @@ impl World {
             let slot = (first + index) % room;
             self.memory.word(ring + slot * size + task, cell);
         }
+
         inner
     }
 
@@ -406,6 +417,7 @@ impl World {
         let ThreadLocal::Offset(offset) = context.tls else {
             panic!("an executable's thread-local storage is at an offset");
         };
+
         let (state, alive) = (context.state, context.alive);
         let (handle_at, some_at, scheduler_at) = (
             context.handle.offset,
@@ -451,6 +463,7 @@ impl World {
             let arc_at = self.runtime_layout(runtime.flavor).arc;
             self.memory.word(handle + arc_at, runtime.arc);
         }
+
         self.memory
             .word(base + scheduler_at, if worker { 0x1234_5000 } else { 0 });
         let (at, size, value) = entered_tag;
@@ -477,6 +490,7 @@ impl World {
                 None => return (tasks, gaps),
             }
         }
+
         panic!("the pages never end");
     }
 
@@ -493,6 +507,7 @@ fn convention(bits: u64, polled: bool) -> (TaskState, String) {
     } else {
         ", cancelled"
     };
+
     match (
         bits & COMPLETE != 0,
         bits & RUNNING != 0,
@@ -535,7 +550,9 @@ fn each_state_is_read_as_tokio_defines_it() {
             tasks.push((flags * 4 + references, bits | (references * REF_ONE)));
         }
     }
+
     let runtime = world.runtime(Flavor::MultiThread, 7, &[tasks.clone()]);
+
     // A worker polls the running tasks with one reference.
     let polled = tasks
         .iter()
@@ -545,6 +562,7 @@ fn each_state_is_read_as_tokio_defines_it() {
     for (tid, id) in (100..).zip(&polled) {
         world.thread(tid, Some(&runtime), true, Some(*id));
     }
+
     let (listed, gaps) = world.tasks(4096, true);
     assert!(gaps.is_empty(), "{gaps:?}");
     assert_eq!(listed.len(), tasks.len());
@@ -586,10 +604,12 @@ fn a_thread_runs_the_task_its_context_names() {
     world.thread(5, None, false, None);
     world.thread(6, Some(&runtime), true, Some(11));
     world.entered_thread(8, Some(&runtime), false, true, None);
+
     // A worker starting, its launch entered before its scheduler is set.
     world.entered_thread(11, Some(&runtime), false, true, Some(2));
     world.thread(9, Some(&current), true, None);
     world.thread(10, Some(&current), true, Some(30));
+
     // A thread that never touched its context.
     world.thread(7, Some(&runtime), true, Some(10));
     let state = world.context().state;
@@ -597,6 +617,7 @@ fn a_thread_runs_the_task_its_context_names() {
     let ThreadLocal::Offset(offset) = world.context().tls else {
         panic!("an offset");
     };
+
     world
         .memory
         .write(pointer.wrapping_add_signed(offset) + state, 1, 1);
@@ -605,11 +626,13 @@ fn a_thread_runs_the_task_its_context_names() {
         number,
         stack: crate::StackSegment::Task,
     };
+
     assert_eq!(world.activity(1), task(10));
     assert_eq!(world.activity(2), ThreadActivity::Idle);
     assert_eq!(world.activity(3), task(12));
     assert_eq!(world.activity(4), ThreadActivity::Idle);
     assert_eq!(world.activity(5), ThreadActivity::Outside);
+
     // A worker polling a suspended task is on it, though the task says
     // otherwise, as when a poll is about to begin.
     assert_eq!(world.activity(6), task(11));
@@ -641,6 +664,7 @@ fn a_thread_runs_the_task_its_context_names() {
             .expect("a task");
         assert!(matches!(context, super::TaskContext::OnThread(on) if on == ThreadId::new(thread)));
     }
+
     assert!(
         world
             .model
@@ -671,6 +695,7 @@ fn a_threads_current_task_is_its_contexts_whatever_its_list_says() {
     world.thread(1, Some(&runtime), true, Some(10));
     world.thread(2, Some(&runtime), true, None);
     world.thread(3, None, false, None);
+
     // Another thread was binding a task to the first shard, whose head it
     // has written and the task's header not yet.
     let head = world.runtime_layout(Flavor::MultiThread).owned.head;
@@ -683,6 +708,7 @@ fn a_threads_current_task_is_its_contexts_whatever_its_list_says() {
             .current_task(&world.memory, ThreadId::new(tid))
             .expect("the context reads")
     };
+
     assert_eq!(current(1), Some(10));
     assert_eq!(current(2), None);
     assert_eq!(current(3), None);
@@ -727,6 +753,7 @@ fn addresses_at_the_end_of_memory_are_reported_not_followed() {
     let ThreadLocal::Offset(offset) = world.context().tls else {
         panic!("an executable's thread-local storage is at an offset");
     };
+
     let (state, alive) = (world.context().state, world.context().alive);
     for below in 0..512 {
         let base = u64::MAX - below;
@@ -742,6 +769,7 @@ fn addresses_at_the_end_of_memory_are_reported_not_followed() {
         );
         world.memory.threads.remove(&ThreadId::new(tid));
     }
+
     let head = world
         .model
         .layout
@@ -834,6 +862,7 @@ fn a_missing_name_makes_only_what_needs_it_unavailable() {
         "{:?}",
         page.gaps
     );
+
     // A pool thread's task is still known: it needs no task's header.
     assert!(matches!(
         without_header.thread_activity(&memory, ThreadId::new(1)),
@@ -884,11 +913,13 @@ fn locks_are_held_as_their_mutex_says() {
             .chain([pool.lock])
             .collect::<Vec<_>>()
     };
+
     for lock in locks(&module()) {
         assert_eq!((lock.size, lock.held), (4, u64::from(u32::MAX)), "{lock:?}");
         assert!(lock.is_held(1) && lock.is_held(2), "{lock:?}");
         assert!(!lock.is_held(0), "{lock:?}");
     }
+
     for lock in locks(&parking_lot) {
         assert_eq!((lock.size, lock.held), (1, 1), "{lock:?}");
         assert!(lock.is_held(0b01) && lock.is_held(0b11), "{lock:?}");
@@ -901,14 +932,19 @@ fn locks_are_held_as_their_mutex_says() {
 enum Damage {
     /// The task names another list as its owner.
     ForeignOwner,
+
     /// The task's back link names another task.
     BrokenBack,
+
     /// The shard's last task links to its head again.
     Cycle,
+
     /// The task's vtable polls no task.
     DataVtable,
+
     /// The shard's lock is held.
     HeldLock,
+
     /// The list's count is one more than it holds.
     WrongCount,
 }
@@ -950,6 +986,7 @@ fn a_futures_type_says_whether_it_may_run_a_set() {
             })
             .collect::<Vec<_>>()
     };
+
     let path_is = |info: &TypeInfo, path: &[&str], base: &str| {
         info.identity.as_ref().is_some_and(|identity| {
             identity
@@ -960,6 +997,7 @@ fn a_futures_type_says_whether_it_may_run_a_set() {
                 && identity.base.starts_with(base)
         })
     };
+
     let may = |types: Vec<TypeReference>, expected: bool, what: &str| {
         assert!(!types.is_empty(), "no {what}");
         for ty in types {
@@ -971,6 +1009,7 @@ fn a_futures_type_says_whether_it_may_run_a_set() {
             );
         }
     };
+
     may(
         named(&|info| {
             path_is(
@@ -1022,6 +1061,7 @@ fn a_shard_being_changed_is_one_gap_however_its_links_disagree() {
     world
         .memory
         .write(runtime.shards + lock.offset, 1, lock.size);
+
     // A task being linked in front of the second has not yet been linked
     // back to.
     let second = runtime.headers[0][1];
@@ -1055,6 +1095,7 @@ proptest! {
     ) {
         let _serial = shared_world().lock();
         let shards = 1_usize << shard_bits;
+
         // tokio keeps each task in the shard its id picks.
         let lists = (0..shards)
             .map(|shard| {
@@ -1121,6 +1162,7 @@ proptest! {
                     Some((damaged, node)) if damaged == shard => node,
                     _ => tasks.len(),
                 };
+
                 tasks[..keep].iter().map(|(id, _)| *id)
             })
             .collect::<Vec<_>>();

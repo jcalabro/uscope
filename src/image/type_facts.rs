@@ -26,15 +26,19 @@ pub enum LayoutChild {
         variant: u32,
         member: u32,
     },
+
     /// A dimension's lower bound, extent, or stride, as `part` says.
     Bound {
         dimension: u32,
         part: BoundPart,
     },
+
     /// Where an array's elements are.
     DataLocation,
+
     /// Whether an array is allocated.
     Allocated,
+
     /// Whether an array is associated with storage.
     Associated,
 }
@@ -56,12 +60,15 @@ impl BoundPart {
 pub struct TypeFacts {
     /// The dictionary entry each Go shape typedef names.
     pub dictionary_indices: Vec<(TypeId, u64)>,
+
     /// Whether each C++ class whose producer says how calls pass it is
     /// passed by value.
     pub passed_by_value: Vec<(TypeId, bool)>,
+
     /// The float type of complex numbers' parts, by the part's name and
     /// size.
     pub complex_parts: Vec<(Arc<str>, u64, TypeId)>,
+
     /// The expression finding each child of an aggregate laid out at run
     /// time.
     pub dynamic_layouts: Vec<(TypeId, LayoutChild, ExpressionId)>,
@@ -101,8 +108,10 @@ impl Record for ComplexPartRecord {
 )]
 pub struct DynamicLayoutRecord {
     pub aggregate: U32,
+
     /// The member, base, or variant, as the kind says.
     pub first: U32,
+
     /// A variant's member.
     pub second: U32,
     pub expression: U32,
@@ -115,12 +124,19 @@ impl Record for DynamicLayoutRecord {
 
 pub mod children {
     pub const MEMBER: u8 = 0;
+
     pub const BASE: u8 = 1;
+
     pub const DISCRIMINANT: u8 = 2;
+
     pub const VARIANT_MEMBER: u8 = 3;
+
     pub const BOUND: u8 = 4;
+
     pub const DATA_LOCATION: u8 = 5;
+
     pub const ALLOCATED: u8 = 6;
+
     pub const ASSOCIATED: u8 = 7;
 }
 
@@ -292,12 +308,14 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
         facts.is_sorted_by(|earlier, later| earlier.ty.get() < later.ty.get())
             && facts.iter().all(|fact| valid_type(fact.ty))
     };
+
     if !ordered(view.dictionary)
         || !ordered(view.passed)
         || !view.passed.iter().all(|fact| fact.value.get() <= 1)
     {
         return Err("a type fact is malformed".into());
     }
+
     let strings = view.strings;
     if !view
         .complex
@@ -310,6 +328,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a complex number's part is malformed".into());
     }
+
     let key = |layout: &DynamicLayoutRecord| {
         (
             layout.aggregate.get(),
@@ -318,6 +337,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             layout.second.get(),
         )
     };
+
     if !view.layouts.iter().all(|layout| {
         valid_type(layout.aggregate)
             && (layout.expression.get() as usize) < expressions
@@ -337,5 +357,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("a run-time layout is malformed".into());
     }
+
     Ok(())
 }

@@ -15,13 +15,17 @@ pub struct ZoneBlock {
     pub depth: u32,
     pub start: i64,
     pub end: i64,
+
     /// The zone's site, or for a run, its zones' site, or [`NONE`] when
     /// they are of several.
     pub site: u32,
+
     /// A label's value, or [`NONE`].
     pub value: u32,
+
     /// How many zones it draws.
     pub count: u32,
+
     /// The `ZONE_` flags of any of them.
     pub flags: u32,
 }
@@ -41,8 +45,10 @@ pub fn zone_blocks(
         if threads.is_some_and(|threads| !threads.contains(&thread)) {
             continue;
         }
+
         let start = zones.start.get() as usize;
         let row = &capture.zones[start..start + zones.count.get() as usize];
+
         // One depth's zones do not overlap, so their ends are in order too.
         let first = row.partition_point(|zone| zone.end.get() <= range.0);
         let last = row.partition_point(|zone| zone.start.get() < range.1);
@@ -58,11 +64,13 @@ pub fn zone_blocks(
                 count: 1,
                 flags: zone.flags.get(),
             };
+
             if block.end - block.start >= fold {
                 blocks.extend(run.take());
                 blocks.push(block);
                 continue;
             }
+
             match &mut run {
                 Some(run) if block.start - run.end < fold => {
                     run.end = block.end;
@@ -75,8 +83,10 @@ pub fn zone_blocks(
                 _ => blocks.extend(run.replace(block)),
             }
         }
+
         blocks.extend(run);
     }
+
     blocks
 }
 
@@ -100,11 +110,14 @@ pub struct ZoneStats {
     pub p90: u64,
     pub p99: u64,
     pub max: u64,
+
     /// Lengths in buckets of equal ratio from the shortest to the longest:
     /// each its lowest length and count, the last bucket to `max`.
     pub histogram: Vec<(u64, u64)>,
+
     /// The longest, longest first.
     pub longest: Vec<ZoneAt>,
+
     /// Each label value's time and count, most time first: for a label's
     /// sites.
     pub values: Vec<(u32, u64, u64)>,
@@ -130,6 +143,7 @@ pub fn zone_stats(
         if threads.is_some_and(|threads| !threads.contains(&thread)) {
             continue;
         }
+
         let start = zones.start.get() as usize;
         for zone in &capture.zones[start..start + zones.count.get() as usize] {
             let end = zone.end.get();
@@ -144,12 +158,14 @@ pub fn zone_stats(
             }
         }
     }
+
     let length = |zone: &ZoneAt| u64::try_from(zone.end - zone.start).unwrap_or(0);
     found.sort_by_key(|zone| std::cmp::Reverse(length(zone)));
     let lengths: Vec<u64> = found.iter().rev().map(length).collect();
     let Some((&min, &max)) = lengths.first().zip(lengths.last()) else {
         return ZoneStats::default();
     };
+
     // The length below which `share` of them are.
     let at = |share: f64| {
         #[expect(
@@ -161,6 +177,7 @@ pub fn zone_stats(
         let rank = ((lengths.len() as f64 * share).ceil() as usize).clamp(1, lengths.len());
         lengths[rank - 1]
     };
+
     let mut values: Vec<(u32, u64, u64)> = Vec::new();
     for zone in found.iter().filter(|zone| zone.value != NONE) {
         match values.iter_mut().find(|(value, _, _)| *value == zone.value) {
@@ -171,6 +188,7 @@ pub fn zone_stats(
             None => values.push((zone.value, length(zone), 1)),
         }
     }
+
     values.sort_by(|a, b| (b.1, a.0).cmp(&(a.1, b.0)));
     ZoneStats {
         count: lengths.len() as u64,
@@ -199,6 +217,7 @@ fn histogram(lengths: &[u64], min: u64, max: u64) -> Vec<(u64, u64)> {
     if min == max {
         return vec![(min, lengths.len() as u64)];
     }
+
     let (low, high) = ((min.max(1) as f64).ln(), (max as f64).ln());
     let edge = |bucket: usize| {
         if bucket == 0 {
@@ -207,14 +226,17 @@ fn histogram(lengths: &[u64], min: u64, max: u64) -> Vec<(u64, u64)> {
             (low + (high - low) * bucket as f64 / BUCKETS as f64).exp() as u64
         }
     };
+
     let mut buckets: Vec<(u64, u64)> = (0..BUCKETS).map(|bucket| (edge(bucket), 0)).collect();
     let mut bucket = 0;
     for &length in lengths {
         while bucket + 1 < BUCKETS && length >= buckets[bucket + 1].0 {
             bucket += 1;
         }
+
         buckets[bucket].1 += 1;
     }
+
     buckets
 }
 
@@ -223,13 +245,17 @@ fn histogram(lengths: &[u64], min: u64, max: u64) -> Vec<(u64, u64)> {
 pub struct PlotSeries {
     /// Its name's string.
     pub name: u32,
+
     /// How many values it drew, and how many were not finite.
     pub values: u64,
     pub unshown: u64,
+
     /// By time, each a bin's values.
     pub bins: Vec<PlotBin>,
+
     /// The last value drawable before the range, which holds into it.
     pub held: Option<f64>,
+
     /// Whether a value follows the range, so the last one holds to its end.
     pub continues: bool,
 }
@@ -260,7 +286,9 @@ pub fn plot_series(
             .iter()
             .filter(|plot| threads.is_none_or(|threads| threads.contains(&plot.thread.get())))
     };
+
     let name_of = |site: u32| capture.sites[site as usize].name.get();
+
     // By name: the last drawable value before the range, and whether any
     // value follows it.
     let mut edges: BTreeMap<u32, (Option<(i64, f64)>, bool)> = BTreeMap::new();
@@ -275,6 +303,7 @@ pub fn plot_series(
             edges.entry(name_of(plot.site.get())).or_default().1 = true;
         }
     }
+
     let mut values: Vec<(&str, u32, i64, f64)> = chosen()
         .filter(|plot| (range.0..range.1).contains(&plot.time.get()))
         .map(|plot| {
@@ -299,13 +328,16 @@ pub fn plot_series(
                 continues: false,
             });
         }
+
         let Some(series) = series.last_mut() else {
             continue;
         };
+
         if !value.is_finite() {
             series.unshown += 1;
             continue;
         }
+
         series.values += 1;
         let bin = bin_of(time);
         match series.bins.last_mut() {
@@ -322,8 +354,10 @@ pub fn plot_series(
                 high: value,
             }),
         }
+
         last_bin = bin;
     }
+
     for (&name, &(held, _)) in &edges {
         if held.is_some() && series.iter().all(|series| series.name != name) {
             series.push(PlotSeries {
@@ -336,12 +370,14 @@ pub fn plot_series(
             });
         }
     }
+
     for series in &mut series {
         if let Some(&(held, continues)) = edges.get(&series.name) {
             series.held = held.map(|(_, value)| value);
             series.continues = continues;
         }
     }
+
     series.sort_by(|a, b| capture.string(a.name).cmp(capture.string(b.name)));
     series
 }

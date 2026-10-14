@@ -48,6 +48,7 @@ pub use format::TableKind;
 pub use strings::{
     PathId, Paths, PathsBuilder, StrId, Strings, StringsBuilder, valid_pool, valid_reference,
 };
+
 pub use validate::{ImageError, Limits};
 
 use container::{Format, TableBytes, Tables};
@@ -202,6 +203,7 @@ impl Image {
             tables,
             target,
         };
+
         validate::contents(&image)?;
         Ok(image)
     }
@@ -221,6 +223,7 @@ impl Image {
         let Some(placed) = self.tables[T::KIND.index()] else {
             return &[];
         };
+
         self.rows(placed)
     }
 
@@ -235,6 +238,7 @@ impl Image {
         let Some(placed) = self.tables[kind.index()] else {
             return &[];
         };
+
         self.rows(placed)
     }
 
@@ -323,6 +327,7 @@ impl<'a> Builder<'a> {
                 TableBytes::Borrowed(rows.as_bytes()),
             );
         }
+
         self
     }
 
@@ -337,6 +342,7 @@ impl<'a> Builder<'a> {
                 TableBytes::Owned(Box::new(rows)),
             );
         }
+
         self
     }
 
@@ -356,6 +362,7 @@ impl<'a> Builder<'a> {
                 TableBytes::Borrowed(rows.as_bytes()),
             );
         }
+
         self
     }
 
@@ -380,6 +387,7 @@ impl<'a> Builder<'a> {
                 TableBytes::Owned(Box::new(rows)),
             );
         }
+
         self
     }
 
@@ -389,6 +397,7 @@ impl<'a> Builder<'a> {
             let length = bytes.len();
             self.add(kind, 1, length, TableBytes::Owned(Box::new(bytes)));
         }
+
         self
     }
 

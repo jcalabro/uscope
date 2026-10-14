@@ -70,6 +70,7 @@ pub fn go_kind_word(identity: &TypeIdentity) -> Option<&'static str> {
     if identity.language != SourceLanguage::Go {
         return None;
     }
+
     match identity.go?.kind {
         GoKind::Map => Some("map"),
         GoKind::Chan => Some("chan"),
@@ -88,13 +89,16 @@ fn matches_into(
     if depth > MAX_DEPTH {
         return false;
     }
+
     let by_kind = pattern.path.is_empty() && go_kind_word(identity) == Some(&pattern.base);
     if !by_kind && identity.base.as_ref() != pattern.base {
         return false;
     }
+
     if by_kind {
         return arguments_match(pattern, identity, types, captures, depth);
     }
+
     // A pattern may spell the inline namespaces a path omits, anywhere.
     let path = pattern
         .path
@@ -123,6 +127,7 @@ fn arguments_match(
     let Some(arguments) = &pattern.arguments else {
         return true;
     };
+
     // Trailing arguments may be left out, as C++ fills them with defaults,
     // but a pattern that reaches a parameter pack spells all of it:
     // `std::tuple<A, B>` names only pairs.
@@ -173,11 +178,13 @@ fn argument_matches(
             let Some(info) = types.type_info(*reference) else {
                 return false;
             };
+
             info.identity.as_deref().is_some_and(|identity| {
                 identity.language == language
                     && matches_into(pattern, identity, types, captures, depth + 1)
             })
         }
+
         // An argument known only by how the type's name spells it, such
         // as rustc's `str`, matches a pattern that spells it so.
         (ArgumentPattern::Type(pattern), TypeArgument::Unknown(spelled)) => {
@@ -185,6 +192,7 @@ fn argument_matches(
                 && pattern.arguments.is_none()
                 && pattern.base == spelled.as_ref()
         }
+
         // Any other argument the debugger could not resolve matches only
         // `_`.
         _ => false,

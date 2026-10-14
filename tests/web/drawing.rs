@@ -46,6 +46,7 @@ fn with(frame: &Value, extra: &Value) -> Value {
     for (key, value) in extra.as_object().expect("an object") {
         params[key] = value.clone();
     }
+
     params
 }
 
@@ -110,6 +111,7 @@ fn assert_colors_match(squares: &[Value], colors: &[u64]) {
 async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
     let web = Web::start("chess", &[&fixture("chess")]);
     let mut tab = web.control("tab").await;
+
     // After the game's last move, white's castling.
     let frame = stop_at(&mut tab, "main.rs:147").await;
 
@@ -128,11 +130,13 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
     assert_eq!(drawing["offered"], true);
     assert_eq!(drawing["problem"], Value::Null);
     assert_eq!(drawing["renderer"]["name"], "chess-board");
+
     // The renderer came in the program's own views section.
     let origin = drawing["renderer"]["origin"].as_str().expect("an origin");
     assert!(origin.contains("chess"), "{origin}");
     assert!(bytes.is_empty());
     assert_eq!(names(&drawing["inputs"]), ["squares", "turn"]);
+
     // Inputs that are parts of the board say which, for a renderer's selects.
     assert_eq!(
         paths(&drawing["inputs"]),
@@ -152,7 +156,9 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
             ["kind", {"t": "enum", "name": kind, "value": {"t": "int", "i": number}}],
         ]}})
     };
+
     let empty = json!({"t": "sum", "variant": "None", "value": null});
+
     // e1g1 moved the king and the rook beside it.
     assert_eq!(squares[4], empty, "e1");
     assert_eq!(squares[5], piece("White", "Rook", 3), "f1");
@@ -217,6 +223,7 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
         .request("renderer", json!({"digest": "0".repeat(32)}))
         .await
         .expect_err("no renderer has that digest");
+
     // As after a reload, which the page answers by asking again.
     assert_eq!(kind, "staleStop");
 }
@@ -235,10 +242,12 @@ fn life_step(cells: &[u8]) -> Vec<u8> {
                     }
                 }
             }
+
             let alive = cells[row * columns + column] == 1;
             next[row * columns + column] = u8::from(around == 3 || (around == 2 && alive));
         }
     }
+
     next
 }
 
@@ -257,6 +266,7 @@ fn life_seed() -> Vec<u8> {
     ] {
         cells[row * 64 + column] = 1;
     }
+
     cells
 }
 
@@ -285,6 +295,7 @@ async fn a_session_views_file_draws_memory_read_at_once_at_each_stop() {
         names(&drawing["inputs"]),
         ["cells", "columns", "generation"]
     );
+
     // Bytes and numbers the view writes are no part of the value.
     assert_eq!(
         paths(&drawing["inputs"]),
@@ -409,7 +420,9 @@ async fn reloading_views_reads_the_files_and_renderers_again() {
             .find(|renderer| renderer["name"] == "life")
             .map(|renderer| renderer["digest"].clone())
     };
+
     let before = tab.ok("renderers", json!(null)).await;
+
     // Each name is listed once: the session's, then the built-ins.
     let listed = before["renderers"]
         .as_array()
@@ -475,6 +488,7 @@ async fn reloading_views_reads_the_files_and_renderers_again() {
 async fn a_pointer_offers_and_draws_the_drawings_of_what_it_points_to() {
     let web = Web::start("pointer", &[&fixture("chess")]);
     let mut tab = web.control("tab").await;
+
     // make_move's `self` is a `&mut Board`.
     let frame = stop_at(&mut tab, "main.rs:108").await;
     let scopes = tab.ok("scopes", frame.clone()).await;
@@ -523,6 +537,7 @@ async fn a_map_kept_behind_a_pointer_draws_as_its_entries() {
     assert_eq!(entries["t"], "entries", "{entries}");
     let entries = entries["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 56);
+
     // Go's int is 64 bits wide, so it arrives exact, as a bigint.
     assert!(
         entries.contains(&json!([{"t": "text", "s": "/api/search"}, {"t": "big", "big": "600"}])),
@@ -538,6 +553,7 @@ async fn a_mesh_view_reads_its_vectors_storage_and_vertex_layout() {
     let frame = stop_at(&mut tab, "mesh.cpp:124").await;
     let draw = |path: &str| with(&frame, &json!({"path": path, "renderer": "mesh"}));
     let (drawing, bytes) = tab.draw(draw("mesh")).await.expect("draw the torus");
+
     // A vertex is a position and a normal, three floats each, and RGBA.
     for (name, value) in [
         ("stride", 28),
@@ -551,6 +567,7 @@ async fn a_mesh_view_reads_its_vectors_storage_and_vertex_layout() {
             "{name}"
         );
     }
+
     // Each vector's elements, as one read of its storage.
     assert_eq!(
         input(&drawing, "vertices"),
@@ -566,6 +583,7 @@ async fn a_mesh_view_reads_its_vectors_storage_and_vertex_layout() {
         .iter()
         .map(|float| f32::from_le_bytes(*float))
         .collect::<Vec<_>>();
+
     // The first ring's first vertex sits on the torus's outer edge.
     assert!(
         (first[0] - 1.35).abs() < 0.06 && first[1].abs() < 1e-6,

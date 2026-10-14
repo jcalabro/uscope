@@ -27,6 +27,7 @@ async fn signals_are_named_and_follow_gdbs_default_policy() {
 
     let mut scenario = Scenario::launch("signal-policy");
     let mut events = scenario.handle().subscribe();
+
     // SIGUSR1 and the real-time signal stop; SIGALRM, SIGURG, SIGCHLD, and
     // SIGWINCH are delivered without stopping or being reported.
     assert!(matches!(
@@ -37,6 +38,7 @@ async fn signals_are_named_and_follow_gdbs_default_policy() {
         scenario.resume_to_stop().await,
         StopReason::Exception(info) if info.code == 35 && info.description.starts_with("SIG35 ")
     ));
+
     // Every signal was delivered, so every handler ran.
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -48,6 +50,7 @@ async fn signals_are_named_and_follow_gdbs_default_policy() {
             "{event:?}"
         );
     }
+
     for name in ["SIGALRM", "SIGURG", "SIGCHLD", "SIGWINCH"] {
         assert_eq!(
             scenario
@@ -57,6 +60,7 @@ async fn signals_are_named_and_follow_gdbs_default_policy() {
             "{name}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -74,16 +78,19 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
             Err(Error::UnknownSignal(code)) if code == signal
         ));
     }
+
     let reported = SignalPolicy {
         stop: false,
         print: true,
         pass: true,
     };
+
     let discarded = SignalPolicy {
         stop: false,
         print: true,
         pass: false,
     };
+
     for (name, policy, previous) in [
         (
             "SIGUSR1",
@@ -125,6 +132,7 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
     }
 
     let mut events = handle.subscribe();
+
     // Nothing stops. SIGALRM, whose default action would kill the program,
     // and the real-time signal are discarded, so their handlers never run.
     assert_eq!(
@@ -149,11 +157,13 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
             _ => {}
         }
     }
+
     assert_eq!(
         received.iter().map(|(code, _)| *code).collect::<Vec<_>>(),
         [code("SIGUSR1"), code("SIGALRM")],
         "only signals whose policy prints are reported: {received:?}"
     );
+
     // raise() sends with tgkill, which names the sending process: the
     // program itself.
     let process = process.expect("the program launched").get();
@@ -297,6 +307,7 @@ async fn steps_run_signal_handlers_without_stopping_in_them() {
         );
         assert_eq!(function(&scenario).await.as_deref(), Some("sum_to"));
     }
+
     assert_eq!(
         scenario.step_to_stop(StepKind::Out).await,
         StopReason::Step {
@@ -313,6 +324,7 @@ async fn steps_run_signal_handlers_without_stopping_in_them() {
             assert!(steps < 16, "never entered sum_to");
             scenario.step_to_stop(StepKind::IntoSource).await;
         }
+
         while function(&scenario).await.as_deref() == Some("sum_to") {
             steps += 1;
             assert!(steps < 128, "never left sum_to");
@@ -323,8 +335,10 @@ async fn steps_run_signal_handlers_without_stopping_in_them() {
                 "{kind:?} stopped in the handler"
             );
         }
+
         assert_eq!(handled(&scenario).await, crossed, "{kind:?}");
     }
+
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -336,6 +350,7 @@ async fn steps_run_signal_handlers_without_stopping_in_them() {
 async fn go_preemption_signals_never_stop_the_program() {
     let mut scenario = Scenario::launch("preempt-go");
     let urgent = code("SIGURG");
+
     // Reporting SIGURG proves the runtime sent it while the program ran.
     scenario
         .operation(
@@ -363,6 +378,7 @@ async fn go_preemption_signals_never_stop_the_program() {
                 preemptions += 1;
             }
             Ok(_) => {}
+
             // So many signals arrived that this subscriber fell behind.
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
                 preemptions += skipped;
@@ -370,6 +386,7 @@ async fn go_preemption_signals_never_stop_the_program() {
             Err(_) => break,
         }
     }
+
     // The program finishes only once it has received eight.
     assert!(preemptions >= 8, "only {preemptions} preemption signals");
     scenario.shutdown().await;

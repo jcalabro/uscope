@@ -11,6 +11,7 @@ use crate::capture::records::NONE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Current,
+
     /// A path or key only the base has.
     Base,
 }
@@ -49,11 +50,13 @@ fn children(tree: &CallTree, node: u32) -> Vec<u32> {
         NONE => (0, index(tree.len())),
         node => (node + 1, tree.end[node as usize]),
     };
+
     let mut found = Vec::new();
     while at < end {
         found.push(at);
         at = tree.end[at as usize];
     }
+
     found
 }
 
@@ -84,6 +87,7 @@ pub fn diff_trees(current: (&Keys<'_>, &CallTree), base: (&Keys<'_>, &CallTree))
                 (tree.own[at as usize], tree.total[at as usize])
             })
         };
+
         let (own, total) = weights(current.1, pair.current);
         let (base_own, base_total) = weights(base.1, pair.base);
         out.key.push(pair.key);
@@ -106,12 +110,14 @@ pub fn diff_trees(current: (&Keys<'_>, &CallTree), base: (&Keys<'_>, &CallTree))
         next.reverse();
         pending.extend(next);
     }
+
     for node in (0..out.len()).rev() {
         let parent = out.parent[node];
         if parent != NONE {
             out.end[parent as usize] = out.end[parent as usize].max(out.end[node]);
         }
     }
+
     out
 }
 
@@ -137,6 +143,7 @@ fn pairs(
         let name = names.of(Side::Base, base, node);
         unmatched.entry(name).or_default().push_back(node);
     }
+
     let mut paired = Vec::with_capacity(ours.len() + theirs.len());
     for &node in &ours {
         let name = names.of(Side::Current, current, node);
@@ -150,6 +157,7 @@ fn pairs(
             depth,
         });
     }
+
     let left: std::collections::BTreeSet<u32> = unmatched.into_values().flatten().collect();
     paired.extend(
         theirs
@@ -205,6 +213,7 @@ pub fn diff_costs(current: (&Keys<'_>, &Costs), base: (&Keys<'_>, &Costs)) -> Ve
             .or_default()
             .push_back(row);
     }
+
     let mut rows = Vec::with_capacity(current.1.rows.len() + base.1.rows.len());
     for cost in &current.1.rows {
         let matched = unmatched
@@ -220,6 +229,7 @@ pub fn diff_costs(current: (&Keys<'_>, &Costs), base: (&Keys<'_>, &Costs)) -> Ve
             base_total: matched.map_or(0, |cost| cost.total),
         });
     }
+
     let mut left: Vec<usize> = unmatched.into_values().flatten().collect();
     left.sort_unstable();
     rows.extend(left.into_iter().map(|row| {

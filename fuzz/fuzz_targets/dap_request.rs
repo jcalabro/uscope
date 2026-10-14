@@ -18,6 +18,7 @@ fn decode(arguments: &Value) {
             $(let _ = serde_json::from_value::<$kind>(arguments.clone());)*
         };
     }
+
     decode_as!(
         protocol::InitializeArguments,
         protocol::SetBreakpointsArguments,
@@ -67,8 +68,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = protocol::MessageError::request_seq(data);
         }
     }
+
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = protocol::address(text);
+
         // What a completion completes is always the end of the text.
         let (_, partial, start) = complete::completing(text);
         assert_eq!(&text[start..], partial);

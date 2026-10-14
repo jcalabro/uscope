@@ -32,6 +32,7 @@ use super::frames::{
     code_instance_is_active, frame_lookup_address, source_for_code_instance, source_line_changed,
     source_step_destination,
 };
+
 use super::native::LinuxTraceOps;
 use super::{ActiveKind, Controller, LinuxError, StepStart, backend_error};
 
@@ -40,16 +41,21 @@ use super::{ActiveKind, Controller, LinuxError, StepStart, backend_error};
 pub(super) struct StepLoops {
     /// The function whose loops they are.
     enclosing: FunctionId,
+
     /// The enclosing function's activation, which runs them.
     activation: Activation,
+
     /// The bodies whose passes complete the step: the one it began in, or
     /// every loop body of the enclosing function, when it began there.
     bodies: BTreeSet<FunctionId>,
+
     /// Whether the step began in a body.
     in_body: bool,
+
     /// For a step begun in an out-of-line body, where the enclosing
     /// activation resumes once the call that runs the loop returns.
     resume: Option<VirtualAddress>,
+
     /// Whether the step left the body it began in for the iterator, and
     /// goes on to the body's next pass or the end of the loop.
     left: bool,
@@ -73,12 +79,15 @@ impl StepLoops {
 pub(super) enum LoopReach {
     /// It is no part of the loops' plan.
     Elsewhere,
+
     /// The step is complete: a body's next pass begins, or a step out's
     /// loop is done.
     Complete,
+
     /// Another activation reached it, such as another loop's body: the
     /// step goes on as it was.
     Pass,
+
     /// The step goes on from here as a step over in the code here: in the
     /// enclosing function once the loop is done, or in a body a step over
     /// entered from the line its loop is on.
@@ -106,6 +115,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         ) else {
             return Ok(None);
         };
+
         let function = instance.function();
         let Some(enclosing) = image
             .function(function)
@@ -116,6 +126,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if kind != StepKind::OverSource {
                 return Ok(None);
             }
+
             let bodies = image
                 .functions()
                 .filter(|body| body.enclosing() == Some(function))
@@ -124,12 +135,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             if bodies.is_empty() {
                 return Ok(None);
             }
+
             // A plan that runs to breakpoints stops at the entries of
             // out-of-line bodies, and at the statements of inlined ones.
             if !plan.is_empty() {
                 plan.extend(bodies.iter().flat_map(|body| self.function_entries(*body)));
                 plan.extend(self.inlined_body_statements(instance, &bodies));
             }
+
             return Ok(Some(StepLoops {
                 enclosing: function,
                 activation,
@@ -139,6 +152,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 left: false,
             }));
         };
+
         let in_body = |activation, resume| StepLoops {
             enclosing,
             activation,
@@ -147,6 +161,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             resume,
             left: false,
         };
+
         // Inlined with its iterator, the body runs in the enclosing
         // function's own activation.
         if matches!(instance.kind(), CodeInstanceKind::Inline { .. }) {
@@ -155,21 +170,27 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if outer.function() == enclosing {
                     return Ok(Some(in_body(activation, None)));
                 }
+
                 parent = outer.parent();
             }
+
             return Ok(None);
         }
+
         let Some((activation, resume)) = self.enclosing_activation(pid, registers, enclosing)?
         else {
             return Ok(None);
         };
+
         let mut loops = in_body(activation, Some(resume));
+
         // A step out runs the rest of the loop, to where the enclosing
         // activation resumes.
         if kind == StepKind::Out {
             *plan = BTreeSet::from([resume]);
             loops.left = true;
         }
+
         Ok(Some(loops))
     }
 
@@ -207,11 +228,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let resume = self.executable_return_address(pid, context.instruction)?;
                 return Ok(Some((view.activation(cfa), resume)));
             }
+
             context = match provider.caller(&context) {
                 CallerResult::Caller(caller) => caller,
                 CallerResult::Finished(_) => return Ok(None),
             };
         }
+
         Ok(None)
     }
 
@@ -223,6 +246,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if kind != StepKind::OverSource {
             return Ok(false);
         }
+
         let Some((start_activation, loops)) = self.active_step().and_then(|start| {
             let loops = start
                 .loops
@@ -232,18 +256,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         }) else {
             return Ok(false);
         };
+
         let registers = self.ptrace.registers(pid)?;
         if !start_activation.has_returned(self.stack_position(pid, &registers)) {
             return Ok(false);
         }
+
         // Returned all the way to the enclosing function, the step is
         // already back in the loop's own code.
         let Ok(current) = self.top_activation(pid, &registers) else {
             return Ok(false);
         };
+
         if !current.is_callee_of(loops.activation) {
             return Ok(false);
         }
+
         record!("step over follows its loop from the body's return");
         let inferior = self.inferior.as_ref().ok_or(crate::Error::NotRunning)?;
         let mut plan = loops
@@ -282,22 +310,27 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(loops) = self.active_step().and_then(|start| start.loops.clone()) else {
             return Ok(LoopReach::Elsewhere);
         };
+
         let registers = self.ptrace.registers(pid)?;
         if loops.waits() && Some(address) == loops.resume {
             if self.top_activation(pid, &registers).ok() != Some(loops.activation) {
                 return Ok(LoopReach::Pass);
             }
+
             if kind == StepKind::Out {
                 return Ok(LoopReach::Complete);
             }
+
             // The loop is done: the step goes on in the enclosing
             // function, to its next line.
             self.restart_step_over(pid)?;
             return Ok(LoopReach::Restarted);
         }
+
         if loops.in_body && !loops.left {
             return Ok(LoopReach::Elsewhere);
         }
+
         if !loops
             .bodies
             .iter()
@@ -305,6 +338,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             return Ok(LoopReach::Elsewhere);
         }
+
         // A body's pass belongs to the step's loops only while their
         // activation runs it.
         let ours = self
@@ -313,6 +347,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !ours {
             return Ok(LoopReach::Pass);
         }
+
         // Entered from the line its loop is on, which is where the body
         // begins, a step over goes on to the body's next line.
         let begun_on = self.active_step().and_then(|start| start.source.clone());
@@ -323,6 +358,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.restart_step_over(pid)?;
             return Ok(LoopReach::Restarted);
         }
+
         Ok(LoopReach::Complete)
     }
 
@@ -363,10 +399,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         }) else {
             return Ok(());
         };
+
         let registers = self.ptrace.registers(pid)?;
         let Some(location) = self.location_for_activation(pid, &registers, activation)? else {
             return Ok(());
         };
+
         let elsewhere = innermost_function(&self.module_image, &location).is_some_and(|function| {
             !loops.bodies.contains(&function) && function != loops.enclosing
         });
@@ -376,6 +414,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ..loops
             });
         }
+
         Ok(())
     }
 
@@ -389,6 +428,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return BTreeSet::new();
         };
+
         let image = &self.module_image;
         image
             .line_entries_in(instance)
@@ -412,6 +452,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return BTreeSet::new();
         };
+
         self.module_image
             .instances_for_function(function)
             .filter(|instance| matches!(instance.kind(), CodeInstanceKind::OutOfLine))
@@ -452,9 +493,11 @@ pub(super) fn inline_loop_step_is_complete(
             && source_line_changed(start.source.as_ref(), location.source.as_ref()))
         .then_some(true);
     }
+
     if !loops.in_inline_body() {
         return None;
     }
+
     Some(if in_a_body {
         kind == StepKind::OverSource
             && source_step_destination(image, location, kind)
@@ -500,6 +543,7 @@ fn runs_function(image: &ModuleImage, location: &ImageLocation, function: Functi
             .code_instance(*instance)
             .is_some_and(|instance| instance.function() == function)
     };
+
     location.physical_instance.as_ref().is_some_and(runs)
         || match &location.inline_frames {
             InlineFrameLookup::Unique(chain) => chain.instances.iter().any(runs),

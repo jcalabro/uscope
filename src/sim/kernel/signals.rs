@@ -8,22 +8,30 @@ use super::{
     ExitStatus, Happening, Kernel, Parent, SigInfo, State, StopKind, Tgid, Thread, Tid, Tracing,
     WaitStatus,
 };
+
 #[cfg(test)]
 use crate::sim::world::Sabotage;
 
 pub const SIGTRAP: i32 = libc::SIGTRAP;
+
 pub const SIGKILL: i32 = libc::SIGKILL;
+
 pub const SIGSTOP: i32 = libc::SIGSTOP;
+
 pub const SIGCONT: i32 = libc::SIGCONT;
 
 /// `si_code` of a signal sent by `kill`.
 pub const SI_USER: i32 = libc::SI_USER;
+
 /// `si_code` of a signal sent by `tgkill`.
 pub const SI_TKILL: i32 = libc::SI_TKILL;
+
 /// `si_code` of a breakpoint trap.
 pub const TRAP_BRKPT: i32 = 1;
+
 /// `si_code` of a single-step trap.
 pub const TRAP_TRACE: i32 = 2;
+
 /// `si_code` of a hardware breakpoint's trap.
 pub const TRAP_HWBKPT: i32 = 4;
 
@@ -109,6 +117,7 @@ impl Kernel {
         if !self.processes.contains_key(&group) {
             return Err(Errno::ESRCH);
         }
+
         match signal {
             SIGKILL => self.kill_process(group, ExitStatus::Signal(SIGKILL, false)),
             SIGCONT => self.continue_process(group),
@@ -117,6 +126,7 @@ impl Kernel {
                 return Err(Errno::ENOSYS);
             }
         }
+
         Ok(())
     }
 
@@ -134,10 +144,12 @@ impl Kernel {
         } else {
             sender
         };
+
         let process = self.processes.get_mut(&group).expect("the process lives");
         for signal in STOPPING {
             process.shared.remove(signal);
         }
+
         let ended = process.stopped.take().is_some();
         process.continued |= ended;
         for thread in self
@@ -148,18 +160,22 @@ impl Kernel {
             for signal in STOPPING {
                 thread.pending.remove(signal);
             }
+
             if thread.state == State::JobStopped {
                 thread.state = State::Running;
             }
+
             if let Tracing::Seized { interrupted, .. } = &mut thread.tracing
                 && !thread.state.exiting()
             {
                 *interrupted = true;
             }
         }
+
         if ended {
             self.happenings.push(Happening::Continued { tgid: group });
         }
+
         if self
             .threads
             .get(&group.leader())
@@ -189,6 +205,7 @@ impl Kernel {
         else {
             return;
         };
+
         process.continued = false;
         self.notify_parent(group, libc::CLD_CONTINUED);
     }
@@ -200,6 +217,7 @@ impl Kernel {
         else {
             return;
         };
+
         if let Some(parent) = self.processes.get_mut(&parent) {
             parent.shared.insert(SigInfo {
                 signal: libc::SIGCHLD,
@@ -222,13 +240,16 @@ impl Kernel {
         {
             return Err(Errno::ESRCH);
         }
+
         if signal != SIGSTOP {
             self.gap(format!("tgkill with {}", name(signal)));
             return Err(Errno::ENOSYS);
         }
+
         if let Some(process) = self.processes.get_mut(&group) {
             process.shared.remove(SIGCONT);
         }
+
         for thread in self
             .threads
             .values_mut()
@@ -236,6 +257,7 @@ impl Kernel {
         {
             thread.pending.remove(SIGCONT);
         }
+
         // K-SIG-1: delivered at the thread's next chance as a stop from
         // the tracer.
         let thread = self.threads.get_mut(&tid).expect("the thread exists");
@@ -258,9 +280,11 @@ impl Kernel {
         let Some(process) = self.processes.get_mut(&group) else {
             return;
         };
+
         if process.group_exit.is_some() {
             return;
         }
+
         process.group_exit = Some(exit);
         let mut pulled = Vec::new();
         let mut finished = Vec::new();
@@ -281,15 +305,19 @@ impl Kernel {
                 } => {
                     thread.state = State::Exiting(exit);
                     thread.report = None;
+
                     // K-SYS-5: a call stopped at its entry never runs.
                     thread.entered = false;
+
                     // A system call the thread stopped inside returns on
                     // the way out.
                     if let Some(result) = thread.returning.take() {
                         thread.registers.general[super::RAX] = result;
                     }
+
                     pulled.push(thread.tid);
                 }
+
                 State::Stopped {
                     kind: StopKind::Exit(own),
                     ..
@@ -297,9 +325,11 @@ impl Kernel {
                 State::Exiting(_) | State::Zombie(_) => {}
             }
         }
+
         for &(tid, own) in &finished {
             self.become_zombie(tid, own);
         }
+
         self.happenings.extend(
             pulled
                 .into_iter()
@@ -321,10 +351,12 @@ impl Kernel {
         }) else {
             return false;
         };
+
         if ![SIGSTOP, SIGCONT, libc::SIGCHLD].contains(&info.signal) {
             self.gap(format!("delivering pending {}", name(info.signal)));
             return true;
         }
+
         self.signal_stop(tid, info);
         !matches!(self.threads[&tid].state, State::Running)
     }
@@ -344,6 +376,7 @@ impl Kernel {
                 signal: stopped,
             });
         }
+
         thread.state = State::Running;
         thread.report = None;
         if let Some(signal) = signal {
@@ -377,6 +410,7 @@ impl Kernel {
             self.gap(format!("group-stop of a traced thread by {}", name(signal)));
             return;
         }
+
         if self.threads_of(group).count() > 1 {
             self.gap(format!(
                 "group-stop of a process with several threads by {}",
@@ -384,6 +418,7 @@ impl Kernel {
             ));
             return;
         }
+
         self.threads.get_mut(&tid).expect("the thread").state = State::JobStopped;
         let process = self.processes.get_mut(&group).expect("the process lives");
         process.stopped = Some(signal);
@@ -414,6 +449,7 @@ impl Kernel {
         let group = thread.tgid;
         let traced = thread.traced();
         thread.state = State::Zombie(exit);
+
         // The tracer reaps a traced thread; nobody waits for an untraced one
         // but its process's parent.
         thread.report = traced.then(|| exit.wait_status(tid));
@@ -422,6 +458,7 @@ impl Kernel {
         let Some(process) = self.processes.get(&group) else {
             return;
         };
+
         let alone = process.group_exit.is_none()
             && self.threads.values().any(|thread| {
                 thread.tgid == group
@@ -431,6 +468,7 @@ impl Kernel {
         if tid == group.leader() && alone {
             self.happenings.push(Happening::LeaderExitedAlone { tid });
         }
+
         if !traced {
             self.reap_untraced(tid);
         }

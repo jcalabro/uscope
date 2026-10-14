@@ -11,14 +11,18 @@ pub use crate::capture::records::{ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, ZONE_MIS
 pub struct ProfileZone {
     pub pid: u32,
     pub tid: u32,
+
     /// How many of the thread's zones hold it.
     pub depth: u32,
+
     /// Its site's name: a zone's name, or a label's key.
     pub name: String,
+
     /// A label's value; `None` for a zone.
     pub value: Option<String>,
     pub start: i64,
     pub end: i64,
+
     /// `ZONE_` flags: what of it was not seen.
     pub flags: u32,
 }
@@ -37,6 +41,7 @@ pub struct PlotValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramMarker {
     pub kind: MarkerKind,
+
     /// The row of the thread that marked it, by which a [`Query`] selects
     /// the thread, if the record names one.
     ///
@@ -45,8 +50,10 @@ pub struct ProgramMarker {
     pub pid: u32,
     pub tid: u32,
     pub time: i64,
+
     /// Its site's name.
     pub name: String,
+
     /// A message's text.
     pub text: Option<String>,
 }
@@ -55,14 +62,19 @@ pub struct ProgramMarker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ProbeCounts {
     pub events: u64,
+
     /// Records threads wrote over before uscope read them.
     pub overwritten: u64,
+
     /// Events no ring could take.
     pub no_ring: u64,
+
     /// Events a signal handler raised while its thread was writing.
     pub interrupted: u64,
+
     /// Records, and rings, that broke the ABI.
     pub malformed: u64,
+
     /// Values plotted.
     pub plotted: u64,
 }
@@ -71,9 +83,11 @@ pub struct ProbeCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneSite {
     pub name: String,
+
     /// Whether its sites are labels.
     pub label: bool,
     pub count: u64,
+
     /// Nanoseconds, all of them and the longest.
     pub total: u64,
     pub longest: u64,
@@ -112,6 +126,7 @@ impl Profile {
                 });
             }
         }
+
         zones
     }
 
@@ -232,6 +247,7 @@ impl Profile {
             entry.longest = entry.longest.max(length);
             entry.flagged += u64::from(zone.flags.get() != 0);
         }
+
         sites.sort_by(|a, b| (b.total, &a.name).cmp(&(a.total, &b.name)));
         sites
     }

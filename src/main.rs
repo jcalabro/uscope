@@ -271,21 +271,29 @@ enum Tool {
     /// Serve the Debug Adapter Protocol to an editor.
     #[command(version)]
     Dap(dap::DapArgs),
+
     /// Check and explain how views present program types.
     Views(ViewsArgs),
+
     /// Serve a debugger to web browsers.
     Web(Box<web::WebArgs>),
+
     /// Show, check, and create settings files, and trust projects.
     Config(ConfigArgs),
+
     /// Record where a program spends its time, from outside it.
     Record(cli::profile::RecordArgs),
+
     /// Summarize a recorded profile.
     Report(cli::profile::ReportArgs),
+
     /// Write a profile in another format: pprof, folded stacks, or a
     /// Chrome trace, or read one of theirs.
     Convert(cli::profile::ConvertArgs),
+
     /// Give a profile recorded with `--symbols later` its source lines.
     Symbolize(cli::profile::SymbolizeArgs),
+
     /// Trace the system calls a program makes, as strace does.
     Syscalls(Box<cli::syscalls::SyscallsArgs>),
 }
@@ -299,6 +307,7 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
 
 fn main() -> ExitCode {
     uscope::timings::alloc::return_freed_memory_promptly();
+
     // The terminal launcher must stay single-threaded, so it runs before the
     // runtime starts its threads.
     if std::env::args_os()
@@ -307,6 +316,7 @@ fn main() -> ExitCode {
     {
         return dap::launcher::run(std::env::args_os().skip(1));
     }
+
     // So is the helper that opens browsers, which forks.
     if std::env::args_os()
         .nth(1)
@@ -314,17 +324,20 @@ fn main() -> ExitCode {
     {
         return web::terminal::run_helper(std::env::args_os().skip(2));
     }
+
     // Both of uscope's own variables are removed from the environment here,
     // before uscope starts any other thread, so every program it starts
     // goes without them. Removing them is unsafe only while another thread
     // may read the environment, and none exists yet.
     #[cfg(debug_assertions)]
     start_flight_recording();
+
     // SAFETY: the process has no other thread yet.
     #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
     unsafe {
         cli::config::take_environment();
     }
+
     match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(async_main()),
         Err(error) => {
@@ -349,6 +362,7 @@ fn start_flight_recording() {
 
     const VARIABLE: &str = "USCOPE_FLIGHT_RECORDING";
     let path = std::env::var_os(VARIABLE);
+
     // SAFETY: `main` calls this before uscope starts any other thread, so
     // none can read the environment meanwhile.
     unsafe { std::env::remove_var(VARIABLE) };
@@ -358,6 +372,7 @@ fn start_flight_recording() {
         None if std::env::var_os("NEXTEST").is_some() => return,
         None => flight_recorder::stream_run().map(drop),
     };
+
     if let Err(error) = started {
         eprintln!("warning: cannot write the flight recording: {error}");
     }
@@ -370,6 +385,7 @@ async fn async_main() -> ExitCode {
     {
         eprintln!("warning: {error}; loading debug information without it");
     }
+
     match &args.tool {
         Some(Tool::Dap(dap_args)) => {
             let code = match dap::run(dap_args).await {
@@ -379,6 +395,7 @@ async fn async_main() -> ExitCode {
                     1
                 }
             };
+
             // Reading stdin blocks a runtime thread that would keep the
             // runtime from shutting down after the client left.
             std::process::exit(code);
@@ -391,6 +408,7 @@ async fn async_main() -> ExitCode {
                     1
                 }
             };
+
             // Tabs still connected would keep the runtime from shutting down.
             std::process::exit(code);
         }
@@ -421,6 +439,7 @@ async fn async_main() -> ExitCode {
         }
         None => {}
     }
+
     let recording = match &args.timings {
         Some(_) => {
             match uscope::timings::Recording::start(uscope::timings::Options { instructions: true })
@@ -434,6 +453,7 @@ async fn async_main() -> ExitCode {
         }
         None => None,
     };
+
     let early = Renderers::detect(args.color.unwrap_or_default(), args.batch);
     let session = match cli::session::prepare(&args, early.stderr) {
         Ok(session) => session,
@@ -442,6 +462,7 @@ async fn async_main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
     let renderers = Renderers::configured(&session.settings, args.batch);
 
     let result = run(session, renderers).await;
@@ -455,6 +476,7 @@ async fn async_main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+
     match result {
         Ok(()) => ExitCode::SUCCESS,
         // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
@@ -471,11 +493,13 @@ async fn async_main() -> ExitCode {
 
 fn parse_args() -> Args {
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+
     // Alone, uscope starts the project's launch configuration, or, with
     // none, shows its short help.
     if arguments.len() == 1 && !project_launches() {
         arguments.push("-h".into());
     }
+
     let color = cli::help::color_choice(&arguments);
     let command = cli::help::configure(Args::command(), color);
     let matches = command.get_matches_from(arguments);
@@ -489,6 +513,7 @@ fn project_launches() -> bool {
     let Ok(start) = std::env::current_dir() else {
         return false;
     };
+
     let user = cli::config::UserFile::choose(false, None);
     cli::config::Files::read(&start, &user)
         .and_then(|files| files.settings(true))
@@ -540,27 +565,33 @@ enum ViewsCommand {
     Check {
         /// The program whose types to check.
         program: PathBuf,
+
         /// Also present values with the views in FILE. May be repeated.
         #[arg(long = "views", value_name = "FILE")]
         views: Vec<PathBuf>,
     },
+
     /// Explain which view presents a type of the program, and why each
     /// view tried before it did not bind.
     Explain {
         /// The program that defines the type.
         program: PathBuf,
+
         /// The type, as an expression names one: `intvec`, `std::vector<int>`.
         #[arg(value_name = "TYPE")]
         name: String,
+
         /// Also present values with the views in FILE. May be repeated.
         #[arg(long = "views", value_name = "FILE")]
         views: Vec<PathBuf>,
     },
+
     /// Replay kernel runs that `views record` recorded, with no program.
     /// Fails unless every run does again what it did.
     Replay {
         /// The recorded runs.
         recording: PathBuf,
+
         /// Replay with the kernel module in FILE, rather than the built-in
         /// kernel each run names.
         #[arg(long = "kernel", value_name = "FILE")]
@@ -585,6 +616,7 @@ fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -
             recording.display()
         );
     }
+
     let wasm = kernel
         .map(|path| {
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
@@ -611,6 +643,7 @@ fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -
             }
         }
     }
+
     Ok(reproduced && !runs.is_empty())
 }
 
@@ -624,6 +657,7 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
             return replay_views(recording, kernel.as_deref());
         }
     };
+
     let debugger = Debugger::new(program)
         .with_context(|| format!("failed to initialize debugger for {}", program.display()))?;
     let renderers = Renderers::detect(ColorChoice::Auto, true);
@@ -634,6 +668,7 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
         cli::config::Settings::defaults(root.clone()),
         LaunchSettings::default(),
     );
+
     // A file that could not be used fails either command, as a view that
     // binds nothing fails a check.
     let usable = console.load_views(&root, views).await;
@@ -677,9 +712,11 @@ async fn open_debugger(
                 debug_files: debug_files.clone(),
                 ..options.clone()
             };
+
             Debugger::open_core(&options)
                 .with_context(|| format!("failed to open core dump {}", options.core.display()))
         }
+
         Target::Attach {
             process,
             executable: Some(executable),
@@ -708,6 +745,7 @@ struct ConfigArgs {
     /// Read FILE instead of the user's settings file.
     #[arg(long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: ConfigCommand,
 }
@@ -717,19 +755,25 @@ enum ConfigCommand {
     /// Print the project root and the settings and state files a session
     /// in this directory reads, and which exist.
     Path,
+
     /// Print every setting in effect and where it comes from.
     Show,
+
     /// Check every settings file, failing at the first error, as for a
     /// project's CI.
     Check,
+
     /// Write the user's settings file with every setting at its default,
     /// commented out. Refuses to overwrite one.
     Init,
+
     /// Trust the project's startup commands, aliases, and launch
     /// configurations until they change.
     Trust,
+
     /// Forget that the project is trusted.
     Untrust,
+
     /// List the trusted projects.
     Trusted,
 }
@@ -744,6 +788,7 @@ fn print_config_paths(start: &std::path::Path, user: Option<&std::path::Path>) {
         Some(path) => println!("user:         {}{}", path.display(), exists(path)),
         None => println!("user:         none (USCOPE_CONFIG is empty)"),
     }
+
     let mut files = vec![
         ("project:", root.join(".uscope/config.toml")),
         ("local:", root.join(".uscope/config.local.toml")),
@@ -754,6 +799,7 @@ fn print_config_paths(start: &std::path::Path, user: Option<&std::path::Path>) {
         files.push(("trust:", state.join("trust.toml")));
         files.push(("history:", state.join("history")));
     }
+
     for (name, path) in files {
         println!("{name:<13} {}{}", path.display(), exists(&path));
     }
@@ -771,6 +817,7 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
         }
         UserFile::Disabled => None,
     };
+
     match args.command {
         ConfigCommand::Path => {
             print_config_paths(&start, user_path.as_deref());
@@ -785,10 +832,12 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
                 for file in &files.read {
                     println!("{}: ok", file.path.display());
                 }
+
                 if files.read.is_empty() {
                     println!("no settings files exist");
                 }
             }
+
             Ok(true)
         }
         ConfigCommand::Init => {
@@ -796,10 +845,12 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
             if path.exists() {
                 anyhow::bail!("{} already exists; it was left as it is", path.display());
             }
+
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
+
             std::fs::write(&path, config::commented_defaults())
                 .with_context(|| format!("cannot write {}", path.display()))?;
             println!("wrote {}", path.display());
@@ -814,6 +865,7 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
                 );
                 return Ok(true);
             };
+
             let mut store = TrustStore::load()?;
             store
                 .trust(&files.root, &acting)
@@ -826,6 +878,7 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
             for line in acting.lines() {
                 println!("    {line}");
             }
+
             Ok(true)
         }
         ConfigCommand::Untrust => {
@@ -836,6 +889,7 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
             } else {
                 println!("the project at {} was not trusted", root.display());
             }
+
             Ok(true)
         }
         ConfigCommand::Trusted => {
@@ -845,9 +899,11 @@ fn run_config(args: &ConfigArgs) -> Result<bool> {
                 println!("{}", root.display());
                 any = true;
             }
+
             if !any {
                 println!("no project is trusted");
             }
+
             Ok(true)
         }
     }

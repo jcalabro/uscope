@@ -34,6 +34,7 @@ fn fixture_path() -> std::path::PathBuf {
 struct Image {
     module: Arc<ModuleImage>,
     hidden: Vec<&'static str>,
+
     /// Where `runtime.tlsg` says the goroutine is kept, as an external link
     /// would place it.
     tlsg: Option<ThreadLocal>,
@@ -169,6 +170,7 @@ impl RuntimeStop for Memory {
             };
             *byte = read;
         }
+
         true
     }
 
@@ -195,6 +197,7 @@ struct G {
     goid: u64,
     status: u64,
     wait_reason: u64,
+
     /// The m running it, or 0.
     m: u64,
 }
@@ -253,6 +256,7 @@ impl<'a> World<'a> {
             let offset = self.offset("runtime.g", path);
             self.memory.word(at + offset, value);
         }
+
         let status = self.offset("runtime.g", &["atomicstatus"]);
         self.memory.write(
             at + status,
@@ -271,6 +275,7 @@ impl<'a> World<'a> {
         for (index, g) in (0..).zip(gs) {
             self.memory.word(array + 8 * index, *g);
         }
+
         let allgs = self.symbol("runtime.allgs");
         self.memory.word(allgs, array);
         self.memory.word(allgs + 8, gs.len() as u64);
@@ -287,6 +292,7 @@ impl<'a> World<'a> {
         for (place, g) in places.iter().zip(gs) {
             self.goroutine(*place, *g);
         }
+
         self.allgs(&places, places.len() as u64);
         places
     }
@@ -297,6 +303,7 @@ impl<'a> World<'a> {
             hidden: self.image.hidden.clone(),
             tlsg: self.image.tlsg,
         };
+
         super::detect(Arc::new(image))
             .expect("a Go runtime")
             .expect("the runtime binds")
@@ -358,6 +365,7 @@ fn a_goroutine_being_scanned_shows_the_status_it_returns_to() {
             },
         ]
     };
+
     world.goroutines(&gs(0));
     let model = world.model();
     let (resting, gaps) = listed(model.as_ref(), &world.memory);
@@ -390,6 +398,7 @@ fn an_unreadable_goroutine_is_a_gap_among_the_others() {
         wait_reason: 0,
         m: 0,
     };
+
     let places = world.goroutines(&[g(1), g(3)]);
     let missing = HEAP + 0xdead_0000;
     world.allgs(&[places[0], missing, places[1]], 3);
@@ -416,6 +425,7 @@ fn a_threads_goroutine_is_found_by_each_way_of_keeping_it() {
     let thread = ThreadId::new(4242);
     let pointer = HEAP + 0x50_0000;
     let slot = HEAP + 0x60_0000;
+
     // An external link's thread-local block puts it further below.
     let below = 0x40_u64;
     for (tlsg, place) in [
@@ -446,6 +456,7 @@ fn a_threads_goroutine_is_found_by_each_way_of_keeping_it() {
             let offset = world.offset("runtime.m", &[path]);
             world.memory.word(m + offset, value);
         }
+
         world.memory.word(slot, below.wrapping_neg());
         world.memory.threads.insert(thread, pointer);
         let model = world.model();
@@ -460,6 +471,7 @@ fn a_threads_goroutine_is_found_by_each_way_of_keeping_it() {
             },
             "{tlsg:?}"
         );
+
         // On its m's system stack, the thread still runs the goroutine.
         world.memory.word(g0 + world.offset("runtime.g", &["m"]), m);
         world.memory.word(place, g0);

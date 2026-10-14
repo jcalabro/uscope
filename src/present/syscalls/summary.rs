@@ -146,6 +146,7 @@ fn key(column: Column, id: SyscallId, stats: &SyscallStats) -> (u64, String) {
         Column::Bytes => stats.bytes,
         Column::Name | Column::Errnos => 0,
     };
+
     (u64::MAX - number, name(id))
 }
 
@@ -165,6 +166,7 @@ fn cell(
             } else {
                 stats.total_ns as f64 * 100.0 / all_time as f64
             };
+
             format!("{percent:.2}")
         }
         Column::TotalTime => format!(
@@ -225,10 +227,12 @@ pub fn table(
             }
         });
     }
+
     let mut total = SyscallStats::default();
     for (_, stats) in &rows {
         total.merge(stats);
     }
+
     let all_time = total.total_ns;
     let cell =
         |column, stats: &SyscallStats, label: &str| cell(column, stats, label, all_time, errno);
@@ -238,6 +242,7 @@ pub fn table(
             if index > 0 {
                 text.push(' ');
             }
+
             let width = column.width();
             if matches!(column, Column::Name | Column::Errnos) {
                 let _ = write!(text, "{value:<width$}");
@@ -245,8 +250,10 @@ pub fn table(
                 let _ = write!(text, "{value:>width$}");
             }
         }
+
         text.trim_end().to_owned()
     };
+
     let rule = line(
         &mut columns
             .iter()
@@ -268,6 +275,7 @@ pub fn table(
                 .map(|&column| (column, cell(column, stats, &label))),
         ));
     }
+
     lines.push(rule);
     lines.push(line(
         &mut columns
@@ -291,6 +299,7 @@ mod tests {
         for _ in 0..3 {
             write.add(Outcome::Returned(1), Some(57_000), 1);
         }
+
         let mut open = SyscallStats::default();
         open.add(Outcome::Returned(3), Some(10_000), 0);
         open.add(Outcome::of_return(-2), Some(20_000), 0);
@@ -303,6 +312,7 @@ mod tests {
                 number.to_string()
             }
         };
+
         let lines = table(&calls, &Column::DEFAULT, Some(Column::TotalTime), &errno);
         assert_eq!(
             lines,

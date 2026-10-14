@@ -77,12 +77,14 @@ pub(super) fn narrow(storage: ValueStorage, size: u64) -> ValueStorage {
     let ValueStorage::Composite(composite) = &storage else {
         return storage;
     };
+
     let Some(end) = size
         .checked_mul(8)
         .and_then(|bits| composite.start.checked_add(bits))
     else {
         return storage;
     };
+
     let Some(piece) = composite
         .pieces
         .iter()
@@ -90,10 +92,12 @@ pub(super) fn narrow(storage: ValueStorage, size: u64) -> ValueStorage {
     else {
         return storage;
     };
+
     let within = composite.start - piece.offset;
     let Ok(byte_size) = usize::try_from(size) else {
         return storage;
     };
+
     match &piece.location {
         PieceLocation::Memory {
             address,
@@ -116,6 +120,7 @@ pub(super) fn narrow(storage: ValueStorage, size: u64) -> ValueStorage {
             else {
                 return storage;
             };
+
             ValueStorage::Bytes {
                 source: source.clone(),
                 raw: Arc::clone(raw),
@@ -124,6 +129,7 @@ pub(super) fn narrow(storage: ValueStorage, size: u64) -> ValueStorage {
                 address: None,
             }
         }
+
         PieceLocation::ImplicitPointer {
             debug_info_offset,
             byte_offset,
@@ -148,6 +154,7 @@ pub(super) fn read(
             let raw = runtime.read_memory(*address, size)?;
             Ok((VariableValueSource::Memory(*address), raw))
         }
+
         ValueStorage::Bytes {
             raw, start, end, ..
         } => {
@@ -190,6 +197,7 @@ pub(super) fn read_bits(
             "bit-field width exceeds its declared scalar storage".into(),
         ));
     }
+
     if let ValueStorage::Composite(composite) = storage {
         let start = composite
             .start
@@ -200,6 +208,7 @@ pub(super) fn read_bits(
         wide[..raw.len()].copy_from_slice(&raw);
         return Ok(u128::from_le_bytes(wide));
     }
+
     let first_byte = bit_offset / 8;
     let span = (bit_offset % 8 + bit_size).div_ceil(8);
     let selected = offset(
@@ -296,6 +305,7 @@ fn read_composite(
             PieceLocation::Memory { .. } | PieceLocation::Bytes { .. } => {}
         }
     }
+
     match undefined.as_slice() {
         [] => {}
         [only] if only.size == bits => {
@@ -312,6 +322,7 @@ fn read_composite(
             .into());
         }
     }
+
     if let Some(reason) = unavailable {
         return Err(reason.into());
     }
@@ -339,6 +350,7 @@ fn read_composite(
                 let raw = runtime.read_memory(address, length)?;
                 copy_bits(&raw, first % 8, &mut value, destination, size)?;
             }
+
             PieceLocation::Bytes {
                 raw, bit_offset, ..
             } => copy_bits(raw, bit_offset + within, &mut value, destination, size)?,
@@ -351,6 +363,7 @@ fn read_composite(
             }
         }
     }
+
     Ok(value)
 }
 
@@ -369,10 +382,12 @@ fn copy_bits(
         destination[to..to + length].copy_from_slice(&source[from..from + length]);
         return Ok(());
     }
+
     for bit in 0..size {
         let (source_bit, destination_bit) = (from + bit, to + bit);
         let value = (source[index(source_bit)?] >> (source_bit % 8)) & 1;
         destination[index(destination_bit)?] |= value << (destination_bit % 8);
     }
+
     Ok(())
 }

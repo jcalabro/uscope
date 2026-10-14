@@ -69,6 +69,7 @@ async fn frame_view(scenario: &mut Scenario, level: u32) -> uscope::StopContext 
     else {
         panic!("not stopped");
     };
+
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
@@ -94,6 +95,7 @@ async fn assignments_change_memory_the_program_then_uses() {
         .operation("assign", assign(&view, "pointee", "100"))
         .await;
     assert_eq!(signed(&assigned), 100);
+
     // The pointer sees the new value: the write went to memory.
     let through = scenario.operation("inspect", read(&view, "*pointer")).await;
     assert_eq!(signed(&through), 100);
@@ -129,6 +131,7 @@ async fn assignments_change_memory_the_program_then_uses() {
             "{target} = {value}: {message:?}"
         );
     }
+
     let caller = handle.at(frame_view(&mut scenario, 1).await);
     let error = scenario
         .attempt(
@@ -140,6 +143,7 @@ async fn assignments_change_memory_the_program_then_uses() {
         error.map(|_| ()).map_err(|error| error.to_string()),
         Err("300 does not fit `unsigned char` exactly".to_owned())
     );
+
     // A caller's variable in memory can change too; main checks it.
     let changed = scenario
         .operation("assign in caller", assign(&caller, "signed_int", "5"))
@@ -171,6 +175,7 @@ async fn enumerations_take_their_enumerators_names() {
         )
         .await;
     assert_eq!(signed(&assigned), 0);
+
     // inspect_enums now sees a different value than main set.
     scenario.remove_all_breakpoints().await;
     assert_eq!(
@@ -208,6 +213,7 @@ async fn registers_hold_whole_variables_of_the_innermost_frame_only() {
         .operation("assign register", assign(&innermost, "parameter", "41"))
         .await;
     assert_eq!(signed(&assigned), 41);
+
     // The optimized caller's variables are constants with no storage.
     let context = frame_view(&mut scenario, 1).await;
     let caller = handle.at(context);
@@ -218,6 +224,7 @@ async fn registers_hold_whole_variables_of_the_innermost_frame_only() {
         refused.map(|_| ()).map_err(|error| error.to_string()),
         Err("the debug information computes it; it has no storage".to_owned())
     );
+
     // The function computes with the register's new value.
     scenario.remove_all_breakpoints().await;
     assert_eq!(
@@ -234,6 +241,7 @@ async fn memory_writes_keep_breakpoints_installed_and_span_words() {
     let reason = scenario.run_to_stop().await;
     let address = crate::support::breakpoint_address(&reason);
     let handle = scenario.handle().clone();
+
     // The program's bytes at the breakpoint, written back over the trap.
     let code = scenario
         .operation("read code", handle.read_memory(address, 16))
@@ -246,11 +254,13 @@ async fn memory_writes_keep_breakpoints_installed_and_span_words() {
         .operation("read code again", handle.read_memory(address, 16))
         .await;
     assert_eq!(again.bytes, code.bytes, "traps stay hidden");
+
     // The second call still stops at the breakpoint.
     assert!(matches!(
         scenario.resume_to_stop().await,
         StopReason::Breakpoint { hits, .. } if hits[0].breakpoint == breakpoint.id
     ));
+
     // Bytes across a word boundary, starting mid-word.
     let global = scenario
         .operation("address", handle.runtime_address("uscope_value"))
@@ -306,6 +316,7 @@ async fn stopped_in_checked() -> (Scenario, uscope::StopId, uscope::ThreadId) {
     else {
         panic!("not stopped");
     };
+
     (scenario, stop_id, thread_id)
 }
 
@@ -321,6 +332,7 @@ async fn stopped_line(scenario: &Scenario) -> Option<u64> {
 #[tokio::test]
 async fn a_jump_moves_a_thread_within_its_function_under_a_new_stop() {
     let (mut scenario, before, thread) = stopped_in_checked().await;
+
     // The thread has yet to arrive at a breakpoint where it lands.
     let target = scenario
         .add_source_breakpoint("jump.c", jump_line("target"))
@@ -335,9 +347,11 @@ async fn a_jump_moves_a_thread_within_its_function_under_a_new_stop() {
     else {
         panic!("not stopped");
     };
+
     assert_ne!(stop_id, before);
     assert_eq!(reason, StopReason::Jump);
     assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
+
     // Nothing ran: `status = value` never did.
     assert_eq!(
         support::evaluate_value(&scenario, "status").await.signed(),
@@ -355,12 +369,14 @@ async fn a_jump_moves_a_thread_within_its_function_under_a_new_stop() {
     let StopReason::Breakpoint { hits, .. } = scenario.resume_to_stop().await else {
         panic!("the breakpoint where the thread landed did not stop it");
     };
+
     assert_eq!(hits[0].breakpoint, target.id);
     assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
     assert_eq!(
         support::evaluate_value(&scenario, "status").await.signed(),
         0
     );
+
     // Only `status += 100` runs.
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -396,9 +412,11 @@ async fn a_jump_is_refused_out_of_its_function_or_to_several_places() {
             "{spec}: {message_text:?}"
         );
     }
+
     let InferiorState::Stopped { stop_id, .. } = scenario.snapshot().await.inferior else {
         panic!("not stopped");
     };
+
     assert_eq!(stop_id, before);
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -417,6 +435,7 @@ async fn assigning_the_program_counter_moves_the_thread_under_a_new_stop() {
     let BreakpointLocation::Image(image_address) = target.locations[0].location else {
         panic!("{target:?}");
     };
+
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
         .await;
@@ -443,6 +462,7 @@ async fn assigning_the_program_counter_moves_the_thread_under_a_new_stop() {
     else {
         panic!("not stopped");
     };
+
     assert_ne!(stop_id, before);
     assert_eq!(reason, StopReason::Jump);
     assert_eq!(stopped_line(&scenario).await, Some(jump_line("target")));
@@ -477,6 +497,7 @@ async fn assigned_registers_are_what_the_thread_computes_with() {
             .is_err_and(|error| error.to_string().contains("a caller's registers")),
         "{refused:?}"
     );
+
     // Back in main, the call's result is in rax, which main stores next.
     scenario.remove_all_breakpoints().await;
     assert!(matches!(
@@ -523,6 +544,7 @@ async fn a_thread_moved_out_of_a_system_call_resumes_where_it_was_moved() {
     let InferiorState::Running { process_id, .. } = scenario.snapshot().await.inferior else {
         panic!("not running");
     };
+
     support::wait_for_system_call(process_id, 34);
     let reason = scenario.operation("pause", scenario.handle().pause()).await;
     assert_eq!(reason, StopReason::Pause);

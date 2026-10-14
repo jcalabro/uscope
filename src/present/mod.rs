@@ -33,14 +33,17 @@ pub const PAGE: u32 = 256;
 /// One value to present.
 pub struct Item<'a> {
     pub name: &'a str,
+
     /// How to evaluate the value again, when it can be.
     pub path: Option<Expression>,
+
     /// Whether the value is `[raw]`, the value as stored, which its path
     /// would evaluate as its view presents it: its own children are reached
     /// through the path, but it is not named by it.
     pub raw: bool,
     pub type_info: Option<&'a TypeInfo>,
     pub state: &'a VariableState,
+
     /// Where the value's variable is declared, in a module's sources.
     pub declaration: Option<(ModuleId, SourceLocation)>,
 }
@@ -49,15 +52,20 @@ pub struct Item<'a> {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub name: String,
+
     /// The value's summary, or why there is none.
     pub text: String,
+
     /// The type's name, when the type is known.
     pub type_name: Option<Arc<str>>,
     pub declaration: Option<(ModuleId, SourceLocation)>,
+
     /// How to evaluate the value again, which its children extend.
     pub path: Option<Expression>,
+
     /// Whether the row is `[raw]`, which its path does not name.
     pub raw: bool,
+
     /// What an available value offers; none for a value that has none.
     pub details: Option<Details>,
 }
@@ -77,23 +85,30 @@ impl Row {
 )]
 pub struct Details {
     pub expand: Option<Expand>,
+
     /// The function a pointer enters, by address.
     pub code: Option<u64>,
+
     /// The value's natural memory: what a pointer points to, or where the
     /// value is stored.
     pub memory: Option<u64>,
+
     /// How many bytes the value occupies at `memory`, when it is stored
     /// there and its size is known: a pointer's pointee has none.
     pub memory_bytes: Option<u64>,
+
     /// Whether assigning to the row's path can change it: numbers,
     /// enumerations, and pointers in memory, or whole variables in the
     /// innermost frame's registers.
     pub editable: bool,
     pub constant: bool,
+
     /// Whether a view presents the value as text.
     pub text_view: bool,
+
     /// Whether the value is a record, union, or variant.
     pub aggregate: bool,
+
     /// The renderers of the drawings its view offers, each once, which only
     /// the web page draws.
     pub drawings: Vec<Arc<str>>,
@@ -105,11 +120,13 @@ pub enum Expand {
     Children {
         reference: Arc<ValueChildrenReference>,
         counts: Counts,
+
         /// Whether the children are all elements (`Some(true)`), all named
         /// (`Some(false)`), or a view's elements followed by its named
         /// fields and `[raw]` (`None`).
         indexed: Option<bool>,
     },
+
     /// What a pointer points to.
     Pointee(Box<DereferenceReference>),
 }
@@ -138,6 +155,7 @@ pub fn drawings(presentation: &uscope::Presentation) -> Vec<Arc<str>> {
             names.push(Arc::clone(&visualizer.renderer.name));
         }
     }
+
     names
 }
 
@@ -146,6 +164,7 @@ pub fn drawings(presentation: &uscope::Presentation) -> Vec<Arc<str>> {
 pub struct Window {
     pub start: u64,
     pub count: u64,
+
     /// Which children to list: a view's elements or its named children.
     pub filter: Option<Filter>,
 }
@@ -175,6 +194,7 @@ impl Window {
 #[derive(Debug)]
 pub enum ListError {
     Debugger(uscope::Error),
+
     /// The program changed so the listing no longer applies.
     Changed(&'static str),
 }
@@ -213,6 +233,7 @@ impl Code {
             if !image.contains_address(address) {
                 return None;
             }
+
             let symbol = image.symbolize(address)?;
             (symbol.offset == 0
                 && matches!(
@@ -228,6 +249,7 @@ impl Code {
 pub struct Presenter<'a> {
     pub handle: &'a DebuggerHandle,
     pub code: &'a Code,
+
     /// Whether integers show in hexadecimal.
     pub hex: bool,
 }
@@ -262,17 +284,20 @@ impl Presenter<'_> {
                 } else {
                     None
                 };
+
                 // A pointer to a function, or a function value, leads to
                 // the function's code.
                 let code = called(value)
                     .filter(|address| self.code.function_entry(*address).is_some())
                     .map(VirtualAddress::get);
+
                 // A pointer's natural memory is what it points to.
                 let memory = match (value, source) {
                     (VariableValue::Address(address), _) => Some(address.address.get()),
                     (_, VariableValueSource::Memory(address)) => Some(address.get()),
                     _ => None,
                 };
+
                 let memory_bytes = match (value, source) {
                     (VariableValue::Address(_), _) => None,
                     (_, VariableValueSource::Memory(_)) => {
@@ -280,6 +305,7 @@ impl Presenter<'_> {
                     }
                     _ => None,
                 };
+
                 let whole = item.path.as_ref().is_some_and(Expression::is_name);
                 Some(Details {
                     expand,
@@ -301,6 +327,7 @@ impl Presenter<'_> {
             }
             _ => None,
         };
+
         Row {
             name: item.name.to_owned(),
             text: text(item.type_info, item.state, self.hex),
@@ -342,11 +369,13 @@ impl Presenter<'_> {
             } else {
                 Expression::name(&variable.name)
             };
+
             let name = if returned {
                 format!("returned {}", variable.name)
             } else {
                 variable.name.to_string()
             };
+
             rows.push(self.listed(
                 Item {
                     name: &name,
@@ -359,6 +388,7 @@ impl Presenter<'_> {
                 context,
             ));
         }
+
         if kind == VariableKind::Local
             && let Some(exhaustion) = snapshot.completion.exhaustion()
         {
@@ -367,6 +397,7 @@ impl Presenter<'_> {
                 exhaustion.resource, exhaustion.limit
             )));
         }
+
         rows
     }
 
@@ -386,12 +417,14 @@ impl Presenter<'_> {
             } => Some(source.clone()),
             _ => None,
         };
+
         let mut by_name = BTreeMap::<&str, Vec<usize>>::new();
         for (index, variable) in snapshot.variables.iter().enumerate() {
             if variable.kind != VariableKind::Returned {
                 by_name.entry(&variable.name).or_default().push(index);
             }
         }
+
         let mut unnamed = BTreeSet::new();
         for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
             let bound = if let Some(expression) = Expression::name(name)
@@ -402,6 +435,7 @@ impl Presenter<'_> {
             } else {
                 None
             };
+
             let matching = indices
                 .iter()
                 .copied()
@@ -415,6 +449,7 @@ impl Presenter<'_> {
                 }
             }
         }
+
         unnamed
     }
 
@@ -465,6 +500,7 @@ impl Presenter<'_> {
                 ),
             );
         }
+
         Ok(rows)
     }
 
@@ -496,9 +532,11 @@ impl Presenter<'_> {
                     .await;
             }
         }
+
         if window.start != 0 {
             return Ok(Vec::new());
         }
+
         Ok(vec![self.listed(
             Item {
                 name: &format!("*{name}"),
@@ -525,6 +563,7 @@ impl Presenter<'_> {
                 "the range no longer evaluates to elements",
             ));
         };
+
         let base = expression.range_base();
         let mut rows = Vec::new();
         for child in window.slice(page.children.iter()) {
@@ -540,9 +579,11 @@ impl Presenter<'_> {
                 context,
             ));
         }
+
         if let Some(exhaustion) = page.completion.exhaustion() {
             rows.push(Listed::Truncated(limit_text(exhaustion)));
         }
+
         Ok(rows)
     }
 
@@ -563,6 +604,7 @@ impl Presenter<'_> {
             }
             _ => (window.start, reference.total()),
         };
+
         let end = end.min(start.saturating_add(window.count));
         let mut rows = Vec::new();
         let mut offset = start;
@@ -585,15 +627,19 @@ impl Presenter<'_> {
                     context,
                 ));
             }
+
             if let Some(exhaustion) = page.completion.exhaustion() {
                 rows.push(Listed::Truncated(limit_text(exhaustion)));
                 break;
             }
+
             if page.children.is_empty() {
                 break;
             }
+
             offset += page.children.len() as u64;
         }
+
         Ok(rows)
     }
 
@@ -603,6 +649,7 @@ impl Presenter<'_> {
         let Ok(expression) = Expression::parse(base) else {
             return Vec::new();
         };
+
         let Ok(uscope::Evaluation::Value { value, .. }) = self
             .handle
             .at(context)
@@ -615,6 +662,7 @@ impl Presenter<'_> {
         else {
             return Vec::new();
         };
+
         let mut state = value.state;
         if let VariableState::Available {
             children: ValueChildren::NotApplicable,
@@ -625,6 +673,7 @@ impl Presenter<'_> {
         {
             state = pointee.state;
         }
+
         let VariableState::Available {
             children: ValueChildren::Available(children),
             ..
@@ -632,6 +681,7 @@ impl Presenter<'_> {
         else {
             return Vec::new();
         };
+
         let Ok(page) = self
             .handle
             .value_children(
@@ -645,6 +695,7 @@ impl Presenter<'_> {
         else {
             return Vec::new();
         };
+
         page.children
             .iter()
             .filter(|child| shown(child))
@@ -739,6 +790,7 @@ fn editable(
         }
         _ => false,
     };
+
     leaf && storage && named
 }
 
@@ -751,10 +803,12 @@ pub fn child_name(child: &ValueChild) -> String {
                 name
             })
         }
+
         ValueChildRelationship::SliceElement { index }
         | ValueChildRelationship::Element { index } => {
             format!("[{index}]")
         }
+
         // A map's entry is named by its key.
         ValueChildRelationship::Entry { key, .. } => summary(Some(&key.type_info), &key.state),
         ValueChildRelationship::Member(member) => {
@@ -810,10 +864,12 @@ pub fn text(type_info: Option<&TypeInfo>, state: &VariableState, hexadecimal: bo
             if hexadecimal && let Some(number) = &presentation.number {
                 return text(number.type_info.as_ref(), &number.state, true);
             }
+
             true
         }
         _ => false,
     };
+
     (hexadecimal && !presented)
         .then(|| hex(type_info.and_then(|type_info| type_info.byte_size), state))
         .flatten()
@@ -825,6 +881,7 @@ fn hex(byte_size: Option<u64>, state: &VariableState) -> Option<String> {
     let VariableState::Available { value, .. } = state else {
         return None;
     };
+
     let bits = byte_size
         .filter(|size| (1..=16).contains(size))
         .map_or(128, |size| size * 8);
@@ -833,6 +890,7 @@ fn hex(byte_size: Option<u64>, state: &VariableState) -> Option<String> {
     } else {
         (1_u128 << bits) - 1
     };
+
     let number = match value {
         VariableValue::Scalar(ScalarValue::Signed(value))
         | VariableValue::Enumeration {
@@ -846,6 +904,7 @@ fn hex(byte_size: Option<u64>, state: &VariableState) -> Option<String> {
         } => *value & mask,
         _ => return None,
     };
+
     Some(format!("{number:#x}"))
 }
 
@@ -869,12 +928,14 @@ fn global_expression(
                 global.qualified_name
             ));
         }
+
         selectors.push(format!(
             "{}::{}",
             file.path.display(),
             global.qualified_name
         ));
     }
+
     selectors
         .into_iter()
         .find(|selector| {
@@ -915,6 +976,7 @@ mod tests {
             text: None,
             presentation: None,
         };
+
         let signed = state(VariableValue::Scalar(ScalarValue::Signed(-1)));
         assert_eq!(hex(Some(4), &signed).as_deref(), Some("0xffffffff"));
         assert_eq!(hex(Some(1), &signed).as_deref(), Some("0xff"));
@@ -944,6 +1006,7 @@ mod tests {
             presented: None,
             visualizers: Arc::from([]),
         };
+
         let state = VariableState::Available {
             source: VariableValueSource::Computed,
             raw: None,
@@ -953,6 +1016,7 @@ mod tests {
             text: None,
             presentation: Some(Arc::new(presentation)),
         };
+
         assert_eq!(text(None, &state, true), text(None, &state, false));
     }
 }

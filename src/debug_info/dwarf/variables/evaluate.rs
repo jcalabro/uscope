@@ -14,6 +14,7 @@ use crate::{
 use super::codec::{
     bytes_to_u64, integer_bytes, register_u64, signed_integer_bytes, wrapping_integer_bytes,
 };
+
 use super::location::{Expression, LocationListId, LocationSelectionError, LocationTables, select};
 use super::shape::ValueShapeError;
 use super::types::DynamicAggregateLayoutKey;
@@ -147,6 +148,7 @@ fn resolve_frame_base(
                     ),
                 }
             }
+
             Metadata::Absent(
                 MetadataAbsence::NoFrameBase
                 | MetadataAbsence::NotApplicable
@@ -157,6 +159,7 @@ fn resolve_frame_base(
             Metadata::Malformed(description) => FrameBaseCache::Malformed(Arc::clone(description)),
         };
     }
+
     match context.cache {
         FrameBaseCache::Available(value) => Ok(*value),
         FrameBaseCache::Unavailable(reason) => Err(EvaluateError::Unavailable(reason.clone())),
@@ -190,11 +193,13 @@ fn evaluate_frame_base(
             "frame base is not one complete piece".into(),
         ));
     };
+
     if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
         return Err(EvaluateError::Malformed(
             "frame base is a partial piece".into(),
         ));
     }
+
     match piece.location {
         Location::Address { address } => Ok(VirtualAddress::new(address)),
         Location::Register { register } => {
@@ -252,14 +257,17 @@ pub(super) fn evaluate_dynamic_aggregate_address(
             "runtime aggregate child location produced multiple pieces".into(),
         ));
     };
+
     if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
         return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
     }
+
     let Location::Address { address } = piece.location else {
         return Err(EvaluateError::Malformed(
             "runtime aggregate child location did not produce an address".into(),
         ));
     };
+
     Ok(VirtualAddress::new(address))
 }
 
@@ -283,16 +291,19 @@ pub(super) fn evaluate_with_object<'expression>(
     object_address: Option<VirtualAddress>,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     budget.consume_expression_work(u64::from(MAX_EVALUATION_ITERATIONS))?;
+
     // gimli rejects an expression with no operations as a stack underflow.
     if expression.bytes().is_empty() {
         return Ok(empty_location());
     }
+
     let reader = gimli::EndianSlice::new(expression.bytes(), endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding());
     if let Some(address) = object_address {
         evaluation.set_initial_value(address.get());
         evaluation.set_object_address(address.get());
     }
+
     // Bound evaluation so a malformed expression with a backward branch cannot
     // hang the controller thread.
     evaluation.set_max_iterations(MAX_EVALUATION_ITERATIONS);
@@ -321,6 +332,7 @@ pub(super) fn evaluate_with_object<'expression>(
                         resolve_frame_base(context, endian, runtime, budget)?
                     }
                 };
+
                 evaluation_step(evaluation.resume_with_frame_base(value.get()))?
             }
             EvaluationResult::RequiresCallFrameCfa => evaluation_step(
@@ -377,6 +389,7 @@ pub(super) fn evaluate_with_object<'expression>(
             EvaluationResult::RequiresTls(offset) => {
                 evaluation_step(evaluation.resume_with_tls(runtime.tls_address(offset)?.get()))?
             }
+
             EvaluationResult::RequiresWasmLocal { .. }
             | EvaluationResult::RequiresWasmGlobal { .. }
             | EvaluationResult::RequiresWasmStack { .. } => {
@@ -433,6 +446,7 @@ fn entry_value(
         RunTimeEndian::Little => word.to_le_bytes(),
         RunTimeEndian::Big => word.to_be_bytes(),
     };
+
     evaluation_value(&bytes, value_type, endian)
 }
 
@@ -454,13 +468,16 @@ fn called_procedure(
         gimli::DieReference::UnitRef(offset) => debug_info_offset(expression, offset),
         gimli::DieReference::DebugInfoRef(offset) => u64::try_from(offset.0).ok(),
     };
+
     let procedure = offset
         .and_then(|offset| expression.procedure(offset))
         .ok_or(crate::UnsupportedVariableFeature::CrossDieEvaluation)?;
+
     // A procedure without a location has no effect (DWARF 5 section 2.5.1.5).
     let Some(location) = procedure.locations() else {
         return Ok(&[]);
     };
+
     match select(location, address) {
         Ok(Some(called)) => Ok(called.bytes()),
         Ok(None) => Err(VariableUnavailableReason::UnavailableAtInstruction.into()),
@@ -484,6 +501,7 @@ fn entry_parameter(
             .next()
             .map_err(|error| EvaluateError::Malformed(evaluation_error(error)))
     };
+
     let parameter = match (next()?, next()?, next()?) {
         (Some(gimli::Operation::Register { register }), None, None) => (
             EntryParameter::Register(register.into()),
@@ -520,6 +538,7 @@ fn entry_parameter(
         ),
         _ => return Err(crate::UnsupportedVariableFeature::EntryValue.into()),
     };
+
     Ok(parameter)
 }
 
@@ -530,6 +549,7 @@ fn evaluation_value_type(
     if offset == 0 {
         return Ok(gimli::ValueType::Generic);
     }
+
     u64::try_from(offset)
         .ok()
         .and_then(|offset| expression.base_type(offset))
@@ -544,20 +564,24 @@ fn evaluation_value(
     if value_type == gimli::ValueType::Generic {
         return bytes_to_u64(bytes, endian).map(Value::Generic);
     }
+
     let Ok(size) = usize::try_from(value_type.bit_size(u64::MAX) / 8) else {
         return Err(EvaluateError::Malformed(
             "register or memory value is too large to read".into(),
         ));
     };
+
     if bytes.len() < size {
         return Err(EvaluateError::Malformed(
             "register or memory value is shorter than its DWARF type".into(),
         ));
     }
+
     let bytes = match endian {
         RunTimeEndian::Little => &bytes[..size],
         RunTimeEndian::Big => &bytes[bytes.len() - size..],
     };
+
     Value::parse(value_type, gimli::EndianSlice::new(bytes, endian))
         .map_err(|error| EvaluateError::Malformed(evaluation_error(error)))
 }
@@ -572,6 +596,7 @@ pub(super) fn dwarf_value_bytes(
             "scalar type is too large to read".into(),
         ));
     };
+
     let mut integer = match value {
         Value::Generic(value) | Value::U64(value) => u128::from(value),
         Value::U8(value) => u128::from(value),
@@ -593,12 +618,14 @@ pub(super) fn dwarf_value_bytes(
             ));
         }
     };
+
     // GCC and Clang represent optimized source booleans with word-sized
     // bitwise expressions (notably DW_OP_not). The source truth value is the
     // low bit after conversion to the declared one-byte boolean type.
     if type_info.encoding == BaseTypeEncoding::Boolean {
         integer &= 1;
     }
+
     wrapping_integer_bytes(integer, size, target)
 }
 
@@ -631,6 +658,7 @@ fn narrowed_constant(value: u128, size: usize) -> u128 {
     if size == 0 || bits >= 64 {
         return value;
     }
+
     let pattern = value & ((1_u128 << bits) - 1);
     let negative = pattern >> (bits - 1) == 1;
     let extended = pattern | (u128::from(u64::MAX) & !((1_u128 << bits) - 1));

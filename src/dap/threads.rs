@@ -17,6 +17,7 @@ use super::protocol::ErrorBody;
 /// The first id given to a context that is not named by its own number.
 /// Every Linux thread id is below it (`PID_MAX_LIMIT` is 2^22).
 const ALLOCATED: i64 = 1 << 30;
+
 /// The largest id DAP clients accept: thread ids are 32-bit signed.
 const MAX_ID: i64 = i32::MAX as i64;
 
@@ -26,6 +27,7 @@ pub struct ThreadHandles {
     next: i64,
     ids: HashMap<ExecutionContext, i64>,
     contexts: HashMap<i64, ExecutionContext>,
+
     /// The entry that says how many tasks a list leaves out, which names
     /// no context.
     placeholder: Option<i64>,
@@ -48,10 +50,12 @@ impl ThreadHandles {
         if let Some(&id) = self.ids.get(&context) {
             return Ok(id);
         }
+
         let own = match context {
             ExecutionContext::Thread(thread) => thread.get(),
             ExecutionContext::Task(task) => task.number,
         };
+
         let id = match i64::try_from(own)
             .ok()
             .filter(|id| (1..ALLOCATED).contains(id) && !self.contexts.contains_key(id))
@@ -63,6 +67,7 @@ impl ThreadHandles {
                 ))
             })?,
         };
+
         self.ids.insert(context, id);
         self.contexts.insert(id, context);
         Ok(id)
@@ -73,6 +78,7 @@ impl ThreadHandles {
         if let Some(id) = self.placeholder {
             return Ok(id);
         }
+
         let id = self
             .allocate()
             .ok_or_else(|| ErrorBody::new("every client thread id is in use"))?;
@@ -95,14 +101,17 @@ impl ThreadHandles {
         if let Some(&context) = self.contexts.get(&id) {
             return Ok(context);
         }
+
         if self.placeholder == Some(id) {
             return Err(ErrorBody::new(format!(
                 "{id} is not a thread: it counts the threads the list leaves out"
             )));
         }
+
         if (1..ALLOCATED).contains(&id) {
             return Ok(ExecutionContext::Thread(ThreadId::new(id.unsigned_abs())));
         }
+
         Err(ErrorBody::new(format!("there is no thread {id}")))
     }
 }
@@ -122,10 +131,12 @@ mod tests {
                 number,
             })
         };
+
         assert_eq!(handles.id(thread(4321)), Ok(4321));
         assert_eq!(handles.context(4321), Ok(thread(4321)));
         assert_eq!(handles.id(task(0, 7)), Ok(7));
         assert_eq!(handles.context(7), Ok(task(0, 7)));
+
         // An unannounced thread is named by its id until something takes it.
         assert_eq!(handles.context(99), Ok(thread(99)));
 

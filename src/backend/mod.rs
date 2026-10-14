@@ -35,9 +35,11 @@ pub struct ExecutableSource {
     pub display_path: Arc<PathBuf>,
     pub data: Arc<[u8]>,
     pub identity: FileIdentity,
+
     /// For an attach target, the start time that keeps a recycled process ID
     /// from being mistaken for the process whose executable was read.
     pub process_start_time: Option<u64>,
+
     /// Where the session finds separate debug files.
     pub debug_files: crate::debug_info::DebugFileSearch,
 }
@@ -64,6 +66,7 @@ pub struct Executable {
     pub identity: FileIdentity,
     pub process_start_time: Option<u64>,
     pub debug_files: crate::debug_info::DebugFileSearch,
+
     /// The C library the executable runs on, whose structures locate TLS.
     c_library: linux::CLibrary,
 }
@@ -94,9 +97,11 @@ fn process_exe_link(process: i32) -> std::io::Result<(PathBuf, PathBuf)> {
         Ok(display) => return Ok((leader, display)),
         Err(error) => error,
     };
+
     let Ok(mut threads) = fs::read_dir(format!("/proc/{process}/task")) else {
         return Err(error);
     };
+
     threads
         .find_map(|thread| {
             let link = thread.ok()?.path().join("exe");
@@ -125,6 +130,7 @@ fn read_executable_source(
 /// of `/proc/<pid>/stat`.
 pub fn process_start_time(process: i32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
+
     // The command name may contain spaces and parentheses; fields resume
     // after its final closing parenthesis.
     stat.rsplit_once(')')?

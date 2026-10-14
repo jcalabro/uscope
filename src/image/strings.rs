@@ -35,6 +35,7 @@ impl Pooled {
         if same(first) {
             return Some(first);
         }
+
         self.collided.iter().copied().find(|row| same(*row))
     }
 
@@ -67,9 +68,11 @@ impl StringsBuilder {
         }) {
             return Some(StrId(id));
         }
+
         if text.as_bytes().contains(&0) {
             return None;
         }
+
         let id = StrId(u32::try_from(self.bytes.len()).ok()?);
         self.bytes.extend_from_slice(text.as_bytes());
         self.bytes.push(0);
@@ -126,9 +129,11 @@ impl PathsBuilder {
         if bytes.contains(&0) {
             return None;
         }
+
         if let Some(&id) = self.ids.get(bytes) {
             return Some(id);
         }
+
         let id = PathId(u32::try_from(self.bytes.len()).ok()?);
         self.bytes.extend_from_slice(bytes);
         self.bytes.push(0);
@@ -185,6 +190,7 @@ pub fn valid_reference(pool: &[u8], offset: u32, utf8: bool) -> bool {
     let Some(&byte) = pool.get(offset as usize) else {
         return false;
     };
+
     // Continuation bytes are 0b10xx_xxxx.
     !utf8 || byte & 0xc0 != 0x80
 }

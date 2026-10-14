@@ -10,10 +10,12 @@ fn sources(directory: &Path) -> Vec<(PathBuf, String)> {
         if test_file || path.extension().is_none_or(|extension| extension != "rs") {
             continue;
         }
+
         let source = std::fs::read_to_string(&path).expect("read a source file");
         let source = source.split("#[cfg(test)]").next().unwrap_or_default();
         sources.push((path, source.to_owned()));
     }
+
     sources.sort();
     sources
 }
@@ -47,5 +49,6 @@ fn the_model_stays_pure() {
             );
         }
     }
+
     assert!(sources.len() >= 8, "the model's sources were found");
 }

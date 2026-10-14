@@ -83,6 +83,7 @@ async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
         if let Err(problem) = check_tokio_stop(scenario.handle().clone()).await {
             panic!("{fixture}: at the attach: {problem}");
         }
+
         let (listed, gaps) = tasks(&scenario, 4096).await;
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
         let stop = scenario.snapshot().await.stop_id.expect("stopped");
@@ -113,6 +114,7 @@ async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
                 "{fixture}: {listed:#?}"
             );
         }
+
         // Having accepted or answered, each task waits again, or is on its
         // way back to its await.
         for (function, waits_for) in [
@@ -132,6 +134,7 @@ async fn an_attached_servers_task_is_listed_and_it_serves_once_detached() {
                 _ => panic!("{fixture}: {task:#?}"),
             }
         }
+
         let task = by_function["serve"];
 
         let breakpoint = scenario

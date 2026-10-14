@@ -35,7 +35,9 @@ async fn a_stripped_program_says_its_goroutines_are_unavailable() {
         let [gap] = page.gaps.as_ref() else {
             panic!("{fixture}: {page:?}");
         };
+
         assert!(gap.contains("debug information"), "{fixture}: {gap}");
+
         // Every thread says why its goroutine is unknown, as `$task` does.
         for thread in scenario.snapshot().await.threads.iter() {
             assert!(
@@ -48,6 +50,7 @@ async fn a_stripped_program_says_its_goroutines_are_unavailable() {
                 "{fixture}"
             );
         }
+
         let task = Expression::parse("$task").expect("parses");
         let refused = scenario
             .handle()
@@ -58,6 +61,7 @@ async fn a_stripped_program_says_its_goroutines_are_unavailable() {
             refused.to_string().contains(gap.as_ref()),
             "{fixture}: {refused}"
         );
+
         // Steps go by the function table's lines, on the thread.
         scenario.step_to_stop(StepKind::OverSource).await;
         assert_eq!(

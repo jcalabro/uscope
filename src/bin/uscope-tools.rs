@@ -42,10 +42,12 @@ struct Args {
     /// or one per CPU up to 16.
     #[arg(long, global = true)]
     jobs: Option<std::num::NonZeroUsize>,
+
     /// Load through the image cache in DIR; loads are uncached otherwise,
     /// so that measurements ingest debug information.
     #[arg(long, global = true, value_name = "DIR")]
     cache: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Tool,
 }
@@ -56,58 +58,73 @@ enum Tool {
     /// form two loaders' dumps can be compared in.
     Dump {
         program: PathBuf,
+
         /// Dump only these sections; every one by default.
         #[arg(long, value_enum, value_delimiter = ',')]
         sections: Vec<Section>,
+
         /// How many statement addresses of each code instance to inspect
         /// variables at, besides its entry and last instruction.
         #[arg(long, default_value_t = 3)]
         variable_addresses: usize,
+
         /// Write the dump to FILE instead of stdout.
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+
     /// Load PROGRAM once and print what it cost, as JSON.
     Load {
         program: PathBuf,
+
         /// Count retired instructions with a hardware counter.
         #[arg(long)]
         instructions: bool,
     },
+
     /// Load every program and shared library under PATHS through the image
     /// cache `--cache` names, so that later loads read it.
     Warm {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
+
     /// Summarize a `--timings` report, or the differences between two.
     Timings {
         /// The report; with a second, the base it is compared to.
         file: PathBuf,
+
         /// The newer report, compared with the first.
         new: Option<PathBuf>,
+
         /// Also show each thread's busy time and the work each span spread
         /// across threads.
         #[arg(long)]
         threads: bool,
+
         /// Show every phase, not only the first forty.
         #[arg(long)]
         all: bool,
     },
+
     /// Load each program of a pinned corpus in processes of their own, and
     /// report what loading costs.
     Bench(BenchArgs),
+
     /// Run reference workloads bare and under each preset, and report what
     /// recording cost them.
     Overhead(OverheadArgs),
+
     /// Time a getppid loop bare and under each syscall-tracing engine, and
     /// report what tracing cost each call.
     SyscallOverhead(SyscallOverheadArgs),
+
     /// Group the blocks a DHAT profile records by the first uscope function
     /// that allocated them.
     Heap {
         /// The `dhat.out` file DHAT wrote.
         profile: PathBuf,
+
         /// How many sites to list in each ranking.
         #[arg(long, default_value_t = 25)]
         rows: usize,
@@ -119,25 +136,32 @@ struct OverheadArgs {
     /// Where the built fixtures are.
     #[arg(long, default_value = "build/test-programs")]
     programs: PathBuf,
+
     /// Runs of each workload under each setup.
     #[arg(long, default_value_t = 5)]
     runs: usize,
+
     /// Seconds a program runs, once recording is on, before its rate is
     /// counted.
     #[arg(long, default_value_t = 1.0)]
     warmup: f64,
+
     /// Seconds its rate is counted.
     #[arg(long, default_value_t = 3.0)]
     window: f64,
+
     /// Only these workloads: c, go, tokio, or probes.
     #[arg(long, value_delimiter = ',')]
     only: Vec<String>,
+
     /// Write every run as JSON to FILE.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
+
     /// Compare with the runs a saved report holds.
     #[arg(long, value_name = "BASE")]
     compare: Option<PathBuf>,
+
     /// Fail unless the prod preset costs every workload less than PERCENT.
     #[arg(long, value_name = "PERCENT")]
     check: Option<f64>,
@@ -148,22 +172,28 @@ struct SyscallOverheadArgs {
     /// Where the built fixtures are.
     #[arg(long, default_value = "build/test-programs")]
     programs: PathBuf,
+
     /// The uscope executable to trace with.
     #[arg(long, default_value = "target/release/uscope")]
     uscope: PathBuf,
+
     /// Starts uscope with `CAP_BPF` and `CAP_PERFMON`, given its path and
     /// arguments.
     #[arg(long, default_value = "/run/wrappers/bin/uscope-bpf")]
     launcher: PathBuf,
+
     /// Runs of each setup.
     #[arg(long, default_value_t = 5)]
     runs: usize,
+
     /// Calls each run of the loop makes.
     #[arg(long, default_value_t = 3_000_000)]
     calls: u64,
+
     /// Write every run as JSON to FILE.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
+
     /// Compare with the runs a saved report holds.
     #[arg(long, value_name = "BASE")]
     compare: Option<PathBuf>,
@@ -174,27 +204,34 @@ struct BenchArgs {
     /// The seconds-long corpus of small programs, or every program.
     #[arg(long, value_enum, default_value = "full")]
     corpus: Corpus,
+
     /// Loads per program, in processes of their own.
     #[arg(long, default_value_t = 5)]
     repeat: usize,
+
     /// Write the report as JSON to FILE.
     #[arg(long)]
     out: Option<PathBuf>,
+
     /// Compare with a saved report whose provenance matches.
     #[arg(long, value_name = "BASE")]
     compare: Option<PathBuf>,
+
     /// Fail unless the deterministic counts are within those BASELINE
     /// records for the same programs.
     #[arg(long, value_name = "BASELINE")]
     check: Option<PathBuf>,
+
     /// Rewrite BASELINE with this run's deterministic counts, without
     /// checking them against it. With `--only`, the other programs keep
     /// their counts.
     #[arg(long, value_name = "BASELINE")]
     record: Option<PathBuf>,
+
     /// Also count each load's instructions under Callgrind.
     #[arg(long)]
     callgrind: bool,
+
     /// Only the programs whose names contain one of these.
     #[arg(long, value_delimiter = ',')]
     only: Vec<String>,
@@ -235,9 +272,11 @@ fn run(args: Args) -> Result<bool> {
                 variable_addresses,
                 ..DumpOptions::default()
             };
+
             if !sections.is_empty() {
                 options.sections = sections.into_iter().collect();
             }
+
             let mut out: Box<dyn std::io::Write> = match &output {
                 Some(path) => Box::new(std::io::BufWriter::new(
                     std::fs::File::create(path)
@@ -245,10 +284,12 @@ fn run(args: Args) -> Result<bool> {
                 )),
                 None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
             };
+
             uscope::tools::dump::dump(&program, &options, &mut out)?;
             out.flush()?;
             Ok(true)
         }
+
         Tool::Load {
             program,
             instructions,
@@ -261,10 +302,12 @@ fn run(args: Args) -> Result<bool> {
             if args.cache.is_none() {
                 bail!("warm needs --cache DIR");
             }
+
             let warmed = uscope::tools::warm(&paths)?;
             for (path, error) in &warmed.failed {
                 println!("{}: {error}", path.display());
             }
+
             println!(
                 "{} modules in the image cache, {} that do not load",
                 warmed.loaded,
@@ -272,6 +315,7 @@ fn run(args: Args) -> Result<bool> {
             );
             Ok(true)
         }
+
         Tool::Timings {
             file,
             new,
@@ -298,8 +342,10 @@ fn run(args: Args) -> Result<bool> {
                     }
                 }
             }
+
             Ok(true)
         }
+
         // Unless told how many, each program loads on one worker, whose
         // counts repeat exactly, and on as many as there are.
         Tool::Bench(bench) => run_bench(
@@ -328,12 +374,14 @@ fn run_overhead(args: &OverheadArgs) -> Result<bool> {
         window: Duration::try_from_secs_f64(args.window)?,
         only: args.only.clone(),
     };
+
     let runs = overhead::measure(&options, |run| {
         eprintln!("{} {}: {:.1}/s", run.workload, run.setup, run.rate);
     })?;
     if let Some(out) = &args.out {
         std::fs::write(out, serde_json::to_string_pretty(&runs)?)?;
     }
+
     let summaries = overhead::summarize(&runs);
     let base = match &args.compare {
         Some(path) => Some(overhead::summarize(&serde_json::from_slice::<
@@ -341,10 +389,12 @@ fn run_overhead(args: &OverheadArgs) -> Result<bool> {
         >(&std::fs::read(path)?)?)),
         None => None,
     };
+
     print!("{}", overhead_table(&summaries, base.as_deref()));
     let Some(limit) = args.check else {
         return Ok(true);
     };
+
     let over: Vec<_> = summaries
         .iter()
         .filter(|summary| summary.setup == "prod" && summary.cost_percent >= limit)
@@ -355,6 +405,7 @@ fn run_overhead(args: &OverheadArgs) -> Result<bool> {
             summary.workload, summary.cost_percent
         );
     }
+
     Ok(over.is_empty())
 }
 
@@ -368,12 +419,14 @@ fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
         runs: args.runs,
         calls: args.calls,
     };
+
     let runs = syscall_overhead::measure(&options, |run| {
         eprintln!("{}: {:.1} ns a call", run.setup, run.ns_per_call);
     })?;
     if let Some(out) = &args.out {
         std::fs::write(out, serde_json::to_string_pretty(&runs)?)?;
     }
+
     let base = match &args.compare {
         Some(path) => Some(syscall_overhead::summarize(&serde_json::from_slice::<
             Vec<syscall_overhead::Run>,
@@ -382,6 +435,7 @@ fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
         )?)?)),
         None => None,
     };
+
     let mut table = String::from("setup         ns/call     added   noise\n");
     for summary in syscall_overhead::summarize(&runs) {
         let was = base
@@ -394,6 +448,7 @@ fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
             summary.setup, summary.ns_per_call, summary.added_ns, summary.noise_ns
         )?;
     }
+
     print!("{table}");
     Ok(true)
 }
@@ -437,6 +492,7 @@ fn overhead_table(
             summary.workload, summary.setup, summary.rate, summary.noise_percent
         );
     }
+
     table
 }
 
@@ -453,8 +509,10 @@ struct Dhat {
 struct DhatSite {
     tb: u64,
     tbk: u64,
+
     #[serde(default)]
     gb: u64,
+
     #[serde(default)]
     gbk: u64,
     fs: Vec<usize>,
@@ -491,11 +549,13 @@ fn allocation_site(frames: &[usize], table: &[String]) -> String {
         let Some(name) = table.get(frame) else {
             continue;
         };
+
         let function = name.split(" (").next().unwrap_or(name);
         let function = function.split_once(": ").map_or(function, |(_, rest)| rest);
         if !function.contains("uscope") || PLUMBING.iter().any(|skip| function.contains(skip)) {
             continue;
         }
+
         let place = name
             .rsplit_once('(')
             .and_then(|(_, place)| place.strip_suffix(')'))
@@ -503,6 +563,7 @@ fn allocation_site(frames: &[usize], table: &[String]) -> String {
         let short = function.get(..110).unwrap_or(function);
         return place.map_or_else(|| short.to_owned(), |place| format!("{short}  @{place}"));
     }
+
     frames
         .first()
         .and_then(|frame| table.get(*frame))
@@ -528,6 +589,7 @@ fn heap_text(path: &Path, rows: usize) -> Result<String> {
         totals[2] += site.gb;
         totals[3] += site.gbk;
     }
+
     let sum = |index: usize| sites.values().map(|totals| totals[index]).sum::<u64>();
     let mut text = format!(
         "total {:.0} MB in {:.2} M blocks; at peak {:.0} MB in {:.2} M blocks\n",
@@ -547,6 +609,7 @@ fn heap_text(path: &Path, rows: usize) -> Result<String> {
             totals[3]
         );
     }
+
     ranked.sort_by_key(|(site, totals)| (std::cmp::Reverse(totals[1]), (*site).clone()));
     text.push_str("\nby blocks allocated\n");
     for (site, totals) in ranked.iter().take(rows) {
@@ -557,6 +620,7 @@ fn heap_text(path: &Path, rows: usize) -> Result<String> {
             totals[0] as f64 / 1e6
         );
     }
+
     Ok(text)
 }
 
@@ -592,6 +656,7 @@ struct BenchReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProgramResult {
     name: String,
+
     /// The loader's workers; reports from before there were several had
     /// one.
     #[serde(default = "one")]
@@ -645,6 +710,7 @@ struct Program {
 fn corpus(kind: Corpus) -> Result<Vec<Program>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut programs = Vec::new();
+
     // The golden programs' executables, one directory of builds each.
     let golden = root.join("build/golden");
     let mut golden_programs = Vec::new();
@@ -664,14 +730,17 @@ fn corpus(kind: Corpus) -> Result<Vec<Program>> {
             }
         }
     }
+
     golden_programs.sort();
     for path in golden_programs {
         let Some(file) = path.file_name() else {
             bail!("{} has no file name", path.display());
         };
+
         let name = format!("golden/{}", file.to_string_lossy());
         programs.push(Program { name, path });
     }
+
     let fixtures = [
         "containers-cpp-gcc-o2",
         "containers-zig-self-hosted",
@@ -683,12 +752,14 @@ fn corpus(kind: Corpus) -> Result<Vec<Program>> {
         Corpus::Smoke => fixtures.to_vec(),
         Corpus::Full => fixtures.iter().chain(&large).copied().collect(),
     };
+
     for name in fixture_names {
         programs.push(Program {
             name: name.to_owned(),
             path: root.join("build/test-programs").join(name),
         });
     }
+
     if kind == Corpus::Full {
         // The Go command the pinned toolchain ships: 23 MB with compressed
         // debug sections.
@@ -706,11 +777,13 @@ fn corpus(kind: Corpus) -> Result<Vec<Program>> {
                 path: go,
             });
         }
+
         programs.push(Program {
             name: "uscope-large".to_owned(),
             path: root.join("target/bench/large/uscope"),
         });
     }
+
     Ok(programs)
 }
 
@@ -740,6 +813,7 @@ fn provenance() -> Provenance {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .unwrap_or_default()
     };
+
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|info| {
@@ -768,6 +842,7 @@ fn median(values: &mut [f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
+
     values.sort_by(f64::total_cmp);
     values[values.len() / 2]
 }
@@ -786,12 +861,14 @@ fn load_once(program: &Path, jobs: usize) -> Result<Measured> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 /// The instructions one load of `program` runs, as Callgrind counts them.
 fn callgrind(program: &Path) -> Result<u64> {
     let out = std::env::temp_dir().join(format!("uscope-callgrind-{}.out", std::process::id()));
+
     // One worker, so that the count is the same each run.
     let status = Command::new("valgrind")
         .arg("--tool=callgrind")
@@ -809,6 +886,7 @@ fn callgrind(program: &Path) -> Result<u64> {
     if !status.success() {
         bail!("callgrind failed on {}", program.display());
     }
+
     text?
         .lines()
         .find_map(|line| {
@@ -825,6 +903,7 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
     if !args.only.is_empty() {
         programs.retain(|program| args.only.iter().any(|only| program.name.contains(only)));
     }
+
     let mut results = Vec::new();
     for (program, &jobs) in programs
         .iter()
@@ -838,12 +917,14 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
             );
             continue;
         };
+
         eprint!("{} x{jobs} ", program.name);
         let mut measured = Vec::new();
         for _ in 0..args.repeat.max(1) {
             measured.push(load_once(&program.path, jobs)?);
             eprint!(".");
         }
+
         let callgrind_instructions = if args.callgrind && jobs == 1 {
             let count = callgrind(&program.path)?;
             eprint!(" callgrind");
@@ -851,6 +932,7 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
         } else {
             None
         };
+
         eprintln!();
         let first = &measured[0];
         let mut wall = measured
@@ -902,20 +984,24 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
             wall_ms: wall,
         });
     }
+
     let report = BenchReport {
         schema: BENCH_SCHEMA,
         provenance: provenance(),
         programs: results,
     };
+
     print!("{}", bench_text(&report));
     if let Some(out) = &args.out {
         std::fs::write(out, serde_json::to_string_pretty(&report)?)?;
     }
+
     let mut passed = true;
     if let Some(base) = &args.compare {
         let base: BenchReport = serde_json::from_str(&std::fs::read_to_string(base)?)?;
         print!("\n{}", compare_text(&base, &report));
     }
+
     // A baseline being recorded again is not checked: its counts are the
     // ones this run replaces.
     if let Some(path) = args
@@ -929,6 +1015,7 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
         print!("\n{text}");
         passed &= ok;
     }
+
     if let Some(path) = &args.record {
         // A run of some programs keeps the others' counts; a run of all
         // replaces the baseline, dropping programs no longer measured.
@@ -937,6 +1024,7 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
         } else {
             serde_json::from_str(&std::fs::read_to_string(path)?)?
         };
+
         let measured = report.programs.iter().filter(|program| program.jobs == 1);
         let mut recorded = 0;
         for program in measured {
@@ -950,11 +1038,13 @@ fn run_bench(args: &BenchArgs, sweep: &[usize]) -> Result<bool> {
             );
             recorded += 1;
         }
+
         let mut text = serde_json::to_string_pretty(&counts)?;
         text.push('\n');
         std::fs::write(path, text)?;
         println!("\nrecorded {recorded} programs in {}", path.display());
     }
+
     Ok(passed)
 }
 
@@ -989,9 +1079,11 @@ fn bench_text(report: &BenchReport) -> String {
             (Some(low), Some(high)) => format!("{low:.0}-{high:.0}"),
             _ => "-".to_owned(),
         };
+
         let mb = |bytes: Option<f64>| {
             bytes.map_or_else(|| "-".to_owned(), |bytes| format!("{:.1}", bytes / 1e6))
         };
+
         let _ = writeln!(
             text,
             "{:<34} {:>9.1} {:>6.1} {:>8} {:>9.1} {:>9} {:>11} {:>10} {:>10} {:>14}{}",
@@ -1016,6 +1108,7 @@ fn bench_text(report: &BenchReport) -> String {
             }
         );
     }
+
     text
 }
 
@@ -1035,12 +1128,14 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
         dirty: false,
         ..new.provenance.clone()
     };
+
     if !comparable {
         let _ = writeln!(
             text,
             "the runs' machines, toolchains, or builds differ, so only deterministic counts compare"
         );
     }
+
     let base_programs = base
         .programs
         .iter()
@@ -1056,22 +1151,26 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
         let Some(before) = base_programs.get(&label) else {
             continue;
         };
+
         let same_input = before.digest == program.digest;
         let mut row = |measure: &str, old: Option<f64>, now: Option<f64>, noise: f64| {
             let (Some(old), Some(now)) = (old, now) else {
                 return;
             };
+
             let change = if old == 0.0 {
                 0.0
             } else {
                 (now - old) / old * 100.0
             };
+
             let flag = if change.abs() <= noise { " ~" } else { "" };
             let _ = writeln!(
                 text,
                 "{label:<28} {measure:<14} {old:>14.1} {now:>14.1} {change:>+8.1}%{flag}"
             );
         };
+
         if comparable {
             let spread =
                 |result: &ProgramResult| match (result.wall_ms.first(), result.wall_ms.last()) {
@@ -1100,6 +1199,7 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
                 2.0,
             );
         }
+
         if same_input {
             row(
                 "allocations",
@@ -1126,6 +1226,7 @@ fn compare_text(base: &BenchReport, new: &BenchReport) -> String {
             );
         }
     }
+
     text
 }
 
@@ -1144,6 +1245,7 @@ fn check_counts(
             let _ = writeln!(text, "{}: not in the baseline", program.name);
             continue;
         };
+
         seen.insert(program.name.as_str());
         if counts.digest != program.digest {
             let _ = writeln!(
@@ -1154,6 +1256,7 @@ fn check_counts(
             ok = false;
             continue;
         }
+
         for (measure, limit, now) in [
             ("allocations", counts.allocations, program.allocations),
             (
@@ -1182,13 +1285,16 @@ fn check_counts(
             }
         }
     }
+
     for name in baseline.keys().filter(|_| whole_corpus) {
         if !seen.contains(name.as_str()) {
             let _ = writeln!(text, "{name}: in the baseline but not measured");
         }
     }
+
     if ok {
         text.push_str("deterministic counts are within the baseline\n");
     }
+
     (text, ok)
 }

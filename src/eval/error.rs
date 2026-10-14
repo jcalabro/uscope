@@ -10,27 +10,38 @@ use super::syntax::Span;
 pub enum ErrorKind {
     /// The text is not an expression.
     Syntax,
+
     /// The expression exceeds a size, depth, or ambiguity limit.
     Limit,
+
     /// A name means nothing in the scope.
     UnknownName,
+
     /// A name means several things; the message says how to choose.
     AmbiguousName,
+
     /// An operator does not apply to its operand's type.
     Type,
+
     /// An index is outside an array's bounds.
     Bounds,
+
     /// A map holds no entry for a key.
     MissingKey,
+
     /// Arithmetic has no result: a division by zero, a result beyond 128
     /// bits, a shift out of range, or a value that does not fit.
     Arithmetic,
+
     /// An operand that must be in memory is not.
     NotAnLvalue,
+
     /// The expression assigns where assigning is not allowed.
     Mode,
+
     /// An assignment's value does not fit its target.
     Assignment,
+
     /// An operand has a type the debugger cannot compute with.
     Unsupported,
 }
@@ -60,9 +71,11 @@ impl ErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionError {
     pub kind: ErrorKind,
+
     /// The bytes of the expression's text the error is about.
     pub span: Span,
     pub message: String,
+
     /// A suggestion that rewrites the expression, when one is known.
     pub hint: Option<String>,
 }
@@ -94,6 +107,7 @@ impl fmt::Display for ExpressionError {
         if let Some(hint) = &self.hint {
             write!(formatter, " ({hint})")?;
         }
+
         Ok(())
     }
 }

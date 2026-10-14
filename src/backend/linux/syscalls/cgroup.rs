@@ -14,8 +14,10 @@ const INIT_CGROUP_NS: &str = "cgroup:[4026531835]";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cgroup {
     pub path: PathBuf,
+
     /// The kernel's id for it, its directory's inode.
     pub id: u64,
+
     /// Its depth below the root, which is level 0.
     pub level: u32,
 }
@@ -25,6 +27,7 @@ pub struct Cgroup {
 pub struct PidNamespace {
     /// Its proc inode number.
     pub inum: u32,
+
     /// Its depth below the initial namespace, which is level 0.
     pub level: u32,
 }
@@ -33,19 +36,25 @@ pub struct PidNamespace {
 pub enum CgroupError {
     #[error("{0} is not a cgroup below {ROOT}")]
     NotCgroup(PathBuf),
+
     #[error("{ROOT} is not the unified (v2) cgroup hierarchy, which tracing a cgroup needs")]
     NotUnified,
+
     #[error(
         "uscope runs in a cgroup namespace of its own, where it cannot tell how deep a cgroup \
          is; run it in the host's (with docker, --cgroupns=host)"
     )]
     Namespaced,
+
     #[error("a container id is at least 12 hexadecimal digits, not {0:?}")]
     BadId(String),
+
     #[error("no cgroup below {ROOT} holds a container {0}")]
     NoContainer(String),
+
     #[error("{count} cgroups hold a container whose id begins {id}; give more of it")]
     Ambiguous { id: String, count: usize },
+
     #[error("reading {0}: {1}")]
     Io(PathBuf, #[source] std::io::Error),
 }
@@ -63,11 +72,13 @@ impl Cgroup {
         if !unified {
             return Err(CgroupError::NotUnified);
         }
+
         let namespace = std::fs::read_link("/proc/self/ns/cgroup")
             .map_err(|error| CgroupError::Io("/proc/self/ns/cgroup".into(), error))?;
         if namespace != Path::new(INIT_CGROUP_NS) {
             return Err(CgroupError::Namespaced);
         }
+
         below(Path::new(ROOT), path)
     }
 
@@ -110,6 +121,7 @@ fn below(root: &Path, path: &Path) -> Result<Cgroup, CgroupError> {
     if !path.join("cgroup.procs").is_file() {
         return Err(not());
     }
+
     let id = std::fs::metadata(&path)
         .map_err(|error| CgroupError::Io(path.clone(), error))?
         .ino();
@@ -124,6 +136,7 @@ fn container(root: &Path, id: &str) -> Result<PathBuf, CgroupError> {
     if id.len() < 12 || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(CgroupError::BadId(id.to_owned()));
     }
+
     let id = id.to_ascii_lowercase();
     let mut found = Vec::new();
     let mut pending = vec![(root.to_owned(), 0)];
@@ -131,10 +144,12 @@ fn container(root: &Path, id: &str) -> Result<PathBuf, CgroupError> {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };
+
         for entry in entries.flatten() {
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
+
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let bare = ["docker-", "libpod-", "cri-containerd-", "crio-"]
@@ -148,6 +163,7 @@ fn container(root: &Path, id: &str) -> Result<PathBuf, CgroupError> {
             }
         }
     }
+
     match found.len() {
         0 => Err(CgroupError::NoContainer(id)),
         1 => Ok(found.remove(0)),
@@ -171,6 +187,7 @@ pub fn pid_namespace(processes: &[u32]) -> Result<Option<PidNamespace>, String> 
             Err(_) if !Path::new(&format!("/proc/{process}")).exists() => continue,
             Err(error) => return Err(format!("process {process}'s: {error}")),
         };
+
         match shared {
             None => shared = Some(theirs),
             Some(seen) if seen != theirs => {
@@ -179,9 +196,11 @@ pub fn pid_namespace(processes: &[u32]) -> Result<Option<PidNamespace>, String> 
             Some(_) => {}
         }
     }
+
     let Some(shared) = shared else {
         return Err("it had no processes as tracing began".into());
     };
+
     Ok((shared != own).then_some(shared))
 }
 
@@ -193,6 +212,7 @@ fn namespace_of(process: &str) -> Result<PidNamespace, std::io::Error> {
         .and_then(|text| text.strip_prefix("pid:[")?.strip_suffix(']'))
         .and_then(|number| number.parse().ok())
         .ok_or_else(|| std::io::Error::other(format!("unexpected link {}", link.display())))?;
+
     // Its ids from the initial namespace inward, one per level.
     let status = std::fs::read_to_string(format!("/proc/{process}/status"))?;
     let depth = status
@@ -272,6 +292,7 @@ mod tests {
             below(&root, &root.join("kubepods/besteffort/pod1/missing")),
             Err(CgroupError::NotCgroup(_))
         ));
+
         // A directory without cgroup.procs is not one.
         assert!(matches!(
             below(&root, &root.join("kubepods")),

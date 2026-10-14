@@ -15,6 +15,7 @@ fn an_allocation_past_the_cap_aborts_the_test_process() {
         std::hint::black_box(bytes);
         return;
     }
+
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",

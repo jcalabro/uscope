@@ -15,12 +15,15 @@ pub fn demangle(name: &str) -> Option<String> {
     if let Ok(demangled) = rustc_demangle::try_demangle(name) {
         return Some(format!("{demangled:#}"));
     }
+
     if name.starts_with("_D") {
         return dlang::qualified_name(name);
     }
+
     if !name.starts_with("_Z") {
         return None;
     }
+
     let symbol = cpp_demangle::Symbol::new_with_options(
         name,
         &cpp_demangle::ParseOptions::default().recursion_limit(CPP_RECURSION_LIMIT),
@@ -39,20 +42,25 @@ pub fn demangle(name: &str) -> Option<String> {
 /// `shapes::scale(double)` all spell `_ZN6shapes5scaleEd`.
 pub fn spells(mangled: &str, name: &str) -> bool {
     let (written, written_parameters) = split_parameters(name);
+
     // Only a mangled name holding the name's last part can demangle to it,
     // which spares demangling every symbol of a module.
     let last = last_part(name);
     if last.is_empty() || !mangled.contains(last) {
         return false;
     }
+
     let Some(demangled) = demangle(mangled) else {
         return false;
     };
+
     let (qualified, parameters) = split_parameters(&demangled);
+
     // A clone, such as `[clone .constprop.0]`, is other code.
     if parameters.contains("[clone") {
         return false;
     }
+
     let named = qualified == written
         || qualified
             .strip_suffix(written)
@@ -106,6 +114,7 @@ pub fn ada_name(encoded: &str) -> Option<String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     };
+
     name.split("__")
         .all(identifier)
         .then(|| name.replace("__", "."))
@@ -126,9 +135,11 @@ pub fn rust_path(demangled: &str) -> Option<String> {
         if inner[..close].contains(" as ") {
             return None;
         }
+
         unwrapped = format!("{}{}", &inner[..close], &inner[close + 1..]);
         name = &unwrapped;
     }
+
     let mut path = String::with_capacity(name.len());
     let mut depth = 0_usize;
     for (at, character) in name.char_indices() {
@@ -141,6 +152,7 @@ pub fn rust_path(demangled: &str) -> Option<String> {
             _ => {}
         }
     }
+
     (depth == 0).then(|| path.replace("::::", "::").trim_end_matches("::").to_owned())
 }
 
@@ -160,6 +172,7 @@ fn closing(text: &str) -> Option<usize> {
             _ => {}
         }
     }
+
     None
 }
 
@@ -175,6 +188,7 @@ fn split_parameters(name: &str) -> (&str, &str) {
             _ => {}
         }
     }
+
     (name, "")
 }
 
@@ -204,6 +218,7 @@ mod tests {
         ] {
             assert_eq!(path(mangled), expected, "{mangled}");
         }
+
         assert_eq!(
             rust_path("<alloc::boxed::Box<F> as core::future::Future>::poll"),
             None
@@ -313,6 +328,7 @@ mod tests {
         ] {
             assert_eq!(demangle(mangled).as_deref(), expected, "{mangled}");
         }
+
         let nested = format!("_D1f{}v", "P".repeat(10_000));
         assert_eq!(demangle(&nested), None);
     }

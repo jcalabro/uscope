@@ -21,8 +21,10 @@ use crate::syscalls::{Abi, Outcome, Pid, SyscallId, Tid};
 /// How many records the ring holds: so few that most are lost, a few, and
 /// more than a run makes.
 const CAPACITIES: [usize; 4] = [1, 4, 64, 1 << 16];
+
 /// How many records arrive between the consumer's drains.
 const DRAINS: [u64; 4] = [1, 3, 16, 1000];
+
 /// The CPUs calls are counted on.
 const CPUS: u32 = 4;
 
@@ -31,17 +33,22 @@ pub struct TraceModel {
     capacity: usize,
     drain_every: u64,
     since_drain: u64,
+
     /// Records written and not yet read, with the call each was made of.
     ring: VecDeque<(Served, Vec<u8>)>,
     served: u64,
     traced: u64,
+
     /// What the stream program counts in its lost counter.
     lost: u64,
     stats: BTreeMap<SyscallId, BTreeMap<u32, RawStatValue>>,
+
     /// Failures by slot and errno.
     errnos: BTreeMap<(u32, u32), u64>,
+
     /// Each call's calls and errors, by errno, as served.
     expected: BTreeMap<SyscallId, (u64, u64, BTreeMap<u16, u64>)>,
+
     /// Drops records without counting them, under
     /// [`super::world::Sabotage::LoseTracedCalls`].
     #[cfg(test)]
@@ -61,6 +68,7 @@ impl TraceModel {
             stats: BTreeMap::new(),
             errnos: BTreeMap::new(),
             expected: BTreeMap::new(),
+
             #[cfg(test)]
             uncounted: false,
         }
@@ -81,13 +89,16 @@ impl TraceModel {
                 if self.uncounted {
                     continue;
                 }
+
                 self.lost += 1;
             }
+
             self.since_drain += 1;
             if self.since_drain >= self.drain_every {
                 self.drain(marks)?;
             }
         }
+
         Ok(())
     }
 
@@ -132,6 +143,7 @@ impl TraceModel {
                 Ok(Record::Call(event)) => event,
                 other => return Err(format!("the record of {call:?} decoded as {other:?}")),
             };
+
             let outcome = call
                 .returned
                 .map_or(Outcome::ProcessExited, Outcome::of_return);
@@ -154,9 +166,11 @@ impl TraceModel {
                     "the trace shows {read:?}, but the kernel served {made:?}"
                 ));
             }
+
             self.traced += 1;
             marks.hit(Mark::TraceDecoded);
         }
+
         Ok(())
     }
 
@@ -170,6 +184,7 @@ impl TraceModel {
                 self.served, self.traced, self.lost
             ));
         }
+
         let folded = bpf::fold(
             Pid::new(0),
             self.stats
@@ -190,6 +205,7 @@ impl TraceModel {
                 ));
             }
         }
+
         Ok(())
     }
 }

@@ -189,6 +189,7 @@ fn styles_change_descriptors_constants_and_names() {
         fds: FdStyle::Paths,
         ..Style::default()
     };
+
     assert_eq!(
         call(
             &read,
@@ -224,6 +225,7 @@ fn styles_change_descriptors_constants_and_names() {
         constants: Constants::Raw,
         ..Style::default()
     };
+
     assert_eq!(
         line(&open, &raw),
         r#"openat(-100, "/etc/hostname", 0x80000) = 3"#
@@ -232,6 +234,7 @@ fn styles_change_descriptors_constants_and_names() {
         constants: Constants::Verbose,
         ..Style::default()
     };
+
     assert_eq!(
         line(&open, &verbose),
         r#"openat(-100 /* AT_FDCWD */, "/etc/hostname", 0x80000 /* O_RDONLY|O_CLOEXEC */) = 3"#
@@ -240,6 +243,7 @@ fn styles_change_descriptors_constants_and_names() {
         arg_names: true,
         ..Style::default()
     };
+
     assert_eq!(
         line(&open, &named),
         r#"openat(dfd=AT_FDCWD, filename="/etc/hostname", flags=O_RDONLY|O_CLOEXEC) = 3"#
@@ -248,6 +252,7 @@ fn styles_change_descriptors_constants_and_names() {
         hex: Hex::All,
         ..Style::default()
     };
+
     assert_eq!(
         line(&read, &hex),
         r#"read(3, "\x68\x6f\x73\x74\x0a", 64) = 5"#
@@ -256,11 +261,13 @@ fn styles_change_descriptors_constants_and_names() {
         call: SyscallId::named(Abi::X86_32, "getpid").expect("getpid"),
         ..event("getpid", &[], 42, &[])
     };
+
     assert_eq!(line(&i386, &Style::default()), "getpid() = 42");
     let unknown_call = SyscallEvent {
         call: SyscallId::new(Abi::X86_64, 999),
         ..event("getpid", &[1, 2], -38, &[])
     };
+
     assert_eq!(
         line(&unknown_call, &Style::default()),
         "syscall_0x3e7(0x1, 0x2, 0, 0, 0, 0) = -1 ENOSYS (Function not implemented)"

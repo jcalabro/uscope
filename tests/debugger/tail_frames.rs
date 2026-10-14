@@ -77,6 +77,7 @@ async fn a_backtrace_shows_the_one_chain_of_tail_calls() {
                 .all(|(level, frame)| frame.level as usize == level),
             "{variant}: {trace:#?}"
         );
+
         // Each is at its jump, in its own function's code.
         for frame in &trace[1..3] {
             assert_eq!(
@@ -129,6 +130,7 @@ async fn a_tail_call_frame_knows_only_what_was_passed_to_it() {
             let registers = scenario
                 .operation("registers", scenario.handle().registers())
                 .await;
+
             // Only the thread's own segments are the same in every frame.
             let segments = ["cs", "ss", "ds", "es", "fs", "gs", "fs_base", "gs_base"];
             assert!(
@@ -142,6 +144,7 @@ async fn a_tail_call_frame_knows_only_what_was_passed_to_it() {
             let variable = scenario
                 .operation("value", scenario.handle().variable("value"))
                 .await;
+
             // Clang's tail call to `middle` does not say what it passed.
             if (variant, function) == ("tail-frames-clang-o2", "middle") {
                 assert_eq!(
@@ -153,6 +156,7 @@ async fn a_tail_call_frame_knows_only_what_was_passed_to_it() {
                 );
                 continue;
             }
+
             assert_eq!(
                 available_value(&variable.state),
                 &uscope::VariableValue::Scalar(ScalarValue::Signed(value)),

@@ -29,6 +29,7 @@ use crate::profiler::{Preset, Profile, RecordOptions, Watch, record_watched};
 enum Measure {
     /// The program writes a line as each unit of work ends.
     Lines,
+
     /// The program is a line server, which clients load.
     Server,
 }
@@ -90,14 +91,18 @@ const BATCH: usize = 32;
 pub struct Run {
     pub workload: String,
     pub setup: String,
+
     /// Units of work, or requests answered, a second.
     pub rate: f64,
+
     /// A server's 99th-percentile latency for a batch of requests, in
     /// nanoseconds.
     pub p99_ns: Option<u64>,
+
     /// The share of one CPU uscope spent recording, past reading debug
     /// information.
     pub recorder_cpu: Option<f64>,
+
     /// How much more memory uscope's process held at its most while it
     /// recorded than as it began.
     pub recording_bytes: Option<u64>,
@@ -108,12 +113,16 @@ pub struct Run {
 pub struct Options {
     /// Where the built fixtures are.
     pub programs: PathBuf,
+
     /// Runs of each workload under each setup.
     pub runs: usize,
+
     /// How long a program runs before its window, once recording is on.
     pub warmup: Duration,
+
     /// How long its rate is counted.
     pub window: Duration,
+
     /// Only the workloads with these names; every one when empty.
     pub only: Vec<String>,
 }
@@ -140,6 +149,7 @@ pub fn measure(options: &Options, mut progress: impl FnMut(&Run)) -> Result<Vec<
             }
         }
     }
+
     Ok(runs)
 }
 
@@ -171,6 +181,7 @@ impl Placement {
             let Ok(siblings) = std::fs::read_to_string(siblings) else {
                 continue;
             };
+
             // A core's first CPU names it.
             let first = siblings
                 .trim()
@@ -181,6 +192,7 @@ impl Placement {
                 cores.push(cpu);
             }
         }
+
         anyhow::ensure!(
             cores.len() > PROGRAM_CORES,
             "the machine has {} cores, and the workloads need {} and uscope one",
@@ -202,9 +214,11 @@ impl Placement {
         for &cpu in program_cores {
             program.set(cpu)?;
         }
+
         for &cpu in if near.is_empty() { rest } else { &near } {
             uscope.set(cpu)?;
         }
+
         Ok(Self { program, uscope })
     }
 
@@ -240,6 +254,7 @@ fn cpu_list(path: &str) -> Vec<usize> {
             cpus.extend(first..=last);
         }
     }
+
     cpus
 }
 
@@ -275,6 +290,7 @@ fn run(
                 let stop = &stop;
                 let recording = scope.spawn(move || {
                     let mut sent = false;
+
                     // The recording starts the program from this thread,
                     // which goes back to uscope's CPUs once it has.
                     placement.program()?;
@@ -297,6 +313,7 @@ fn run(
                 (None, Some(recording))
             }
         };
+
         on.recv_timeout(Duration::from_mins(1))
             .context("the program never started")?;
         let reader = BufReader::new(reader);
@@ -304,13 +321,16 @@ fn run(
             Measure::Lines => lines(reader, options),
             Measure::Server => server(reader, options),
         };
+
         // A line program runs until stopped; a server exits once told.
         if let Some(mut child) = bare {
             if workload.measure == Measure::Lines {
                 child.kill().ok();
             }
+
             child.wait()?;
         }
+
         let mut run = Run {
             workload: workload.name.to_owned(),
             setup: setup.to_owned(),
@@ -319,6 +339,7 @@ fn run(
             recorder_cpu: None,
             recording_bytes: None,
         };
+
         if let Some(recording) = recording {
             stop.store(true, Ordering::Relaxed);
             let recording = recording
@@ -329,6 +350,7 @@ fn run(
                 .zip(memory("VmHWM:"))
                 .map(|(resident, peak)| peak.saturating_sub(resident));
         }
+
         let measured = measured?;
         run.rate = measured.rate;
         run.p99_ns = measured.p99_ns;
@@ -352,8 +374,10 @@ fn lines(mut reader: BufReader<std::io::PipeReader>, options: &Options) -> Resul
         if now >= end {
             break;
         }
+
         counted += u32::from(now >= begin);
     }
+
     Ok(Measured {
         rate: f64::from(counted) / options.window.as_secs_f64(),
         p99_ns: None,
@@ -385,6 +409,7 @@ fn server(mut reader: BufReader<std::io::PipeReader>, options: &Options) -> Resu
                     .map_err(|_| anyhow::anyhow!("a client panicked"))??,
             );
         }
+
         Ok::<_, anyhow::Error>(latencies)
     })?;
     std::net::TcpStream::connect(&address)?.write_all(b"quit\n")?;
@@ -414,11 +439,13 @@ fn client(address: &str, begin: Instant, end: Instant) -> Result<Vec<Duration>> 
         if asked >= end {
             return Ok(latencies);
         }
+
         writer.write_all(&b"ask\n".repeat(BATCH))?;
         for _ in 0..BATCH {
             answer.clear();
             anyhow::ensure!(reader.read_line(&mut answer)? > 0, "the server hung up");
         }
+
         if asked >= begin {
             latencies.push(asked.elapsed());
         }
@@ -456,8 +483,10 @@ pub struct Summary {
     pub workload: String,
     pub setup: String,
     pub rate: f64,
+
     /// How much less work it did than bare, in percent.
     pub cost_percent: f64,
+
     /// Bare's spread, the range of its runs over their median, in percent:
     /// the noise a cost is read against.
     pub noise_percent: f64,
@@ -476,10 +505,12 @@ pub fn summarize(runs: &[Run]) -> Vec<Summary> {
                 .filter(|run| run.workload == workload.name && run.setup == setup)
                 .collect()
         };
+
         let bare_rates: Vec<f64> = of("bare").iter().map(|run| run.rate).collect();
         let Some(base) = median(bare_rates.iter().copied()) else {
             continue;
         };
+
         let spread = bare_rates.iter().copied().fold(f64::NAN, f64::max)
             - bare_rates.iter().copied().fold(f64::NAN, f64::min);
         for (setup, _) in SETUPS {
@@ -487,6 +518,7 @@ pub fn summarize(runs: &[Run]) -> Vec<Summary> {
             let Some(rate) = median(these.iter().map(|run| run.rate)) else {
                 continue;
             };
+
             summaries.push(Summary {
                 workload: workload.name.to_owned(),
                 setup: setup.to_owned(),
@@ -499,6 +531,7 @@ pub fn summarize(runs: &[Run]) -> Vec<Summary> {
             });
         }
     }
+
     summaries
 }
 

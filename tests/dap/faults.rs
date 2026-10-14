@@ -137,11 +137,13 @@ fn pausing_before_the_program_runs_is_refused_and_right_after_it_starts_stops_it
     let mut dap = Dap::start("pause while launching");
     dap.initialize(Profile::Neovim);
     let launch = dap.send("launch", json!({"program": fixture("spin")}));
+
     // Nothing runs until configuration is done.
     assert_eq!(
         dap.request_error("pause", json!({"threadId": 1})),
         "the program is not running"
     );
+
     // A pause sent with configurationDone stops the program it starts.
     let done = dap.send("configurationDone", Value::Null);
     let paused = dap.send("pause", json!({"threadId": 1}));
@@ -175,6 +177,7 @@ fn a_program_killed_from_outside_ends_the_session_whether_running_or_stopped() {
         } else {
             dap.event(started.mark, "process", |_| true);
         }
+
         let mark = dap.mark();
         nix::sys::signal::kill(
             pid(dap.process_id().expect("process")),
@@ -186,6 +189,7 @@ fn a_program_killed_from_outside_ends_the_session_whether_running_or_stopped() {
             json!({"exitCode": 128 + 9})
         );
         dap.event(mark, "terminated", |_| true);
+
         // Requests that need a program say there is none.
         assert_eq!(
             dap.request_error("stackTrace", json!({"threadId": 1})),

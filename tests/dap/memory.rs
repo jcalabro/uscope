@@ -64,9 +64,11 @@ fn memory_reads_return_readable_bytes_and_say_where_reading_stopped() {
         "readMemory",
         json!({"memoryReference": value["memoryReference"], "count": 8}),
     );
+
     // Little-endian 0x1122334455667788.
     assert_eq!(read["data"], "iHdmVUQzIhE=");
     assert_eq!(read["address"], value["memoryReference"]);
+
     // Offsets and decimal references reach the same bytes.
     let decimal = address(&value["memoryReference"]).to_string();
     let offset = dap.request(
@@ -145,6 +147,7 @@ fn disassembly_returns_exactly_the_rows_asked_for_around_any_address() {
     );
     assert_eq!(rows[200]["symbol"], "breakpoint_target");
     assert!(rows[200]["line"].as_u64().is_some());
+
     // A source is named on the first row of each run of one file.
     let first_source = rows
         .iter()
@@ -155,6 +158,7 @@ fn disassembly_returns_exactly_the_rows_asked_for_around_any_address() {
             .as_str()
             .is_some_and(|path| path.ends_with("basic.c"))
     );
+
     // Padding rows are marked and never decoded from unproven starts.
     for row in &rows {
         if row["presentationHint"] == "invalid" {
@@ -170,6 +174,7 @@ fn disassembly_returns_exactly_the_rows_asked_for_around_any_address() {
             );
         }
     }
+
     // A direct call names its target.
     let call = disassemble(&mut dap, &caller, -1, 1);
     assert_eq!(call.len(), 1);
@@ -178,16 +183,19 @@ fn disassembly_returns_exactly_the_rows_asked_for_around_any_address() {
         text.starts_with("call") && text.contains("<breakpoint_target>"),
         "{text}"
     );
+
     // Scrolling up from the first row continues exactly before it.
     let first = rows[0]["address"].clone();
     let above = disassemble(&mut dap, &first, -50, 50);
     assert_eq!(above.len(), 50);
     assert!(address(&above[49]["address"]) < address(&first));
+
     // Scrolling down continues after the last row.
     let last = rows[399]["address"].clone();
     let below = disassemble(&mut dap, &last, 1, 50);
     assert_eq!(below.len(), 50);
     assert!(address(&below[0]["address"]) > address(&last));
+
     // An address no module maps is all padding.
     let nowhere = disassemble(&mut dap, &json!("0x10"), -2, 4);
     assert_eq!(nowhere.len(), 4);
@@ -214,6 +222,7 @@ fn instruction_breakpoints_stop_at_their_address() {
     let pointer = trace["stackFrames"][0]["instructionPointerReference"].clone();
     let rows = disassemble(&mut dap, &pointer, 0, 3);
     let target = rows[2]["address"].clone();
+
     // The reference and offset name the same instruction two ways.
     let offset = i64::try_from(address(&target) - address(&pointer)).expect("small offset");
     let set = dap.request(
@@ -223,6 +232,7 @@ fn instruction_breakpoints_stop_at_their_address() {
     let [valid, invalid] = &crate::dap::breakpoints(&set)[..] else {
         panic!("two breakpoints");
     };
+
     assert_eq!(
         (&valid["verified"], &valid["instructionReference"]),
         (&json!(true), &target)
@@ -276,6 +286,7 @@ fn disassembly_crosses_into_a_functions_split_off_cold_part() {
         "rows ascend"
     );
     assert_eq!(addresses[8], cold);
+
     // The cold part is named by its own symbol, and its line is the branch
     // of main that gcc moved there.
     assert_eq!(rows[8]["symbol"], "main.cold");

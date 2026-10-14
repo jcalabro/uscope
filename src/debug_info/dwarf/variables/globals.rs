@@ -11,12 +11,14 @@ use crate::VariableKind;
 use crate::debug_info::dwarf::{
     DieKey, DieWalk, DwarfError, Reader, Units, is_type_unit, str_attribute,
 };
+
 use crate::image::variables::Global;
 
 use super::die::{
     debug_info_offset, declaration_with_origins, flag_with_origins, origin_chain,
     string_with_origins, type_with_origins,
 };
+
 use super::location::copy_data_object_value_with_origins;
 use super::types::TypeArenaBuilder;
 use super::{DataObject, Metadata, MetadataAbsence, ValueDescription};
@@ -32,8 +34,10 @@ use super::{DataObject, Metadata, MetadataAbsence, ValueDescription};
 struct GlobalScope<'data> {
     /// The scope enclosing this one; the root encloses itself.
     parent: u32,
+
     /// The name this scope adds to its parent's path, if any.
     name: Option<Cow<'data, str>>,
+
     /// How many names the path has.
     depth: u32,
     routine: bool,
@@ -79,8 +83,10 @@ impl<'data> ScopeTable<'data> {
             if let Some(name) = &current.name {
                 names.push(&**name);
             }
+
             current = self.scope(current.parent);
         }
+
         names.reverse();
         names.join("::")
     }
@@ -115,12 +121,14 @@ impl DefinitionIndex {
                 for identity in identities {
                     self.by_identity.insert(Arc::clone(identity), candidate);
                 }
+
                 DefinitionResolution::New
             }
             [definition] => {
                 for identity in identities {
                     self.by_identity.insert(Arc::clone(identity), *definition);
                 }
+
                 DefinitionResolution::Existing(*definition)
             }
             _ => {
@@ -131,6 +139,7 @@ impl DefinitionIndex {
                         .entry(Arc::clone(identity))
                         .or_insert(candidate);
                 }
+
                 DefinitionResolution::Conflict
             }
         }
@@ -165,6 +174,7 @@ pub(super) fn load_globals<'data>(
         .collect::<Vec<_>>();
     for unit_table in unit_tables {
         let (scopes, mut unit_scopes) = unit_table?;
+
         // A unit's scope `n` past its root is the table's `first + n - 1`.
         let first = super::row(table.scopes.len());
         let global = |local: u32| if local == 0 { 0 } else { first + local - 1 };
@@ -174,9 +184,11 @@ pub(super) fn load_globals<'data>(
                 ..scope
             });
         }
+
         for scope in &mut unit_scopes.scopes {
             *scope = global(*scope);
         }
+
         table.units.push(unit_scopes);
     }
 
@@ -199,6 +211,7 @@ pub(super) fn load_globals<'data>(
                 Ok(chain) => (chain, None),
                 Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
             };
+
             let name =
                 match string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name) {
                     Ok(Some(name)) => name,
@@ -207,6 +220,7 @@ pub(super) fn load_globals<'data>(
                         format!("<malformed global at {:#x}: {error}>", entry.offset().0).into()
                     }
                 };
+
             // A malformed linkage name marks this entry malformed, not the module.
             let linkage =
                 |attribute| string_with_origins(dwarf, units, unit, entry, &chain, attribute);
@@ -214,10 +228,12 @@ pub(super) fn load_globals<'data>(
                 Ok(None) => linkage(gimli::DW_AT_MIPS_linkage_name),
                 result => result,
             };
+
             let (linkage_name, linkage_error) = match linkage_result {
                 Ok(name) => (name, None),
                 Err(error) => (None, Some(Arc::<str>::from(error.to_string()))),
             };
+
             let scope = chain
                 .iter()
                 .filter_map(|(origin_unit, origin)| {
@@ -238,6 +254,7 @@ pub(super) fn load_globals<'data>(
             } else {
                 Arc::from(format!("{}::{name}", table.path(scope)))
             };
+
             let declaration = declaration_with_origins(dwarf, units, unit, entry, &chain, files);
             let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
             let type_info = types.variable_type(type_unit, type_value);
@@ -256,6 +273,7 @@ pub(super) fn load_globals<'data>(
             if declaration_only {
                 continue;
             }
+
             let external = flag_with_origins(entry, &chain, gimli::DW_AT_external).unwrap_or(false);
             *order = order.checked_add(1).ok_or_else(|| {
                 DwarfError::MalformedVariable("data-object DIE order overflows".into())
@@ -284,12 +302,14 @@ pub(super) fn load_globals<'data>(
                 frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 malformed,
             };
+
             let info = Global {
                 object: 0,
                 qualified_name,
                 linkage_name: linkage_name.clone(),
                 external,
             };
+
             let canonical_die = chain.first().map_or(key, |(origin_unit, origin)| DieKey {
                 unit: *origin_unit,
                 offset: origin.offset().0,
@@ -301,6 +321,7 @@ pub(super) fn load_globals<'data>(
             if let Some(linkage_name) = &linkage_name {
                 identities.push(Arc::from(format!("linkage:{linkage_name}")));
             }
+
             if let DefinitionResolution::Existing(existing_global) =
                 definitions.resolve(&identities, globals.len())
             {
@@ -313,8 +334,10 @@ pub(super) fn load_globals<'data>(
                         ..info
                     };
                 }
+
                 continue;
             }
+
             types
                 .budget
                 .charge("data objects", size_of::<DataObject>())?;
@@ -324,6 +347,7 @@ pub(super) fn load_globals<'data>(
             });
             objects.push(object);
         }
+
         // A unit that could not be read to its end fails the load once the
         // globals before the failure are recorded, as in a serial pass.
         if let Some(error) = error {
@@ -363,6 +387,7 @@ fn unit_scopes<'data>(
                     });
                     super::row(table.len() - 1)
                 }
+
                 gimli::DW_TAG_namespace
                 | gimli::DW_TAG_module
                 | gimli::DW_TAG_class_type
@@ -377,6 +402,7 @@ fn unit_scopes<'data>(
                         Ok(None) => Cow::Borrowed("{anonymous type}"),
                         Err(error) => Cow::Owned(format!("{{malformed scope: {error}}}")),
                     };
+
                     table.push(GlobalScope {
                         parent,
                         name: Some(name),
@@ -387,11 +413,13 @@ fn unit_scopes<'data>(
                 }
                 _ => parent,
             };
+
             unit_scopes.offsets.push(die.offset.0);
             unit_scopes.scopes.push(scope);
             scopes.push(scope);
         }
     }
+
     // Entries follow one another, so their offsets are already in order.
     if !unit_scopes.offsets.is_sorted() {
         let mut pairs = unit_scopes
@@ -403,6 +431,7 @@ fn unit_scopes<'data>(
         pairs.sort_by_key(|(offset, _)| *offset);
         (unit_scopes.offsets, unit_scopes.scopes) = pairs.into_iter().unzip();
     }
+
     Ok((table, unit_scopes))
 }
 
@@ -421,24 +450,30 @@ fn unit_globals<'data>(
     if is_type_unit(unit) {
         return (found, None);
     }
+
     let mut search = || {
         let mut walk = DieWalk::new(unit)?;
         while let Some(die) = walk.next()? {
             if die.tag != gimli::DW_TAG_variable {
                 continue;
             }
+
             let key = DieKey {
                 unit: unit_index,
                 offset: die.offset.0,
             };
+
             let current_scope = table.get(key).unwrap_or(0);
             if table.scope(current_scope).routine {
                 continue;
             }
+
             found.push((key, current_scope, walk.decode()?.clone()));
         }
+
         Ok::<_, DwarfError>(())
     };
+
     let error = search().err();
     (found, error)
 }

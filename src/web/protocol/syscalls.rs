@@ -8,25 +8,30 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct SyscallQuery {
     pub profile: String,
+
     /// The revision the tab has seen, which keeps its cached answers
     /// apart; the server answers from the newest.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
     pub revision: u32,
+
     /// Calls that ended in `[start, end)`, in nanoseconds from the
     /// profile's start, or all.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub range: Option<[i64; 2]>,
+
     /// strace's selection, as `-e` takes it, expressions apart by spaces:
     /// `trace=%file status=failed`.
     #[serde(default)]
     pub filter: String,
+
     /// Calls of these threads, by id, or of all.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub threads: Option<Vec<u32>>,
+
     /// Calls whose duration falls in this log2 bucket, as a heat map's
     /// row names it, or all.
     #[serde(default)]
@@ -44,8 +49,10 @@ pub enum SyscallGroup {
     Class,
     Process,
     Thread,
+
     /// The file, socket, or pipe a call names, by path or descriptor.
     Path,
+
     /// The innermost frame with a source line.
     Site,
 }
@@ -56,6 +63,7 @@ pub enum SyscallGroup {
 pub struct SyscallSummaryQuery {
     #[serde(flatten)]
     pub query: SyscallQuery,
+
     #[serde(default)]
     pub group: SyscallGroup,
 }
@@ -69,11 +77,14 @@ pub struct SyscallSummary {
     pub total: u64,
     pub calls: u64,
     pub errors: u64,
+
     /// Records the engine lost: counts are lower bounds when above zero.
     pub lost: u64,
+
     /// Whether the kernel counted the calls without reporting them, so
     /// that only the summary has them.
     pub counted: bool,
+
     /// The engine that traced, `bpf` or `ptrace`.
     pub engine: Option<String>,
     pub processes: u32,
@@ -90,6 +101,7 @@ pub struct SyscallRow {
     pub name: String,
     pub calls: u64,
     pub errors: u64,
+
     /// Calls with a duration, which the times cover.
     pub timed: u64,
     pub total_ns: u64,
@@ -98,6 +110,7 @@ pub struct SyscallRow {
     pub p99_ns: Option<u64>,
     pub max_ns: u64,
     pub bytes: u64,
+
     /// Failures by errno name, most first.
     pub errnos: Vec<SyscallCount>,
 }
@@ -126,6 +139,7 @@ pub struct SyscallRateQuery {
     #[serde(flatten)]
     pub query: SyscallQuery,
     pub buckets: u32,
+
     #[serde(default)]
     pub by: SyscallRateBy,
 }
@@ -138,6 +152,7 @@ pub struct SyscallRate {
     /// The range's start and each slice's nanoseconds.
     pub start: i64,
     pub width: i64,
+
     /// Most calls first; the rest past the first few as `other`.
     pub series: Vec<SyscallSeries>,
     pub errors: Vec<u64>,
@@ -166,8 +181,10 @@ pub struct SyscallHeatmapQuery {
 pub struct SyscallHeatmap {
     pub start: i64,
     pub width: i64,
+
     /// Rows of log2 latency, as a histogram's buckets.
     pub rows: u32,
+
     /// Each slice's rows of counts, slice after slice.
     pub counts: Vec<u32>,
     pub most: u32,
@@ -179,6 +196,7 @@ pub struct SyscallHeatmap {
 pub struct SyscallDetailQuery {
     #[serde(flatten)]
     pub query: SyscallQuery,
+
     /// The call, by name.
     pub call: String,
 }
@@ -192,10 +210,13 @@ pub struct SyscallDetail {
     pub whole: Vec<u64>,
     pub selected: Vec<u64>,
     pub errnos: Vec<SyscallCount>,
+
     /// What counts as slow: the selection's 90th percentile.
     pub slow_ns: Option<u64>,
+
     /// Where the slow and failed calls came from, most first.
     pub callers: Vec<SyscallCaller>,
+
     /// Slow or failed calls without a stack.
     pub unplaced: u64,
 }
@@ -235,6 +256,7 @@ pub struct SyscallLog {
 pub struct SyscallLine {
     /// The event's place in the trace, which `syscallCall` names it by.
     pub event: u64,
+
     /// Nanoseconds from the profile's start.
     pub time: i64,
     pub tid: u32,
@@ -242,6 +264,7 @@ pub struct SyscallLine {
     pub tokens: Vec<SyscallToken>,
     pub duration_ns: Option<u64>,
     pub failed: bool,
+
     /// Whether it is a call, which expands; signals and exits do not.
     pub call: bool,
 }
@@ -259,6 +282,7 @@ pub struct SyscallToken {
 #[serde(rename_all = "camelCase")]
 pub struct SyscallCallQuery {
     pub profile: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
@@ -272,17 +296,23 @@ pub struct SyscallCallQuery {
 #[serde(rename_all = "camelCase")]
 pub struct SyscallCall {
     pub arguments: Vec<SyscallArgument>,
+
     /// Hex dumps of the bytes it read or wrote, as `-e read=` prints them.
     pub dumps: Vec<String>,
+
     /// Its stack's functions, innermost first.
     pub stack: Vec<String>,
+
     /// Why the stack ends early, when it does.
     pub stack_ends: Option<String>,
+
     /// When it entered and returned, from the profile's start.
     pub entered: Option<i64>,
     pub exited: Option<i64>,
+
     /// What its result means, as `ENOENT (No such file or directory)`.
     pub result: Vec<SyscallToken>,
+
     /// Where in the source it was made, when its stack says.
     pub site: Option<SyscallSite>,
 }
@@ -295,6 +325,7 @@ pub struct SyscallSite {
     pub function: String,
     pub path: String,
     pub line: u32,
+
     /// The text from line `first`, or why it could not be read.
     pub first: u32,
     pub text: Option<Vec<String>>,
@@ -333,11 +364,14 @@ pub struct SyscallLanes {
 pub struct SyscallLane {
     pub tid: u32,
     pub pid: u32,
+
     /// Its process's program.
     pub name: Option<String>,
+
     /// Each slice's nanoseconds spent in calls, and failed calls.
     pub busy: Vec<u64>,
     pub failed: Vec<u32>,
+
     /// Slices one call spans from end to end: the thread was blocked.
     pub blocked: Vec<bool>,
 }
@@ -358,8 +392,10 @@ pub struct SyscallFile {
     pub failed: u64,
     pub read: u64,
     pub written: u64,
+
     /// Nanoseconds in `fsync` and `fdatasync`.
     pub sync_ns: u64,
+
     /// Nanoseconds in every call on it.
     pub total_ns: u64,
 }
@@ -379,6 +415,7 @@ pub struct SyscallEndpoint {
     pub endpoint: String,
     pub connects: u64,
     pub failed: u64,
+
     /// Nanoseconds the connects took.
     pub connect_ns: u64,
     pub sent: u64,
@@ -398,14 +435,17 @@ pub struct SyscallProcesses {
 pub struct SyscallProcess {
     pub pid: u32,
     pub parent: Option<u32>,
+
     /// The programs it ran, in order.
     pub images: Vec<String>,
     pub threads: u32,
     pub calls: u64,
     pub errors: u64,
+
     /// From the profile's start.
     pub started: i64,
     pub ended: Option<i64>,
+
     /// How it ended, as strace's last line says it.
     pub end: Option<String>,
 }
@@ -419,6 +459,7 @@ pub struct RecordSyscalls {
     /// The calls to trace, as `-e` takes them; every call when empty.
     #[serde(default)]
     pub filter: String,
+
     /// Unwinds each call's stack, as `-k` does.
     #[serde(default)]
     pub stacks: bool,
@@ -429,6 +470,7 @@ pub struct RecordSyscalls {
 #[serde(rename_all = "camelCase")]
 pub struct SyscallInFlightQuery {
     pub profile: String,
+
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     #[expect(dead_code, reason = "only the tab's cache reads it")]
@@ -451,8 +493,10 @@ pub struct SyscallInFlight {
 pub struct SyscallBlocked {
     pub tid: u32,
     pub pid: u32,
+
     /// The call as strace prints its entry.
     pub tokens: Vec<SyscallToken>,
+
     /// How long it had been blocked.
     pub blocked_ns: u64,
 }

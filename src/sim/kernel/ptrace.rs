@@ -9,7 +9,9 @@ use super::{
     DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Tgid, Thread, Tid,
     Tracing, WaitStatus,
 };
+
 use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, Registers};
+
 #[cfg(test)]
 use crate::sim::world::Sabotage;
 
@@ -68,8 +70,10 @@ impl Kernel {
                     *value = held.general[index];
                 }
             }
+
             registers
         };
+
         self.stopped_mut(tid)?.registers = registers;
         Ok(())
     }
@@ -90,6 +94,7 @@ impl Kernel {
                 }
             }
         }
+
         registers
     }
 
@@ -100,6 +105,7 @@ impl Kernel {
         if let Some(phantom) = self.phantom_debug.get(&tid) {
             return Ok(phantom.peek(index));
         }
+
         match self.debug_behavior {
             DebugBehavior::Discarding => Ok(0),
             _ => Ok(thread.debug.peek(index)),
@@ -116,6 +122,7 @@ impl Kernel {
             DebugBehavior::Faithful => 0,
             DebugBehavior::Contended(others) => others,
         };
+
         #[cfg(test)]
         let phantom = self.sabotage == Some(Sabotage::PhantomArming);
         let thread = self.stopped_mut(tid)?;
@@ -124,6 +131,7 @@ impl Kernel {
         } else {
             contended
         };
+
         let others = contended + thread.debug_held;
         #[cfg(test)]
         if phantom && thread.tid != thread.tgid.leader() {
@@ -134,6 +142,7 @@ impl Kernel {
                 .or_insert(registers)
                 .poke(index, value, others);
         }
+
         thread.debug.poke(index, value, others)
     }
 
@@ -166,6 +175,7 @@ impl Kernel {
         if self.sabotage == Some(Sabotage::LosePokes) {
             return Ok(());
         }
+
         let space = &mut self
             .processes
             .get_mut(&group)
@@ -200,6 +210,7 @@ impl Kernel {
             self.gap(format!("blocking signals {mask:#x}"));
             return Err(Errno::ENOSYS);
         }
+
         Ok(())
     }
 
@@ -279,6 +290,7 @@ impl Kernel {
                     self.gap("a signal other than SIGKILL passed at a system-call-stop");
                     return Err(Errno::ENOSYS);
                 }
+
                 thread.state = State::Running;
                 thread.report = None;
                 if signal.is_some() {
@@ -286,6 +298,7 @@ impl Kernel {
                     self.kill_process(group, super::ExitStatus::Signal(libc::SIGKILL, false));
                 }
             }
+
             State::Stopped {
                 kind: StopKind::Signal(_),
                 ..
@@ -297,6 +310,7 @@ impl Kernel {
                 thread.state = State::Running;
                 thread.report = None;
             }
+
             State::Stopped {
                 kind: StopKind::Group(_),
                 ..
@@ -306,16 +320,19 @@ impl Kernel {
                     self.gap("resuming a thread of a stopped process");
                     return Err(Errno::ENOSYS);
                 }
+
                 let thread = self.threads.get_mut(&tid).expect("the thread");
                 thread.state = State::Running;
                 thread.report = None;
             }
+
             State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..
             } => self.become_zombie(tid, exit),
             _ => unreachable!("a resumed thread was stopped"),
         }
+
         Ok(())
     }
 
@@ -339,6 +356,7 @@ impl Kernel {
         let State::Stopped { kind, .. } = thread.state else {
             unreachable!("a stopped thread has stop information");
         };
+
         let general = &thread.registers.general;
         let args = [
             general[RDI],
@@ -356,6 +374,7 @@ impl Kernel {
         } else {
             args
         };
+
         Ok(match kind {
             StopKind::Syscall { exit: false } => CallInfo {
                 op: 1,
@@ -383,14 +402,17 @@ impl Kernel {
         if thread.traced() {
             return Err(Errno::EPERM);
         }
+
         if matches!(thread.state, State::Zombie(_)) {
             self.happenings.push(Happening::SeizeRefused { tid });
             return Err(Errno::EPERM);
         }
+
         thread.tracing = Tracing::Seized {
             tracer,
             interrupted: false,
         };
+
         thread.options = options;
         if thread.state == State::JobStopped {
             let signal = self.processes[&thread.tgid]
@@ -402,6 +424,7 @@ impl Kernel {
                 WaitStatus::GroupStop(tid, signal),
             );
         }
+
         Ok(())
     }
 
@@ -418,15 +441,18 @@ impl Kernel {
         if !thread.seized() {
             return Err(Errno::EIO);
         }
+
         if !thread.state.exiting() {
             thread.tracing = Tracing::Seized {
                 tracer: caller,
                 interrupted: true,
             };
+
             if thread.is_stopped() {
                 self.happenings.push(Happening::InterruptWaits { tid });
             }
         }
+
         Ok(())
     }
 
@@ -443,14 +469,17 @@ impl Kernel {
         if forget {
             thread.pending.remove(super::signals::SIGSTOP);
         }
+
         thread.tracing = Tracing::Untraced;
         thread.single_step = false;
+
         // K-SYS-6: an untraced thread stops at no call.
         thread.syscall_stops = false;
         thread.options = Options::default();
         thread.report = None;
         let state = thread.state;
         let group = thread.tgid;
+
         // Only a thread that runs on can meet a trap left in its code.
         let exiting = matches!(
             state,
@@ -475,6 +504,7 @@ impl Kernel {
                     self.act_by_default(tid, signal);
                 }
             }
+
             State::Stopped {
                 kind: StopKind::Event(..) | StopKind::Group(_),
                 ..
@@ -488,16 +518,19 @@ impl Kernel {
                     self.gap("a signal passed detaching at a system-call-stop");
                     return Err(Errno::ENOSYS);
                 }
+
                 let thread = self.threads.get_mut(&tid).expect("the thread");
                 thread.state = State::Running;
                 thread.syscall_stops = false;
             }
+
             State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..
             } => self.become_zombie(tid, exit),
             _ => unreachable!("a detached thread was stopped"),
         }
+
         let stopped = self
             .processes
             .get(&group)
@@ -508,6 +541,7 @@ impl Kernel {
         {
             thread.state = State::JobStopped;
         }
+
         Ok(())
     }
 
@@ -519,9 +553,11 @@ impl Kernel {
         if self.sabotage == Some(Sabotage::HideQueuedContinue) && signal == libc::SIGCONT {
             return false;
         }
+
         let Some(thread) = self.threads.get(&tid) else {
             return false;
         };
+
         if process_wide {
             self.processes
                 .get(&thread.tgid)
@@ -537,10 +573,13 @@ impl Kernel {
 pub struct CallInfo {
     /// 1 at an entry, 2 at an exit, 0 at any other stop.
     pub op: u8,
+
     /// The call, at an entry.
     pub number: u64,
+
     /// Its arguments, at an entry.
     pub args: [u64; 6],
+
     /// What it returned, at an exit.
     pub value: i64,
 }

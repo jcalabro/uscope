@@ -19,11 +19,14 @@ use crate::timings::{Options, Recording, Report};
 pub struct Measured {
     /// Whether the load succeeded, or why it failed.
     pub outcome: Result<(), String>,
+
     /// What the load cost.
     pub report: Report,
+
     /// The heap the loaded debug information holds, net of what the load
     /// freed.
     pub retained_heap_bytes: Option<i64>,
+
     /// What freeing each part of the loaded debug information returns, in
     /// order: the variable provider, the unwinder, then the image and what
     /// they shared with it.
@@ -51,6 +54,7 @@ pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured>
             part();
             retained_parts.push((name.to_owned(), held - live()));
         };
+
         let crate::debug_info::DebugInfo {
             image,
             unwind,
@@ -73,6 +77,7 @@ pub fn measure_load(path: &Path, instructions: bool) -> anyhow::Result<Measured>
 pub struct Warmed {
     /// How many modules loaded.
     pub loaded: usize,
+
     /// The modules that did not, and why.
     pub failed: Vec<(PathBuf, String)>,
 }
@@ -84,6 +89,7 @@ pub fn warm(paths: &[PathBuf]) -> anyhow::Result<Warmed> {
     for path in paths {
         collect_modules(path, &mut modules)?;
     }
+
     modules.sort();
     let search = crate::debug_info::DebugFileSearch::new(&crate::DebugFileOptions::default());
     let loads = crate::pool::install(|| {
@@ -103,6 +109,7 @@ pub fn warm(paths: &[PathBuf]) -> anyhow::Result<Warmed> {
             Err(failure) => warmed.failed.push(failure),
         }
     }
+
     Ok(warmed)
 }
 
@@ -114,16 +121,21 @@ fn collect_modules(path: &Path, modules: &mut Vec<PathBuf>) -> std::io::Result<(
         for entry in std::fs::read_dir(path)? {
             collect_modules(&entry?.path(), modules)?;
         }
+
         return Ok(());
     }
+
     if !metadata.is_file() {
         return Ok(());
     }
+
     let mut header = [0_u8; 18];
     let read = std::io::Read::read_exact(&mut std::fs::File::open(path)?, &mut header);
+
     // ET_EXEC and ET_DYN, little-endian.
     if read.is_ok() && header.starts_with(b"\x7fELF") && matches!(header[16..18], [2 | 3, 0]) {
         modules.push(path.to_owned());
     }
+
     Ok(())
 }

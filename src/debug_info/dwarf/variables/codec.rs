@@ -24,6 +24,7 @@ pub(super) fn integer_bit_width(base: &BaseType) -> std::result::Result<u32, Arc
     if bits == 0 || bits > storage_bits || bits > 128 {
         return Err("integer bit width is outside its storage representation".into());
     }
+
     u32::try_from(bits).map_err(|_| Arc::from("integer bit width exceeds u32"))
 }
 
@@ -40,8 +41,10 @@ pub(super) fn checked_integer_value(
             if !fits_signed(value, bits) {
                 return Err("signed enumerator does not fit its representation".into());
             }
+
             Ok(IntegerValue::Signed(value))
         }
+
         (
             BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter,
             IntegerValue::Unsigned(value),
@@ -50,6 +53,7 @@ pub(super) fn checked_integer_value(
                 .map_err(|_| Arc::from("enumerator does not fit its signed representation"))?;
             checked_integer_value(IntegerValue::Signed(value), base)
         }
+
         (
             BaseTypeEncoding::Boolean
             | BaseTypeEncoding::Unsigned
@@ -59,11 +63,14 @@ pub(super) fn checked_integer_value(
             if bits < 128 && value >= 1_u128 << bits {
                 return Err("unsigned enumerator does not fit its representation".into());
             }
+
             if matches!(base.encoding, BaseTypeEncoding::Boolean) && value > 1 {
                 return Err("boolean enumerator is neither zero nor one".into());
             }
+
             Ok(IntegerValue::Unsigned(value))
         }
+
         (
             BaseTypeEncoding::Boolean
             | BaseTypeEncoding::Unsigned
@@ -90,6 +97,7 @@ pub(super) fn decode_integer_value(
     if bytes.len() != expected {
         return Err("integer storage size mismatch".into());
     }
+
     let bits = integer_bit_width(base)?;
     let raw = unsigned_value(bytes, byte_order).map_err(|reason| Arc::from(reason.to_string()))?
         & low_bits_mask(bits as usize);
@@ -101,8 +109,10 @@ pub(super) fn decode_integer_value(
                 let shift = 128 - bits;
                 (raw << shift).cast_signed() >> shift
             };
+
             IntegerValue::Signed(signed)
         }
+
         BaseTypeEncoding::Boolean
         | BaseTypeEncoding::Unsigned
         | BaseTypeEncoding::UnsignedCharacter => IntegerValue::Unsigned(raw),
@@ -110,6 +120,7 @@ pub(super) fn decode_integer_value(
             return Err("integer representation is floating-point".into());
         }
     };
+
     checked_integer_value(value, base)
 }
 
@@ -152,6 +163,7 @@ pub(super) fn enumeration_constant(
         }
         _ => return Err("enumerator constant has an unsupported form".into()),
     };
+
     checked_integer_value(value, base)
 }
 
@@ -178,11 +190,14 @@ pub(super) fn read_uleb128_u128(
             if available < 7 && payload >= 1_u128 << available {
                 return Err("unsigned discriminant LEB128 exceeds 128 bits".into());
             }
+
             value |= payload << shift;
         }
+
         if byte & 0x80 == 0 {
             return Ok(value);
         }
+
         shift = shift
             .checked_add(7)
             .ok_or_else(|| Arc::from("unsigned discriminant LEB128 shift overflows"))?;
@@ -210,6 +225,7 @@ pub(super) fn read_sleb128_i128(
             let available = 128 - shift;
             value |= (payload & low_bits_mask(available.min(7) as usize)) << shift;
         }
+
         if byte & 0x80 == 0 {
             let negative = byte & 0x40 != 0;
             if shift >= 128 {
@@ -218,6 +234,7 @@ pub(super) fn read_sleb128_i128(
                 } else {
                     payload == 0
                 };
+
                 if !canonical {
                     return Err("signed discriminant LEB128 exceeds 128 bits".into());
                 }
@@ -233,13 +250,16 @@ pub(super) fn read_sleb128_i128(
                     } else {
                         0
                     };
+
                     if high != expected {
                         return Err("signed discriminant LEB128 exceeds 128 bits".into());
                     }
                 }
             }
+
             return Ok(value.cast_signed());
         }
+
         shift = shift
             .checked_add(7)
             .ok_or_else(|| Arc::from("signed discriminant LEB128 shift overflows"))?;
@@ -276,6 +296,7 @@ pub(super) fn extract_bit_field(
     if bit_size == 0 || bit_size > 128 || end > available {
         return Err("bit-field range is outside its containing object".into());
     }
+
     let mut value = 0_u128;
     for field_bit in 0..bit_size {
         let source = bit_offset + field_bit;
@@ -288,11 +309,13 @@ pub(super) fn extract_bit_field(
             ByteOrder::Little => (byte >> within) & 1,
             ByteOrder::Big => (byte >> (7 - within)) & 1,
         };
+
         match byte_order {
             ByteOrder::Little => value |= u128::from(bit) << field_bit,
             ByteOrder::Big => value = (value << 1) | u128::from(bit),
         }
     }
+
     Ok(value)
 }
 
@@ -304,6 +327,7 @@ pub(super) fn wrapping_integer_bytes(
     if size == 0 || size > 16 {
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
+
     integer_bytes(value & low_bits_mask(size * 8), size, target)
 }
 
@@ -327,6 +351,7 @@ pub(super) fn dwarf_address_bytes(
             ));
         }
     };
+
     wrapping_integer_bytes(u128::from(address), size, target)
 }
 
@@ -340,11 +365,13 @@ pub(super) fn decode_address(
     if size == 0 || size > 8 {
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
+
     if raw.len() != size {
         return Err(EvaluateError::Malformed(
             "pointer storage size does not match its declared type".into(),
         ));
     }
+
     let value = unsigned_value(raw, target.byte_order).map_err(EvaluateError::Malformed)?;
     Ok(VirtualAddress::new(u64::try_from(value).map_err(|_| {
         EvaluateError::Malformed("pointer value exceeds 64 bits".into())
@@ -361,10 +388,12 @@ pub(super) fn integer_bytes(
             "constant value does not fit its scalar type".into(),
         ));
     }
+
     let bytes = match target.byte_order {
         ByteOrder::Little => value.to_le_bytes()[..size].to_vec(),
         ByteOrder::Big => value.to_be_bytes()[16 - size..].to_vec(),
     };
+
     Ok(bytes.into())
 }
 
@@ -376,6 +405,7 @@ pub(super) fn signed_integer_bytes(
     if size == 0 || size > 16 {
         return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
+
     let bits = size * 8;
     let signed_bits =
         u32::try_from(bits).map_err(|_| crate::UnsupportedVariableFeature::ScalarRepresentation)?;
@@ -384,6 +414,7 @@ pub(super) fn signed_integer_bytes(
             "signed constant value does not fit its scalar type".into(),
         ));
     }
+
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
 }
 
@@ -392,6 +423,7 @@ const fn fits_signed(value: i128, bits: u32) -> bool {
     if bits >= 128 {
         return true;
     }
+
     let half = 1_i128 << (bits - 1);
     -half <= value && value < half
 }
@@ -422,11 +454,13 @@ pub(super) fn bytes_to_u64(
             "DWARF expression requested more than one word".into(),
         ));
     }
+
     let mut word = [0_u8; 8];
     match endian {
         RunTimeEndian::Little => word[..bytes.len()].copy_from_slice(bytes),
         RunTimeEndian::Big => word[8 - bytes.len()..].copy_from_slice(bytes),
     }
+
     Ok(match endian {
         RunTimeEndian::Little => u64::from_le_bytes(word),
         RunTimeEndian::Big => u64::from_be_bytes(word),
@@ -446,6 +480,7 @@ pub(super) fn decode_scalar(
             "scalar storage size mismatch".into(),
         ));
     }
+
     match type_info.encoding {
         BaseTypeEncoding::Boolean => {
             let bits = integer_bit_width(type_info).map_err(ScalarDecodeError::Malformed)?;
@@ -469,6 +504,7 @@ pub(super) fn decode_scalar(
                     "signed encoding decoded as an unsigned integer".into(),
                 ));
             };
+
             Ok(ScalarValue::Signed(value))
         }
         BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => {
@@ -480,6 +516,7 @@ pub(super) fn decode_scalar(
                     "unsigned encoding decoded as a signed integer".into(),
                 ));
             };
+
             Ok(ScalarValue::Unsigned(value))
         }
         BaseTypeEncoding::Floating => {
@@ -514,6 +551,7 @@ pub(super) fn complex_part(complex: &BaseType) -> BaseType {
             })
             .into(),
     };
+
     BaseType {
         name: Arc::clone(&name),
         base_name: name,
@@ -530,11 +568,13 @@ pub(super) fn unsigned_value(
     if bytes.is_empty() || bytes.len() > 16 {
         return Err("unsupported integer storage size".into());
     }
+
     let mut value = [0_u8; 16];
     match byte_order {
         ByteOrder::Little => value[..bytes.len()].copy_from_slice(bytes),
         ByteOrder::Big => value[16 - bytes.len()..].copy_from_slice(bytes),
     }
+
     Ok(match byte_order {
         ByteOrder::Little => u128::from_le_bytes(value),
         ByteOrder::Big => u128::from_be_bytes(value),
@@ -587,9 +627,11 @@ fn decode_float(
             let Some((significand, rest)) = bytes.split_first_chunk::<8>() else {
                 return Err(narrow("x87 extended significand is truncated"));
             };
+
             let Some(sign_exponent) = rest.first_chunk::<2>() else {
                 return Err(narrow("x87 extended sign and exponent are truncated"));
             };
+
             Ok(FloatValue::X87Extended {
                 significand: u64::from_le_bytes(*significand),
                 sign_exponent: u16::from_le_bytes(*sign_exponent),

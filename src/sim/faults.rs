@@ -15,11 +15,14 @@ use super::choices::{Choices, Stream};
 pub enum Plan {
     /// At the first action from this one on while a program runs.
     KillAtStep(u64),
+
     /// Right after the program creates its Nth thread.
     KillNearClone(u64),
+
     /// Between two ptrace requests: before the Nth call the controller makes
     /// into the kernel takes effect.
     KillInsideCall(u64),
+
     /// Right after the program forks its Nth child.
     KillNearFork(u64),
 }
@@ -66,12 +69,16 @@ impl fmt::Display for Plan {
 #[derive(Debug, Default)]
 pub struct Faults {
     pub plan: Option<Plan>,
+
     /// The action at which the fault fired.
     pub fired: Option<u64>,
+
     /// How many threads programs created so far.
     clones: u64,
+
     /// How many children programs forked so far.
     forks: u64,
+
     /// How many calls the controller made into the kernel so far.
     calls: u64,
 }

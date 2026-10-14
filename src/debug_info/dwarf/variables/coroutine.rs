@@ -29,10 +29,13 @@ use crate::image::variables::{Object, VariableFunction};
 pub(super) struct Resumption<'a> {
     /// Where its future begins.
     object: VirtualAddress,
+
     /// The future's size.
     size: u64,
+
     /// The suspended state the poll began in.
     state: &'a CoroutineState,
+
     /// Where the body runs.
     address: ImageAddress,
     resumes: crate::image::resumes::ResumeView<'a>,
@@ -64,6 +67,7 @@ impl DwarfVariableInfo {
         else {
             return None;
         };
+
         let state_size = usize::try_from(coroutine.state.size).ok()?;
         budget.consume_memory(state_size).ok()?;
         let raw = runtime
@@ -102,6 +106,7 @@ pub(in crate::debug_info) fn held_ranges(
     let Ok(functions) = variables.function_index() else {
         return Vec::new();
     };
+
     // Each body's resumptions are followed on their own, in parallel, and
     // kept in the order of the bodies.
     let held = resume_points
@@ -111,6 +116,7 @@ pub(in crate::debug_info) fn held_ranges(
             let Ok(points) = points else {
                 return held;
             };
+
             let Some(function) = instances
                 .get(instance.index())
                 .and_then(|instance| instance.ranges.iter().map(|range| range.start).min())
@@ -118,6 +124,7 @@ pub(in crate::debug_info) fn held_ranges(
             else {
                 return held;
             };
+
             for point in points.points.iter() {
                 for object in function
                     .objects
@@ -134,10 +141,12 @@ pub(in crate::debug_info) fn held_ranges(
                     ) else {
                         continue;
                     };
+
                     let in_scope = |address: u64| {
                         let address = ImageAddress::new(address);
                         object.ranges.iter().any(|range| range.contains(address))
                     };
+
                     // The dispatch leaves for the state outside every
                     // variable's scope.
                     let Some(entered) =
@@ -145,11 +154,13 @@ pub(in crate::debug_info) fn held_ranges(
                     else {
                         continue;
                     };
+
                     if let (reached, true) = flood_all(code, entered, &in_scope) {
                         held.push(((offset, point.state), reached.to_vec()));
                     }
                 }
             }
+
             held
         })
         .collect::<Vec<_>>();
@@ -165,10 +176,12 @@ impl Resumption<'_> {
         else {
             return;
         };
+
         let memory = match source {
             VariableValueSource::Memory(address) => Some(*address),
             _ => None,
         };
+
         if let Some(reason) = self.stale(catalog, memory) {
             variable.state = VariableState::Unavailable(reason);
         }
@@ -189,12 +202,15 @@ impl Resumption<'_> {
         if catalog.coroutine().is_some() {
             return None;
         }
+
         let (Some(resumed), Some(declared)) = (&self.state.location, catalog.declaration()) else {
             return None;
         };
+
         if declared.file != resumed.file || declared.line >= resumed.line {
             return None;
         }
+
         // Bound anew since the poll resumed, as a loop's variable is.
         if let Some(mut held) = catalog
             .debug_info_offset()
@@ -203,6 +219,7 @@ impl Resumption<'_> {
         {
             return None;
         }
+
         let stale = match memory {
             Some(address)
                 if address.get() >= self.object.get()
@@ -214,6 +231,7 @@ impl Resumption<'_> {
                         && member.layout == RecordMemberLayout::ByteOffset(offset)
                 })
             }
+
             // A location list says where the variable is at each address,
             // which the compiler knows better than this does.
             _ => catalog.location().is_some_and(|location| {
@@ -224,6 +242,7 @@ impl Resumption<'_> {
                     .eq([None])
             }),
         };
+
         stale.then_some(VariableUnavailableReason::NotSavedAcrossAwait { line: resumed.line })
     }
 }

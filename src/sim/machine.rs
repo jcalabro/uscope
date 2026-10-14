@@ -17,6 +17,7 @@ use super::faults::Faults;
 use super::kernel::{Happening, Kernel, Parent, Planted, State, Tgid, Tid, signals};
 use super::marks::{Mark, Marks};
 use super::schedule::{Action, Scheduler, SessionId};
+
 #[cfg(test)]
 use super::world::Sabotage;
 use super::world::TRACER;
@@ -27,29 +28,39 @@ const PREEMPT_BURST: u64 = 8;
 
 pub struct Machine {
     pub kernel: Rc<RefCell<Kernel>>,
+
     /// Each session's waiter, by session.
     pub waiters: RefCell<Vec<Rc<RefCell<SimWaiter>>>>,
     pub choices: Rc<RefCell<Choices>>,
     pub scheduler: RefCell<Scheduler>,
     pub faults: RefCell<Faults>,
     pub marks: Rc<RefCell<Marks>>,
+
     /// Processes something outside the session killed.
     pub killed: Rc<RefCell<BTreeSet<Tgid>>>,
+
     /// Processes that began to end as a whole.
     pub ending: Rc<RefCell<BTreeSet<Tgid>>>,
+
     /// Whether the first session holds the children its program forks.
     pub following: Rc<Cell<bool>>,
+
     /// Threads the debugger released with code not the program's: the
     /// address, the byte there, and the program's.
     pub unclean: RefCell<Vec<(Tid, Planted)>>,
+
     /// Threads that received a SIGCONT, which only a debugger sends.
     pub leaked: RefCell<Vec<Tid>>,
+
     /// The action in progress.
     pub step: Cell<u64>,
+
     /// How many instructions threads executed so far.
     pub ran: Cell<u64>,
+
     /// How often, in a thousand, a call is preempted.
     pub preempt: u64,
+
     #[cfg(test)]
     pub sabotage: Option<Sabotage>,
 }
@@ -92,6 +103,7 @@ impl Machine {
                     if !externally {
                         self.marks.borrow_mut().hit(Mark::GroupExitEndedStop);
                     }
+
                     lines.push(format!("{tid} was taken out of its stop"));
                 }
                 Happening::LeaderExitedAlone { tid } => {
@@ -110,6 +122,7 @@ impl Machine {
                     {
                         marks.hit(Mark::ForkedFromThread);
                     }
+
                     drop(marks);
                     self.note_seized_child(child);
                     lines.push(format!("{parent} forked {child}"));
@@ -117,6 +130,7 @@ impl Machine {
                         lines.extend(self.kill(Mark::KilledNearFork));
                     }
                 }
+
                 Happening::Released {
                     tid,
                     tracer,
@@ -147,6 +161,7 @@ impl Machine {
                     if signal == libc::SIGCONT {
                         self.marks.borrow_mut().hit(Mark::HeldContinueSuppressed);
                     }
+
                     lines.push(format!(
                         "{tid} was resumed without {}",
                         signals::name(signal)
@@ -158,10 +173,12 @@ impl Machine {
                     if signal == libc::SIGCONT {
                         self.leaked.borrow_mut().push(tid);
                     }
+
                     lines.push(format!("{tid} received {}", signals::name(signal)));
                 }
             }
         }
+
         lines
     }
 
@@ -172,6 +189,7 @@ impl Machine {
         let kernel = self.kernel.borrow();
         let mut marks = self.marks.borrow_mut();
         let parent = kernel.process_of(tid).map(|process| process.parent);
+
         // A child held for a session of its own is detached stopping, not
         // released.
         let held = kernel.threads.get(&tid).is_some_and(|thread| {
@@ -184,12 +202,14 @@ impl Machine {
                 if parent == Some(Parent::Init) {
                     marks.hit(Mark::ReleasedAfterParentExit);
                 }
+
                 if self.following.get() {
                     marks.hit(Mark::ReleasedWhileFollowing);
                 }
             }
             Some(_) | None => {}
         }
+
         if let Some(planted) = planted {
             self.unclean.borrow_mut().push((tid, planted));
         }
@@ -245,15 +265,18 @@ impl Machine {
         } else {
             format!("collect for session {session}")
         };
+
         if let Some(status) = collected.reaped {
             let _ = write!(line, " {status}");
         }
+
         if collected.held {
             self.marks.borrow_mut().hit(Mark::QueueFull);
             line.push_str(" -> held, the queue is full");
         } else {
             line.push_str(" -> queued");
         }
+
         line
     }
 
@@ -263,6 +286,7 @@ impl Machine {
         if self.sabotage == Some(Sabotage::DeafWaiter) {
             return false;
         }
+
         self.waiters.borrow()[session]
             .borrow()
             .can_collect(&self.kernel.borrow())
@@ -296,6 +320,7 @@ impl Preemption for Machine {
         {
             record_inside_call(&line);
         }
+
         if !self
             .choices
             .borrow_mut()
@@ -303,6 +328,7 @@ impl Preemption for Machine {
         {
             return;
         }
+
         let actors = self.choices.borrow_mut().below(Stream::Preempt, 3) + 1;
         for _ in 0..actors {
             let mut options = self
@@ -315,6 +341,7 @@ impl Preemption for Machine {
             if options.is_empty() {
                 return;
             }
+
             let action = *self.choices.borrow_mut().pick(Stream::Preempt, &options);
             let line = match action {
                 Action::Run(tid) => {
@@ -334,6 +361,7 @@ impl Preemption for Machine {
                     unreachable!("only threads and waiters act inside a call")
                 }
             };
+
             record_inside_call(&format!("preempt: {line}"));
             for line in self.absorb() {
                 record_inside_call(&format!("preempt: {line}"));

@@ -11,6 +11,7 @@ mod frame_pointers;
 mod probes;
 mod record;
 pub(crate) use record::{OwnedLine, hex, symbolize as symbolize_lines};
+
 mod segments;
 mod session;
 mod symbols;
@@ -24,6 +25,7 @@ pub use crate::capture::records::GapReason;
 /// The task row of a sample no task snapshot named, as queries and lanes
 /// give it.
 pub const NO_TASK: u32 = NONE;
+
 /// A key no path holds: a focus on it keeps nothing.
 pub const NO_KEY: u32 = NONE;
 pub use crate::capture::records::MarkerKind;
@@ -54,10 +56,12 @@ use crate::capture::{Capture, file};
 pub enum Preset {
     /// For production: 49 samples a second and a small stack copy.
     Production,
+
     /// For development: 999 samples a second and a stack copy deep enough
     /// to unwind code without frame pointers.
     #[default]
     Development,
+
     /// The most the kernel allows.
     Maximum,
 }
@@ -117,6 +121,7 @@ pub enum StackCopy {
     /// linked statically shows before it runs, and [`DEEP_STACK_COPY`]
     /// otherwise. The profile says which, and why.
     Auto,
+
     /// This many bytes, rounded up to a multiple of eight.
     Bytes(u32),
 }
@@ -126,6 +131,7 @@ pub enum StackCopy {
 pub enum SampleSource {
     /// CPU time, at `rate` samples a second.
     Clock { rate: u32 },
+
     /// Each execution of the first instruction of the function a symbol of
     /// the program names. The program runs without address randomization.
     Function { symbol: String },
@@ -156,45 +162,59 @@ impl std::fmt::Display for SampleSource {
 pub struct RecordOptions {
     pub source: SampleSource,
     pub stack: StackCopy,
+
     /// The most frames a stack keeps, at least one.
     pub max_frames: usize,
+
     /// Pages each CPU's ring holds: the most a burst of samples can write
     /// before they are drained. Fewer lose more samples, every one counted.
     pub ring_pages: usize,
+
     /// The most events an attach may open: one per thread per CPU.
     pub max_events: usize,
+
     /// Whether to record each interval a thread spends off its CPU.
     pub off_cpu: bool,
+
     /// The CPU time uscope may spend recording, which it holds to by
     /// sampling less of each period: none bounds it.
     pub budget: Option<budget::Budget>,
+
     /// Keeps only what happened in the last span this long, which a
     /// trigger saves: a recording's memory then holds no more.
     pub window: Option<std::time::Duration>,
+
     /// Cuts the recording into segments this long, without a window: each
     /// is a complete profile of its span alone, which the watch's save
     /// takes as it ends, or early when triggered. The recording's own
     /// profile is the last.
     pub segment: Option<std::time::Duration>,
+
     /// How often to stop the program, through the debugger's attach, to
     /// read where its tasks wait: none never does.
     pub task_snapshots: Option<std::time::Duration>,
+
     /// Whether task snapshots read the program as it runs, without
     /// stopping it, leaving out each task that changes while read.
     pub live_snapshots: bool,
+
     /// The instrumentation sites to switch on in a program built with
     /// uscope's probes SDK.
     pub probes: ProbeSelection,
+
     /// How long a program goes on writing its instrumentation once uscope
     /// stops reading it, as when uscope is killed, before it switches
     /// every site off.
     pub probe_timeout: std::time::Duration,
+
     /// Directories searched for separate debug files.
     pub debug_directories: Vec<PathBuf>,
+
     /// Whether to leave symbolizing to whoever opens the profile, which
     /// then holds only modules' build ids and addresses: for hosts that
     /// keep no debug information.
     pub symbols_later: bool,
+
     /// The system calls to trace beside the samples, with the BPF engine,
     /// each with its stack: a program the recording starts only.
     pub syscalls: Option<crate::syscalls::CallSet>,
@@ -237,20 +257,28 @@ impl Default for RecordOptions {
 pub enum RecordError {
     #[error(transparent)]
     Launch(#[from] perf::LaunchError),
+
     #[error(transparent)]
     Attach(#[from] perf::OpenError),
+
     #[error("starting the program failed: {0}")]
     Start(std::io::Error),
+
     #[error("tracing system calls failed: {0}")]
     Syscalls(String),
+
     #[error("the program has no function named '{0}'")]
     NoSuchFunction(String),
+
     #[error("{count} functions are named '{name}'; name one by its symbol")]
     AmbiguousFunction { name: String, count: usize },
+
     #[error("the calls of '{name}' cannot be counted exactly: {why}")]
     Uncountable { name: String, why: String },
+
     #[error("reading the program failed: {0}")]
     Program(String),
+
     #[error(
         "the program was not loaded where the breakpoint assumed (bias {expected:#x}, not {actual:#x}): its samples would be of another instruction"
     )]
@@ -275,6 +303,7 @@ fn query(view: StackView) -> Query {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StackEnding {
     Complete,
+
     /// Short of its outermost frame, for this reason.
     Truncated(String),
 }
@@ -286,10 +315,12 @@ pub struct SampledStack {
     pub tid: u32,
     pub time: i64,
     pub weight: u64,
+
     /// Function names, innermost first, each inlined function a frame of
     /// its own; a frame without symbols is its module's address.
     pub functions: Vec<String>,
     pub ending: StackEnding,
+
     /// The number of the task it ran, when task snapshots before and after
     /// it agree on which that was.
     pub task: Option<u64>,
@@ -300,11 +331,14 @@ pub struct SampledStack {
 pub struct ProfileTask {
     /// Its row, which queries select it by.
     pub row: u32,
+
     /// What its runtime calls a task, and its number.
     pub noun: String,
     pub number: u64,
+
     /// The labels the program gave it, such as Go's profiler labels.
     pub labels: Vec<(String, String)>,
+
     /// The weight of the samples that ran it, and the nanoseconds of
     /// waiting the snapshots found it in.
     pub weight: u64,
@@ -318,10 +352,13 @@ pub struct TaskWaitStack {
     pub noun: String,
     pub task: u64,
     pub time: i64,
+
     /// The nanoseconds of waiting it stands for: since the snapshot before.
     pub weight: u64,
+
     /// The runtime's words for what it waits for, or its state.
     pub state: String,
+
     /// Function names, innermost first, as a sample's are.
     pub functions: Vec<String>,
     pub ending: StackEnding,
@@ -332,10 +369,13 @@ pub struct TaskWaitStack {
 pub struct OffCpuInterval {
     pub pid: u32,
     pub tid: u32,
+
     /// When it left its CPU.
     pub time: i64,
+
     /// Nanoseconds until it ran again, or until the recording ended.
     pub duration: u64,
+
     /// Whether it left while it could still run, rather than blocking.
     pub preempted: bool,
 }
@@ -344,8 +384,10 @@ pub struct OffCpuInterval {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionCost {
     pub name: String,
+
     /// The weight of samples it was the innermost function of.
     pub own: u64,
+
     /// The weight of samples it was anywhere on the stack of.
     pub total: u64,
 }
@@ -357,6 +399,7 @@ pub enum StackView {
     /// runtime's dispatch, with wrappers folded away.
     #[default]
     Logical,
+
     /// The frames as the thread ran them.
     Native,
 }
@@ -368,10 +411,12 @@ pub struct ProfileThread {
     pub row: u32,
     pub pid: u32,
     pub tid: u32,
+
     /// The name it last had, if the kernel reported one.
     pub name: Option<String>,
     pub samples: u64,
     pub weight: u64,
+
     /// Nanoseconds it spent off its CPU, blocked and preempted.
     pub blocked: u64,
     pub preempted: u64,
@@ -390,9 +435,11 @@ pub struct CallNode {
 #[derive(Debug)]
 pub struct ReadProfile {
     pub profile: Profile,
+
     /// Whether the file was cut short, as by a crash, and only its complete
     /// parts were read.
     pub truncated: bool,
+
     /// The parts read.
     pub chunks: usize,
 }
@@ -404,6 +451,7 @@ impl Profile {
         if path.is_dir() {
             return Self::read_segments(path);
         }
+
         Self::import(&std::fs::read(path)?)
     }
 
@@ -512,6 +560,7 @@ impl Profile {
                 preempted: 0,
             }
         };
+
         for range in &capture.sample_ranges {
             let samples = capture.thread_samples(range);
             let row = range.thread.get();
@@ -519,10 +568,12 @@ impl Profile {
             thread.samples = samples.len() as u64;
             thread.weight = samples.iter().map(|sample| sample.weight.get()).sum();
         }
+
         for range in &capture.zone_ranges {
             let row = range.thread.get();
             threads.entry(row).or_insert_with(|| new(row));
         }
+
         for range in &capture.off_cpu_ranges {
             let row = range.thread.get();
             let thread = threads.entry(row).or_insert_with(|| new(row));
@@ -535,6 +586,7 @@ impl Profile {
                 *total += interval.duration.get();
             }
         }
+
         threads.into_values().collect()
     }
 
@@ -697,6 +749,7 @@ impl Profile {
                     }),
             );
         }
+
         intervals
     }
 
@@ -726,6 +779,7 @@ impl Profile {
                 });
             }
         }
+
         stacks
     }
 
@@ -762,11 +816,13 @@ impl Profile {
                 weight.0 += sample.weight.get();
             }
         }
+
         for wait in &capture.task_waits {
             if let Some(weight) = weights.get_mut(wait.task.get() as usize) {
                 weight.1 += wait.weight.get();
             }
         }
+
         capture
             .tasks
             .iter()
@@ -782,6 +838,7 @@ impl Profile {
                         .map(|(key, value)| (key.to_owned(), value.to_owned()))
                         .collect(),
                 };
+
                 ProfileTask {
                     row,
                     noun: capture.string(task.runtime.get()).to_owned(),
@@ -836,15 +893,18 @@ impl Profile {
                 ending = StackEnding::Truncated(reason.to_owned());
                 continue;
             }
+
             let lines = capture.frame_lines(frame);
             if lines.is_empty() {
                 functions.push(self.address_name(frame));
             }
+
             for line in lines {
                 let function = &capture.functions[line.function.get() as usize];
                 functions.push(capture.string(function.name.get()).to_owned());
             }
         }
+
         (functions, ending)
     }
 
@@ -855,6 +915,7 @@ impl Profile {
         if module == NONE {
             return format!("{:#x}", record.address.get());
         }
+
         let path = self
             .capture
             .string(self.capture.modules[module as usize].path.get());
@@ -879,6 +940,7 @@ impl Profile {
                 });
             }
         }
+
         Ok(())
     }
 }
@@ -888,6 +950,7 @@ impl Profile {
 pub enum ProfileFileError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
     /// The file is not a profile, or is damaged.
     #[error("{0}")]
     Invalid(String),

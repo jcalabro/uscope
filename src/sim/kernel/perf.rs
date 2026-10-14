@@ -14,12 +14,16 @@ use crate::sim::memory::AddressSpace;
 /// `PERF_RECORD_SAMPLE`, and the `misc` of one taken in user code.
 const RECORD_SAMPLE: u32 = 9;
 const MISC_USER: u16 = 2;
+
 /// The callchain's mark before the user addresses.
 const CONTEXT_USER: u64 = (-512_i64).cast_unsigned();
+
 /// `PERF_SAMPLE_REGS_ABI_64`.
 const ABI_64: u64 = 2;
+
 /// The most addresses a chain holds: the events' `sample_max_stack`.
 const MAX_STACK: usize = 127;
+
 /// The end of user memory, `TASK_SIZE_MAX`.
 const TASK_SIZE: u64 = 0x7fff_ffff_f000;
 
@@ -29,6 +33,7 @@ pub struct Breakpoint {
     pub tgid: Tgid,
     pub address: u64,
     pub stack_bytes: u32,
+
     /// The records written so far, as a ring holds them.
     pub records: Vec<u8>,
 }
@@ -52,6 +57,7 @@ impl Kernel {
             self.gap("a frame-pointer walk as deep as a chain holds");
             return Vec::new();
         }
+
         let thread = &self.threads[&tid];
         let space = &self.processes[&thread.tgid].space;
         let registers = &thread.registers;
@@ -78,6 +84,7 @@ impl Kernel {
         if self.sabotage == Some(super::Sabotage::SkewSampledReturnAddresses) {
             skew_return_addresses(&thread.shadow, sp, &mut stack);
         }
+
         stack.resize(usize::try_from(size).expect("a copy fits"), 0);
 
         let length = header + 16 + stack.len();
@@ -88,6 +95,7 @@ impl Kernel {
         for word in words {
             record.extend(word.to_le_bytes());
         }
+
         record.extend(size.to_le_bytes());
         record.extend(&stack);
         record.extend(copied.to_le_bytes());
@@ -101,9 +109,11 @@ impl Kernel {
         let Some(breakpoint) = &self.perf else {
             return;
         };
+
         if breakpoint.tgid != thread.tgid || breakpoint.address != thread.registers.rip {
             return;
         }
+
         let record = self.sample(tid, breakpoint.stack_bytes);
         if let Some(breakpoint) = &mut self.perf {
             breakpoint.records.extend(record);
@@ -120,9 +130,11 @@ fn walk_frames(space: &AddressSpace, mut link: u64, chain: &mut Vec<u64>) {
         if link.checked_add(16).is_none_or(|end| end > TASK_SIZE) || space.present(link, 16) < 16 {
             break;
         }
+
         let (Some(next), Some(return_address)) = (space.peek(link), space.peek(link + 8)) else {
             break;
         };
+
         chain.push(return_address);
         link = next;
     }
@@ -170,6 +182,7 @@ fn skew_return_addresses(shadow: &super::shadow::Shadow, sp: u64, stack: &mut [u
         let Some(offset) = call.slot.checked_sub(sp) else {
             continue;
         };
+
         let offset = usize::try_from(offset).unwrap_or(usize::MAX);
         if let Some(word) = stack.get_mut(offset..offset.saturating_add(8))
             && word.len() == 8

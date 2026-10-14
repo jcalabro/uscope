@@ -40,6 +40,7 @@ fn rendered(kind: &str, value: &VariableValue) -> Option<String> {
         IntegerValue::Unsigned(value) => value.to_string(),
         _ => unreachable!("integer values are signed or unsigned"),
     };
+
     Some(match (kind, value) {
         ("int", VariableValue::Scalar(ScalarValue::Signed(value))) => value.to_string(),
         ("int", VariableValue::Scalar(ScalarValue::Unsigned(value))) => value.to_string(),
@@ -52,6 +53,7 @@ fn rendered(kind: &str, value: &VariableValue) -> Option<String> {
         ("f64", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary64(bits)))) => {
             format!("{bits:#x}")
         }
+
         (
             "f80",
             VariableValue::Scalar(ScalarValue::Floating(FloatValue::X87Extended {
@@ -84,6 +86,7 @@ async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
         matches!(reason, StopReason::Breakpoint { .. }),
         "{fixture}: {reason:?}"
     );
+
     // The fixture flushes its expectations before it calls barrier.
     let printed = std::fs::read_to_string(&output_path).expect("read the fixture's output");
     let expectations = expectations(&printed);
@@ -109,11 +112,13 @@ async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
                 continue;
             }
         };
+
         let result = scenario.handle().evaluate(&expression).await;
         if let Some(message) = disagreement(expectation, result, optimized) {
             failures.push(format!("`{}`: {message}", expectation.expression));
         }
     }
+
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     scenario.shutdown().await;
 }
@@ -144,6 +149,7 @@ fn disagreement(
             if elements == expectation.value {
                 return None;
             }
+
             format!("{elements} instead of {}", expectation.value)
         }
         ("text", Ok(Evaluation::Value { value, cause })) => match &value.state {
@@ -186,6 +192,7 @@ fn disagreement(
             other => format!("{other:?}"),
         },
     };
+
     Some(message)
 }
 

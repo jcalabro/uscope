@@ -63,11 +63,13 @@ use super::watches::{self, Intent};
 use crate::backend::sim_edge::{
     Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
 };
+
 use crate::{DebuggerHandle, HeldChild, HeldProcess, ProcessId};
 
 /// The process identifier of the first session's debugger, which launches
 /// programs. Each session adopting a held child traces as the next.
 pub const TRACER: i32 = 100;
+
 /// The session the client drives.
 const FIRST: SessionId = 0;
 
@@ -76,10 +78,13 @@ const FIRST: SessionId = 0;
 pub struct Settings {
     /// How many trace lines to keep, or all of them.
     pub keep: Option<usize>,
+
     /// The most actions a session may take before it fails as runaway.
     pub max_steps: u64,
+
     /// Stops the run after this action, to inspect the state there.
     pub stop_at: Option<u64>,
+
     /// Breaks the simulation on purpose, to check that the oracles notice.
     #[cfg(test)]
     pub sabotage: Option<Sabotage>,
@@ -91,68 +96,88 @@ pub struct Settings {
 pub enum Sabotage {
     /// Ptrace writes report success without writing.
     LosePokes,
+
     /// The waiter never reaps a status.
     DeafWaiter,
+
     /// Once a stop is published, a stopped thread runs again behind the
     /// controller's back.
     ResumeBehindTheController,
+
     /// The CPU executes the program's own instruction under a trap the
     /// debugger planted for the user.
     SkipTraps,
+
     /// Ptrace reads of a return address where a call pushed it report the
     /// next address.
     SkewReturnAddresses,
+
     /// A single step of the thread the client steps executes two
     /// instructions.
     LateSingleSteps,
+
     /// Ptrace reads of small numbers other than zero on the main thread's
     /// stack report them one greater. Zeros, which end chains of frames,
     /// and slots where calls pushed return addresses stay as they are.
     SkewSmallStackWords,
+
     /// Ptrace reads of the same small numbers report every other one one
     /// greater, so two reads of a value that has not changed disagree.
     FlickeringStackWords,
+
     /// `PTRACE_GETREGS` reports general registers other than the stack and
     /// frame pointers one greater when they hold small numbers other than
     /// zero, and `PTRACE_SETREGS` takes back what it reported, so the
     /// program runs on unchanged.
     SkewSmallRegisters,
+
     /// Ptrace writes to the debug registers of threads other than a
     /// process's first go to a copy that reads them back, leaving the
     /// thread's own slots as they were.
     PhantomArming,
+
     /// Threads other than a process's first take no debug exception for
     /// an access their slots cover.
     MissWatchTraps,
+
     /// A thread's debug exception for an access its slots cover is raised
     /// again after its next instruction, which accessed nothing.
     RepeatWatchTraps,
+
     /// Ptrace reads of a word that points eight bytes past itself, as a
     /// linked node's next link does when its successor follows it in
     /// memory, report the node after that successor, so a list walk skips
     /// a node.
     SkipLinkedNodes,
+
     /// `PTRACE_DETACH` forgets a SIGSTOP pending for the thread, so a fork
     /// child released to be held runs on instead.
     ForgetStopRequests,
+
     /// The kernel never reports a SIGCONT pending, so a session detaching
     /// from a held child leaves the one that ended its stop for the program.
     HideQueuedContinue,
+
     /// SIGCONT is reported sent by no process, so a session cannot tell the
     /// one it sent to end a held child's stop from the program's own.
     MisattributeContinues,
+
     /// Ptrace reads of a call instruction the thread the client steps has
     /// come to report its first byte as a no-op, so the debugger cannot
     /// tell the thread is about to call.
     HideSteppedCalls,
+
     /// Samples copy each return address a call pushed as the next address.
     SkewSampledReturnAddresses,
+
     /// A thread resumed to stop at system calls makes a call a catchpoint
     /// stops without stopping at its entry.
     SkipCallStops,
+
     /// `PTRACE_GET_SYSCALL_INFO` reports a call's second argument one
     /// greater.
     MisreportCallArguments,
+
     /// The model of the tracepoint stream drops a call from a full ring
     /// without counting it lost.
     LoseTracedCalls,
@@ -164,6 +189,7 @@ impl Default for Settings {
             keep: Some(400),
             max_steps: 2_000_000,
             stop_at: None,
+
             #[cfg(test)]
             sabotage: None,
         }
@@ -174,19 +200,24 @@ impl Default for Settings {
 pub struct Outcome {
     pub seed: u64,
     pub swarm: Swarm,
+
     /// The binary and arguments the session debugged.
     pub program: String,
     pub arguments: Vec<String>,
     pub fingerprint: u64,
     pub steps: u64,
     pub failure: Option<Failure>,
+
     /// The trace's kept lines, and how many older ones were dropped.
     pub trace: Vec<String>,
     pub dropped: u64,
+
     /// The state when the run stopped at `Settings::stop_at`.
     pub state: Option<String>,
+
     /// The interesting states the run reached.
     pub marks: Marks,
+
     /// The planned fault, if it never fired.
     pub unfired: Option<Plan>,
 }
@@ -218,10 +249,12 @@ pub fn run(seed: u64, corpus: &Corpus, settings: &Settings) -> Outcome {
                 break;
             }
         }
+
         if settings.stop_at == Some(world.step()) {
             state = Some(world.dump());
             break;
         }
+
         if world.step() >= settings.max_steps {
             failure = Some(Failure {
                 step: world.step(),
@@ -233,6 +266,7 @@ pub fn run(seed: u64, corpus: &Corpus, settings: &Settings) -> Outcome {
             break;
         }
     }
+
     let (lines, dropped) = world.trace.lines();
     let faults = world.machine.faults.borrow();
     Outcome {
@@ -275,14 +309,18 @@ type ClientTask = Pin<Box<dyn Future<Output = Result<(), Failure>>>>;
 /// the client task that drives it.
 struct Session {
     tracer: i32,
+
     /// The controller, until it exits.
     controller: Option<SimController>,
+
     /// The client task, until it finishes.
     client: Option<ClientTask>,
+
     /// What the client did, for the trace.
     notes: Rc<RefCell<Vec<String>>>,
     woken: Arc<Woken>,
     waker: Waker,
+
     /// Whether the controller was asked to shut down.
     shutting_down: bool,
 }
@@ -313,40 +351,53 @@ struct World<'a> {
     program: &'a Program,
     variant: &'a Variant,
     run: &'a Run,
+
     /// The bytes `AT_RANDOM` names.
     random: [u8; 16],
     machine: Rc<Machine>,
+
     /// The sessions, the first the client's.
     sessions: Vec<Session>,
     shared: Shared,
     auditor: Auditor,
+
     /// The children the first session held that no session took yet.
     waiting: VecDeque<HeldChild>,
+
     /// The children held that no session has seized, and that were not
     /// released, which the holding oracle watches.
     held: BTreeSet<Tgid>,
+
     /// Each thread's latest arrival at a trap the controller heard of.
     arrivals: BTreeMap<Tid, Arrival>,
+
     /// The step the client requested, until it ends.
     stepping: Option<Begun>,
+
     /// The watchpoints the client knows of, with the bytes each watched at
     /// the last stop.
     watches: Vec<Intent>,
     baselines: BTreeMap<u64, Vec<u8>>,
+
     /// The hits each watchpoint had counted at the last stop judged.
     watch_counts: BTreeMap<u64, u64>,
+
     /// The last stop watch accounting judged.
     judged_stop: Option<u64>,
+
     /// Each thread's reason at a system call, with the catchpoints the
     /// client knew of when it first saw it, which the reason answers to.
     /// A reason outlives the stop it was made at when another stop, as a
     /// jump's, publishes it again.
     catch_reasons: catches::Reasons,
+
     /// The profiler's samples of running threads.
     sampler: Sampler,
+
     /// The model of the BPF engine's tracepoint stream.
     tracing: RefCell<TraceModel>,
     trace: Trace,
+
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
 }
@@ -372,6 +423,7 @@ impl<'a> World<'a> {
         {
             tracing.uncounted = settings.sabotage == Some(Sabotage::LoseTracedCalls);
         }
+
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
         kernel.borrow_mut().debug_behavior = swarm.debug;
@@ -379,6 +431,7 @@ impl<'a> World<'a> {
         {
             kernel.borrow_mut().sabotage = settings.sabotage;
         }
+
         let marks = Rc::new(RefCell::new(Marks::default()));
         let shared = Shared::default();
         let attach = swarm
@@ -399,6 +452,7 @@ impl<'a> World<'a> {
             step: Cell::new(0),
             ran: Cell::new(0),
             preempt: swarm.preempt,
+
             #[cfg(test)]
             sabotage: settings.sabotage,
         });
@@ -416,6 +470,7 @@ impl<'a> World<'a> {
             disabled_watches: RefCell::new(BTreeMap::new()),
             released_while_running: Cell::new(false),
         };
+
         let first = Session::new(
             TRACER,
             controller,
@@ -449,6 +504,7 @@ impl<'a> World<'a> {
             sampler,
             tracing: RefCell::new(tracing),
             trace,
+
             #[cfg(debug_assertions)]
             capture,
         }
@@ -464,6 +520,7 @@ impl<'a> World<'a> {
         let Some(after) = self.swarm.attach else {
             return true;
         };
+
         self.machine.ran.get() >= after
             || self
                 .machine
@@ -487,10 +544,12 @@ impl<'a> World<'a> {
                 if self.machine.can_collect(id) {
                     actions.push(Action::Collect(id));
                 }
+
                 if controller.has_message() {
                     actions.push(Action::Deliver(id));
                 }
             }
+
             if session.client.is_some()
                 && session.woken.0.load(Ordering::Relaxed)
                 && (id != FIRST || self.client_may_act())
@@ -498,9 +557,11 @@ impl<'a> World<'a> {
                 actions.push(Action::Poll(id));
             }
         }
+
         if !self.waiting.is_empty() {
             actions.push(Action::Follow);
         }
+
         actions
     }
 
@@ -513,10 +574,12 @@ impl<'a> World<'a> {
             self.check()?;
             return Ok(Progress::Continue);
         }
+
         let actions = self.actions();
         if actions.is_empty() {
             return self.finish();
         }
+
         let action = self.machine.scheduler.borrow_mut().choose(
             &actions,
             step,
@@ -528,10 +591,12 @@ impl<'a> World<'a> {
             Ok(line) => line.clone(),
             Err(failure) => format!("{action:?} failed: {}", failure.check),
         };
+
         self.trace.line(format!("#{step} {line}"));
         for line in self.machine.absorb() {
             self.trace.line(format!("    {line}"));
         }
+
         self.receive_held();
         self.flush();
         performed?;
@@ -545,6 +610,7 @@ impl<'a> World<'a> {
             self.follow_watches();
             self.judge()?;
         }
+
         #[cfg(test)]
         self.sabotage();
         self.check()?;
@@ -562,6 +628,7 @@ impl<'a> World<'a> {
         {
             return;
         }
+
         let mut kernel = self.machine.kernel.borrow_mut();
         if let Some(thread) = kernel.threads.values_mut().find(|thread| {
             matches!(
@@ -598,6 +665,7 @@ impl<'a> World<'a> {
                 if let Some(sampled) = sampled {
                     line = format!("{line}; {sampled}");
                 }
+
                 Ok(line)
             }
             Action::Collect(id) => Ok(self.machine.collect(id)),
@@ -612,6 +680,7 @@ impl<'a> World<'a> {
                 } else {
                     format!("poll session {id}")
                 };
+
                 match task.as_mut().poll(&mut Context::from_waker(&session.waker)) {
                     Poll::Pending => Ok(polled),
                     Poll::Ready(result) => {
@@ -637,6 +706,7 @@ impl<'a> World<'a> {
         let Some(receiver) = receiver.as_mut() else {
             return;
         };
+
         let kernel = self.machine.kernel.borrow();
         let mut marks = self.machine.marks.borrow_mut();
         while let Ok(child) = receiver.try_recv() {
@@ -649,6 +719,7 @@ impl<'a> World<'a> {
             {
                 marks.hit(Mark::HeldAfterParentExit);
             }
+
             self.trace.line(format!(
                 "    {} held {tgid} for another session",
                 child.parent()
@@ -677,10 +748,12 @@ impl<'a> World<'a> {
             self.trace
                 .line("    the first session takes no more children".to_owned());
         }
+
         if decision == 0 {
             self.release(held)?;
             return Ok(format!("follow {tgid} -> released"));
         }
+
         let id = self.sessions.len();
         let tracer = TRACER + i32::try_from(id).expect("few sessions");
         let (controller, handle) = start_controller(
@@ -701,6 +774,7 @@ impl<'a> World<'a> {
             child: held,
             requests,
         };
+
         self.sessions.push(Session::new(
             tracer,
             controller,
@@ -731,6 +805,7 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+
         kernel.serve(TRACER);
         kernel
             .kill(tgid, libc::SIGCONT)
@@ -754,6 +829,7 @@ impl<'a> World<'a> {
         if controller.handle(delivery) {
             return Ok(description);
         }
+
         self.controller_exited(id)?;
         Ok(format!("{description} -> controller exited"))
     }
@@ -779,6 +855,7 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+
         kernel.forget_tracer(tracer);
         Ok(())
     }
@@ -794,6 +871,7 @@ impl<'a> World<'a> {
         let delivery = controller.take().expect("deliver needs a message");
         let description = delivery.description.clone();
         let before = controller.truth();
+
         // A trap whose stop the controller now hears of: each arrival at a
         // trap is one hit.
         let trapped = delivery
@@ -815,7 +893,9 @@ impl<'a> World<'a> {
             self.controller_exited(FIRST)?;
             return Ok(format!("deliver {description} -> controller exited"));
         }
+
         let after = controller.truth();
+
         // A group exit or SIGKILL meanwhile takes the trap's thread out of
         // its stop, and the controller may never count the hit.
         let disturbed = trap.as_ref().is_some_and(|trap| {
@@ -843,11 +923,14 @@ impl<'a> World<'a> {
                     counted: BTreeSet::new(),
                 };
             }
+
             arrival.counted.extend(counted);
         }
+
         for arrival in self.arrivals.values_mut() {
             oracles::still_counting(&mut arrival.counted, &after, arrival.address);
         }
+
         Ok(format!("deliver {description}"))
     }
 
@@ -868,12 +951,14 @@ impl<'a> World<'a> {
         if tails > 0 {
             marks.hit(Mark::TailCallFrames);
         }
+
         match unwound {
             Some(Unwound::Whole) => marks.hit(Mark::WholeBacktrace),
             Some(Unwound::Truncated) => marks.hit(Mark::TruncatedBacktrace),
             Some(Unwound::Corrupt) => marks.hit(Mark::CorruptCaller),
             None => {}
         }
+
         Ok(())
     }
 
@@ -887,6 +972,7 @@ impl<'a> World<'a> {
                 Observation::Backtrace { stop, backtrace } if self.still_at(stop) => {
                     self.judge_backtrace(&backtrace)?;
                 }
+
                 Observation::StepBegins {
                     thread,
                     kind,
@@ -930,6 +1016,7 @@ impl<'a> World<'a> {
                     for mark in reached {
                         marks.hit(mark);
                     }
+
                     drop(marks);
                     let inspected = semantics::variables(
                         &self.machine.kernel.borrow(),
@@ -944,6 +1031,7 @@ impl<'a> World<'a> {
                         self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
                     }
                 }
+
                 Observation::Presented {
                     stop,
                     name,
@@ -961,11 +1049,13 @@ impl<'a> World<'a> {
                         marks.hit(mark);
                     }
                 }
+
                 Observation::Backtrace { .. }
                 | Observation::Variables { .. }
                 | Observation::Presented { .. } => {}
             }
         }
+
         Ok(())
     }
 
@@ -986,6 +1076,7 @@ impl<'a> World<'a> {
         else {
             return Ok(Vec::new());
         };
+
         let address = image_address + self.variant.image.bias();
         match &value.state {
             crate::VariableState::Available {
@@ -998,26 +1089,32 @@ impl<'a> World<'a> {
                 ));
             }
         }
+
         let kernel = self.machine.kernel.borrow();
         let Some(tgid) = self.controller().and_then(SimController::inferior) else {
             return Ok(Vec::new());
         };
+
         let Some(process) = kernel.processes.get(&tgid) else {
             return Ok(Vec::new());
         };
+
         let memory = |at: u64, size: u64| process.space.read_user(at, size);
         let Some(truth) = views::truth(name, address, &memory) else {
             return Ok(Vec::new());
         };
+
         let items = |fetched: &Result<Vec<crate::ValueChildPage>, String>| match fetched {
             Ok(fetched) => {
                 for one in fetched {
                     views::within(one, crate::InspectionLimits::default())?;
                 }
+
                 views::items(fetched)
             }
             Err(error) => Err(format!("reading its elements failed: {error}")),
         };
+
         let shown = views::shown(value, items(whole)?, items(paged)?)
             .ok_or_else(|| format!("its view presented nothing: {:?}", value.state))?;
         views::judge(&truth, &shown)
@@ -1037,6 +1134,7 @@ impl<'a> World<'a> {
         if watches == self.watches {
             return;
         }
+
         let mut kernel = self.machine.kernel.borrow_mut();
         let tgid = self.controller().and_then(SimController::inferior);
         self.baselines
@@ -1048,6 +1146,7 @@ impl<'a> World<'a> {
                 self.baselines.insert(watch.id, bytes);
             }
         }
+
         kernel.watching.watches = watches
             .iter()
             .map(|watch| UserWatch {
@@ -1071,9 +1170,11 @@ impl<'a> World<'a> {
         let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
             return Ok(());
         };
+
         if self.judged_stop == Some(stop) {
             return Ok(());
         }
+
         self.judged_stop = Some(stop);
         let mut kernel = self.machine.kernel.borrow_mut();
         let ending = kernel
@@ -1096,19 +1197,23 @@ impl<'a> World<'a> {
                 marks.hit(mark);
             }
         }
+
         self.watch_counts.clone_from(&truth.watchpoints);
+
         // What a watch was asked before this stop no longer applies.
         for intent in self.shared.watches.borrow_mut().values_mut() {
             intent
                 .policies
                 .drain(..intent.policies.len().saturating_sub(1));
         }
+
         kernel.watching.restart();
         for watch in &self.watches {
             if let Some(bytes) = watches::bytes(&kernel, tgid, watch) {
                 self.baselines.insert(watch.id, bytes);
             }
         }
+
         Ok(())
     }
 
@@ -1117,6 +1222,7 @@ impl<'a> World<'a> {
         let Some(controller) = self.controller() else {
             return false;
         };
+
         controller.public_stop() == Some(stop.get())
             && controller.inferior().is_some_and(|tgid| {
                 self.machine
@@ -1143,9 +1249,11 @@ impl<'a> World<'a> {
         let Some(stepped) = kernel.threads.get(&tid) else {
             return;
         };
+
         let mut begun = Begun::new(stepped, kind, presentation);
         let bias = self.variant.image.bias();
         begun.targets = targets.iter().map(|address| address + bias).collect();
+
         // Where the chosen call returns: the instruction after it, which a
         // breakpoint's trap over the call does not shorten.
         begun.into_return = call.and_then(|call| {
@@ -1176,6 +1284,7 @@ impl<'a> World<'a> {
         let (Some(begun), Some(tracking)) = (begun, tracking) else {
             return Ok(());
         };
+
         let stop = self.controller().and_then(SimController::public_stop);
         if begun.kind == crate::StepKind::Advance {
             let stopped = stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop)));
@@ -1191,12 +1300,15 @@ impl<'a> World<'a> {
             if judged.is_some() {
                 self.machine.marks.borrow_mut().hit(Mark::AdvanceJudged);
             }
+
             return Ok(());
         }
+
         let ended = matches!(reason, Some(crate::StopReason::Step { kind }) if *kind == begun.kind);
         if !ended || !stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop))) {
             return Ok(());
         }
+
         let judged = semantics::step(
             &self.machine.kernel.borrow(),
             &begun,
@@ -1208,9 +1320,11 @@ impl<'a> World<'a> {
         if judged.is_some() {
             marks.hit(Mark::StepJudged);
         }
+
         if judged == Some(Judged::Exactly) {
             marks.hit(Mark::SourceStepExact);
         }
+
         Ok(())
     }
 
@@ -1221,6 +1335,7 @@ impl<'a> World<'a> {
         for line in self.capture.take() {
             self.trace.line(format!("    | {line}"));
         }
+
         for (id, session) in self.sessions.iter().enumerate() {
             for note in session.notes.borrow_mut().drain(..) {
                 if id == FIRST {
@@ -1237,6 +1352,7 @@ impl<'a> World<'a> {
         if let Some(gap) = &self.machine.kernel.borrow().gap {
             return Err(Failure::model_gap(gap.0.clone()));
         }
+
         self.trace_served()?;
         self.auditor.check(
             &self.machine.kernel.borrow(),
@@ -1251,6 +1367,7 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+
         if let Some(&(tid, (address, now, was))) = self.machine.unclean.borrow().first() {
             return Err(Failure::debugger(
                 "clean release",
@@ -1260,12 +1377,14 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+
         if let Some(tid) = self.machine.leaked.borrow().first() {
             return Err(Failure::debugger(
                 "transparency",
                 format!("thread {tid} received SIGCONT, which only a debugger sends"),
             ));
         }
+
         self.check_held()?;
         if let Some(lost) = self.machine.kernel.borrow().watching.lost.first() {
             return Err(Failure::debugger(
@@ -1276,6 +1395,7 @@ impl<'a> World<'a> {
                 ),
             ));
         }
+
         // Only a process the controller debugs has the user's breakpoints
         // and watches, once it finished launching or attaching: none once it
         // detached, or once it exited itself.
@@ -1291,10 +1411,12 @@ impl<'a> World<'a> {
             kernel.watching.restart();
             kernel.debugged = debugged;
         }
+
         drop(kernel);
         if let Some(truth) = &truth {
             self.account_watches(truth)?;
         }
+
         let mut first = truth;
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
@@ -1305,10 +1427,12 @@ impl<'a> World<'a> {
             let Some(controller) = &session.controller else {
                 continue;
             };
+
             let truth = match first.take() {
                 Some(truth) if id == FIRST => truth,
                 _ => controller.truth(),
             };
+
             oracles::code_integrity(&kernel, &truth, &self.variant.image)
                 .map_err(|message| Failure::debugger("code integrity", message))?;
             oracles::site_ownership(&kernel, &truth)
@@ -1336,6 +1460,7 @@ impl<'a> World<'a> {
                     .for_each(|mark| marks.hit(mark));
             }
         }
+
         oracles::output_so_far(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
         Ok(())
@@ -1353,9 +1478,11 @@ impl<'a> World<'a> {
                 seized.push(tgid);
             }
         }
+
         for tgid in seized {
             self.held.remove(&tgid);
         }
+
         Ok(())
     }
 
@@ -1381,6 +1508,7 @@ impl<'a> World<'a> {
                     ),
                 ));
             }
+
             if session.controller.is_some() {
                 return Err(Failure::debugger(
                     "liveness",
@@ -1391,6 +1519,7 @@ impl<'a> World<'a> {
                 ));
             }
         }
+
         self.trace_served()?;
         self.tracing
             .borrow_mut()
@@ -1408,6 +1537,7 @@ impl<'a> World<'a> {
         if marks.count(Mark::Detached) > 0 && ran_on {
             marks.hit(Mark::FinishedAfterDetach);
         }
+
         Ok(Progress::Finished)
     }
 
@@ -1427,6 +1557,7 @@ impl<'a> World<'a> {
                 thread.registers.rip
             );
         }
+
         for (id, session) in self.sessions.iter().enumerate() {
             let waiter = Rc::clone(&self.machine.waiters.borrow()[id]);
             let waiter = waiter.borrow();
@@ -1455,6 +1586,7 @@ impl<'a> World<'a> {
                 },
             );
         }
+
         text
     }
 }
@@ -1501,6 +1633,7 @@ fn start_controller(
         requests: channels.requests,
         events: channels.events,
     };
+
     (controller, handle)
 }
 
@@ -1571,6 +1704,7 @@ fn marker_rows(program: &Program, variant: &Variant) -> BTreeMap<u64, u64> {
     if facts.optimized {
         return BTreeMap::new();
     }
+
     program
         .markers
         .iter()

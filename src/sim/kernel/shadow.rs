@@ -18,12 +18,16 @@ use crate::sim::cpu::{Flow, RSP, Registers};
 pub struct Call {
     /// Where the call returns to.
     pub return_address: u64,
+
     /// Where the call pushed the return address.
     pub slot: u64,
+
     /// The activation the call began.
     pub activation: u64,
+
     /// Where the call went.
     pub target: u64,
+
     /// The general registers the callee was entered with.
     pub entry: [u64; 16],
 }
@@ -35,8 +39,10 @@ pub struct Call {
 pub struct Jump {
     /// The jump instruction.
     pub from: u64,
+
     /// The instruction after it.
     pub next: u64,
+
     /// Where it went.
     pub to: u64,
 }
@@ -46,11 +52,14 @@ pub struct Jump {
 pub struct Shadow {
     /// The activation the thread began in, which no call made.
     pub base: u64,
+
     /// Calls not yet returned from, outermost first.
     pub calls: Vec<Call>,
+
     /// For each of `calls`, the jumps its activation took with its stack
     /// as the call left it, each once.
     pub jumps: Vec<Vec<Jump>>,
+
     /// Whether a return went somewhere no call said, after which the
     /// shadow no longer describes the stack.
     pub lost: bool,
@@ -101,21 +110,25 @@ impl Shadow {
                     Some(call) if call.return_address == rip => {}
                     _ => self.lost = true,
                 }
+
                 self.jumps.truncate(self.calls.len());
             }
             Flow::Jump { from, next } => {
                 let Some(call) = self.calls.last() else {
                     return;
                 };
+
                 if registers.general[RSP] != call.slot {
                     return;
                 }
+
                 self.jumps.resize(self.calls.len(), Vec::new());
                 let jump = Jump {
                     from,
                     next,
                     to: rip,
                 };
+
                 let jumps = self.jumps.last_mut().expect("a call's jumps");
                 if !jumps.contains(&jump) {
                     jumps.push(jump);
@@ -130,6 +143,7 @@ impl Shadow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub rip: u64,
+
     /// How many calls deep it was.
     pub depth: usize,
     pub activation: u64,
@@ -139,9 +153,11 @@ pub struct Position {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tracking {
     pub tid: Tid,
+
     /// Positions deeper than this many calls are not recorded: no step
     /// must stop in a callee it entered, so none decides an oracle.
     pub depth: usize,
+
     /// Positions in the order the thread passed them, without repeats of
     /// the one before.
     pub positions: Vec<Position>,
@@ -154,11 +170,13 @@ impl Tracking {
         if tid != self.tid || shadow.depth() > self.depth {
             return;
         }
+
         let position = Position {
             rip,
             depth: shadow.depth(),
             activation: shadow.activation(),
         };
+
         if self.positions.last() != Some(&position) {
             self.positions.push(position);
         }

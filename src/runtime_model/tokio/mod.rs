@@ -27,39 +27,47 @@ use super::{
     RuntimeSignals, RuntimeStop, StartedTask, StoredValue, TaskContext, TaskEnd, TaskEntries,
     TaskPage, TaskRef, TaskStarter, ThreadActivity,
 };
+
 use crate::unwind::{RDI, RSI, RegisterFile};
 use crate::{ImageAddress, StackSegment, TaskState, ThreadId, ThreadLocal, VirtualAddress};
 
 /// What tokio calls its tasks.
 pub(super) const TASK_NOUN: (&str, &str) = ("task", "tasks");
+
 /// The releases the contract was checked against, oldest first. Another is
 /// read as the newest of them wherever its debug information binds, and
 /// says it is unverified.
 const VERIFIED: [(u64, u64); 2] = [(1, 52), (1, 53)];
+
 /// A source file every build of tokio compiles, by which its version is
 /// read from the directory Cargo unpacked it in.
 const VERSIONED_SOURCE: &str = "src/runtime/task/raw.rs";
+
 /// The task state's bits (`runtime/task/state.rs`), which tokio keeps in
 /// constants its debug information does not describe.
 const RUNNING: u64 = 0b1;
 const COMPLETE: u64 = 0b10;
 const NOTIFIED: u64 = 0b100;
 const CANCELLED: u64 = 0b10_0000;
+
 /// The most shards one list may have, and the most tasks one list or
 /// queue is read for, so corrupted memory cannot make the debugger read
 /// without end.
 const MAX_SHARDS: u64 = 1 << 16;
 const MAX_TASKS: u64 = 1 << 24;
+
 /// The function each task's vtable polls it through, which a symbol
 /// mangled in v0 names with its generic arguments and a legacy one
 /// without them.
 const POLL: &str = "tokio::runtime::task::raw::poll";
+
 /// The closure a multi-thread runtime's workers run in the blocking pool,
 /// as a v0 symbol names it and as debug information does.
 const LAUNCH: [&str; 2] = [
     "multi_thread::worker::Launch>::launch::{closure",
     "multi_thread::worker::{impl#0}::launch::{closure_env",
 ];
+
 /// The functions that start tasks, by the name debug information gives
 /// them and the start of their symbol's, and whether each also schedules
 /// woken tasks. A runtime binds each task it spawns to its list in
@@ -98,6 +106,7 @@ pub fn detect(
             deferrable: &[],
         }));
     }
+
     Some(Ok(Arc::new(TokioRuntime::bind(Arc::clone(image)))))
 }
 
@@ -107,6 +116,7 @@ fn version(path: &std::path::Path) -> Option<(u64, u64, Arc<str>)> {
     for _ in VERSIONED_SOURCE.split('/') {
         components.next()?;
     }
+
     let directory = components.next()?.as_os_str().to_str()?;
     let release = directory.strip_prefix("tokio-")?;
     let mut parts = release.split('.');
@@ -119,15 +129,20 @@ fn version(path: &std::path::Path) -> Option<(u64, u64, Arc<str>)> {
 struct TokioRuntime {
     image: Arc<dyn RuntimeImage + Send + Sync>,
     layout: Layout,
+
     /// Why every result may be wrong: a release the contract was not
     /// checked against, or one the program does not name.
     caveat: Option<Arc<str>>,
+
     /// Whether each vtable, by image address, is a task's.
     vtables: Mutex<BTreeMap<ImageAddress, Option<Arc<str>>>>,
+
     /// Where the future is in the cells of each poll function.
     futures: Mutex<BTreeMap<ImageAddress, Result<future::FutureLayout, Arc<str>>>>,
+
     /// Where the function that runs each coroutine type begins.
     bodies: Mutex<BTreeMap<crate::TypeReference, Option<ImageAddress>>>,
+
     /// Where each function that starts tasks begins, and whether it also
     /// schedules woken tasks.
     starters: Vec<(ImageAddress, bool)>,
@@ -146,14 +161,18 @@ struct Instance {
 struct ThreadContext {
     thread: ThreadId,
     runtime: Option<Instance>,
+
     /// Whether the thread runs a scheduler: a worker, or the thread a
     /// current-thread runtime blocks on.
     worker: bool,
+
     /// Whether the thread entered its runtime: a worker, or a thread that
     /// blocks on it.
     entered: bool,
+
     /// The task the thread polls.
     task: Option<u64>,
+
     /// The `LocalSet` the thread runs, by its `Shared`.
     local: Option<VirtualAddress>,
 }
@@ -224,6 +243,7 @@ impl TokioRuntime {
                 "tokio's version is unknown; its runtime is read as tokio {major}.{minor}'s"
             )),
         };
+
         let starters = STARTERS
             .iter()
             .flat_map(|&(name, symbol, schedules)| {
@@ -284,6 +304,7 @@ impl TokioRuntime {
                 .gaps
                 .push(format!("tasks of local sets cannot be read: {reason}").into());
         }
+
         let locals = locals.ok().flatten();
         for thread in stop.threads() {
             match Self::thread_context(stop, context, locals, thread) {
@@ -293,6 +314,7 @@ impl TokioRuntime {
                     {
                         census.runtimes.push(runtime);
                     }
+
                     census.threads.push(found);
                 }
                 Ok(None) => {}
@@ -301,6 +323,7 @@ impl TokioRuntime {
                     .push(format!("thread {thread}'s tokio context: {reason}").into()),
             }
         }
+
         let running = census.threads.iter().filter_map(|thread| thread.local);
         let sets = stop.task_sets().into_iter().map(VirtualAddress::new);
         for set in running.chain(sets) {
@@ -308,10 +331,12 @@ impl TokioRuntime {
                 flavor: Flavor::Local,
                 handle: set,
             };
+
             if !census.runtimes.contains(&set) {
                 census.runtimes.push(set);
             }
         }
+
         Ok(census)
     }
 
@@ -345,11 +370,13 @@ impl TokioRuntime {
         if state != locals.alive {
             return Ok(None);
         }
+
         let context =
             records::pointer(stop, base.wrapping_add(locals.context)).ok_or_else(unreadable)?;
         if context == records::NULL {
             return Ok(None);
         }
+
         Self::set_shared(stop, locals, context).map(Some)
     }
 
@@ -368,6 +395,7 @@ impl TokioRuntime {
         if state != context.alive {
             return Ok(None);
         }
+
         let option = base.wrapping_add(context.handle.offset);
         let runtime = if &*context.handle_option.active(stop, option)?.name == "Some" {
             let handle = option.wrapping_add(context.handle_some);
@@ -386,6 +414,7 @@ impl TokioRuntime {
         } else {
             None
         };
+
         let worker =
             records::word(stop, base.wrapping_add(context.scheduler)).ok_or_else(unreadable)? != 0;
         let entered = &*context
@@ -402,10 +431,12 @@ impl TokioRuntime {
         } else {
             None
         };
+
         let local = match locals {
             Some(locals) => Self::running_set(stop, locals, thread)?,
             None => None,
         };
+
         Ok(Some(ThreadContext {
             thread,
             runtime,
@@ -441,6 +472,7 @@ impl TokioRuntime {
                 counted: false,
             });
         }
+
         let owned = self.owned(runtime.flavor)?;
         let at = runtime.handle.wrapping_add(owned.at);
         let unreadable = || Arc::<str>::from(format!("the task list at {at:#x} is unreadable"));
@@ -453,6 +485,7 @@ impl TokioRuntime {
             count: word(owned.count)?,
             counted: true,
         };
+
         let mask = word(owned.mask)?;
         if !list.length.is_power_of_two()
             || list.length > MAX_SHARDS
@@ -465,6 +498,7 @@ impl TokioRuntime {
             )
             .into());
         }
+
         Ok(list)
     }
 
@@ -507,10 +541,13 @@ impl TokioRuntime {
         let Ok(tasks) = self.task_layout() else {
             return false;
         };
+
         let Some(poll) = records::pointer(stop, vtable.wrapping_add(tasks.poll)) else {
             return false;
         };
+
         let poll = stop.load_bias().wrapping_unload(poll);
+
         // A legacy symbol names no generic arguments, while the debug
         // information names them under either mangling.
         [self.image.symbol_at(poll), self.image.function_name(poll)]
@@ -538,6 +575,7 @@ fn thread_local(
                 .ok_or("the slot of tokio's context is unreadable")?
         }
     };
+
     Ok(VirtualAddress::new(pointer.wrapping_add_signed(offset)))
 }
 
@@ -566,11 +604,13 @@ impl RuntimeModel for TokioRuntime {
                 .gaps
                 .push(format!("tokio's tasks cannot be read: {reason}").into()),
         }
+
         // A running blocking closure's task is known only by its number,
         // with no header to read where it was spawned from.
         for task in page.value.tasks.iter_mut().filter(|task| task.locator != 0) {
             task.spawned = self.spawned_at(stop, VirtualAddress::new(task.locator));
         }
+
         page
     }
 
@@ -603,6 +643,7 @@ impl RuntimeModel for TokioRuntime {
         let Some(found) = self.find(stop, &census, task)? else {
             return Ok(None);
         };
+
         match (found.state, found.thread) {
             (TaskState::Running, Some(thread)) => Ok(Some(TaskContext::OnThread(thread))),
             (TaskState::Running, None) => {
@@ -736,16 +777,19 @@ impl RuntimeModel for TokioRuntime {
                 let crate::TypeKind::Record { members, .. } = &info.kind else {
                     return None;
                 };
+
                 let member = members
                     .iter()
                     .find(|member| member.name.as_deref() == Some("local_set"))?;
                 let crate::RecordMemberLayout::ByteOffset(offset) = member.layout else {
                     return None;
                 };
+
                 records::pointer(stop, future.wrapping_add(offset))?
             }
             _ => return None,
         };
+
         let context = records::pointer(stop, set.wrapping_add(locals.set))?;
         Self::set_shared(stop, locals, context)
             .ok()
@@ -766,17 +810,21 @@ impl RuntimeModel for TokioRuntime {
         let Some(found) = self.find(stop, &census, task)? else {
             return Ok(None);
         };
+
         let header = VirtualAddress::new(found.locator);
         if header == records::NULL {
             return Ok(None);
         }
+
         let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.number));
         let vtable =
             records::pointer(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
         let entry = |offset: u64| {
             records::pointer(stop, vtable.wrapping_add(offset)).ok_or_else(unreadable)
         };
+
         let (poll, shutdown) = (entry(tasks.poll)?, entry(tasks.shutdown)?);
+
         // The task's cell is freed as the box that holds it is dropped,
         // which the glue for `Box<Cell<T, S>>` does for the task's `T` and
         // `S`, as its poll function's name spells them.
@@ -814,6 +862,7 @@ impl RuntimeModel for TokioRuntime {
         let (Some(header), Some(argument)) = (task.task.locator, registers.get(RDI)) else {
             return false;
         };
+
         // The functions that run the task are passed its header; the glue
         // that frees it, the box that holds it.
         if task.frees.contains(&entry) {
@@ -836,6 +885,7 @@ impl RuntimeModel for TokioRuntime {
             .ok_or("the task is not located")?;
         let unreadable = || Arc::<str>::from(format!("task {} is unreadable", task.task.number));
         let word = |address: VirtualAddress| records::word(stop, address).ok_or_else(unreadable);
+
         // A freed task's place may hold another task, or nothing.
         let vtable = VirtualAddress::new(word(header.wrapping_add(tasks.vtable))?);
         let id = word(header.wrapping_add(word(vtable.wrapping_add(tasks.id_offset))?))?;
@@ -844,7 +894,9 @@ impl RuntimeModel for TokioRuntime {
         {
             return Err(format!("task {} is no longer where it was", task.task.number).into());
         }
+
         let state = word(header.wrapping_add(tasks.state))?;
+
         // tokio never takes back a cancellation, nor cancels a task that
         // completed.
         Ok(if state & CANCELLED != 0 {
@@ -895,18 +947,22 @@ fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
     ) -> impl Iterator<Item = (crate::TypeReference, bool)> + '_ {
         fields.iter().map(move |member| (member.type_ref, boxed))
     }
+
     let mut seen = std::collections::BTreeSet::new();
     let mut pending = vec![(ty, false)];
     while let Some((ty, boxed)) = pending.pop() {
         if !seen.insert((ty.id, boxed)) {
             continue;
         }
+
         let Some(info) = image.type_info(ty) else {
             continue;
         };
+
         if matches!(local_type(info), Some("LocalSet" | "RunUntil")) {
             return true;
         }
+
         match &info.kind {
             TypeKind::Pointer {
                 target: Some(target),
@@ -916,18 +972,21 @@ fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
                 let Some(pointee) = image.type_info(*target) else {
                     continue;
                 };
+
                 if super::futures::trait_object(&pointee.name)
                     .is_some_and(|name| name.starts_with("dyn core::future::future::Future"))
                     || local_type(pointee) == Some("LocalSet")
                 {
                     return true;
                 }
+
                 // A box or pin holds the future it points to; another
                 // pointer's target is some other future's, or no future.
                 if boxed {
                     pending.push((*target, false));
                 }
             }
+
             TypeKind::Record {
                 members: fields,
                 bases,
@@ -937,6 +996,7 @@ fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
                 pending.extend(members(fields, boxed));
                 pending.extend(bases.iter().map(|base| (base.type_ref, boxed)));
             }
+
             TypeKind::Union {
                 members: fields, ..
             } => pending.extend(members(fields, boxed)),
@@ -961,6 +1021,7 @@ fn may_hold_set(image: &dyn RuntimeImage, ty: crate::TypeReference) -> bool {
             _ => {}
         }
     }
+
     false
 }
 

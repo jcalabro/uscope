@@ -42,6 +42,7 @@ impl Truth {
                 _ => {}
             }
         }
+
         truth
     }
 }
@@ -87,6 +88,7 @@ async fn the_running_and_queued_closures_are_the_pools_tasks() {
                 .find(|task| task.id.number == id)
                 .unwrap_or_else(|| panic!("{fixture}: task {id}: {listed:#?}"))
         };
+
         let running = listed_as(truth.blocker);
         assert_eq!(
             (running.id.number, running.state.clone(), running.thread),
@@ -111,6 +113,7 @@ async fn the_running_and_queued_closures_are_the_pools_tasks() {
                 "{fixture}"
             );
         }
+
         assert!(
             matches!(
                 activities(&mut scenario).await.get(&pool),
@@ -145,6 +148,7 @@ async fn the_running_and_queued_closures_are_the_pools_tasks() {
             assert_eq!(stopped_thread(&mut scenario).await, pool, "{fixture}");
             assert_eq!(stopped_task(&mut scenario).await, *id, "{fixture}");
         }
+
         scenario.remove_breakpoint(runs.id).await;
         scenario.shutdown().await;
     }

@@ -8,11 +8,13 @@ use super::{
     CANCELLED, COMPLETE, Census, Cursor, Instance, List, MAX_TASKS, NOTIFIED, RUNNING, Tasks,
     TokioRuntime,
 };
+
 use crate::runtime_model::futures::{self, AsyncFrameKind, ChainEnd};
 use crate::runtime_model::records;
 use crate::runtime_model::{
     Partial, RuntimeStop, RuntimeTask, StartedTask, TaskPage, TaskRef, ThreadActivity,
 };
+
 use crate::{RecordedPlace, StackSegment, TaskState, ThreadId, VirtualAddress};
 
 /// One task of a list, checked: it belongs to the list, its vtable is a
@@ -49,6 +51,7 @@ impl TokioRuntime {
                 return;
             }
         };
+
         let resume = match cursor {
             Cursor::Start => Some((0, 0, None)),
             Cursor::Node(header) => match self.locate(stop, census, tasks, header) {
@@ -60,18 +63,22 @@ impl TokioRuntime {
             },
             Cursor::Blocking(_) => None,
         };
+
         if let Some((first, mut shard, mut node)) = resume {
             for &runtime in census.runtimes.iter().skip(first) {
                 if self.list_page(stop, census, runtime, (shard, node), limit, page) {
                     return;
                 }
+
                 (shard, node) = (0, None);
             }
         }
+
         let start = match cursor {
             Cursor::Blocking(index) => index,
             Cursor::Start | Cursor::Node(_) => 0,
         };
+
         let blocking = self.blocking(stop, census, tasks, &mut page.gaps);
         for (index, task) in (0..)
             .zip(blocking)
@@ -80,10 +87,12 @@ impl TokioRuntime {
             if program_only && task.internal {
                 continue;
             }
+
             if page.value.tasks.len() == limit {
                 page.value.next = Some(Cursor::Blocking(index).encode());
                 return;
             }
+
             page.value.tasks.push(task);
         }
     }
@@ -109,8 +118,10 @@ impl TokioRuntime {
                 return false;
             }
         };
+
         let flavor = runtime.flavor.describe();
         let shard_start = (shard, node.is_some());
+
         // A list read with no shard changing or damaged holds its count.
         let mut whole = true;
         let mut total = 0;
@@ -127,6 +138,7 @@ impl TokioRuntime {
                             .into(),
                         );
                     }
+
                     (head, locked)
                 }
                 Err(reason) => {
@@ -136,6 +148,7 @@ impl TokioRuntime {
                     continue;
                 }
             };
+
             let (mut at, mut previous) = node.take().unwrap_or((head, records::NULL));
             let mut walked = 0;
             while at != records::NULL {
@@ -151,6 +164,7 @@ impl TokioRuntime {
                     );
                     break;
                 }
+
                 match self.node(stop, tasks, &list, at, previous) {
                     // A page ends only before a task the next can list.
                     Ok(_) if page.value.tasks.len() == limit => {
@@ -167,6 +181,7 @@ impl TokioRuntime {
                         walked += 1;
                         total += 1;
                     }
+
                     // A shard being changed may disagree with itself
                     // anywhere, which its gap already says.
                     Err(_) if changing => break,
@@ -183,8 +198,10 @@ impl TokioRuntime {
                     }
                 }
             }
+
             shard += 1;
         }
+
         // A list one page reads whole holds its count. One that pages read
         // in parts is not counted, which would read it all again, so that
         // a page costs what its own tasks do.
@@ -197,6 +214,7 @@ impl TokioRuntime {
                 .into(),
             );
         }
+
         false
     }
 
@@ -218,6 +236,7 @@ impl TokioRuntime {
             })?;
             return Ok((head, false));
         }
+
         let owned = self.owned(runtime.flavor)?;
         let at = list
             .shards
@@ -244,6 +263,7 @@ impl TokioRuntime {
             records::word(stop, address)
                 .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
         };
+
         let owner = word(header.wrapping_add(tasks.owner))?;
         if owner != list.id {
             return Err(format!(
@@ -252,6 +272,7 @@ impl TokioRuntime {
             )
             .into());
         }
+
         let (vtable, trailer) = self.trailer(stop, tasks, header)?;
         let back = VirtualAddress::new(word(trailer.wrapping_add(tasks.prev))?);
         if back != previous {
@@ -260,6 +281,7 @@ impl TokioRuntime {
             )
             .into());
         }
+
         let id_offset = word(vtable.wrapping_add(tasks.id_offset))?;
         Ok(Node {
             id: word(header.wrapping_add(id_offset))?,
@@ -279,6 +301,7 @@ impl TokioRuntime {
             records::word(stop, address)
                 .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
         };
+
         let vtable = VirtualAddress::new(word(header.wrapping_add(tasks.vtable))?);
         self.checked_vtable(stop, vtable)?;
         let offset = word(vtable.wrapping_add(tasks.trailer_offset))?;
@@ -301,6 +324,7 @@ impl TokioRuntime {
             if list.id != owner {
                 continue;
             }
+
             let (vtable, trailer) = self.trailer(stop, tasks, header)?;
             let id_offset =
                 records::word(stop, vtable.wrapping_add(tasks.id_offset)).ok_or_else(stale)?;
@@ -311,8 +335,10 @@ impl TokioRuntime {
             if self.follows(stop, tasks, runtime, &list, shard, previous)? != header {
                 return Err(stale());
             }
+
             return Ok((index, shard, Some((header, previous))));
         }
+
         Err(stale())
     }
 
@@ -330,6 +356,7 @@ impl TokioRuntime {
         if previous == records::NULL {
             return Ok(self.shard(stop, runtime, list, shard)?.0);
         }
+
         let (_, trailer) = self.trailer(stop, tasks, previous)?;
         records::pointer(stop, trailer.wrapping_add(tasks.next))
             .ok_or_else(|| format!("the task at {previous:#x} is unreadable").into())
@@ -358,18 +385,22 @@ impl TokioRuntime {
         {
             return Ok(Some((header, found)));
         }
+
         let (mut at, _) = self.shard(stop, runtime, &list, shard)?;
         let mut previous = records::NULL;
         for _ in 0..=list.count {
             if at == records::NULL {
                 return Ok(None);
             }
+
             let found = self.node(stop, tasks, &list, at, previous)?;
             if found.id == number {
                 return Ok(Some((at, found)));
             }
+
             (previous, at) = (at, found.next);
         }
+
         Err(format!("a shard holds more than its runtime's {} tasks", list.count).into())
     }
 
@@ -381,6 +412,7 @@ impl TokioRuntime {
         task: TaskRef,
     ) -> Result<Option<RuntimeTask>, Arc<str>> {
         let tasks = self.task_layout()?;
+
         // A runtime whose list cannot be read may hold the task, so it is
         // absent only once every list was read.
         let mut unreadable = None;
@@ -399,6 +431,7 @@ impl TokioRuntime {
                 Err(reason) => unreadable = unreadable.or(Some(reason)),
             }
         }
+
         let mut gaps = Vec::new();
         if let Some(found) = self
             .blocking(stop, census, tasks, &mut gaps)
@@ -407,6 +440,7 @@ impl TokioRuntime {
         {
             return Ok(Some(found));
         }
+
         unreadable
             .or_else(|| gaps.into_iter().next())
             .map_or(Ok(None), |reason| {
@@ -427,6 +461,7 @@ impl TokioRuntime {
         thread: ThreadId,
     ) -> Result<ThreadActivity, Arc<str>> {
         let context = self.context()?;
+
         // A program whose sets cannot be read says so in its pages of tasks.
         let locals = self.locals().ok().flatten();
         let found = Self::thread_context(stop, context, locals, thread)?;
@@ -437,6 +472,7 @@ impl TokioRuntime {
                 flavor: Flavor::Local,
                 handle: set,
             };
+
             if self
                 .listed(stop, self.task_layout()?, set, number, None)?
                 .is_some()
@@ -447,26 +483,32 @@ impl TokioRuntime {
                 });
             }
         }
+
         let Some((found, runtime)) = found.and_then(|found| Some((found, found.runtime?))) else {
             return Ok(ThreadActivity::Outside);
         };
+
         let between = match (found.worker, runtime.flavor, found.entered) {
             (true, Flavor::MultiThread, _) | (false, _, false) => ThreadActivity::Idle,
             _ => ThreadActivity::Outside,
         };
+
         let Some(number) = found.task else {
             return Ok(between);
         };
+
         let running = ThreadActivity::Task {
             number,
             stack: StackSegment::Task,
         };
+
         // A pool thread runs its closure's task, as the blocking tasks list
         // it. One that entered the runtime blocks on it, or is a worker
         // whose launch has not yet set its scheduler.
         if !found.worker {
             return Ok(if found.entered { between } else { running });
         }
+
         Ok(
             match self.listed(stop, self.task_layout()?, runtime, number, None)? {
                 Some(_) => running,
@@ -502,6 +544,7 @@ impl TokioRuntime {
                             .into(),
                         );
                     }
+
                     let labels = self
                         .list(stop, runtime)
                         .map_or_else(|_| Vec::new(), |list| label(census, runtime, list.id));
@@ -513,6 +556,7 @@ impl TokioRuntime {
                 Err(reason) => gaps.push(format!("queued blocking tasks: {reason}").into()),
             }
         }
+
         found.extend(
             census
                 .threads
@@ -562,6 +606,7 @@ impl TokioRuntime {
         if length > capacity || capacity > MAX_TASKS || (capacity > 0 && head >= capacity) {
             return Err(format!("its queue holds {length} of {capacity} from slot {head}").into());
         }
+
         let mut queued = Vec::new();
         for index in 0..length {
             let slot = (head + index) % capacity;
@@ -576,6 +621,7 @@ impl TokioRuntime {
                 ..task(word(header.wrapping_add(id_offset))?, header.get())
             });
         }
+
         Ok((queued, pool.lock.is_held(lock)))
     }
 }
@@ -601,10 +647,12 @@ impl TokioRuntime {
         if length > MAX_PATH {
             return None;
         }
+
         let mut path = vec![0; usize::try_from(length).ok()?];
         if !stop.read(file, &mut path) {
             return None;
         }
+
         Some(RecordedPlace {
             path: String::from_utf8(path).ok()?.into(),
             line: u32::try_from(records::read(stop, location.wrapping_add(spawns.line), 4)?)
@@ -637,11 +685,13 @@ impl TokioRuntime {
         let number = records::word(stop, header.wrapping_add(id_offset)).ok_or_else(unreadable)?;
         let (future, ty) = self.future(stop, header)?;
         let chain = futures::walk(self.image.as_ref(), stop, future, ty);
+
         // A task that has not begun has a root coroutine that has not
         // either; a woken one has run.
         if schedules && chain.end != ChainEnd::Unresumed {
             return Ok(None);
         }
+
         let coroutine = chain.frames.last().and_then(|root| match root.kind {
             AsyncFrameKind::Coroutine { .. } => Some(root.ty),
             AsyncFrameKind::Leaf => None,
@@ -683,6 +733,7 @@ fn label(census: &Census, runtime: Instance, list: u64) -> crate::runtime_model:
     if census.runtimes.len() < 2 {
         return Vec::new();
     }
+
     vec![(
         "runtime".into(),
         format!("{} {list}", runtime.flavor.describe()).into(),
@@ -701,6 +752,7 @@ fn owned_task(
         Flavor::Local => thread.local == Some(runtime.handle),
         _ => thread.runtime == Some(runtime) && thread.worker,
     };
+
     let thread = census
         .threads
         .iter()
@@ -726,11 +778,13 @@ fn owned_task(
     } else {
         (TaskState::Blocked, "suspended")
     };
+
     let detail = if cancelled && node.state & COMPLETE == 0 {
         format!("{detail}, cancelled")
     } else {
         detail.to_owned()
     };
+
     RuntimeTask {
         thread: thread.filter(|_| state == TaskState::Running),
         state,

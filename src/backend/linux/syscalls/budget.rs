@@ -8,8 +8,10 @@ use std::collections::VecDeque;
 
 /// The most bytes of a string or buffer kept once strings are capped.
 pub const CAPPED_BYTES: u32 = 16;
+
 /// The most elements of an array kept once strings are capped.
 pub const CAPPED_ELEMENTS: u32 = 4;
+
 /// The sparsest sampling before only counting: one call in this many.
 pub const SPARSEST: u32 = 64;
 
@@ -18,6 +20,7 @@ pub const SPARSEST: u32 = 64;
 pub enum Step {
     DropStacks,
     CapStrings,
+
     /// Send one call in this many, and count the rest.
     Sample(u32),
     CountOnly,
@@ -54,14 +57,17 @@ impl Budget {
         if stacks {
             steps.push_back(Step::DropStacks);
         }
+
         if long_strings {
             steps.push_back(Step::CapStrings);
         }
+
         let mut every = 2;
         while every <= SPARSEST {
             steps.push_back(Step::Sample(every));
             every *= 2;
         }
+
         steps.push_back(Step::CountOnly);
         Self { percent, steps }
     }
@@ -100,6 +106,7 @@ mod tests {
         while let Some(step) = budget.after(30_000_000, second) {
             taken.push(step);
         }
+
         assert_eq!(
             taken,
             [

@@ -44,6 +44,7 @@ pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
     if let Some(hint) = &error.hint {
         let _ = write!(output, "\nhint: {hint}");
     }
+
     output
 }
 
@@ -75,6 +76,7 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
         } else {
             renderer.paint(Role::Alias, &aliases).to_string()
         };
+
         let _ = write!(
             output,
             "\n  {}{}  {rendered_aliases}{}  {}",
@@ -84,6 +86,7 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
             command.summary
         );
     }
+
     if !aliases.is_empty() {
         let width = aliases.keys().map(String::len).max().unwrap_or(0);
         output.push_str("\n\naliases from the settings:");
@@ -95,6 +98,7 @@ pub fn help(aliases: &BTreeMap<String, String>, renderer: Renderer) -> String {
             );
         }
     }
+
     output.push_str("\n\nUse `help <command>` for aliases and usage.");
     output
 }
@@ -115,6 +119,7 @@ pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
             renderer.paint(Role::Alias, aliases)
         );
     }
+
     if command.takes_arguments() {
         let _ = write!(
             output,
@@ -123,6 +128,7 @@ pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
             command.usage
         );
     }
+
     output
 }
 
@@ -148,11 +154,13 @@ fn catchpoint_line(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> Strin
     } else {
         names.join(", ")
     };
+
     let phase = match catchpoint.phase {
         uscope::CatchPhase::Entry => "at entry",
         uscope::CatchPhase::Exit => "at exit",
         uscope::CatchPhase::Both => "at entry and exit",
     };
+
     let condition = catchpoint
         .condition
         .as_ref()
@@ -170,6 +178,7 @@ pub fn catchpoints(catchpoints: &[uscope::Catchpoint], renderer: Renderer) -> St
     if catchpoints.is_empty() {
         return renderer.paint(Role::Metadata, "no catchpoints").to_string();
     }
+
     catchpoints
         .iter()
         .map(|catchpoint| {
@@ -213,6 +222,7 @@ fn hit_condition(
     if !condition.may_stop_after(hit_count) {
         text.push_str(" (no later hit can stop)");
     }
+
     Some(text)
 }
 
@@ -239,6 +249,7 @@ fn catchpoint_ids(ids: &[uscope::CatchpointId], renderer: Renderer) -> String {
     } else {
         "catchpoints"
     };
+
     let ids: Vec<String> = ids
         .iter()
         .map(|id| renderer.paint(Role::Metadata, format!("c{id}")).to_string())
@@ -290,6 +301,7 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
         }
         (None, None) => {}
     }
+
     if let Some(message) = &breakpoint.log_message {
         let _ = write!(
             options,
@@ -297,16 +309,20 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
             renderer.paint(Role::Value, message)
         );
     }
+
     if let [only] = placed {
         return format!("{heading} at {}{options}", self::placed(only, renderer));
     }
+
     let mut output = if placed.is_empty() {
         format!("{heading}, pending until a module with its code loads{options}")
     } else {
         format!("{heading} at {} locations{options}", placed.len())
     };
+
     for location in placed {
         let described = self::placed(location, renderer);
+
         // A location without a source line already says its address.
         if location.source.is_none() {
             let _ = write!(output, "\n  {described}");
@@ -318,6 +334,7 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
             );
         }
     }
+
     output
 }
 
@@ -325,9 +342,11 @@ pub fn breakpoint(breakpoint: &Breakpoint, placed: &[Placed], renderer: Renderer
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
     pub location: BreakpointLocation,
+
     /// The innermost function, inline or not, containing it.
     pub function: Option<Arc<str>>,
     pub source: Option<(Arc<PathBuf>, LineNumber)>,
+
     /// The module containing it, unless it is the program's own.
     pub module: Option<Arc<PathBuf>>,
 }
@@ -351,6 +370,7 @@ pub fn placed(placed: &Placed, renderer: Renderer) -> String {
         ),
         (None, None) => breakpoint_location(placed.location, renderer),
     };
+
     if let Some(module) = &placed.module {
         let name = module.file_name().map_or_else(
             || module.display().to_string(),
@@ -358,6 +378,7 @@ pub fn placed(placed: &Placed, renderer: Renderer) -> String {
         );
         let _ = write!(output, " in {}", renderer.paint(Role::Name, name));
     }
+
     output
 }
 
@@ -398,11 +419,13 @@ pub fn breakpoints(rows: &[(&Breakpoint, Vec<Placed>)], renderer: Renderer) -> S
     if rows.is_empty() {
         return renderer.paint(Role::Metadata, "no breakpoints").to_string();
     }
+
     let (branch, last) = if renderer.unicode() {
         ("\u{251c} ", "\u{2514} ")
     } else {
         ("|- ", "`- ")
     };
+
     let mut table = Table::new(&["Id", "On", "Hits", "Where", "Options"], &[2]);
     for (breakpoint, placed) in rows {
         let place = match placed.as_slice() {
@@ -414,6 +437,7 @@ pub fn breakpoints(rows: &[(&Breakpoint, Vec<Placed>)], renderer: Renderer) -> S
                 several.len()
             ),
         };
+
         let mut options = counted_options(
             breakpoint.hit_condition,
             breakpoint.hit_count,
@@ -423,12 +447,15 @@ pub fn breakpoints(rows: &[(&Breakpoint, Vec<Placed>)], renderer: Renderer) -> S
         if let Some(message) = &breakpoint.log_message {
             options.push(format!("log \"{}\"", renderer.paint(Role::Value, message)));
         }
+
         if breakpoint.temporary {
             options.push("temporary".to_owned());
         }
+
         if placed.is_empty() {
             options.push(renderer.paint(Role::Warning, "pending").to_string());
         }
+
         table.row(
             vec![
                 renderer.paint(Role::Metadata, breakpoint.id).to_string(),
@@ -459,6 +486,7 @@ pub fn breakpoints(rows: &[(&Breakpoint, Vec<Placed>)], renderer: Renderer) -> S
             },
         );
     }
+
     table.render(3, renderer)
 }
 
@@ -486,11 +514,14 @@ fn counted_options(
         if !hit.may_stop_after(hit_count) {
             text.push_str(" (no later hit can stop)");
         }
+
         options.push(text);
     }
+
     if let Some(condition) = condition {
         options.push(format!("if {}", renderer.paint(Role::Value, condition)));
     }
+
     options
 }
 
@@ -498,6 +529,7 @@ fn counted_options(
 /// lines beneath it that start where the column `beneath` does.
 struct Table {
     headings: Vec<String>,
+
     /// The columns aligned right, as counts are.
     right: &'static [usize],
     rows: Vec<(Vec<String>, Vec<String>)>,
@@ -518,6 +550,7 @@ impl Table {
 
     fn render(self, beneath: usize, renderer: Renderer) -> String {
         let columns = self.headings.len();
+
         // A last column every row leaves empty is not shown.
         let shown = if self
             .rows
@@ -528,6 +561,7 @@ impl Table {
         } else {
             columns
         };
+
         let widths = (0..shown)
             .map(|column| {
                 self.rows
@@ -549,6 +583,7 @@ impl Table {
                 if column > 0 {
                     line.push_str("  ");
                 }
+
                 if self.right.contains(&column) {
                     line.push_str(&padding);
                     line.push_str(cell);
@@ -559,8 +594,10 @@ impl Table {
                     }
                 }
             }
+
             line.trim_end().to_owned()
         };
+
         let headings = self
             .headings
             .iter()
@@ -575,6 +612,7 @@ impl Table {
                     .map(|text| format!("{}{text}", " ".repeat(indent))),
             );
         }
+
         lines.join("\n")
     }
 }
@@ -589,6 +627,7 @@ fn visible_width(text: &str) -> usize {
             width += 1;
             continue;
         }
+
         match characters.next() {
             // A control sequence ends at its final byte.
             Some('[') => {
@@ -598,12 +637,14 @@ fn visible_width(text: &str) -> usize {
                     }
                 }
             }
+
             // An operating system command, such as a link, ends at ST.
             Some(']') => {
                 while let Some(character) = characters.next() {
                     if character == '\u{7}' {
                         break;
                     }
+
                     if character == '\u{1b}' && characters.peek() == Some(&'\\') {
                         characters.next();
                         break;
@@ -613,6 +654,7 @@ fn visible_width(text: &str) -> usize {
             _ => {}
         }
     }
+
     width
 }
 
@@ -631,6 +673,7 @@ fn watch_scope_suffix(scope: &WatchScope) -> String {
         WatchScope::Frame { thread, activation } => {
             format!(" (frame {activation} of thread {thread})")
         }
+
         // The watch follows the task's stack wherever its runtime moves it.
         WatchScope::Task { task, activation } => {
             format!(" (frame {activation:#x} below the top of task {task}'s stack)")
@@ -656,6 +699,7 @@ pub fn watchpoint_set(watchpoint: &Watchpoint, renderer: Renderer) -> String {
             renderer.paint(Role::Value, condition)
         );
     }
+
     output
 }
 
@@ -679,6 +723,7 @@ pub fn watchpoints(watchpoints: &[Watchpoint], renderer: Renderer) -> String {
     if watchpoints.is_empty() {
         return renderer.paint(Role::Metadata, "no watchpoints").to_string();
     }
+
     let mut table = Table::new(&["Id", "On", "Hits", "Watching", "Where", "Options"], &[2]);
     for watchpoint in watchpoints {
         let mut options = vec![watchpoint.access.to_string()];
@@ -707,6 +752,7 @@ pub fn watchpoints(watchpoints: &[Watchpoint], renderer: Renderer) -> String {
             Vec::new(),
         );
     }
+
     table.render(3, renderer)
 }
 
@@ -765,6 +811,7 @@ pub fn watchpoint_hits(
             } else {
                 format!(" in thread {}", renderer.paint(Role::Metadata, hit.thread))
             };
+
             format!(
                 "{} by {}{}{thread}{}",
                 renderer.paint(Role::Current, "stopped"),
@@ -991,6 +1038,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
             } else {
                 " ".to_owned()
             };
+
             let state = match &thread.state {
                 ThreadState::Running => "running".to_owned(),
                 ThreadState::Stopped {
@@ -998,6 +1046,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                 } => format!("stopped: {}", stop(reason, renderer)),
                 ThreadState::Stopped { reason: None } => "stopped".to_owned(),
             };
+
             let name = thread
                 .name
                 .as_ref()
@@ -1015,6 +1064,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                         StackSegment::Signal => " on its signal stack",
                         _ => "",
                     };
+
                     format!(
                         " — {}{place}",
                         renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
@@ -1027,6 +1077,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                 ),
                 Some(ThreadActivity::Outside) | None => String::new(),
             };
+
             format!(
                 "{marker} {}{name} {state}{activity}",
                 renderer.paint(Role::Metadata, thread.id)
@@ -1044,6 +1095,7 @@ pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer
     } else {
         " ".to_owned()
     };
+
     let detail = task
         .detail
         .as_deref()
@@ -1113,6 +1165,7 @@ pub fn task_labels(task: &TaskSnapshot) -> Option<String> {
             format!("{text:?}")
         }
     };
+
     (!task.labels.is_empty()).then(|| {
         let pairs = task
             .labels
@@ -1224,10 +1277,12 @@ pub fn register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
             output
         })
     };
+
     let digits = match byte_order {
         ByteOrder::Little => digits(&mut bytes.iter().rev()),
         ByteOrder::Big => digits(&mut bytes.iter()),
     };
+
     format!("0x{digits}")
 }
 
@@ -1241,11 +1296,13 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
             if index == HEX_DUMP_BYTES_PER_LINE / 2 {
                 hexadecimal.push(' ');
             }
+
             match bytes.get(index) {
                 Some(byte) => _ = write!(hexadecimal, "{byte:02x} "),
                 None => _ = hexadecimal.write_str("   "),
             }
         }
+
         let ascii = (0..HEX_DUMP_BYTES_PER_LINE)
             .map(|index| match bytes.get(index) {
                 Some(byte @ 0x20..=0x7e) => char::from(*byte),
@@ -1260,6 +1317,7 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
             renderer.paint(Role::Value, ascii)
         ));
     }
+
     if let MemoryReadCompletion::Incomplete {
         next_address,
         reason,
@@ -1279,6 +1337,7 @@ pub fn memory_read(read: &MemoryRead, renderer: Renderer) -> String {
                 .to_string(),
         );
     }
+
     bound_output(&lines.join("\n"))
 }
 
@@ -1309,6 +1368,7 @@ pub fn source_context(
             renderer.paint(Role::Current, context.location.line)
         ));
     }
+
     for line in context.lines.iter() {
         let current = line.number == context.location.line;
         let (marker, role) = if current {
@@ -1319,23 +1379,27 @@ pub fn source_context(
         } else {
             ("  ".to_owned(), Role::Metadata)
         };
+
         let breakpoint = match breakpoints.get(&line.number) {
             Some(enabled) => enabled_mark(*enabled, renderer),
             None if margin => " ".to_owned(),
             None => String::new(),
         };
+
         lines.push(format!(
             "{breakpoint}{marker} {} | {}",
             renderer.paint(role, format_args!("{:>line_width$}", line.number)),
             text(line)
         ));
     }
+
     lines.join("\n")
 }
 
 /// One module `info modules` lists.
 pub struct ModuleRow {
     pub path: Arc<PathBuf>,
+
     /// Where it is loaded, once it is.
     pub load_bias: Option<uscope::LoadBias>,
     pub image: Option<Arc<uscope::ModuleImage>>,
@@ -1360,11 +1424,13 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
             (_, None) => "not loaded".to_owned(),
             (None, Some(_)) => "?".to_owned(),
         };
+
         let described = match &module.image {
             Some(image) if image.functions().len() != 0 => "debug",
             Some(image) if image.symbols().next().is_some() => "symbols",
             _ => "none",
         };
+
         lines.push(format!(
             "{}  {described:<7}  {}",
             renderer.paint(Role::Metadata, format!("{range:<29}")),
@@ -1387,6 +1453,7 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
             )),
             None => {}
         }
+
         if let Some(problem) = module
             .image
             .as_deref()
@@ -1395,6 +1462,7 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
             lines.push(format!("  {}", renderer.paint(Role::Warning, problem)));
         }
     }
+
     lines.join("\n")
 }
 
@@ -1436,12 +1504,14 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
                     }
                     ModuleIdentity::DumpedMemory => "read from the dump".to_owned(),
                 };
+
                 // A file found under a sysroot or in a module path is named.
                 let file = if module.path == core_module.recorded_path {
                     String::new()
                 } else {
                     format!(" from {}", module.path.display())
                 };
+
                 format!("module {}{file} {identity}", module.module.id)
             }
             CoreModuleState::Missing => {
@@ -1455,12 +1525,14 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
                     .to_string()
             }
         };
+
         lines.push(format!(
             "  {} {} {state}",
             renderer.paint(Role::Metadata, core_module.start),
             core_module.recorded_path.display()
         ));
     }
+
     lines.join("\n")
 }
 
@@ -1510,18 +1582,22 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
     if let Some(function) = function {
         return function.name.to_string();
     }
+
     let Some(symbol) = symbol else {
         return "<unknown>".to_owned();
     };
+
     let mut name = symbol
         .demangled_name()
         .unwrap_or_else(|| symbol.name.to_string());
     if symbol.offset != 0 {
         let _ = write!(name, "+{:#x}", symbol.offset);
     }
+
     if symbol.provenance == SymbolExtentProvenance::Inferred {
         name.push_str(" (unsized symbol)");
     }
+
     name
 }
 
@@ -1531,6 +1607,7 @@ pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> Strin
     if targets.is_empty() {
         return "no calls on this line".to_owned();
     }
+
     let mut text = "calls on this line:".to_owned();
     for target in targets {
         let callee = target.callee.as_deref().map_or_else(
@@ -1549,6 +1626,7 @@ pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> Strin
             renderer.paint(Role::Metadata, format!("{:#018x}", target.call.get()))
         );
     }
+
     text
 }
 
@@ -1561,6 +1639,7 @@ pub fn address_description(description: &AddressDescription, renderer: Renderer)
             renderer.paint(Role::Metadata, description.address)
         );
     };
+
     let place = module.image.section.as_ref().map_or_else(
         || {
             format!(
@@ -1598,6 +1677,7 @@ pub fn disassembly_modules(disassembly: &Disassembly) -> BTreeSet<ModuleId> {
         DisassemblyView::Function { blocks, .. } => blocks,
         DisassemblyView::Window { block, .. } => std::slice::from_ref(block),
     };
+
     blocks
         .iter()
         .flat_map(|block| block.instructions.iter())
@@ -1630,6 +1710,7 @@ pub fn disassembly(
                 } => " (symbol)",
                 FunctionOrigin::Symbol { .. } => " (unsized symbol)",
             };
+
             let module = module_name(modules, function.module)
                 .map(|name| format!(" in {}", renderer.paint(Role::Metadata, name)))
                 .unwrap_or_default();
@@ -1652,6 +1733,7 @@ pub fn disassembly(
                         renderer.paint(Role::Metadata, block.range.end)
                     ));
                 }
+
                 disassembly_block(
                     &mut lines,
                     block,
@@ -1663,6 +1745,7 @@ pub fn disassembly(
                 );
             }
         }
+
         DisassemblyView::Window {
             address,
             boundary,
@@ -1672,6 +1755,7 @@ pub fn disassembly(
             if let Some(note) = target_boundary_note(*address, *boundary) {
                 lines.push(renderer.paint(Role::Warning, note).to_string());
             }
+
             if let Some(shortfall) = leading {
                 lines.push(
                     renderer
@@ -1679,6 +1763,7 @@ pub fn disassembly(
                         .to_string(),
                 );
             }
+
             disassembly_block(
                 &mut lines,
                 block,
@@ -1690,6 +1775,7 @@ pub fn disassembly(
             );
         }
     }
+
     lines.join("\n")
 }
 
@@ -1717,6 +1803,7 @@ fn disassembly_block(
                 |symbol| format!(" <{}>:", code_name(None, Some(symbol))),
             )
     };
+
     let place_width = block
         .instructions
         .iter()
@@ -1742,6 +1829,7 @@ fn disassembly_block(
                     .to_string(),
             );
         }
+
         source = current_source;
 
         let marker = if Some(instruction.address) == program_counter {
@@ -1749,6 +1837,7 @@ fn disassembly_block(
         } else {
             "  ".to_owned()
         };
+
         let bytes = instruction_bytes(&instruction.bytes, show_bytes.then_some(bytes_width));
         let text = match &instruction.content {
             InstructionContent::Decoded(decoded) => instruction_text(
@@ -1763,6 +1852,7 @@ fn disassembly_block(
                 .paint(Role::Warning, "(truncated by unreadable memory)")
                 .to_string(),
         };
+
         lines.push(format!(
             "{marker} {}{}{bytes} {text}",
             renderer.paint(
@@ -1783,6 +1873,7 @@ fn disassembly_block(
             );
         }
     }
+
     match block.completion {
         BlockCompletion::Complete => {}
         BlockCompletion::Unreadable { address, reason } => lines.push(
@@ -1833,6 +1924,7 @@ fn instruction_bytes(bytes: &[u8], width: Option<usize>) -> String {
     let Some(width) = width else {
         return String::new();
     };
+
     let text = bytes.iter().fold(String::new(), |mut text, byte| {
         let _ = write!(text, "{byte:02x} ");
         text
@@ -1856,17 +1948,20 @@ pub fn instruction_text(
             InstructionTokenKind::Number | InstructionTokenKind::Address => Some(Role::Value),
             _ => None,
         };
+
         match role {
             Some(role) => _ = write!(text, "{}", renderer.paint(role, &token.text)),
             None => _ = write!(text, "{}", token.text),
         }
     }
+
     let slot = match decoded.indirect_target.as_deref() {
         Some(IndirectTarget::Memory { slot, .. } | IndirectTarget::Unreadable { slot, .. }) => {
             Some(slot.address)
         }
         _ => None,
     };
+
     for reference in decoded.references.iter() {
         // The indirect target below names the memory holding it.
         if reference.kind == InstructionReferenceKind::MemoryOperand
@@ -1874,9 +1969,11 @@ pub fn instruction_text(
         {
             continue;
         }
+
         let Some(name) = reference_name(&reference.description, module, modules) else {
             continue;
         };
+
         let name = renderer.paint(Role::Name, format!("<{name}>"));
         match reference.kind {
             InstructionReferenceKind::BranchTarget => _ = write!(text, " {name}"),
@@ -1889,9 +1986,11 @@ pub fn instruction_text(
             }
         }
     }
+
     if let Some(target) = decoded.indirect_target.as_deref() {
         indirect_target_text(&mut text, target, stopped, module, modules, renderer);
     }
+
     text
 }
 
@@ -1913,8 +2012,10 @@ fn indirect_target_text(
         if let Some(name) = reference_name(description, module, modules) {
             let _ = write!(text, " {}", renderer.paint(Role::Name, format!("<{name}>")));
         }
+
         text
     };
+
     let arrow = renderer.paint(Role::Muted, "->");
     match target {
         IndirectTarget::Register { target } => {
@@ -1934,6 +2035,7 @@ fn indirect_target_text(
                 described(target)
             );
         }
+
         IndirectTarget::Unreadable {
             slot,
             address,
@@ -1983,11 +2085,13 @@ pub fn reference_name(
         (None, Some(section)) => format!("{}+{:#x}", section.name, section.offset),
         (None, None) => return None,
     };
+
     if Some(module.module) != from
         && let Some(file) = module_name(modules, module.module)
     {
         let _ = write!(name, " in {file}");
     }
+
     Some(name)
 }
 
@@ -2049,6 +2153,7 @@ pub fn backtrace(
 ) -> String {
     let shown = limit.unwrap_or(usize::MAX).min(trace.frames.len());
     let mut lines = Vec::with_capacity(shown + 1);
+
     // Where a stack continues on another, each run of frames says whose
     // stack it is on.
     let switches = trace
@@ -2062,6 +2167,7 @@ pub fn backtrace(
     } else {
         runtime_runs(trace, shown, selected)
     };
+
     let note = |lines: &mut Vec<String>, frames: std::ops::Range<usize>| {
         for future in trace.unfollowed.iter().filter(|future| {
             usize::try_from(future.driver.get()).is_ok_and(|level| frames.contains(&level))
@@ -2073,6 +2179,7 @@ pub fn backtrace(
             );
         }
     };
+
     let mut label = |lines: &mut Vec<String>, frame: &StackFrame| {
         if switches && segment != Some(frame.segment) {
             segment = Some(frame.segment);
@@ -2086,6 +2193,7 @@ pub fn backtrace(
             );
         }
     };
+
     for (index, (frame, iterates)) in trace.frames[..shown].iter().zip(iterators).enumerate() {
         if let Some(run) = folded.iter().find(|run| run.contains(&index)) {
             if run.start == index {
@@ -2106,8 +2214,10 @@ pub fn backtrace(
                         .to_string(),
                 );
             }
+
             continue;
         }
+
         label(&mut lines, frame);
         note(&mut lines, index..index + 1);
         lines.push(stack_frame(
@@ -2120,6 +2230,7 @@ pub fn backtrace(
             renderer,
         ));
     }
+
     let more = trace.frames.len() - shown;
     lines.push(if more == 0 {
         format!(
@@ -2149,6 +2260,7 @@ pub fn backtrace(
 /// stack stopped, and the selected frame, are always shown.
 fn runtime_runs(trace: &Backtrace, shown: usize, selected: u32) -> Vec<std::ops::Range<usize>> {
     let frames = &trace.frames[..shown];
+
     // A frame that drives a future is shown with it, or with why it is not.
     let mut kept = trace
         .frames
@@ -2167,6 +2279,7 @@ fn runtime_runs(trace: &Backtrace, shown: usize, selected: u32) -> Vec<std::ops:
     let Some(dispatch) = dispatch else {
         return machinery_runs(frames, &kept);
     };
+
     let mut runs = machinery_runs(&frames[..=dispatch], &kept);
     let below = dispatch + 1..frames.len();
     if below.len() >= 2 {
@@ -2176,6 +2289,7 @@ fn runtime_runs(trace: &Backtrace, shown: usize, selected: u32) -> Vec<std::ops:
             _ => runs.push(below),
         }
     }
+
     runs
 }
 
@@ -2188,6 +2302,7 @@ fn machinery_runs(frames: &[StackFrame], kept: &BTreeSet<u32>) -> Vec<std::ops::
             && !kept.contains(&frame.level)
             && (runtime(frame) || frame.role == CodeRole::Wrapper)
     };
+
     let mut runs = Vec::new();
     let mut start = 0;
     while start < frames.len() {
@@ -2198,11 +2313,14 @@ fn machinery_runs(frames: &[StackFrame], kept: &BTreeSet<u32>) -> Vec<std::ops::
         {
             end += 1;
         }
+
         if end - start >= 2 && frames[start..end].iter().any(runtime) {
             runs.push(start..end);
         }
+
         start = end.max(start + 1);
     }
+
     runs
 }
 
@@ -2259,12 +2377,14 @@ pub fn stack_frame(
             )
         )
     });
+
     // A function that left by a tail call is no activation of its own.
     let tail = if frame.kind == uscope::FrameKind::TailCall {
         format!(" {}", renderer.paint(Role::Metadata, "[tail call]"))
     } else {
         String::new()
     };
+
     // A suspended task's frames run nowhere until it resumes, and the
     // future it awaits runs no code of its own.
     let address = frame
@@ -2275,6 +2395,7 @@ pub fn stack_frame(
         uscope::FrameKind::Async { .. } => " in async",
         _ => " in",
     };
+
     // An awaited future says what it waits for.
     let awaiting = frame
         .awaiting
@@ -2305,6 +2426,7 @@ pub fn stack_frame(
             },
             {
                 let name = frame_code(frame, images);
+
                 // A Rust function's or future's arguments can run to
                 // hundreds of characters; a backtrace keeps its path and its
                 // name.
@@ -2340,6 +2462,7 @@ pub fn elide_arguments(name: &str) -> String {
                 if depth == 0 {
                     opened = at;
                 }
+
                 depth += 1;
                 continue;
             }
@@ -2353,18 +2476,22 @@ pub fn elide_arguments(name: &str) -> String {
                         elided.push_str(list);
                     }
                 }
+
                 continue;
             }
             _ => {}
         }
+
         if depth == 0 {
             elided.push(character);
         }
     }
+
     // An unbalanced list is left as it was written.
     if depth > 0 {
         return name.to_owned();
     }
+
     elided
 }
 
@@ -2376,6 +2503,7 @@ pub fn frame_code(frame: &StackFrame, images: &BTreeMap<ModuleId, Arc<ModuleImag
         let image = images.values().find(|image| image.id() == ty.image);
         return awaited(image.map(AsRef::as_ref), ty);
     }
+
     code_name(frame.function.as_ref(), frame.symbol.as_ref())
 }
 
@@ -2396,6 +2524,7 @@ pub fn awaited_frame(image: Option<&ModuleImage>, frame: &StackFrame) -> Option<
     let uscope::FrameKind::Awaited { ty, .. } = frame.kind else {
         return None;
     };
+
     let name = awaited(image, ty);
     Some(match &frame.awaiting {
         Some(awaiting) => format!("{name} — {awaiting}"),
@@ -2427,6 +2556,7 @@ pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
                 uscope::GlobalVariableType::Malformed(_) => "<malformed type>",
                 _ => "<unknown type>",
             };
+
             format!(
                 "{} ({})",
                 renderer.paint(Role::Name, &entry.variable.qualified_name),
@@ -2454,6 +2584,7 @@ pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
                 .to_string(),
         );
     }
+
     lines.join("\n")
 }
 
@@ -2527,10 +2658,12 @@ pub fn view_explanation(
         }
         None => lines.push("no view binds, so it shows as stored".to_owned()),
     }
+
     if !explanation.candidates.is_empty() {
         lines.push("views tried, in order:".to_owned());
         lines.extend(candidate_lines(&explanation.candidates, "  "));
     }
+
     lines.extend(drawing_lines(&explanation.visualizers, ""));
     lines.join("\n")
 }
@@ -2541,6 +2674,7 @@ fn drawing_lines(drawings: &[uscope::VisualizerBinding], indent: &str) -> Vec<St
     if drawings.is_empty() {
         return Vec::new();
     }
+
     let mut lines = vec![format!("{indent}drawings, which only the web page draws:")];
     lines.extend(drawings.iter().map(|drawing| {
         drawing.rejection.as_ref().map_or_else(
@@ -2589,6 +2723,7 @@ pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -
     if types.is_empty() {
         return format!("no type is named `{name}`");
     }
+
     let mut lines = Vec::new();
     for views in types {
         lines.push(format!(
@@ -2606,12 +2741,15 @@ pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -
             }
             None => lines.push("  no view binds".to_owned()),
         }
+
         if !views.candidates.is_empty() {
             lines.push("  views tried, in order:".to_owned());
             lines.extend(candidate_lines(&views.candidates, "    "));
         }
+
         lines.extend(drawing_lines(&views.visualizers, "  "));
     }
+
     lines.join("\n")
 }
 
@@ -2634,6 +2772,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             ));
         }
     }
+
     let extended = check
         .types
         .iter()
@@ -2648,6 +2787,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             ));
         }
     }
+
     let refused = check
         .types
         .iter()
@@ -2667,15 +2807,18 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
                 .any(|candidate| !uscope::is_built_in_view(&candidate.view));
         }
     }
+
     if !check.unused.is_empty() {
         failed = true;
         lines.push("views that present no type:".to_owned());
         lines.extend(check.unused.iter().map(|view| format!("  {view}")));
     }
+
     failed |= unbound_drawings(check, &mut lines);
     if lines.is_empty() {
         lines.push("no view's pattern names any type".to_owned());
     }
+
     // A kernel is shown as what it is built from, to be reviewed as that.
     if !check.kernels.is_empty() {
         lines.push("kernels, and what they are built from:".to_owned());
@@ -2690,6 +2833,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             }));
         }
     }
+
     // A renderer runs only in the web page, in its sandbox, and is shown
     // as its source, to be reviewed as that.
     if !check.renderers.is_empty() {
@@ -2705,6 +2849,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             }));
         }
     }
+
     (lines.join("\n"), failed)
 }
 
@@ -2730,6 +2875,7 @@ fn unbound_drawings(check: &uscope::ViewCheck, lines: &mut Vec<String>) -> bool 
     if unbound.is_empty() {
         return false;
     }
+
     lines.push("drawings that do not bind:".to_owned());
     lines.extend(unbound.iter().map(|(view, line, name, rejection)| {
         format!("  {name} by {view}, line {line}: {rejection}")
@@ -2843,6 +2989,7 @@ mod tests {
             for alias in aliases(command) {
                 assert!(words.contains(&alias), "{alias} in {row}");
             }
+
             let detail = command_help(command, renderer);
             assert!(detail.contains(command.summary));
             assert_eq!(detail.contains("\n  usage:"), command.takes_arguments());

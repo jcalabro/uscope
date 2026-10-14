@@ -168,6 +168,7 @@ impl App {
         if !self.is_own_page(headers) {
             return None;
         }
+
         let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
         self.session
             .tokens()
@@ -180,6 +181,7 @@ impl App {
                 .get(name)
                 .and_then(|value: &HeaderValue| value.to_str().ok())
         };
+
         self.origins
             .allows(text(header::HOST), text(header::ORIGIN))
     }
@@ -220,6 +222,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         debuginfod: args.debuginfod,
         ..uscope::DebugFileOptions::default()
     };
+
     let session = Session::new(cwd, link_base, tokens, debug_files, args.views.clone());
     session.resume_attached(args.resume);
     let app = Arc::new(App {
@@ -256,11 +259,13 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         if let Some(public) = &app.public {
             writeln!(stdout, "pages are served through {}", public.url())?;
         }
+
         writeln!(stdout, "open {link}")?;
         writeln!(stdout, "anyone with this link can control the program")?;
         if keys.is_some() {
             writeln!(stdout, "press o to open it in your browser")?;
         }
+
         stdout.flush()?;
     }
 
@@ -283,15 +288,19 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         served = axum::serve(listener, router) => served.context("the server failed"),
         () = terminated => Ok(()),
     };
+
     if let Some(starting) = starting {
         // Whatever it started is ended below, not left half launched.
         // Loading cannot be interrupted, so a large program is waited for.
         if !starting.is_finished() {
             eprintln!("uscope web: stopping once the program has loaded");
         }
+
         let _ = starting.await;
     }
+
     session.shutdown().await;
+
     // Recordings end with the server, and so do the programs they run.
     let profiles = Arc::clone(&app_profiles);
     let _ = tokio::task::spawn_blocking(move || profiles.shutdown()).await;
@@ -311,6 +320,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/visualizer-frame", get(frame::frame))
         .fallback(get(page))
         .with_state(app);
+
     // Behind a proxy, nothing outside the public URL's path is served.
     if base.is_empty() {
         api
@@ -334,6 +344,7 @@ fn what_to_serve(
         Some(path) if args.core.is_none() => open_profile(profiles, path)?,
         _ => None,
     };
+
     for path in &args.more_profiles {
         anyhow::ensure!(
             profile.is_some(),
@@ -343,6 +354,7 @@ fn what_to_serve(
         open_profile(profiles, path)?
             .with_context(|| format!("{} is not a profile", path.display()))?;
     }
+
     Ok(if profile.is_some() {
         (None, profile)
     } else {
@@ -358,11 +370,13 @@ fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result
             .with_context(|| format!("reading {}", path.display()))?;
         return Ok(Some(id));
     }
+
     // Only a regular file is read here: a program may be one that blocks
     // its reader, such as a FIFO, which the page is served while loading.
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         return Ok(None);
     }
+
     let mut magic = [0; 8];
     let read = std::fs::File::open(path)
         .and_then(|mut file| std::io::Read::read(&mut file, &mut magic))
@@ -370,6 +384,7 @@ fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result
     if uscope::profiler::Format::of_file(path, &magic[..read]).is_none() {
         return Ok(None);
     }
+
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let id = profiles
         .add(path, &bytes)
@@ -381,6 +396,7 @@ fn start_from(args: &WebArgs) -> Option<Start> {
     if let Some(pid) = args.attach {
         return Some(Start::Attach(ProcessId::new(pid)));
     }
+
     if let Some(core) = &args.core {
         let mut options = CoreDumpOptions::new(core.clone());
         options.executable.clone_from(&args.executable);
@@ -388,6 +404,7 @@ fn start_from(args: &WebArgs) -> Option<Start> {
         options.module_paths.clone_from(&args.module_paths);
         return Some(Start::Core(options));
     }
+
     let program = args.executable.clone()?;
     Some(Start::Launch {
         spec: LaunchSpec {
@@ -407,12 +424,14 @@ async fn bind(args: &WebArgs) -> Result<tokio::net::TcpListener> {
             .await
             .with_context(|| format!("cannot listen on {address}"));
     }
+
     let loopback = |port| SocketAddr::from(([127, 0, 0, 1], port));
     if let Some(port) = args.port {
         return tokio::net::TcpListener::bind(loopback(port))
             .await
             .with_context(|| format!("cannot listen on port {port}"));
     }
+
     match tokio::net::TcpListener::bind(loopback(DEFAULT_PORT)).await {
         Ok(listener) => Ok(listener),
         Err(_) => tokio::net::TcpListener::bind(loopback(0))
@@ -429,6 +448,7 @@ async fn socket(
     let Some(role) = app.authorize(&headers) else {
         return (StatusCode::FORBIDDEN, "join with a link first").into_response();
     };
+
     let session = Arc::clone(&app.session);
     let profiles = Arc::clone(&app.profiles);
     upgrade
@@ -441,9 +461,11 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, body: String) ->
     if !app.is_own_page(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+
     if app.session.tokens().role(body.trim()).is_none() {
         return (StatusCode::FORBIDDEN, "this link is not for this server").into_response();
     }
+
     let cookie = auth::set_cookie(app.port, body.trim(), app.public.as_ref());
     HeaderValue::from_str(&cookie).map_or_else(
         |_| StatusCode::BAD_REQUEST.into_response(),
@@ -461,12 +483,15 @@ async fn download(
     if app.authorize(&headers).is_none() {
         return StatusCode::FORBIDDEN.into_response();
     }
+
     let Some((name, bytes)) = app.profiles.file(&id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+
     let Ok(bytes) = bytes else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+
     // Only characters a file name and a header both take.
     let name: String = name
         .chars()
@@ -505,17 +530,21 @@ async fn page(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
     if !app.known_host(&headers) {
         return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
     }
+
     if uri.path().starts_with("/api/") {
         return StatusCode::NOT_FOUND.into_response();
     }
+
     let Some(asset) = assets::find(uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+
     let cache = if asset.immutable {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
     };
+
     // Through a proxy the page may sit in a frame of the proxy's own pages.
     let csp = if app.public.is_some() {
         "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
@@ -524,11 +553,13 @@ async fn page(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) -> Resp
         "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
          frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
     };
+
     let body = if asset.page {
         assets::rooted(&asset.bytes, app.base())
     } else {
         asset.bytes.into_owned()
     };
+
     (
         [
             (header::CONTENT_TYPE, asset.media_type),

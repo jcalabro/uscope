@@ -16,6 +16,7 @@ use super::terminal::{Renderer, Role};
 
 /// The most bytes one command renders.
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
+
 pub const OUTPUT_TRUNCATION_MARKER: &str = "<truncated: OutputBytes>";
 const ANSI_RESET: &str = "\u{1b}[0m";
 
@@ -40,10 +41,12 @@ impl BoundedOutput {
         if self.truncated {
             return;
         }
+
         if self.value.len() + text.len() <= self.limit {
             self.value.push_str(text);
             return;
         }
+
         let marker_bytes = OUTPUT_TRUNCATION_MARKER.len().min(self.limit);
         let ansi = self.value.contains('\u{1b}') || text.contains('\u{1b}');
         let reset_bytes = if ansi && self.limit >= marker_bytes + ANSI_RESET.len() {
@@ -51,16 +54,19 @@ impl BoundedOutput {
         } else {
             0
         };
+
         let content_limit = self.limit - marker_bytes - reset_bytes;
         if self.value.len() > content_limit {
             let end = safe_ansi_prefix_end(&self.value, content_limit);
             self.value.truncate(end);
         }
+
         let end = safe_ansi_prefix_end(text, content_limit - self.value.len());
         self.value.push_str(&text[..end]);
         if reset_bytes != 0 {
             self.value.push_str(ANSI_RESET);
         }
+
         self.value.push_str(
             &OUTPUT_TRUNCATION_MARKER
                 [..floor_char_boundary(OUTPUT_TRUNCATION_MARKER, marker_bytes)],
@@ -89,6 +95,7 @@ fn floor_char_boundary(text: &str, limit: usize) -> usize {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
+
     end
 }
 
@@ -99,6 +106,7 @@ fn safe_ansi_prefix_end(text: &str, limit: usize) -> usize {
     let Some(escape) = text[..end].rfind('\u{1b}') else {
         return end;
     };
+
     let sequence = &text.as_bytes()[escape..end];
     if sequence.get(1) != Some(&b'[')
         || !sequence
@@ -107,6 +115,7 @@ fn safe_ansi_prefix_end(text: &str, limit: usize) -> usize {
     {
         return escape;
     }
+
     end
 }
 
@@ -180,13 +189,16 @@ pub fn variables_marked(
     if let Some(first) = lines.next() {
         output.push_str(&first);
     }
+
     for line in lines {
         if output.is_truncated() {
             break;
         }
+
         output.push_str("\n");
         output.push_str(&line);
     }
+
     output.into_string()
 }
 
@@ -196,6 +208,7 @@ pub fn variable_summary(variable: &Variable, renderer: Renderer) -> String {
     if variable.kind == VariableKind::Returned {
         return format!("{} {line}", renderer.paint(Role::Metadata, "returned"));
     }
+
     line
 }
 
@@ -203,12 +216,14 @@ fn variable_line(variable: &Variable, renderer: Renderer) -> String {
     let Some(type_info) = &variable.type_info else {
         return untyped(&variable.name, &variable.state, renderer);
     };
+
     let value = match state_failure(&variable.state) {
         Some((role, failure)) => renderer.paint(role, failure).to_string(),
         None => renderer
             .paint(Role::Value, state_summary(type_info, &variable.state))
             .to_string(),
     };
+
     assignment(&type_info.name, &variable.name, &value, renderer)
 }
 
@@ -247,6 +262,7 @@ fn stored_text(state: &VariableState) -> Option<&Arc<uscope::TextSummary>> {
     else {
         return None;
     };
+
     let from_view = presentation
         .as_ref()
         .is_some_and(|presentation| presentation.shape == PresentedShape::Text);
@@ -267,6 +283,7 @@ fn rendered_summary(type_info: &TypeInfo, state: &VariableState, raw: bool) -> S
             {
                 return presentation.summary.to_string();
             }
+
             let summary = value_summary(type_info, value, children);
             let summary = match (stored_text(state), value) {
                 (None, _) => summary,
@@ -276,6 +293,7 @@ fn rendered_summary(type_info: &TypeInfo, state: &VariableState, raw: bool) -> S
                 }
                 (Some(text), _) => uscope::quoted_text(text),
             };
+
             match presentation.as_ref().filter(|_| !raw) {
                 Some(presentation) => format!("{summary} {}", view_failure(presentation)),
                 None => summary,
@@ -310,11 +328,14 @@ pub fn range(expression: &str, page: &ValueChildPage, renderer: Renderer) -> Str
         if values.is_truncated() {
             break;
         }
+
         if index != 0 {
             values.push_str(", ");
         }
+
         values.push_str(&item);
     }
+
     bound_output(&format!(
         "{} = [{}]",
         renderer.paint(Role::Name, expression),
@@ -327,6 +348,7 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
         ValueChildren::Available(reference) => reference.total(),
         _ => 0,
     };
+
     match value {
         VariableValue::Scalar(value) => {
             uscope::scalar_text(value, uscope::characters_of(type_info))
@@ -424,16 +446,22 @@ const fn is_leaf(value: &VariableValue) -> bool {
 pub struct Layout {
     /// Whether groups that do not fit the width break across lines.
     pub pretty: bool,
+
     /// The columns a pretty value fits in.
     pub width: usize,
+
     /// The columns each nested line is indented by.
     pub indent: usize,
+
     /// Whether integers show in hexadecimal.
     pub hexadecimal: bool,
+
     /// Whether values show as stored, without their views.
     pub raw: bool,
+
     /// The most aggregate levels expanded.
     pub max_depth: u64,
+
     /// The most children shown per aggregate.
     pub max_elements: u64,
 }
@@ -489,9 +517,11 @@ impl Builder {
         let Some((open, mut items, item)) = self.frames.pop() else {
             return;
         };
+
         if !item.is_empty() {
             items.push(item);
         }
+
         self.current().push(Doc::Group { open, items, close });
     }
 
@@ -505,6 +535,7 @@ impl Builder {
         while !self.frames.is_empty() {
             self.close(String::new());
         }
+
         self.root
     }
 }
@@ -530,6 +561,7 @@ fn compact(docs: &[Doc], output: &mut BoundedOutput) {
         if output.is_truncated() {
             return;
         }
+
         match doc {
             Doc::Text(text) => output.push_str(text),
             Doc::Group { open, items, close } => {
@@ -538,8 +570,10 @@ fn compact(docs: &[Doc], output: &mut BoundedOutput) {
                     if index != 0 {
                         output.push_str(", ");
                     }
+
                     compact(item, output);
                 }
+
                 output.push_str(close);
             }
         }
@@ -561,12 +595,14 @@ fn pretty(
         if output.is_truncated() {
             return;
         }
+
         let after = flat_width(&docs[index + 1..]) + trailing;
         match doc {
             Doc::Text(text) => {
                 output.push_str(text);
                 *column += text.chars().count();
             }
+
             Doc::Group { items, .. }
                 if items.is_empty()
                     || *column + flat_width(std::slice::from_ref(doc)) + after <= layout.width =>
@@ -577,6 +613,7 @@ fn pretty(
             Doc::Group { open, items, close } => {
                 output.push_str(open);
                 let inner = indent + layout.indent;
+
                 // A sequence of leaves fills each line rather than taking
                 // one line per element.
                 let fill = open.ends_with('[')
@@ -593,10 +630,12 @@ fn pretty(
                         output.push_str(" ");
                         *column += 1;
                     }
+
                     pretty(item, layout, inner, 1, column, output);
                     output.push_str(",");
                     *column += 1;
                 }
+
                 output.push_str("\n");
                 output.push_str(&" ".repeat(indent));
                 output.push_str(close);
@@ -632,6 +671,7 @@ fn hexadecimal_text(type_info: &TypeInfo, state: &VariableState) -> Option<Strin
         } => *value,
         _ => return None,
     };
+
     // An exact integer has no width: a negative one keeps its sign.
     let width = type_info
         .byte_size
@@ -646,6 +686,7 @@ fn hexadecimal_text(type_info: &TypeInfo, state: &VariableState) -> Option<Strin
             } else {
                 (1_u128 << width) - 1
             };
+
             Some(format!("{:#x}", value.cast_unsigned() & mask))
         }
         (IntegerValue::Signed(value), None) => Some(format!("{value:#x}")),
@@ -677,6 +718,7 @@ pub async fn expanded(
         if output.full() {
             break;
         }
+
         let (boxed, depth) = match item {
             Work::Text(text) => {
                 output.text(text);
@@ -692,6 +734,7 @@ pub async fn expanded(
             }
             Work::State(boxed, depth) => (boxed, depth),
         };
+
         let (type_info, state) = &*boxed;
         let VariableState::Available {
             value,
@@ -703,7 +746,9 @@ pub async fn expanded(
             output.text(state_summary(type_info, state));
             continue;
         };
+
         let presentation = presentation.as_deref().filter(|_| !raw);
+
         // A view's elements show inside its summary's brackets; any other
         // presentation is its summary.
         if let Some(presentation) = presentation
@@ -728,6 +773,7 @@ pub async fn expanded(
                 output.text(number.unwrap_or_else(|| presentation.summary.to_string()));
                 continue;
             };
+
             let length = match count {
                 PresentedCount::Exact(count) => format!("len={count}"),
                 PresentedCount::AtLeast(count) => format!("len>={count}"),
@@ -736,6 +782,7 @@ pub async fn expanded(
                     continue;
                 }
             };
+
             let count = count.known();
             let page = first_children(debugger, reference, count, layout, &mut remaining).await?;
             let (opening, closing) = if shape == PresentedShape::Map {
@@ -743,14 +790,17 @@ pub async fn expanded(
             } else {
                 ("[", "]")
             };
+
             output.open(format!("{length} {opening}"));
             work.push(Work::Close(closing.to_owned()));
             schedule_children(&mut work, count, page.as_ref(), depth + 1, raw, &[]);
             continue;
         }
+
         if let Some(presentation) = presentation {
             work.push(Work::Text(format!(" {}", view_failure(presentation))));
         }
+
         // Strings show as their text rather than their parts.
         if stored_text(state).is_some() || is_leaf(value) {
             let hexadecimal = layout
@@ -760,14 +810,17 @@ pub async fn expanded(
             output.text(hexadecimal.unwrap_or_else(|| rendered_summary(type_info, state, true)));
             continue;
         }
+
         if depth >= remaining.aggregate_depth.min(layout.max_depth) {
             output.text("<truncated: AggregateDepth>".to_owned());
             continue;
         }
+
         let ValueChildren::Available(reference) = children else {
             output.text(value_summary(type_info, value, children));
             continue;
         };
+
         if let Some(resource) = [
             (InspectionLimit::ValueNodes, remaining.value_nodes),
             (InspectionLimit::MemoryReads, remaining.memory_reads),
@@ -793,6 +846,7 @@ pub async fn expanded(
             VariableValue::Array { .. } | VariableValue::Slice { .. } => {
                 ("[".to_owned(), "]".to_owned())
             }
+
             // A closure is its function and what it captured.
             VariableValue::Function { code, function } => (
                 format!("{} {{", uscope::function_text(*code, function.as_deref())),
@@ -808,10 +862,12 @@ pub async fn expanded(
             VariableValue::Union => ("{".to_owned(), "} <active member unknown>".to_owned()),
             _ => ("{".to_owned(), "}".to_owned()),
         };
+
         let dimensions = match value {
             VariableValue::Array { dimensions } => dimensions.as_ref(),
             _ => &[],
         };
+
         output.open(opening);
         work.push(Work::Close(closing));
         schedule_children(
@@ -823,6 +879,7 @@ pub async fn expanded(
             dimensions,
         );
     }
+
     let docs = output.finish();
     let mut text = BoundedOutput::new(OUTPUT_LIMIT);
     if layout.pretty {
@@ -832,6 +889,7 @@ pub async fn expanded(
     } else {
         compact(&docs, &mut text);
     }
+
     Ok(assignment(
         &type_info.name,
         name,
@@ -853,6 +911,7 @@ async fn first_children(
     if requested == 0 {
         return Ok(None);
     }
+
     let page = debugger
         .value_children_with_limits(
             reference.clone(),
@@ -905,10 +964,12 @@ fn schedule_children(
                 ValueChildRelationship::Raw => "[raw] = ".to_owned(),
                 _ => "<child> = ".to_owned(),
             };
+
             let (opened, closed) = match &child.relationship {
                 ValueChildRelationship::ArrayElement { indices, .. } => rows(dimensions, indices),
                 _ => (0, 0),
             };
+
             open_rows += opened;
             open_rows -= closed.min(open_rows);
             vec![
@@ -921,12 +982,14 @@ fn schedule_children(
             ]
         })
         .collect::<Vec<_>>();
+
     // Elements cut short inside a row leave it open.
     if open_rows > 0
         && let Some(last) = items.last_mut()
     {
         last.push(Work::Text("]".repeat(open_rows)));
     }
+
     let mut items = items
         .into_iter()
         .chain(
@@ -950,6 +1013,7 @@ fn rows(dimensions: &[ArrayDimension], indices: &[i128]) -> (usize, usize) {
     if dimensions.len() < 2 || indices.len() != dimensions.len() {
         return (0, 0);
     }
+
     let edge = |last: bool| {
         dimensions
             .iter()
@@ -966,6 +1030,7 @@ fn rows(dimensions: &[ArrayDimension], indices: &[i128]) -> (usize, usize) {
             })
             .count()
     };
+
     (edge(false), edge(true))
 }
 
@@ -987,11 +1052,13 @@ pub fn watched_bytes(
     let Some(bytes) = bytes else {
         return "<unreadable>".to_owned();
     };
+
     let little_endian = |bytes: &[u8]| {
         let mut word = [0_u8; 16];
         word[..bytes.len()].copy_from_slice(bytes);
         u128::from_le_bytes(word)
     };
+
     match (
         type_info.and_then(|info| watched_scalar(info, image)),
         bytes.len(),
@@ -1043,6 +1110,7 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
             TypeKind::Pointer { .. } | TypeKind::Reference { .. } => {
                 return Some(WatchedScalar::Address);
             }
+
             TypeKind::Modified { target, .. }
             | TypeKind::Named {
                 target: Some(target),
@@ -1050,10 +1118,12 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
             } => *target,
             _ => return None,
         };
+
         current = image
             .filter(|image| image.id() == next.image)?
             .type_info(next)?;
     }
+
     None
 }
 
@@ -1068,9 +1138,11 @@ pub fn type_definition(
     let info_of = |reference: uscope::TypeReference| {
         images.iter().find_map(|image| image.type_info(reference))
     };
+
     let name_of = |reference: uscope::TypeReference| {
         info_of(reference).map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
     };
+
     let name = type_info.qualified_name();
     let members = |keyword: &str, members: &[uscope::RecordMember]| {
         let mut output = format!("type = {keyword} {name} {{\n");
@@ -1079,6 +1151,7 @@ pub fn type_definition(
                 uscope::RecordMemberLayout::BitRange { bit_size, .. } => format!(" : {bit_size}"),
                 _ => String::new(),
             };
+
             let _ = writeln!(
                 output,
                 "    {} {}{bits};",
@@ -1086,9 +1159,11 @@ pub fn type_definition(
                 member.name.as_deref().unwrap_or("<anonymous>"),
             );
         }
+
         output.push('}');
         output
     };
+
     let mut output = match &type_info.kind {
         TypeKind::Record {
             kind,
@@ -1115,6 +1190,7 @@ pub fn type_definition(
                         IntegerValue::Unsigned(value) => value.to_string(),
                         _ => "?".to_owned(),
                     };
+
                     format!("{} = {value}", enumerator.name)
                 })
                 .collect::<Vec<_>>()
@@ -1122,6 +1198,7 @@ pub fn type_definition(
         ),
         _ => format!("type = {}", renderer.paint(Role::Type, &type_info.name)),
     };
+
     if let Some(identity) = type_info.identity.as_deref()
         && !identity.arguments.is_empty()
     {
@@ -1140,6 +1217,7 @@ pub fn type_definition(
             .collect::<Vec<_>>();
         let _ = write!(output, "\narguments: {}", arguments.join(", "));
     }
+
     output
 }
 
@@ -1184,6 +1262,7 @@ mod tests {
             completion: uscope::InspectionCompletion::Complete,
             usage: uscope::InspectionUsage::default(),
         };
+
         let state = VariableState::Malformed(uscope::VariableMalformedReason {
             kind: uscope::VariableMalformedKind::InvalidAttribute,
             description: "x".repeat(OUTPUT_LIMIT).into(),
@@ -1210,6 +1289,7 @@ mod tests {
         assert_eq!(character(39), r"39 '\''");
         assert_eq!(character(92), r"92 '\\'");
         assert_eq!(character(-1), "-1");
+
         // A byte above ASCII is part of a character in some encoding.
         assert_eq!(character(233), "233");
         assert_eq!(
@@ -1242,6 +1322,7 @@ mod tests {
             }),
             "3.125"
         );
+
         // Shortest round-trip digits, with an exponent where plain digits
         // would run to hundreds of zeros.
         let double = |value: f64| float(uscope::FloatValue::Binary64(value.to_bits()));
@@ -1258,6 +1339,7 @@ mod tests {
             float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
             "3.4028235e38"
         );
+
         // Formats Rust has no type for take as few digits as read back.
         let quad = |text: &str| {
             use rustc_apfloat::Float as _;
@@ -1269,12 +1351,14 @@ mod tests {
             .value;
             float(uscope::FloatValue::Binary128(value.to_bits()))
         };
+
         assert_eq!(quad("0.1"), "0.1");
         assert_eq!(quad("123456"), "123456");
         assert_eq!(quad("-1e30"), "-1e30");
         assert_eq!(quad("1e-9"), "1e-9");
         assert_eq!(quad("0.000001"), "0.000001");
         assert_eq!(float(uscope::FloatValue::Binary16(0x3e00)), "1.5");
+
         // The largest half is 65504, but 65500 reads back as it.
         assert_eq!(float(uscope::FloatValue::Binary16(0x7bff)), "65500");
         assert_eq!(float(uscope::FloatValue::Binary16(1)), "6e-8");

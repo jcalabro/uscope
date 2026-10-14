@@ -47,6 +47,7 @@ async fn dwarf_cfi_unwinds_and_finishes_across_the_compiler_and_linker_matrix() 
             trace.frames.len() >= 4,
             "backtrace was truncated: {trace:?}"
         );
+
         // Unwinding continues through libc's start code to its undefined
         // return address rather than stopping at the main image's boundary.
         assert_eq!(
@@ -121,6 +122,7 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
             sort > 1,
             "{fixture}: no libc frame was reconstructed: {frames:#?}"
         );
+
         // libc has no debug information, so its symbol tables name every
         // frame; so too the main image's start code, which has none either.
         for frame in trace.frames.iter() {
@@ -129,6 +131,7 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
                 "{fixture}: unnamed frame {frame:#?}"
             );
         }
+
         let start = trace.frames.last().expect("frames");
         assert_eq!(
             frames.last().map(|(module, _)| module.as_str()),
@@ -139,6 +142,7 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
             Some("_start"),
             "{fixture}: {start:#?}"
         );
+
         // glibc's entry code declares the return address undefined, so a
         // complete trace proves the walk crossed back through libc into _start.
         assert_eq!(
@@ -217,6 +221,7 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
             Some("abort"),
             "{fixture}: {trace:#?}"
         );
+
         // The stop location is described by the module that contains it.
         let location = scenario
             .operation("location", scenario.handle().current_location())
@@ -251,6 +256,7 @@ async fn go_stop(scenario: &mut Scenario, mut reason: StopReason) -> StopReason 
     while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
         reason = scenario.resume_to_stop().await;
     }
+
     reason
 }
 
@@ -294,15 +300,19 @@ async fn check_go_frame_pointers(scenario: &Scenario, trace: &uscope::Backtrace,
                 .and_then(|register| register.bytes.as_deref())
                 .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("a 64-bit register")))
         };
+
         physical.push((frame, register("rbp"), register("rsp")));
     }
+
     assert!(physical.len() >= 8, "{fixture}: {trace:#?}");
+
     // The innermost frame stopped in its prologue, and the outermost has
     // no caller to check it by.
     for pair in physical[1..].windows(2) {
         let [(frame, rbp, _), (_, _, caller_rsp)] = pair else {
             unreachable!("windows of two")
         };
+
         let context = format!(
             "{fixture}: frame {} {:?}",
             frame.level,
@@ -390,6 +400,7 @@ async fn go_backtraces_match_the_runtimes_own_frames_with_and_without_dwarf() {
                 )
             })
             .collect::<Vec<_>>();
+
         // The checkpoint recorded its callers' frames, which follow the
         // checkpoint's own and that of the function it stopped in.
         assert_eq!(frames[0].0, "main.reached", "{fixture}: {frames:#?}");
@@ -421,6 +432,7 @@ async fn go_backtraces_match_the_runtimes_own_frames_with_and_without_dwarf() {
 async fn backtraces_unwind_through_the_vdso() {
     for variant in ["gcc-o0", "gcc-o2", "clang-o2-nopie"] {
         let fixture = format!("vdso-{variant}");
+
         // clock_gettime faults in an unexported helper that libc calls;
         // time is the vDSO's own, called straight from the program.
         for (mode, caller) in [("clock", "vdso_clock"), ("time", "vdso_time")] {
@@ -440,10 +452,12 @@ async fn backtraces_unwind_through_the_vdso() {
             else {
                 panic!("{context}: the inferior is stopped");
             };
+
             let modules = scenario
                 .operation("modules", scenario.handle().loaded_modules())
                 .await;
             let vdso = support::vdso_module(&modules);
+
             // The kernel links its vDSO at zero.
             let mapping = support::vdso_mapping(process_id);
             assert_eq!(vdso.module.load_bias.get(), mapping.start, "{context}");
@@ -483,6 +497,7 @@ async fn backtraces_unwind_through_the_vdso() {
                 );
                 assert_eq!(level, 1, "{context}: {frames:#?}");
             }
+
             assert_eq!(
                 frames[level + 1],
                 (fixture.clone(), Some("main".to_owned())),
@@ -536,10 +551,12 @@ async fn backtraces_unwind_through_a_signal_handler() {
     let mut scenario = Scenario::launch("signals");
     scenario.add_breakpoint("handle_usr1").await;
     let mut reason = scenario.run_to_stop().await;
+
     // The signal itself stops first, and goes on to the program.
     while let StopReason::Exception(_) = reason {
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
@@ -558,14 +575,17 @@ async fn backtraces_unwind_through_a_signal_handler() {
             .position(|found| found.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("no {name} in {trace:#?}"))
     };
+
     assert_eq!(names[0].as_deref(), Some("handle_usr1"), "{trace:#?}");
     let trampoline = position("__restore_rt");
     assert_eq!(trampoline, 1, "{trace:#?}");
+
     // The trampoline and the interrupted frame are where they are, not
     // after a call.
     for frame in &trace.frames[trampoline..=trampoline + 1] {
         assert_eq!(frame.kind, uscope::FrameKind::Signal, "{trace:#?}");
     }
+
     let raise = position("raise");
     assert!(raise > trampoline + 1, "{trace:#?}");
     assert_eq!(
@@ -590,6 +610,7 @@ async fn backtraces_unwind_through_a_handler_on_an_alternate_stack() {
     while let StopReason::Exception(_) = reason {
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"

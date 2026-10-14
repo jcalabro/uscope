@@ -54,6 +54,7 @@ async fn disassembly_shows_each_frames_function_and_where_it_is() {
         .find(|instruction| instruction["address"] == inner["marked"])
         .expect("the program counter's instruction");
     assert!(!marked["tokens"].as_array().expect("tokens").is_empty());
+
     // A call names where it goes, so the page can follow it.
     let call = instructions(&inner)
         .iter()
@@ -136,8 +137,10 @@ async fn memory_reads_and_writes_at_the_stop_it_names() {
     key["expression"] = "req->key".into();
     let key = tab.ok("evaluate", key).await;
     let address = key["memory"].clone();
+
     // The array is stored in the request, sixteen bytes of it.
     assert_eq!(key["memoryBytes"], 16, "{key}");
+
     // A pointer's memory is its pointee, whose size it does not know.
     let mut req = at.clone();
     req["expression"] = "req".into();
@@ -149,9 +152,11 @@ async fn memory_reads_and_writes_at_the_stop_it_names() {
             json!({"stop": at["stop"], "address": address, "count": 5}),
         )
         .await;
+
     // "user:"
     assert_eq!(read["bytes"], "757365723a", "{read}");
     assert_eq!(read["unreadable"], Value::Null);
+
     // An unmapped page reads as far as it can, and says where it stopped.
     let unmapped = tab
         .ok(
@@ -236,6 +241,7 @@ async fn watchpoints_follow_expressions_and_addresses() {
     let gets = tab.ok("evaluate", gets).await;
     assert_eq!(gets["memoryBytes"], 8, "{gets}");
     let address = gets["memory"].clone();
+
     // Either case of prefix names an address.
     let target = format!(
         "{}:8",

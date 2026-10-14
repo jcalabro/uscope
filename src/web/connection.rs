@@ -19,6 +19,7 @@ use super::profiles::{self, Profiles};
 use super::protocol::{
     self, Envelope, ErrorBody, ErrorKind, Hello, ProfileList, Role, ServerMessage,
 };
+
 use super::session::Session;
 
 /// Answers waiting to be sent; a tab that stops reading slows only its own
@@ -71,6 +72,7 @@ pub async fn serve(
                 if changed.is_err() {
                     break;
                 }
+
                 let state = Arc::clone(&joined.state.borrow_and_update());
                 Message::Text(encode(&ServerMessage::State(state)))
             }
@@ -78,6 +80,7 @@ pub async fn serve(
                 if changed.is_err() {
                     break;
                 }
+
                 let list = ProfileList::clone(&listed.borrow_and_update());
                 Message::Text(encode(&ServerMessage::Profiles(list)))
             }
@@ -89,10 +92,12 @@ pub async fn serve(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         };
+
         if socket.send(outgoing).await.is_err() {
             break;
         }
     }
+
     session.leave(connection);
 }
 
@@ -118,6 +123,7 @@ fn dispatch(
             return;
         }
     };
+
     let session = Arc::clone(session);
     let profiles = Arc::clone(profiles);
     tokio::spawn(async move {
@@ -132,6 +138,7 @@ fn dispatch(
                 .await
                 .map(|result| (result, Vec::new())),
         };
+
         let answer = match answered {
             Ok((result, bytes)) => {
                 if !bytes.is_empty() {
@@ -146,6 +153,7 @@ fn dispatch(
                         return;
                     }
                 }
+
                 ServerMessage::Result { id, result }
             }
             Err(failure) => ServerMessage::Error {
@@ -153,6 +161,7 @@ fn dispatch(
                 error: failure.body(),
             },
         };
+
         let _ = answers.send(Message::Text(encode(&answer))).await;
     });
 }

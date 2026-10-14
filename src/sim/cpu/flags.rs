@@ -30,12 +30,15 @@ pub const fn sign_zero_parity(result: u64, bits: usize) -> u64 {
     if result & sign_bit(bits) != 0 {
         flags |= SIGN;
     }
+
     if result == 0 {
         flags |= ZERO;
     }
+
     if (result & 0xff).count_ones().is_multiple_of(2) {
         flags |= PARITY;
     }
+
     flags
 }
 
@@ -57,12 +60,15 @@ pub const fn add(a: u64, b: u64, carry: bool, bits: usize) -> (u64, u64) {
     if wide >> bits != 0 {
         flags |= CARRY;
     }
+
     if (a ^ result) & (b ^ result) & sign_bit(bits) != 0 {
         flags |= OVERFLOW;
     }
+
     if (a ^ b ^ result) & 0x10 != 0 {
         flags |= ADJUST;
     }
+
     (result, flags)
 }
 
@@ -74,12 +80,15 @@ pub const fn sub(a: u64, b: u64, borrow: bool, bits: usize) -> (u64, u64) {
     if (a as u128) < b as u128 + borrow as u128 {
         flags |= CARRY;
     }
+
     if (a ^ b) & (a ^ result) & sign_bit(bits) != 0 {
         flags |= OVERFLOW;
     }
+
     if (a ^ b ^ result) & 0x10 != 0 {
         flags |= ADJUST;
     }
+
     (result, flags)
 }
 
@@ -96,15 +105,18 @@ pub const fn shift_left(value: u64, count: u32, bits: usize) -> (u64, u64) {
     } else {
         (value << count) & mask(bits)
     };
+
     let mut flags = sign_zero_parity(result, bits);
     let carried = count as usize <= bits && (value >> (bits - count as usize)) & 1 != 0;
     if carried {
         flags |= CARRY;
     }
+
     // OF is defined for one-bit shifts: whether the sign changed.
     if ((result & sign_bit(bits) != 0) != carried) && count == 1 {
         flags |= OVERFLOW;
     }
+
     (result, flags)
 }
 
@@ -116,10 +128,12 @@ pub const fn shift_right(value: u64, count: u32, bits: usize) -> (u64, u64) {
     if count as usize <= bits && (value >> (count - 1)) & 1 != 0 {
         flags |= CARRY;
     }
+
     // OF is defined for one-bit shifts: the original sign.
     if count == 1 && value & sign_bit(bits) != 0 {
         flags |= OVERFLOW;
     }
+
     (result, flags)
 }
 
@@ -137,9 +151,11 @@ pub const fn shift_left_double(
     if (destination >> (bits - count as usize)) & 1 != 0 {
         flags |= CARRY;
     }
+
     if count == 1 && (result ^ destination) & sign_bit(bits) != 0 {
         flags |= OVERFLOW;
     }
+
     (result, flags)
 }
 

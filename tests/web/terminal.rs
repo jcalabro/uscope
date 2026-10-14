@@ -34,6 +34,7 @@ fn recording_browser(directory: &Path) -> PathBuf {
 fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_terminal() {
     let directory = ScratchDir::new("web-open");
     let browser = recording_browser(directory.path());
+
     // The PTY starts without echo; a person's terminal echoes lines.
     let mut command = Command::new("sh");
     command
@@ -68,13 +69,17 @@ fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_termin
         {
             break first.to_owned();
         }
+
         assert!(Instant::now() < deadline, "the browser never opened");
         std::thread::sleep(Duration::from_millis(10));
     };
+
     let [url, helper, helper_parent] = record.split(' ').collect::<Vec<_>>()[..] else {
         panic!("a link and two pids: {record}");
     };
+
     assert_eq!(url, link);
+
     // Whatever runs the browser is no child of the debugger, whose waiter
     // would otherwise reap it as one of the program's threads.
     assert_ne!(helper_parent, server.to_string());
@@ -98,6 +103,7 @@ fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_termin
             .contains(LocalFlags::ECHO | LocalFlags::ICANON),
         "the terminal echoes lines again"
     );
+
     // The helper leaves with uscope.
     crate::web::wait_gone(helper.parse().expect("a pid"));
 }

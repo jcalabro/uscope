@@ -15,10 +15,13 @@ use crate::sim::memory::AddressSpace;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserWatch {
     pub id: u64,
+
     /// The hardware spans covering it, as start and end.
     pub spans: Vec<(u64, u64)>,
+
     /// Whether loads count too.
     pub loads: bool,
+
     /// Whether the debugger reports every access, rather than only those
     /// that change the bytes or that its conditions let stop.
     pub every: bool,
@@ -47,20 +50,27 @@ pub type Watched = Vec<Option<Vec<Vec<u8>>>>;
 pub struct Watching {
     /// The watches the client was told exist, as it last knew them.
     pub watches: Vec<UserWatch>,
+
     /// Accesses to them no armed slot covered.
     pub unseen: Vec<UnseenWatch>,
+
     /// Hits lost to threads running on.
     pub lost: Vec<LostWatch>,
+
     /// Per thread, the watches it accessed since the world last looked.
     pub log: BTreeMap<Tid, BTreeSet<u64>>,
+
     /// The watches a store left as they were since the world last looked.
     pub unchanged: BTreeSet<u64>,
+
     /// Per watch, how many instructions accessed it since the world last
     /// looked, each of which raised one debug exception.
     pub counts: BTreeMap<u64, u64>,
+
     /// Per watch, the bytes each store since the world last looked left,
     /// where all were mapped.
     pub stored: BTreeMap<u64, Vec<Vec<u8>>>,
+
     /// The threads that executed an instruction since the world last
     /// looked.
     pub ran: BTreeSet<Tid>,
@@ -88,6 +98,7 @@ impl Watching {
         let Some(accessed) = self.log.get(&tid) else {
             return;
         };
+
         for watch in &self.watches {
             if watch.every && accessed.contains(&watch.id) {
                 self.lost.push(LostWatch {
@@ -106,6 +117,7 @@ impl Watching {
         if !debugged {
             return Vec::new();
         }
+
         self.watches
             .iter()
             .map(|watch| {
@@ -140,13 +152,16 @@ impl Watching {
                 if !overlaps || !(access.write || watch.loads) {
                     continue;
                 }
+
                 self.log.entry(tid).or_default().insert(watch.id);
                 if !std::mem::replace(&mut counted, true) {
                     *self.counts.entry(watch.id).or_default() += 1;
                 }
+
                 if access.write && before == after {
                     self.unchanged.insert(watch.id);
                 }
+
                 if access.write
                     && let Some(spans) = after
                 {
@@ -155,6 +170,7 @@ impl Watching {
                         .or_default()
                         .push(spans.concat());
                 }
+
                 let mut alone = Accesses::default();
                 alone.push(access);
                 if debug.hits(&alone) == 0 {

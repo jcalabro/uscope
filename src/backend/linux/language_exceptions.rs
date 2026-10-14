@@ -31,6 +31,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.sites_live() {
             self.sync_runtime_hooks()?;
         }
+
         Ok(previous)
     }
 
@@ -41,6 +42,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         let runtimes = self.runtimes(inferior);
         self.signals.set_runtime_handled(
             runtimes
@@ -75,6 +77,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|(address, site)| wanted.get(address) != Some(site))
             .map(|(address, _)| *address)
             .collect::<Vec<_>>();
+
         // Each hook is forgotten only once its trap is, so that a failed
         // removal is retried.
         for address in stale {
@@ -86,11 +89,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             )?;
             inferior.runtime_hooks.remove(&address);
         }
+
         let pid = inferior.memory_thread();
         for (address, site) in wanted {
             if inferior.runtime_hooks.contains_key(&address) {
                 continue;
             }
+
             self.ptrace.install_breakpoint(
                 pid,
                 &mut inferior.breakpoints,
@@ -99,6 +104,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             )?;
             inferior.runtime_hooks.insert(address, site);
         }
+
         Ok(())
     }
 
@@ -116,6 +122,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !self.exception_stops.stops(site.hook.filter.id) {
             return None;
         }
+
         let report = (|| {
             let runtime = self
                 .runtimes(inferior)
@@ -138,6 +145,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 None,
             ),
         };
+
         Some(StopReason::LanguageException(LanguageException {
             kind,
             message,
@@ -152,13 +160,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return;
         };
+
         let Some(stop) = inferior.public_stop.as_ref() else {
             return;
         };
+
         let (stop_id, context) = (stop.id, stop.selected);
         let Ok(trace) = self.backtrace(stop_id, &StackRoot::of_thread(pid)) else {
             return;
         };
+
         // The runtime whose hook the thread entered.
         let runtime = trace
             .frames
@@ -175,11 +186,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 return false;
             };
+
             self.modules
                 .get(&module)
                 .and_then(|module| module.image.source_file(source.file))
                 .is_some_and(|file| runtime.model.own_source(&file.path))
         };
+
         let Some(frame) = trace
             .frames
             .iter()
@@ -188,6 +201,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return;
         };
+
         debug_assert_eq!(
             context,
             crate::ExecutionContext::Thread(debug_thread_id(pid))

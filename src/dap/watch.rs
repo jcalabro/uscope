@@ -17,10 +17,12 @@ pub struct DataEntry {
     pub id: i64,
     data_id: String,
     access: WatchAccess,
+
     /// The condition and hit condition as the client wrote them, blank ones
     /// as none.
     conditions: Conditions,
     pub watchpoint: Result<WatchpointId, String>,
+
     /// Whether the console disabled its watchpoint, as the client was last
     /// told.
     disabled: bool,
@@ -42,6 +44,7 @@ impl Conditions {
                 .filter(|text| !text.is_empty())
                 .map(str::to_owned)
         };
+
         Self {
             condition: given(&breakpoint.condition),
             hit_condition: given(&breakpoint.hit_condition),
@@ -145,6 +148,7 @@ fn access_of(access_type: Option<&str>, mode: Option<&str>) -> Result<WatchAcces
         Some("store") => false,
         Some(other) => return Err(format!("unknown data breakpoint mode '{other}'")),
     };
+
     match (access_type, change) {
         (None | Some("write"), true) => Ok(WatchAccess::Change),
         (None | Some("write"), false) => Ok(WatchAccess::Write),
@@ -171,6 +175,7 @@ impl Session {
         let Ok(stop) = self.current_stop() else {
             return Ok(unwatchable("the program must be stopped to watch a value"));
         };
+
         let handle = self.target_handle()?;
         let (spec, description) = if arguments.as_address == Some(true) {
             let Some(address) = protocol::address(&arguments.name) else {
@@ -179,6 +184,7 @@ impl Session {
                     arguments.name
                 )));
             };
+
             let bytes = arguments
                 .bytes
                 .and_then(|bytes| u64::try_from(bytes).ok())
@@ -197,6 +203,7 @@ impl Session {
                 else {
                     return Ok(unwatchable(&format!("{} cannot be named", arguments.name)));
                 };
+
                 (context, path)
             } else {
                 let context = match arguments.frame_id {
@@ -205,11 +212,13 @@ impl Session {
                     })?,
                     None => stop.innermost(),
                 };
+
                 match uscope::Expression::parse(arguments.name.trim()) {
                     Ok(expression) => (context, expression),
                     Err(error) => return Ok(unwatchable(&error.to_string())),
                 }
             };
+
             match handle.at(context).resolve_watch_target(&expression).await {
                 Ok(target) => {
                     let description = format!(
@@ -224,6 +233,7 @@ impl Session {
                 Err(error) => return Ok(unwatchable(&error.to_string())),
             }
         };
+
         self.data.next_target += 1;
         let data_id = format!("data-{}", self.data.next_target);
         self.data.targets.insert(data_id.clone(), spec);
@@ -247,6 +257,7 @@ impl Session {
     ) -> Result<Value, ErrorBody> {
         let arguments =
             parse::<SetDataBreakpointsArguments>(arguments, "setDataBreakpoints arguments")?;
+
         // Before a program is loaded, nothing is watched, and each data
         // breakpoint says why.
         let handle = self.target_handle().ok();
@@ -261,6 +272,7 @@ impl Session {
                 (breakpoint, access)
             })
             .collect::<Vec<_>>();
+
         // Watchpoints use scarce debug registers, so release first, along
         // with those whose new conditions leave them unarmed. Kept entries
         // are keyed by their place in the request.
@@ -276,6 +288,7 @@ impl Session {
             let Ok(watchpoint) = entry.watchpoint else {
                 continue;
             };
+
             let options = index.map(|index| {
                 let conditions = Conditions::of(wanted[index].0);
                 let options = conditions.options();
@@ -285,6 +298,7 @@ impl Session {
                 kept.insert(index, self.amend_data(entry, conditions, options).await);
                 continue;
             }
+
             if let Some(handle) = &handle {
                 match handle.remove_watchpoint(watchpoint).await {
                     Ok(_) | Err(uscope::Error::WatchpointNotFound(_)) => {}
@@ -297,12 +311,14 @@ impl Session {
                     }
                 }
             }
+
             if let Some((index, conditions, Err(error))) = options {
                 entry.conditions = conditions;
                 entry.watchpoint = Err(error.to_string());
                 kept.insert(index, entry);
             }
         }
+
         let mut entries = Vec::new();
         for (index, (breakpoint, access)) in wanted.into_iter().enumerate() {
             let entry = match access {
@@ -330,8 +346,10 @@ impl Session {
                     disabled: false,
                 },
             };
+
             entries.push(entry);
         }
+
         let body = entries.iter().map(data_json).collect::<Vec<_>>();
         self.data.entries = entries;
         Ok(json!({"breakpoints": body}))
@@ -348,9 +366,11 @@ impl Session {
         if entry.conditions == conditions {
             return entry;
         }
+
         let (Ok(watchpoint), Ok(handle)) = (entry.watchpoint.clone(), self.target_handle()) else {
             return entry;
         };
+
         let amended = match handle
             .set_watchpoint_condition(watchpoint, options.condition)
             .await
@@ -361,10 +381,12 @@ impl Session {
                 .map(drop),
             Err(error) => Err(error),
         };
+
         entry.conditions = conditions;
         if let Err(error) = amended {
             entry.watchpoint = Err(error.to_string());
         }
+
         entry
     }
 
@@ -396,9 +418,11 @@ impl Session {
         let Ok(handle) = self.target_handle() else {
             return Ok(());
         };
+
         let Ok(snapshot) = handle.snapshot().await else {
             return Ok(());
         };
+
         let gone = self
             .data
             .entries
@@ -414,12 +438,14 @@ impl Session {
         for id in self.data.forget(&gone) {
             self.data_removed(id).await?;
         }
+
         // The console enables and disables watchpoints too.
         let mut changed = Vec::new();
         for entry in &mut self.data.entries {
             let Ok(id) = entry.watchpoint else {
                 continue;
             };
+
             let disabled = snapshot
                 .watchpoints
                 .iter()
@@ -429,6 +455,7 @@ impl Session {
                 changed.push(data_json(entry));
             }
         }
+
         for breakpoint in changed {
             self.client
                 .event(
@@ -437,6 +464,7 @@ impl Session {
                 )
                 .await?;
         }
+
         Ok(())
     }
 
@@ -466,6 +494,7 @@ impl Session {
                     .await?;
             }
         }
+
         Ok(())
     }
 
@@ -474,6 +503,7 @@ impl Session {
         let Ok(handle) = self.target_handle() else {
             return String::new();
         };
+
         let watchpoints = handle
             .snapshot()
             .await
@@ -493,6 +523,7 @@ impl Session {
                 let value = |bytes: Option<&[u8]>| {
                     crate::cli::value::watched_bytes(bytes, type_info, Some(image))
                 };
+
                 if hit.changed() {
                     format!(
                         "{subject} changed from {} to {}",

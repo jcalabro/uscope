@@ -59,6 +59,7 @@ async fn stepping_in_at_a_return_enters_its_deferred_calls() {
     use StepKind::{IntoSource, Out, OverSource};
     for fixture in BUILDS {
         let optimized = fixture.ends_with("o2");
+
         // Optimized, the compiler calls a function's few defers itself as
         // it returns; unoptimized, the runtime calls them at its closing
         // brace. Stepping out of one goes on through the runtime to the
@@ -77,6 +78,7 @@ async fn stepping_in_at_a_return_enters_its_deferred_calls() {
                 (Out, "main.direct", "direct return"),
             ]
         };
+
         walk(&mut scenario, fixture, &steps).await;
         scenario.shutdown().await;
 
@@ -113,6 +115,7 @@ async fn stepping_in_at_a_return_enters_its_deferred_calls() {
                 ],
             )
         };
+
         walk(&mut scenario, fixture, &first).await;
         assert_eq!(integer(&scenario, "note").await, Some(1), "{fixture}");
         walk(&mut scenario, fixture, &then).await;
@@ -139,6 +142,7 @@ async fn stepping_over_a_return_runs_its_deferred_calls() {
             ("looped return", "rescue call"),
         ] {
             let mut scenario = stopped_at(fixture, from).await;
+
             // The runtime runs the deferred calls at the closing brace,
             // and the function then reloads its result on its return line;
             // optimized, the compiler calls a few defers itself instead.
@@ -149,6 +153,7 @@ async fn stepping_over_a_return_runs_its_deferred_calls() {
                 } else {
                     ("main.looped", "looped end")
                 };
+
                 steps.splice(
                     0..0,
                     [
@@ -158,6 +163,7 @@ async fn stepping_over_a_return_runs_its_deferred_calls() {
                     ],
                 );
             }
+
             walk(&mut scenario, fixture, &steps).await;
             scenario.shutdown().await;
         }
@@ -173,6 +179,7 @@ async fn a_panic_stops_a_step_in_the_deferred_call_it_runs() {
             } else {
                 "explode call"
             };
+
             let mut scenario = stopped_at(fixture, from).await;
             walk(
                 &mut scenario,

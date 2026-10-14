@@ -41,3 +41,9 @@ invites a swap the compiler can't catch.
   `ImageAddress + LoadBias -> VirtualAddress`, and make them checked.
 - Don't call `.get()` just to do arithmetic. Add the operation to the type.
 - Prefer `Option<Id>` to a sentinel such as `0` or `u32::MAX`.
+
+## Formatting, Whitespace, and Indentation
+
+Prefer whatever the linter and formatted specify. Be sure to leave sufficient
+whitespace between important lines as you go to make the code more human
+readable.

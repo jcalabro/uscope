@@ -37,10 +37,13 @@ pub struct Web {
     child: Option<Child>,
     pub address: SocketAddr,
     pub control_token: String,
+
     /// The path the routes lie under: `/`, or `--public-url`'s.
     pub base: String,
+
     /// `--public-url`'s host and origin, which a proxy's requests carry.
     pub public: Option<(String, String)>,
+
     /// Where the printed link opens, when not the root.
     pub link_to: Option<String>,
     transcript: Transcript,
@@ -90,8 +93,10 @@ impl Web {
             if let Some(address) = printed.trim().strip_prefix("uscope web: serving http://") {
                 serving = Some(address.to_owned());
             }
+
             link = printed.trim().strip_prefix("open ").map(str::to_owned);
         }
+
         // Keep draining stdout so the server never blocks writing to it.
         std::thread::spawn(move || {
             let mut rest = Vec::new();
@@ -112,6 +117,7 @@ impl Web {
                 format!("/{path}"),
             )
         };
+
         Self {
             name: name.to_owned(),
             child: Some(child),
@@ -157,9 +163,11 @@ impl Web {
         if let Some(host) = host {
             let _ = write!(request, "Host: {host}\r\n");
         }
+
         if let Some(origin) = origin {
             let _ = write!(request, "Origin: {origin}\r\n");
         }
+
         request.push_str("\r\n");
         request.push_str(token);
         let response = self.http(&request);
@@ -258,12 +266,15 @@ impl Web {
         if let Some(cookie) = cookie {
             headers.insert("Cookie", cookie.parse().expect("header"));
         }
+
         if let Some(origin) = origin {
             headers.insert("Origin", origin.parse().expect("header"));
         }
+
         if let Some(host) = host {
             headers.insert("Host", host.parse().expect("header"));
         }
+
         match timeout(DEADLINE, tokio_tungstenite::connect_async(request)).await {
             Ok(Ok((socket, _))) => Ok(Client {
                 name: name.to_owned(),
@@ -294,6 +305,7 @@ impl Web {
             if let Some(status) = child.try_wait().expect("wait") {
                 return status;
             }
+
             assert!(Instant::now() < deadline, "uscope web did not exit");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -313,6 +325,7 @@ impl Drop for Web {
         if self.child.is_some() {
             self.interrupt();
         }
+
         if failed {
             self.print_transcript();
         } else if let Some(recording) = &self.recording {
@@ -326,14 +339,18 @@ pub struct Client {
     name: String,
     socket: WebSocketStream<MaybeTlsStream<AsyncTcpStream>>,
     next_id: u64,
+
     /// Messages received while waiting for something else.
     pending: Vec<Value>,
     transcript: Transcript,
+
     /// Every message, for the page's replay tests.
     traffic: Vec<Value>,
     started: Instant,
+
     /// The newest `state` received.
     state: Option<Value>,
+
     /// Binary frames not yet claimed, by the id of the answer they precede.
     binary: Vec<(u64, Vec<u8>)>,
 }
@@ -345,6 +362,7 @@ impl Client {
             Some((end, _)) => format!("{}… ({} bytes)", &text[..end], text.len()),
             None => text.to_owned(),
         };
+
         self.transcript.lock().expect("transcript").push(format!(
             "[{:8.3}] {} {direction} {text}",
             self.started.elapsed().as_secs_f64(),
@@ -357,6 +375,7 @@ impl Client {
         if let Ok(value) = serde_json::from_str::<Value>(text) {
             self.traffic.push(json!({"to": "server", "message": value}));
         }
+
         self.socket.send(Message::text(text)).await.expect("send");
     }
 
@@ -368,6 +387,7 @@ impl Client {
         if !params.is_null() {
             message["params"] = params;
         }
+
         self.send_raw(&message.to_string()).await;
         id
     }
@@ -377,6 +397,7 @@ impl Client {
         if !self.pending.is_empty() {
             return self.pending.remove(0);
         }
+
         self.receive().await
     }
 
@@ -404,12 +425,14 @@ impl Client {
                 }
                 _ => continue,
             };
+
             self.log("<<", &text);
             let value: Value = serde_json::from_str(&text).expect("JSON");
             self.traffic.push(json!({"to": "page", "message": value}));
             if value["type"] == "state" {
                 self.state = Some(value.clone());
             }
+
             return value;
         }
     }
@@ -419,6 +442,7 @@ impl Client {
         if let Some(index) = self.pending.iter().position(&matches) {
             return self.pending.remove(index);
         }
+
         let deadline = Instant::now() + DEADLINE;
         loop {
             assert!(Instant::now() < deadline, "{} never saw {what}", self.name);
@@ -426,6 +450,7 @@ impl Client {
             if matches(&message) {
                 return message;
             }
+
             self.pending.push(message);
         }
     }
@@ -507,6 +532,7 @@ impl Client {
         {
             return state.clone();
         }
+
         let deadline = Instant::now() + DEADLINE;
         loop {
             assert!(
@@ -514,6 +540,7 @@ impl Client {
                 "{} never reached {what}",
                 self.name
             );
+
             // A newer state supersedes queued ones.
             if let Some(index) = self
                 .pending
@@ -525,8 +552,10 @@ impl Client {
                 if condition(&state) {
                     return state;
                 }
+
                 continue;
             }
+
             let message = self.receive().await;
             if message["type"] != "state" {
                 self.pending.push(message);
@@ -559,9 +588,11 @@ impl Client {
                     index += 1;
                 }
             }
+
             if text.contains(ends) {
                 return text;
             }
+
             assert!(
                 Instant::now() < deadline,
                 "{} never printed {ends:?}",
@@ -578,6 +609,7 @@ impl Client {
         let Some(directory) = std::env::var_os("USCOPE_WEB_TRANSCRIPTS") else {
             return;
         };
+
         let root = env!("CARGO_MANIFEST_DIR");
         let text = self
             .traffic
@@ -592,8 +624,10 @@ impl Client {
                     while !output.is_char_boundary(end) {
                         end -= 1;
                     }
+
                     line["message"]["text"] = Value::from(format!("{}…", &output[..end]));
                 }
+
                 line.to_string().replace(root, "<root>")
             })
             .collect::<Vec<_>>()

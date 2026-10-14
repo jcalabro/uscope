@@ -41,6 +41,7 @@ pub enum MetadataAbsence {
 pub enum ConstantValue {
     Unsigned(u128),
     Signed(i128),
+
     /// A fixed-width form with implicit zero high bits.
     Fixed(u128),
     Bytes(Arc<[u8]>),
@@ -49,6 +50,7 @@ pub enum ConstantValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueDescription {
     Location(LocationListId),
+
     /// Boxed, as few data objects are constants and a value is wide.
     Constant(Box<ConstantValue>),
 }
@@ -75,24 +77,30 @@ pub struct DataObject {
     pub kind: VariableKind,
     pub name: Arc<str>,
     pub declaration: Option<SourceLocation>,
+
     /// The code of its scope.
     pub ranges: Arc<[AddressRange<ImageAddress>]>,
+
     /// For a Go local, its declaration, past whose line it is visible;
     /// boxed, as most data objects are not Go's.
     pub go_declaration: Option<Box<GoDeclaration>>,
+
     /// The inline instance owning this variable, or `None` for the physical
     /// frame. Lookup only sees variables of the selected logical frame.
     pub instance: Option<CodeInstanceId>,
     pub lexical_depth: u32,
     pub order: u64,
     pub type_info: TypeResolution,
+
     /// For a variable Go moved to the heap, which its debug information
     /// names `&name`, the type of the pointer its location holds; the
     /// variable is what that points to.
     pub escaped: Option<TypeId>,
+
     /// Whether the compiler made it for itself, such as Go's `.dict` and
     /// `#yield1`: listings leave it out, but its name still reaches it.
     pub hidden: bool,
+
     /// For `$future`, the future rustc passes the body of an async
     /// function or block, as a pointer it leaves unnamed: its type.
     pub coroutine: Option<TypeId>,
@@ -106,6 +114,7 @@ pub struct DataObject {
 pub enum ReturnConvention {
     /// Go's register ABI on x86-64, which the producer names `regabi`.
     GoRegisters,
+
     /// The System V x86-64 convention.
     SystemV(Box<SystemV>),
 }
@@ -116,9 +125,11 @@ pub struct SystemV {
     /// The function's name, which the value is shown by.
     pub name: Arc<str>,
     pub ty: TypeResolution,
+
     /// The function's language, which says whether the convention is
     /// known for aggregates and how C++ passes a class.
     pub language: SourceLanguage,
+
     /// Whether the producer says optimization changed how the function
     /// returns, so the convention no longer says where its value is.
     pub rewritten: bool,
@@ -129,6 +140,7 @@ pub struct SystemV {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
     pub name: Arc<str>,
+
     /// Its offset in the closure's context, past the code pointer.
     pub offset: u64,
     pub type_info: TypeResolution,
@@ -138,13 +150,17 @@ pub struct Capture {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub ranges: Arc<[AddressRange<ImageAddress>]>,
+
     /// Its objects, in the order a frame shows them.
     pub objects: Vec<u32>,
+
     /// The name a Go function value calling it shows.
     pub name: Option<Arc<str>>,
+
     /// The variables a Go closure captured, in its context, or why they
     /// cannot be known.
     pub captures: Result<Vec<Capture>, Arc<str>>,
+
     /// How the function returns its values, when that is known.
     pub returns: Option<ReturnConvention>,
 }
@@ -154,10 +170,13 @@ pub struct Function {
 #[derive(Debug, Clone)]
 pub struct Global {
     pub object: u32,
+
     /// The producer-normalized source qualification.
     pub qualified_name: Arc<str>,
+
     /// The linker identity, when the debug information gives one.
     pub linkage_name: Option<Arc<str>>,
+
     /// Whether the producer marks it as visible outside its unit.
     pub external: bool,
 }
@@ -167,11 +186,14 @@ pub struct Global {
 pub struct Variables {
     pub objects: Vec<DataObject>,
     pub functions: Vec<Function>,
+
     /// The module's globals, in global order.
     pub globals: Vec<Global>,
+
     /// Go functions by the address their code begins at, which a func
     /// value holds.
     pub go_entries: Vec<(ImageAddress, u32)>,
+
     /// `DW_TAG_dwarf_procedure`s, which an implicit pointer may point
     /// into, by their entries' offsets.
     pub procedures: Vec<(u64, Metadata<LocationListId>)>,
@@ -211,6 +233,7 @@ impl CodeRange {
 pub struct GlobalRecord {
     pub object: U32,
     pub qualified_name: U32,
+
     /// The linkage name, or [`NONE`].
     pub linkage_name: U32,
     pub external: u8,
@@ -236,8 +259,10 @@ pub struct GlobalEntry<'a> {
 )]
 pub struct ScopeRecord {
     pub ranges: Span<CodeRange>,
+
     /// The inline instance owning the scope, or [`NONE`].
     pub instance: U32,
+
     /// The code instance a Go local's declaration is in, or [`NONE`].
     pub go_instance: U32,
     pub lexical_depth: U32,
@@ -257,13 +282,16 @@ pub struct ObjectRecord {
     pub name: U32,
     pub declaration: LocationRecord,
     pub scope: U32,
+
     /// The type, or with [`object_flags::TYPE_MALFORMED`] why it is
     /// unknown.
     pub ty: U32,
     pub escaped: U32,
     pub coroutine: U32,
+
     /// What [`ObjectRecord::value_kind`] says it is.
     pub value: U32,
+
     /// Why the object is malformed, or [`NONE`].
     pub malformed: U32,
     pub debug_info_offset: U64,
@@ -278,9 +306,13 @@ impl Record for ObjectRecord {
 
 pub mod object_flags {
     pub const HIDDEN: u8 = 1 << 0;
+
     pub const TYPE_MALFORMED: u8 = 1 << 1;
+
     pub const OFFSET: u8 = 1 << 2;
+
     pub const GO_DECLARED: u8 = 1 << 3;
+
     pub const ALL: u8 = HIDDEN | TYPE_MALFORMED | OFFSET | GO_DECLARED;
 }
 
@@ -288,10 +320,15 @@ pub mod object_flags {
 /// constant, an absence, or why it is malformed.
 pub mod value_kinds {
     pub const LOCATION: u8 = 0;
+
     pub const CONSTANT: u8 = 1;
+
     pub const NO_LOCATION: u8 = 2;
+
     pub const NO_FRAME_BASE: u8 = 3;
+
     pub const NOT_APPLICABLE: u8 = 4;
+
     pub const MALFORMED: u8 = 5;
 }
 
@@ -302,6 +339,7 @@ pub mod value_kinds {
 pub struct ConstantRecord {
     /// The value's low bits, or where a block's bytes begin.
     pub low: U64,
+
     /// The value's high bits, or a block's length.
     pub high: U64,
     pub kind: u8,
@@ -313,8 +351,11 @@ impl Record for ConstantRecord {
 
 pub mod constant_kinds {
     pub const UNSIGNED: u8 = 0;
+
     pub const SIGNED: u8 = 1;
+
     pub const FIXED: u8 = 2;
+
     pub const BYTES: u8 = 3;
 }
 
@@ -325,12 +366,15 @@ pub mod constant_kinds {
 pub struct VariableFunctionRecord {
     pub ranges: Span<CodeRange>,
     pub objects: Span<Item>,
+
     /// The name a Go function value shows, or [`NONE`].
     pub name: U32,
+
     /// The first capture, or with [`function_flags::CAPTURES_MALFORMED`]
     /// why they are unknown.
     pub captures: Span<CaptureRecord>,
     pub returned_name: U32,
+
     /// The returned type, or with [`function_flags::RETURNED_MALFORMED`]
     /// why it is unknown.
     pub returned_type: U32,
@@ -346,14 +390,19 @@ impl Record for VariableFunctionRecord {
 
 pub mod function_flags {
     pub const CAPTURES_MALFORMED: u8 = 1 << 0;
+
     pub const RETURNED_MALFORMED: u8 = 1 << 1;
+
     pub const REWRITTEN: u8 = 1 << 2;
+
     pub const ALL: u8 = CAPTURES_MALFORMED | RETURNED_MALFORMED | REWRITTEN;
 }
 
 pub mod returns {
     pub const UNKNOWN: u8 = 0;
+
     pub const GO_REGISTERS: u8 = 1;
+
     pub const SYSTEM_V: u8 = 2;
 }
 
@@ -364,6 +413,7 @@ pub mod returns {
 pub struct CaptureRecord {
     pub name: U32,
     pub offset: U64,
+
     /// The type, or when `malformed` is set why it is unknown.
     pub ty: U32,
     pub malformed: u8,
@@ -459,6 +509,7 @@ fn resolution(
 #[derive(Default)]
 struct Encoder {
     ranges: Vec<CodeRange>,
+
     /// Keyed by the ranges themselves, so that the many objects sharing a
     /// scope look theirs up without copying them first.
     pooled_ranges: foldhash::HashMap<Box<[AddressRange<ImageAddress>]>, U32>,
@@ -478,6 +529,7 @@ impl Encoder {
         if let Some(first) = self.pooled_ranges.get(ranges) {
             return Ok(Span::new(first.get(), count));
         }
+
         let first = number(self.ranges.len())?;
         self.ranges.extend(ranges.iter().map(|range| CodeRange {
             start: range.start.get().into(),
@@ -492,6 +544,7 @@ impl Encoder {
         if let Some(id) = self.pooled_scopes.get(&scope) {
             return Ok((*id).into());
         }
+
         let id = number(self.scopes.len())?;
         self.scopes.push(scope);
         self.pooled_scopes.insert(scope, id);
@@ -522,6 +575,7 @@ impl Encoder {
             let high = u64::from_le_bytes([b8, b9, b10, b11, b12, b13, b14, b15]);
             (low.into(), high.into())
         };
+
         let record = match constant {
             ConstantValue::Unsigned(value) => {
                 let (low, high) = split(*value);
@@ -558,6 +612,7 @@ impl Encoder {
                 }
             }
         };
+
         let id = number(self.constants.len())?;
         self.constants.push(record);
         Ok(id.into())
@@ -588,6 +643,7 @@ fn absent(absence: MetadataAbsence) -> (u8, U32) {
         MetadataAbsence::NoFrameBase => value_kinds::NO_FRAME_BASE,
         MetadataAbsence::NotApplicable => value_kinds::NOT_APPLICABLE,
     };
+
     (kind, 0.into())
 }
 
@@ -638,6 +694,7 @@ pub fn add_to(
     for object in &variables.objects {
         objects.push(encode_object(&mut encoder, strings, object)?);
     }
+
     let mut functions = Vec::with_capacity(variables.functions.len());
     let mut lists = FunctionLists::default();
     for function in &variables.functions {
@@ -648,6 +705,7 @@ pub fn add_to(
             function,
         )?);
     }
+
     let starts = function_starts(&variables.functions)?;
     let go_entries = keyed(
         variables
@@ -672,6 +730,7 @@ pub fn add_to(
             location_kind,
         });
     }
+
     let globals = variables
         .globals
         .iter()
@@ -725,6 +784,7 @@ fn encode_function(
             value: (*object).into(),
         }));
     let mut flags = 0;
+
     // A malformed list begins at the string that says why, and is empty.
     let captures = match &function.captures {
         Ok(list) => {
@@ -738,6 +798,7 @@ fn encode_function(
                     malformed: u8::from(malformed),
                 });
             }
+
             Span::new(first, number(list.len())?)
         }
         Err(why) => {
@@ -745,6 +806,7 @@ fn encode_function(
             Span::new(text(strings, why)?.get(), 0)
         }
     };
+
     let mut record = VariableFunctionRecord {
         ranges,
         objects: Span::new(first, number(function.objects.len())?),
@@ -760,6 +822,7 @@ fn encode_function(
         returns: returns::UNKNOWN,
         flags,
     };
+
     match &function.returns {
         None => {}
         Some(ReturnConvention::GoRegisters) => record.returns = returns::GO_REGISTERS,
@@ -774,11 +837,13 @@ fn encode_function(
             if malformed {
                 record.flags |= function_flags::RETURNED_MALFORMED;
             }
+
             if convention.rewritten {
                 record.flags |= function_flags::REWRITTEN;
             }
         }
     }
+
     Ok(record)
 }
 
@@ -795,6 +860,7 @@ fn function_starts(functions: &[Function]) -> Result<Vec<FunctionStartRecord>, T
                 .map(|range| (range.start.get(), index, range.end.get())),
         );
     }
+
     starts.sort_unstable();
     let mut prefix_max_end = 0;
     Ok(starts
@@ -832,11 +898,14 @@ fn function_at(
         {
             return Some(found);
         }
+
         if group_start == 0 || starts[group_start - 1].prefix_max_end.get() <= address {
             return None;
         }
+
         group_end = group_start;
     }
+
     None
 }
 
@@ -867,6 +936,7 @@ impl<'a> FunctionIndex<'a> {
                 .iter()
                 .any(|range| range.contains(address))
         };
+
         function_at(&self.starts, address, holds).map(|id| &self.functions[id as usize])
     }
 }
@@ -903,6 +973,7 @@ fn encode_object(
         );
         flags |= object_flags::GO_DECLARED;
     }
+
     let go_instance = object
         .go_declaration
         .as_ref()
@@ -919,12 +990,15 @@ fn encode_object(
     if malformed {
         flags |= object_flags::TYPE_MALFORMED;
     }
+
     if object.hidden {
         flags |= object_flags::HIDDEN;
     }
+
     if object.debug_info_offset.is_some() {
         flags |= object_flags::OFFSET;
     }
+
     let (value_kind, value) = encoder.value(strings, &object.value)?;
     Ok(ObjectRecord {
         name: text(strings, &object.name)?,
@@ -1152,6 +1226,7 @@ impl<'a> Object<'a> {
         if self.record.flags & object_flags::GO_DECLARED == 0 {
             return None;
         }
+
         Some(GoDeclaration {
             location: self.declaration()?,
             instance: some(self.scope.go_instance).map(CodeInstanceId::new),
@@ -1272,6 +1347,7 @@ impl<'a> VariableFunction<'a> {
         if self.record.flags & function_flags::CAPTURES_MALFORMED != 0 {
             return Err(self.view.text(self.record.captures.first().into()));
         }
+
         Ok(self
             .record
             .captures
@@ -1389,6 +1465,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
         lists: image.table::<super::locations::LocationListRecord>().len(),
         files: image.table::<super::lines::FileRecord>().len(),
     };
+
     validate_objects(view, &bounds)?;
     validate_functions(view, &bounds)?;
     validate_indexes(view, &bounds)
@@ -1402,6 +1479,7 @@ fn validate_objects(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
     {
         return Err("a scope's code is empty".into());
     }
+
     if !view.scopes.iter().all(|scope| {
         scope.ranges.within(view.ranges.len())
             && bounds.optional_instance(scope.instance)
@@ -1411,6 +1489,7 @@ fn validate_objects(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
     }) {
         return Err("a scope is malformed".into());
     }
+
     if !view.constants.iter().all(|constant| match constant.kind {
         constant_kinds::UNSIGNED | constant_kinds::SIGNED | constant_kinds::FIXED => true,
         constant_kinds::BYTES => {
@@ -1420,6 +1499,7 @@ fn validate_objects(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
     }) {
         return Err("a constant is malformed".into());
     }
+
     if !view.objects.iter().all(|object| {
         bounds.string(object.name)
             && object.declaration.valid(bounds.files)
@@ -1439,6 +1519,7 @@ fn validate_objects(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
     }) {
         return Err("a data object is malformed".into());
     }
+
     Ok(())
 }
 
@@ -1450,6 +1531,7 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
     }) {
         return Err("a capture is malformed".into());
     }
+
     let objects = view.objects.len();
     if !view
         .function_objects
@@ -1458,6 +1540,7 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
     {
         return Err("a list names no data object".into());
     }
+
     if !view.globals.iter().all(|global| {
         (global.object.get() as usize) < objects
             && bounds.string(global.qualified_name)
@@ -1466,6 +1549,7 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
     }) {
         return Err("a global is malformed".into());
     }
+
     if !view.functions.iter().all(|function| {
         function.ranges.within(view.ranges.len())
             && function.objects.within(view.function_objects.len())
@@ -1499,6 +1583,7 @@ fn validate_functions(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(),
     }) {
         return Err("a function's variables are malformed".into());
     }
+
     Ok(())
 }
 
@@ -1516,17 +1601,21 @@ fn validate_indexes(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
         {
             return Err("the function starts are malformed".into());
         }
+
         previous = Some(key);
     }
+
     let keyed = |index: &[Keyed], length: usize| {
         index.is_sorted_by(|earlier, later| earlier.key.get() < later.key.get())
             && index
                 .iter()
                 .all(|entry| (entry.value.get() as usize) < length)
     };
+
     if !keyed(view.go_entries, functions) || !keyed(view.offsets, view.objects.len()) {
         return Err("an index of variables is malformed".into());
     }
+
     if !view
         .procedures
         .is_sorted_by(|earlier, later| earlier.offset.get() < later.offset.get())
@@ -1537,5 +1626,6 @@ fn validate_indexes(view: VariableView<'_>, bounds: &Bounds<'_>) -> Result<(), S
     {
         return Err("a DWARF procedure is malformed".into());
     }
+
     Ok(())
 }

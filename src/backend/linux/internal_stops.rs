@@ -30,6 +30,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             edit.reject(Error::RequestCancelled);
             return;
         }
+
         let running = self
             .inferior
             .as_ref()
@@ -40,10 +41,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.apply_edit(edit);
             return;
         }
+
         if let Err(error) = self.begin_internal_stop() {
             edit.reject(error);
             return;
         }
+
         let Some(barrier) = self
             .inferior
             .as_mut()
@@ -52,6 +55,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             edit.reject(Error::internal("an internal stop has a barrier"));
             return;
         };
+
         barrier.edits.push(edit);
         if let Err(error) = self.finish_barrier_if_ready() {
             self.fail_inferior(error);
@@ -103,6 +107,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::RemoveAllBreakpoints { reply } => {
                 let _ = reply.send(self.remove_all_breakpoints());
             }
+
             Edit::AddWatchpoint {
                 spec,
                 access,
@@ -123,6 +128,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Edit::SetExceptionStops { stops, reply } => {
                 let _ = reply.send(self.set_exception_stops(stops));
             }
+
             Edit::AddCatchpoint {
                 calls,
                 phase,
@@ -156,6 +162,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             self.begin_internal_stop()?;
         }
+
         let barrier = self
             .inferior
             .as_mut()
@@ -169,6 +176,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             barrier.edits.push(edit);
         }
+
         Ok(())
     }
 
@@ -180,6 +188,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.barrier.is_some() {
             return Ok(());
         }
+
         let triggering_thread = *inferior.threads.keys().next().ok_or(Error::NotRunning)?;
         inferior.barrier = Some(StopBarrier {
             triggering_thread,
@@ -200,6 +209,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.active.is_none() {
             return Ok(());
         }
+
         inferior.repairs = collect_repairs(inferior);
         self.sync_debug_registers()?;
         self.advance_execution()
@@ -215,6 +225,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.queue_repair(pid, address)?;
             return self.start_next_repair();
         }
+
         // The repair runs when the stop resumes execution.
         self.begin_internal_stop()?;
         self.finish_barrier_if_ready()
@@ -234,6 +245,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !owner.is_some_and(|owner| self.runs_step(owner, pid)) {
             return;
         }
+
         if let Some(ActiveKind::Step { progress_owed, .. }) = self
             .inferior
             .as_mut()
@@ -250,12 +262,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         if inferior.barrier.is_some() {
             return Ok(());
         }
+
         let Some(active) = inferior.active.as_ref() else {
             return Ok(());
         };
+
         let threads = active
             .resume_threads
             .iter()
@@ -270,6 +285,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for pid in threads {
             self.continue_thread(pid)?;
         }
+
         Ok(())
     }
 
@@ -287,6 +303,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .flat_map(|inferior| inferior.threads.values())
                 .flat_map(|thread| thread.watch_hits.keys().copied()),
         )?;
+
         // A stop holds a hit or two, so looking each up beats indexing every
         // breakpoint at every stop.
         let breakpoints = &self.breakpoints;
@@ -295,9 +312,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .iter()
                 .any(|breakpoint| breakpoint.id == id && breakpoint.enabled)
         };
+
         let Some(inferior) = self.inferior.as_mut() else {
             return Ok(());
         };
+
         let Some(resumed) = inferior
             .active
             .as_ref()
@@ -305,10 +324,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(());
         };
+
         for (pid, thread) in &mut inferior.threads {
             if !resumed.contains(pid) {
                 continue;
             }
+
             thread.watch_hits.retain(|id, _| {
                 inferior
                     .watch
@@ -336,15 +357,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                 _ => {}
             }
         }
+
         let Some(barrier) = inferior.barrier.as_mut() else {
             return Ok(());
         };
+
         if !matches!(
             barrier.reason,
             Some(StopReason::Breakpoint { .. } | StopReason::Watchpoint { .. })
         ) {
             return Ok(());
         }
+
         // A barrier publishes its triggering thread's own reason.
         barrier.reason = inferior
             .threads
@@ -353,6 +377,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if barrier.reason.is_some() {
             return Ok(());
         }
+
         // The published hit is gone; another thread's reason, if any, takes
         // its place, then the end of an execution that cannot resume, and a
         // pause the hit outranked otherwise.
@@ -370,6 +395,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else if barrier.paused {
             barrier.reason = Some(StopReason::Pause);
         }
+
         Ok(())
     }
 }
@@ -386,6 +412,7 @@ impl Edit {
             Self::RemoveAllBreakpoints { reply } => {
                 let _ = reply.send(Err(error));
             }
+
             Self::AddWatchpoint { reply, .. }
             | Self::SetWatchpointEnabled { reply, .. }
             | Self::RemoveWatchpoint { reply, .. } => {

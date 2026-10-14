@@ -119,9 +119,11 @@ fn worker(queue: &Queue) {
                 if let Some(request) = requests.pop_front() {
                     break request;
                 }
+
                 if queue.done.load(Ordering::Relaxed) {
                     return;
                 }
+
                 requests = queue
                     .ready
                     .wait_timeout(requests, Duration::from_millis(10))
@@ -129,6 +131,7 @@ fn worker(queue: &Queue) {
                     .0;
             }
         };
+
         handle(&request);
     }
 }
@@ -160,12 +163,14 @@ fn produce(queue: &Queue, until: Instant) {
                     50 + rng.below(100)
                 },
             };
+
             let mut requests = queue.requests.lock().expect("the queue");
             requests.push_back(request);
             plot!("queue depth", requests.len() as f64);
             drop(requests);
             queue.ready.notify_one();
         }
+
         std::thread::sleep(Duration::from_micros(500));
     }
 }
@@ -176,6 +181,7 @@ fn render_loop(queue: &Queue) {
             let _zone = zone!("draw");
             black_box(work(300));
         }
+
         frame!();
         std::thread::sleep(Duration::from_micros(16_667 - 300));
     }
@@ -185,11 +191,13 @@ fn main() {
     let seconds: u64 = std::env::args()
         .nth(1)
         .map_or(5, |seconds| seconds.parse().expect("a number of seconds"));
+
     // A recording switches the sites on just after the program starts.
     let deadline = Instant::now() + Duration::from_secs(2);
     while !uscope_probes::listening() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
+
     let queue = Arc::new(Queue {
         requests: Mutex::new(VecDeque::new()),
         ready: Condvar::new(),
@@ -204,6 +212,7 @@ fn main() {
                 .spawn_scoped(scope, move || worker(queue))
                 .expect("a worker");
         }
+
         let queue = &queue;
         std::thread::Builder::new()
             .name("render".into())

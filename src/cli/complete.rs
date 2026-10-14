@@ -13,16 +13,21 @@ use crate::present::complete::Completing;
 pub struct Context {
     /// The settings' aliases.
     pub aliases: Arc<[String]>,
+
     /// The functions of the loaded modules, or the program's.
     pub functions: Arc<[String]>,
+
     /// The names of their source files.
     pub files: Arc<[String]>,
+
     /// Breakpoint ids, and watchpoint ids with their `w`.
     pub breakpoints: Arc<[String]>,
     pub watchpoints: Arc<[String]>,
     pub displays: Arc<[String]>,
+
     /// The selected frame's variables.
     pub names: Arc<[String]>,
+
     /// The globals of the loaded modules.
     pub globals: Arc<[String]>,
 }
@@ -58,6 +63,7 @@ impl Cli {
             Some(frame) => self.frame_names(frame).await,
             None => Arc::default(),
         };
+
         let (breakpoints, watchpoints) =
             snapshot.as_ref().map_or_else(Default::default, |snapshot| {
                 (
@@ -102,6 +108,7 @@ impl Cli {
                 .collect(),
             Err(_) => Vec::new(),
         };
+
         let cached = self
             .completion_code
             .lock()
@@ -111,6 +118,7 @@ impl Cli {
         if let Some(code) = cached {
             return code;
         }
+
         let code = self.code_names(modules).await;
         *self
             .completion_code
@@ -133,6 +141,7 @@ impl Cli {
         if let Some(names) = cached {
             return names.names;
         }
+
         let names: Arc<[String]> = self.debugger.variables().await.map_or_else(
             |_| Arc::default(),
             |variables| {
@@ -163,20 +172,24 @@ impl Cli {
             for function in image.functions() {
                 functions.insert(function.name().to_string());
             }
+
             for symbol in image.symbols() {
                 if symbol.kind() == uscope::SymbolKind::Function && symbol.extent().is_some() {
                     functions.insert(symbol.name().to_string());
                 }
             }
+
             for file in image.source_files() {
                 if let Some(name) = file.path.file_name().and_then(|name| name.to_str()) {
                     files.insert(name.to_owned());
                 }
             }
+
             for global in image.globals() {
                 globals.insert(global.qualified_name.to_string());
             }
         }
+
         Code {
             modules,
             functions: functions.into_iter().collect(),
@@ -191,10 +204,12 @@ impl Cli {
         let Ok(expression) = uscope::Expression::parse(base) else {
             return Vec::new();
         };
+
         let Ok(uscope::Evaluation::Value { value, .. }) = self.debugger.evaluate(&expression).await
         else {
             return Vec::new();
         };
+
         let mut state = value.state;
         if let uscope::VariableState::Available {
             children: uscope::ValueChildren::NotApplicable,
@@ -205,6 +220,7 @@ impl Cli {
         {
             state = pointee.state;
         }
+
         let uscope::VariableState::Available {
             children: uscope::ValueChildren::Available(children),
             ..
@@ -212,6 +228,7 @@ impl Cli {
         else {
             return Vec::new();
         };
+
         let Ok(page) = self
             .debugger
             .value_children(
@@ -225,6 +242,7 @@ impl Cli {
         else {
             return Vec::new();
         };
+
         page.children
             .iter()
             .filter_map(|child| match &child.relationship {
@@ -290,9 +308,11 @@ pub fn complete(
             .chain(context.aliases.iter().cloned());
         return (start, matching(word, names));
     };
+
     let Ok(spec) = resolve_command(first.split_once('/').map_or(first, |(name, _)| name)) else {
         return (start, Vec::new());
     };
+
     let argument = words.len() - 1;
     let ids = |all: bool, watches: bool| {
         let ids = if watches {
@@ -300,11 +320,13 @@ pub fn complete(
         } else {
             &context.breakpoints
         };
+
         ids.iter()
             .cloned()
             .chain((all && argument == 0).then(|| "all".to_owned()))
             .collect::<Vec<_>>()
     };
+
     let candidates = match spec.command {
         command if argument == 0 && takes_location(command) => {
             return location(word, start, context);
@@ -356,6 +378,7 @@ pub fn complete(
         Command::Condition | Command::Ignore | Command::Hits => {
             return expression(before, context, fields, &[]);
         }
+
         Command::Print
         | Command::Pp
         | Command::Display
@@ -371,10 +394,12 @@ pub fn complete(
                 }
                 _ => &[],
             };
+
             return expression(before, context, fields, options);
         }
         _ => Vec::new(),
     };
+
     (start, matching(word, candidates))
 }
 
@@ -408,6 +433,7 @@ fn location(word: &str, start: usize, context: &Context) -> (usize, Vec<String>)
         let start = start + file.len() + 1;
         return (start, matching(function, context.functions.iter().cloned()));
     }
+
     let candidates = context
         .functions
         .iter()
@@ -436,6 +462,7 @@ fn expression(
             .collect(),
         _ => Vec::new(),
     };
+
     (start, matching(partial, candidates))
 }
 
@@ -461,11 +488,13 @@ mod tests {
             names: names(&["call", "record", "records"]),
             globals: names(&["global_record"]),
         };
+
         let mut asked = Vec::new();
         let mut fields = |base: &str| {
             asked.push(base.to_owned());
             vec!["inner".to_owned(), "values".to_owned()]
         };
+
         let mut at_end = |line: &str| complete(line, line.len(), &context, &mut fields);
 
         assert_eq!(

@@ -11,6 +11,7 @@ use super::records::{
     SyscallNote, SyscallStat, Task, TaskWait, Thread, ThreadRange, Truncation, UNSEEN,
     ZONE_BEGAN_UNSEEN, ZONE_ENDED_UNSEEN, Zone, ZoneRange,
 };
+
 use crate::image::{StrId, StringsBuilder};
 use crate::model::{Pid, Tid};
 
@@ -21,8 +22,10 @@ pub struct LineInput<'a> {
     pub file: Option<&'a str>,
     pub line: u32,
     pub column: u32,
+
     /// Where the function is declared.
     pub declared: Option<(&'a str, u32)>,
+
     /// The function's role, by [`role_number`](super::records::role_number).
     pub role: u8,
 }
@@ -36,6 +39,7 @@ pub struct CaptureBuilder {
     module_index: HashMap<(u32, u32, [u8; 16]), u32>,
     processes: Vec<Process>,
     live_processes: HashMap<Pid, u32>,
+
     /// Each pid's and tid's ended rows, which an event from before its end
     /// still belongs to: an id names one process or thread at a time.
     ended_processes: HashMap<Pid, Vec<u32>>,
@@ -55,6 +59,7 @@ pub struct CaptureBuilder {
     functions: Vec<Function>,
     function_index: HashMap<(u32, u32, u32, u32), u32>,
     sites: Vec<Site>,
+
     /// Each thread's zones, whose depths their nesting gives.
     zones: BTreeMap<u32, Vec<Zone>>,
     plots: Vec<Plot>,
@@ -79,6 +84,7 @@ fn grouped<T: Timed>(by_thread: Vec<Vec<T>>) -> (Vec<T>, Vec<ThreadRange>) {
         if samples.is_empty() {
             continue;
         }
+
         samples.sort_by_key(T::time);
         ranges.push(ThreadRange {
             thread: index(thread).into(),
@@ -87,6 +93,7 @@ fn grouped<T: Timed>(by_thread: Vec<Vec<T>>) -> (Vec<T>, Vec<ThreadRange>) {
         });
         rows.extend(samples);
     }
+
     (rows, ranges)
 }
 
@@ -142,6 +149,7 @@ impl CaptureBuilder {
         if let Some(&module) = self.module_index.get(&(path, build_id, digest)) {
             return module;
         }
+
         let module = index(self.modules.len());
         self.modules.push(Module {
             path: path.into(),
@@ -158,6 +166,7 @@ impl CaptureBuilder {
         if let Some(&process) = self.live_processes.get(&pid) {
             return process;
         }
+
         let ended = self.ended_processes.get(&pid).into_iter().flatten();
         if let Some(&process) = ended
             .rev()
@@ -165,6 +174,7 @@ impl CaptureBuilder {
         {
             return process;
         }
+
         let process = index(self.processes.len());
         self.processes.push(Process {
             pid: pid.get().into(),
@@ -212,10 +222,13 @@ impl CaptureBuilder {
                 if thread_record.end.get() < time {
                     thread_record.end = time.into();
                 }
+
                 return thread;
             }
+
             self.live_threads.remove(&tid);
         }
+
         let ended = self.ended_threads.get(&tid).into_iter().flatten();
         if let Some(&thread) = ended.rev().find(|&&row| {
             let thread = &self.threads[row as usize];
@@ -225,10 +238,12 @@ impl CaptureBuilder {
         }) {
             return thread;
         }
+
         let process = self.process(pid, time);
         if self.processes[process as usize].end.get() < time {
             self.processes[process as usize].end = time.into();
         }
+
         let thread = index(self.threads.len());
         self.threads.push(Thread {
             process: process.into(),
@@ -272,6 +287,7 @@ impl CaptureBuilder {
         if let Some(&frame) = self.frame_index.get(&key) {
             return frame;
         }
+
         let frame = index(self.frames.len());
         self.frames.push(Frame {
             address: address.into(),
@@ -308,8 +324,10 @@ impl CaptureBuilder {
                 declared: None,
                 role: 0,
             };
+
             self.symbolize(frame, NONE, &[line]);
         }
+
         frame
     }
 
@@ -328,6 +346,7 @@ impl CaptureBuilder {
         if let Some(&stack) = self.stack_index.get(&(parent, frame)) {
             return stack;
         }
+
         let stack = index(self.stacks.len());
         self.stacks.push(Stack {
             parent: parent.into(),
@@ -375,11 +394,13 @@ impl CaptureBuilder {
             if at < time {
                 break;
             }
+
             if at == time && sample.task.get() == NONE {
                 sample.task = task.into();
                 claimed += 1;
             }
         }
+
         claimed
     }
 
@@ -432,6 +453,7 @@ impl CaptureBuilder {
                 column: line.column.into(),
             });
         }
+
         self.symbols.insert(frame, range(start, lines.len()));
     }
 
@@ -441,6 +463,7 @@ impl CaptureBuilder {
         if let Some(&function) = self.function_index.get(&key) {
             return function;
         }
+
         let function = index(self.functions.len());
         self.functions.push(Function {
             name: name.into(),
@@ -467,6 +490,7 @@ impl CaptureBuilder {
         }) {
             return index(position);
         }
+
         let site = index(self.sites.len());
         self.sites.push(Site {
             name: name.into(),
@@ -522,8 +546,10 @@ impl CaptureBuilder {
             if record.last_seen.get() < time {
                 record.last_seen = time.into();
             }
+
             return task;
         }
+
         let task = index(self.tasks.len());
         self.tasks.push(Task {
             runtime: runtime.into(),
@@ -544,6 +570,7 @@ impl CaptureBuilder {
         if root != NONE {
             record.root = root.into();
         }
+
         if labels != NONE {
             record.labels = labels.into();
         }
@@ -579,6 +606,7 @@ impl CaptureBuilder {
         for samples in &mut self.samples {
             samples.retain(|sample| sample.time.get() >= time);
         }
+
         for intervals in &mut self.off_cpu {
             intervals.retain_mut(|interval| {
                 let start = interval.time.get();
@@ -587,15 +615,19 @@ impl CaptureBuilder {
                     interval.time = time.into();
                     interval.duration = end.abs_diff(time).into();
                 }
+
                 end > time
             });
         }
+
         self.gaps.retain_mut(|gap| {
             if gap.start.get() < time {
                 gap.start = time.min(gap.end.get()).into();
             }
+
             gap.end.get() > time
         });
+
         // A zone open at the cut keeps the part after it, as an interval
         // off a CPU does, beginning unseen.
         for zones in self.zones.values_mut() {
@@ -605,9 +637,11 @@ impl CaptureBuilder {
                     zone.start = time.into();
                     zone.flags = (zone.flags.get() | ZONE_BEGAN_UNSEEN).into();
                 }
+
                 end > time || start >= time
             });
         }
+
         self.plots.retain(|plot| plot.time.get() >= time);
         self.markers.retain(|marker| marker.time.get() >= time);
         self.task_waits.retain(|wait| wait.time.get() >= time);
@@ -620,6 +654,7 @@ impl CaptureBuilder {
         for samples in &mut self.samples {
             samples.retain(|sample| sample.time.get() < time);
         }
+
         for intervals in &mut self.off_cpu {
             intervals.retain_mut(|interval| {
                 let start = interval.time.get();
@@ -628,10 +663,12 @@ impl CaptureBuilder {
                 start < time
             });
         }
+
         self.gaps.retain_mut(|gap| {
             gap.end = gap.end.get().min(time).into();
             gap.start.get() < time
         });
+
         // A zone open at the cut keeps the part before it, ending unseen.
         for zones in self.zones.values_mut() {
             zones.retain_mut(|zone| {
@@ -639,9 +676,11 @@ impl CaptureBuilder {
                     zone.end = time.into();
                     zone.flags = (zone.flags.get() | ZONE_ENDED_UNSEEN).into();
                 }
+
                 zone.start.get() < time
             });
         }
+
         self.plots.retain(|plot| plot.time.get() < time);
         self.markers.retain(|marker| marker.time.get() < time);
         self.task_waits.retain(|wait| wait.time.get() < time);
@@ -658,6 +697,7 @@ impl CaptureBuilder {
             kept += u32::from(keep(call_time(call)));
             kept_before.push(kept);
         }
+
         let blobs = std::mem::take(&mut self.syscall_blobs);
         let bytes = |start: u32, len: u32| {
             if start == NONE {
@@ -666,10 +706,12 @@ impl CaptureBuilder {
                 &blobs[start as usize..(start + len) as usize]
             }
         };
+
         let calls = std::mem::take(&mut self.syscalls);
         for call in calls.into_iter().filter(|call| keep(call_time(call))) {
             self.syscall(call, bytes(call.captures.get(), call.captures_len.get()));
         }
+
         let notes = std::mem::take(&mut self.syscall_notes);
         for mut note in notes.into_iter().filter(|note| keep(note.time.get())) {
             note.calls = kept_before[note.calls.get() as usize].into();
@@ -688,6 +730,7 @@ impl CaptureBuilder {
         for (kind, value) in &mut self.accounts {
             *value = value.saturating_sub(base.get(kind).copied().unwrap_or(0));
         }
+
         self.accounts.retain(|_, value| *value > 0);
     }
 
@@ -697,6 +740,7 @@ impl CaptureBuilder {
         if bytes.is_empty() {
             return (NONE, 0);
         }
+
         let start = index(self.syscall_blobs.len());
         self.syscall_blobs.extend_from_slice(bytes);
         (start, index(bytes.len()))
@@ -771,12 +815,14 @@ impl CaptureBuilder {
         for setting in &capture.settings {
             let key = capture.string(setting.key.get());
             let value = capture.string(setting.value.get());
+
             // Chunks of one recording span its time between them.
             let keep_existing = match (key, self.settings.get(key)) {
                 ("start", Some(existing)) => existing.parse::<i64>().ok() <= value.parse().ok(),
                 ("end", Some(existing)) => existing.parse::<i64>().ok() >= value.parse().ok(),
                 _ => false,
             };
+
             if !keep_existing {
                 self.setting(key, value);
             }
@@ -791,6 +837,7 @@ impl CaptureBuilder {
             map.modules
                 .push(self.module(path, build_id, module.digest, module.size.get()));
         }
+
         for process in &capture.processes {
             // One pid names one process at a time.
             let found = self.processes.iter().position(|existing| {
@@ -810,10 +857,12 @@ impl CaptureBuilder {
                 });
                 index(self.processes.len() - 1)
             };
+
             let existing = &mut self.processes[index as usize];
             existing.end = existing.end.get().max(process.end.get()).into();
             map.processes.push(index);
         }
+
         for thread in &capture.threads {
             let process = map.processes[thread.process.get() as usize];
             let found = self.threads.iter().position(|existing| {
@@ -837,13 +886,16 @@ impl CaptureBuilder {
                 self.off_cpu.push(Vec::new());
                 index(self.threads.len() - 1)
             };
+
             let existing = &mut self.threads[index as usize];
             existing.end = existing.end.get().max(thread.end.get()).into();
             if existing.name.get() == NONE {
                 existing.name = name.into();
             }
+
             map.threads.push(index);
         }
+
         for mapping in &capture.mappings {
             self.mappings.push(Mapping {
                 process: map.processes[mapping.process.get() as usize].into(),
@@ -860,6 +912,7 @@ impl CaptureBuilder {
             map.frames
                 .push(self.frame(kind, module, frame.address.get(), frame.role));
         }
+
         for (frame, &new) in map.frames.iter().enumerate() {
             let symbolized = capture
                 .frame_symbols
@@ -868,6 +921,7 @@ impl CaptureBuilder {
             if !symbolized || self.symbolized(new) {
                 continue;
             }
+
             let module = map.module(capture.frames[frame].module.get());
             let start = index(self.lines.len());
             let lines = capture.frame_lines(index(frame));
@@ -884,14 +938,17 @@ impl CaptureBuilder {
                     ..*line
                 });
             }
+
             self.symbols.insert(new, range(start, lines.len()));
         }
+
         for stack in &capture.stacks {
             let parent = Remap::get(&map.stacks, stack.parent.get());
             let frame = map.frames[stack.frame.get() as usize];
             let stack = self.child(parent, frame);
             map.stacks.push(stack);
         }
+
         for site in &capture.sites {
             let name = capture.string(site.name.get());
             let file = capture.string(site.file.get());
@@ -899,15 +956,18 @@ impl CaptureBuilder {
             map.sites
                 .push(self.site(name, file, site.line.get(), module, site.kind));
         }
+
         for task in &capture.tasks {
             let runtime = capture.string(task.runtime.get());
             let new = self.task(runtime, task.number.get(), task.first_seen.get());
             self.task(runtime, task.number.get(), task.last_seen.get());
+
             // Snapshots find a task's labels with no root frame.
             let root = match task.root.get() {
                 NONE => NONE,
                 root => map.frames[root as usize],
             };
+
             let labels = (task.labels.get() != NONE).then(|| capture.string(task.labels.get()));
             self.describe_task(new, root, labels);
             map.tasks.push(new);
@@ -920,17 +980,21 @@ impl CaptureBuilder {
             task: Remap::get(&map.tasks, sample.task.get()).into(),
             ..*sample
         };
+
         for range in &capture.sample_ranges {
             let thread = map.threads[range.thread.get() as usize] as usize;
             self.samples[thread].extend(capture.thread_samples(range).iter().map(sample));
         }
+
         for range in &capture.off_cpu_ranges {
             let thread = map.threads[range.thread.get() as usize] as usize;
             self.off_cpu[thread].extend_from_slice(capture.thread_off_cpu(range));
         }
+
         for account in &capture.accounting {
             self.count(account.kind.get(), account.value.get());
         }
+
         // Deepest first, so that of two zones of one span, the one that
         // holds the other comes later, as when it was recorded.
         for range in capture.zone_ranges.iter().rev() {
@@ -943,9 +1007,11 @@ impl CaptureBuilder {
                     value: value.into(),
                     ..*zone
                 };
+
                 self.zone(thread, zone);
             }
         }
+
         for plot in &capture.plots {
             self.plots.push(Plot {
                 site: Remap::get(&map.sites, plot.site.get()).into(),
@@ -953,6 +1019,7 @@ impl CaptureBuilder {
                 ..*plot
             });
         }
+
         for marker in &capture.markers {
             let text = self.copy_string(capture, marker.text.get());
             self.markers.push(Marker {
@@ -962,12 +1029,14 @@ impl CaptureBuilder {
                 ..*marker
             });
         }
+
         for wait in &capture.task_waits {
             let state = capture.string(wait.state.get());
             let task = map.tasks[wait.task.get() as usize];
             let stack = Remap::get(&map.stacks, wait.stack.get());
             self.task_wait(task, wait.time.get(), wait.weight.get(), stack, state);
         }
+
         self.gaps.extend_from_slice(&capture.gaps);
         self.absorb_syscalls(capture, map);
     }
@@ -981,14 +1050,17 @@ impl CaptureBuilder {
                 &capture.syscall_blobs[start as usize..(start + len) as usize]
             }
         };
+
         for call in &capture.syscalls {
             let row = Syscall {
                 thread: Remap::get(&map.threads, call.thread.get()).into(),
                 stack: Remap::get(&map.stacks, call.stack.get()).into(),
                 ..*call
             };
+
             self.syscall(row, bytes(call.captures.get(), call.captures_len.get()));
         }
+
         for note in &capture.syscall_notes {
             let text = self.copy_string(capture, note.text.get());
             let row = SyscallNote {
@@ -999,8 +1071,10 @@ impl CaptureBuilder {
                 calls: (calls + note.calls.get()).into(),
                 ..*note
             };
+
             self.push_note(row, bytes(note.blob.get(), note.blob_len.get()));
         }
+
         for stat in &capture.syscall_stats {
             let start = stat.errnos.get() as usize;
             let errnos = &capture.syscall_errnos[start..start + stat.errno_count.get() as usize];
@@ -1008,6 +1082,7 @@ impl CaptureBuilder {
                 process: Remap::get(&map.processes, stat.process.get()).into(),
                 ..*stat
             };
+
             self.syscall_stat(row, errnos);
         }
     }
@@ -1029,6 +1104,7 @@ impl CaptureBuilder {
                 })
                 .collect()
         };
+
         let mut zones = Vec::new();
         let mut zone_ranges = Vec::new();
         for (thread, group) in self.zones {
@@ -1042,12 +1118,14 @@ impl CaptureBuilder {
                 zones.extend(group);
             }
         }
+
         let mut plots = self.plots;
         plots.sort_by_key(|plot| (plot.site.get(), plot.time.get()));
         let mut markers = self.markers;
         markers.sort_by_key(|marker| (marker.time.get(), marker.thread.get()));
         let mut gaps = self.gaps;
         gaps.sort_by_key(|gap| gap.start.get());
+
         // The chunks of one file may hold gaps that overlap; a gap keeps only
         // what no earlier one covers.
         let mut covered = i64::MIN;
@@ -1110,12 +1188,14 @@ impl CaptureBuilder {
             syscall_stats: self.syscall_stats,
             syscall_errnos: self.syscall_errnos,
         };
+
         // A saved capture is read back through the same check.
         if cfg!(debug_assertions)
             && let Err(error) = capture.validate()
         {
             debug_assert!(false, "the builder's capture is invalid: {error}");
         }
+
         capture
     }
 }
@@ -1142,13 +1222,16 @@ fn depths(zones: Vec<Zone>) -> Vec<Vec<Zone>> {
         while open.last().is_some_and(|&end| end <= zone.start.get()) {
             open.pop();
         }
+
         let depth = open.len();
         open.push(zone.end.get());
         if depth == depths.len() {
             depths.push(Vec::new());
         }
+
         depths[depth].push(zone);
     }
+
     depths
 }
 

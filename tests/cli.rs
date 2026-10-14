@@ -131,6 +131,7 @@ fn convert_writes_what_go_and_flame_graph_tools_read() {
         assert!(stack.ends_with(";leaf"), "{line}");
         weight += count.parse::<u64>().expect("a number");
     }
+
     assert_eq!(weight, 6, "{folded}");
 
     let refused = uscope(&["convert", &profile, "out.bin"]);
@@ -172,6 +173,7 @@ fn convert_writes_instrumentation_as_a_chrome_trace() {
             .filter(|event| event["ph"] == phase && event["name"] == name)
             .count()
     };
+
     assert_eq!(named("X", "outer"), 3);
     assert_eq!(named("X", "round=1"), 1);
     assert_eq!(named("i", "done"), 1);
@@ -214,6 +216,7 @@ fn batch_output(arguments: &[&str], commands: &[&str]) -> Output {
     for command in commands {
         all.extend(["--eval", command]);
     }
+
     all.extend_from_slice(arguments);
     uscope(&all)
 }
@@ -239,6 +242,7 @@ fn piped(arguments: &[&str], commands: &[&str]) -> (String, String) {
     for command in commands {
         writeln!(stdin, "{command}").expect("write a command");
     }
+
     drop(stdin);
     let output = child.wait_with_output().expect("wait for uscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -317,6 +321,7 @@ fn frames_line(needle: &str) -> usize {
 /// Returns the state letter of a live process, or `None` once it is gone.
 fn process_state(pid: u32) -> Option<char> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+
     // The command name may contain anything, so the state follows its last
     // closing parenthesis.
     stat.rsplit_once(')')?.1.trim_start().chars().next()
@@ -431,6 +436,7 @@ impl Uscope {
                 }
             }
         }
+
         let stderr = self
             .stderr
             .take()
@@ -474,6 +480,7 @@ fn help_is_task_oriented_and_progressive() {
     ] {
         assert!(short.contains(invocation), "{short}");
     }
+
     for advanced in ["--sysroot", "--module-path", "--source-map"] {
         assert!(!short.contains(advanced), "{short}");
     }
@@ -494,6 +501,7 @@ fn help_is_task_oriented_and_progressive() {
     for advanced in ["--sysroot", "--module-path", "--source-map"] {
         assert!(long.contains(advanced), "{long}");
     }
+
     assert!(!long.contains("uscope dap ["), "{long}");
 
     for subcommand in ["dap", "views", "config"] {
@@ -636,6 +644,7 @@ fn attach_by_name_needs_exactly_one_process_of_that_name() {
     for process in [&first, &second] {
         assert_failure(&output, &process.process_id().to_string());
     }
+
     assert_failure(&output, &format!("2 processes are named '{name}'"));
     assert_failure(
         &batch_output(&["--attach", "no-such-process-name"], &["quit"]),
@@ -672,6 +681,7 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     let stdout = String::from_utf8_lossy(&forced.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&forced.stderr).into_owned();
     assert!(!forced.status.success(), "{stdout}");
+
     // Help styles command names and aliases, and nothing else.
     assert!(stdout.contains("\x1b[1m\x1b[94mbreak\x1b[0m"), "{stdout:?}");
     assert!(stdout.contains("\x1b[94mb\x1b[0m"), "{stdout:?}");
@@ -682,6 +692,7 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     for plain in ["commands", "Set a breakpoint", "Use `help <command>`"] {
         assert!(!stdout.contains(&format!("\x1b[2m{plain}")), "{stdout:?}");
     }
+
     // Source metadata is styled, and the source's keywords, but not its
     // names.
     let current = stdout
@@ -697,6 +708,7 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
         source.contains("uint64_t breakpoint_target(\x1b[") && source.contains("void\x1b[0m)"),
         "the keyword was not highlighted: {current:?}"
     );
+
     // A failed command ends the batch, naming the command.
     assert!(
         stderr.contains("\x1b[1m\x1b[91merror\x1b[0m: --eval #4: unknown command 'invalid'"),
@@ -817,6 +829,7 @@ fn help_lists_every_command_and_details_one_by_name_or_alias() {
     ] {
         assert!(stdout.contains(expected), "{expected:?} in:\n{stdout}");
     }
+
     let (overview, _) = stdout
         .split_once("Use `help <command>` for aliases and usage.")
         .expect("the overview's last line");
@@ -839,6 +852,7 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
         stdout.contains("breakpoint 1 set at 6 locations"),
         "{stdout}"
     );
+
     // Inline copies of one line differ by address.
     assert_eq!(
         stdout
@@ -858,6 +872,7 @@ fn every_co_hit_prints_a_line_of_its_own() {
     for _ in 0..10 {
         commands.extend(["continue", "threads"]);
     }
+
     let stdout = batch(&["build/test-programs/hit-count-threads"], &commands);
     let place = " in contended at tests/fixtures/c/hit-count-threads.c:16";
     let mut co_hits = 0;
@@ -890,9 +905,11 @@ fn every_co_hit_prints_a_line_of_its_own() {
                 assert!(selected.starts_with(&format!("{stopped} ")), "{stop}");
             }
         }
+
         assert_eq!(reported, listed, "{stop}");
         co_hits += reported.len();
     }
+
     // The workers call `contended` together, so many of their hits come
     // at the same stop.
     assert!(co_hits > 0, "{stdout}");
@@ -955,6 +972,7 @@ fn tokio_tasks_are_listed_by_number() {
             12 => " — queued in the blocking pool",
             _ => " — ",
         };
+
         assert!(rest.contains(expected), "{stdout}");
         if *number < 11 {
             assert!(
@@ -985,6 +1003,7 @@ fn a_task_says_where_it_was_created() {
         let creating = text.lines().nth(number - 1).expect("the line").to_owned();
         (place.to_owned(), creating)
     };
+
     let source = "tests/fixtures/rust/tokio/workers/src/main.rs";
     let (place, creating) = created(
         "build/test-programs/tokio-workers-unstable",
@@ -1023,6 +1042,7 @@ fn a_task_panic_says_where_and_in_which_task() {
         )),
         "{stdout}"
     );
+
     // The task is the one the thread list puts on the thread.
     let (thread, task) = header
         .rsplit_once("[thread ")
@@ -1084,11 +1104,13 @@ fn a_runtimes_frames_fold_into_a_line() {
         &["build/test-programs/tokio-workers-o0"],
         &["break task_reached", "run", "bt", "bt -r", "frame 20", "bt"],
     );
+
     // Each backtrace ends saying where unwinding stopped.
     let [folded, raw, selected, _] = stdout.split("\nunwind stopped").collect::<Vec<_>>()[..]
     else {
         panic!("three backtraces: {stdout}");
     };
+
     // `frame` shows the frame it selects before its source.
     let selected = selected
         .split_once("=> ")
@@ -1100,6 +1122,7 @@ fn a_runtimes_frames_fold_into_a_line() {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
+
     let (folded, raw, selected) = (frames(folded), frames(raw), frames(selected));
     let last = raw.len() - 1;
     assert!(raw.iter().all(|line| line.starts_with('#')), "{stdout}");
@@ -1126,6 +1149,7 @@ fn a_runtimes_frames_fold_into_a_line() {
         ],
     );
     assert_eq!(folded.len(), 5, "{stdout}");
+
     // The selected frame stands alone, with its neighbours folded around it.
     assert!(
         selected.iter().any(|line| line.starts_with("#20 ")),
@@ -1165,6 +1189,7 @@ fn a_thread_blocked_on_a_future_shows_its_awaits() {
             .unwrap_or_else(|| panic!("the driver's backtrace: {stdout}"));
         trace.to_owned()
     };
+
     let source = "at tests/fixtures/rust/tokio/drivers/src/main.rs:";
     let trace = backtrace("build/test-programs/tokio-drivers-o0", "current");
     assert_in_order(
@@ -1295,17 +1320,20 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) -> String {
     let directory = support::ScratchDir::new("cli-settings");
     let path = directory.path().join("config.toml");
+
     // How long a run took depends on the machine's load, as the settings
     // every other test uses say.
     let settings = match settings.split_once("[stop]\n") {
         Some((before, after)) => format!("{before}[stop]\nelapsed = false\n{after}"),
         None => format!("{settings}\n[stop]\nelapsed = false\n"),
     };
+
     std::fs::write(&path, settings).expect("write the settings");
     let mut all = vec!["--batch"];
     for command in commands {
         all.extend(["--eval", command]);
     }
+
     all.extend_from_slice(arguments);
     assert_success(
         uscope_command()
@@ -1377,6 +1405,7 @@ fn function_pointers_show_their_signature_and_the_function_they_enter() {
             "type = int (**)(int)\n",
         ],
     );
+
     // A pointer into another module names the function there.
     let shared = batch(
         &["build/test-programs/globals-shared"],
@@ -1411,6 +1440,7 @@ fn function_types_read_as_gdb_reads_them() {
             commands.push(format!("whatis {}", row[0]));
             commands.push(format!("print {}", row[0]));
         }
+
         let commands: Vec<&str> = commands.iter().map(String::as_str).collect();
         let output = batch(&[&program], &commands);
         let mut types = output
@@ -1423,6 +1453,7 @@ fn function_types_read_as_gdb_reads_them() {
             let [name, gdb_type, gdb_function] = row[..] else {
                 panic!("malformed oracle row {row:?}");
             };
+
             let ours = types.next().expect("a type per whatis");
             assert_eq!(compact(ours), compact(gdb_type), "{compiler} whatis {name}");
             let value = values.next().expect("a value per print");
@@ -1430,6 +1461,7 @@ fn function_types_read_as_gdb_reads_them() {
                 .strip_suffix('>')
                 .and_then(|value| value.rsplit_once(" <"))
                 .map_or("", |(_, function)| function);
+
             // gdb names a pointer to data by its symbol too; uscope names
             // only the functions pointers to code enter.
             let expected = if name == "unary_pointer" {
@@ -1437,6 +1469,7 @@ fn function_types_read_as_gdb_reads_them() {
             } else {
                 gdb_function
             };
+
             assert_eq!(function, expected, "{compiler} print {name}: {value}");
         }
     }
@@ -1503,6 +1536,7 @@ fn symbol_versions_tell_apart_definitions_of_one_name() {
             "break timer_create@GLIBC_2.2.5",
         ],
     );
+
     // The default version keeps the plain name, and the old one is named
     // by its version alone.
     let location = |name: &str| {
@@ -1514,6 +1548,7 @@ fn symbol_versions_tell_apart_definitions_of_one_name() {
             })
             .unwrap_or_else(|| panic!("no {name:?} in {output}"))
     };
+
     let (current, old) = (
         location("timer_create"),
         location("timer_create@GLIBC_2.2.5"),
@@ -1581,6 +1616,7 @@ fn functions_without_debug_information_are_found_by_their_symbols() {
             " <printf>:",
         ],
     );
+
     // A name nothing imports or defines is a mistake, not a wait.
     let refused = batch_output(&[MEASURE], &["break printff"]);
     assert!(!refused.status.success());
@@ -1623,6 +1659,7 @@ fn pp_lays_values_out_to_the_width_and_print_formats_combine() {
         ),
         "{wide}"
     );
+
     // With no expression, every local of the frame, expanded.
     assert!(
         wide.contains("(bit_fields) bits = {negative = -3, first = 5, second = 42}\n"),
@@ -1856,6 +1893,7 @@ fn a_stop_names_its_thread_when_the_process_has_several() {
         .lines()
         .find(|line| line.starts_with("stopped at breakpoint 1 (hit 1) in contended at "))
         .unwrap_or_else(|| panic!("no stop in:\n{stdout}"));
+
     // Every worker is running when the first reaches the breakpoint.
     assert!(header.ends_with(" of 5]"), "{header}");
     assert!(
@@ -1919,6 +1957,7 @@ fn unique_prefixes_run_their_command_and_aliases_win() {
     for command in ["break main", "fini", "watchp", "dis", "undisp all"] {
         writeln!(stdin, "{command}").expect("write a command");
     }
+
     drop(stdin);
     let output = child.wait_with_output().expect("wait for uscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -2066,6 +2105,7 @@ fn breakpoint_and_watchpoint_tables_show_each_ones_state_place_and_options() {
         ],
         "{tables}"
     );
+
     // Several locations are listed beneath, each with its address.
     assert!(lines[3].starts_with("              |- 0x"), "{tables}");
     assert!(
@@ -2506,6 +2546,7 @@ fn view_files_loaded_together_stack_as_on_the_command_line() {
     for path in [&first, &second] {
         fs::write(path, "uscope-views 1\n").expect("write a view file");
     }
+
     let (first, second) = (first.display().to_string(), second.display().to_string());
     let load_both = format!("views load {first} {second}");
     let output = batch(
@@ -2539,6 +2580,7 @@ fn a_repository_inside_a_project_is_its_own_project() {
     let subdirectory = inner.join("src");
     fs::create_dir_all(outer.join(".uscope/state")).expect("make the outer project");
     fs::create_dir_all(&subdirectory).expect("make the inner repository");
+
     // A worktree's `.git` is a file.
     fs::write(inner.join(".git"), "gitdir: elsewhere\n").expect("mark the repository");
     let root = |start: &std::path::Path| {
@@ -2555,10 +2597,12 @@ fn a_repository_inside_a_project_is_its_own_project() {
             .unwrap_or_default()
             .to_owned()
     };
+
     assert_eq!(
         root(&subdirectory),
         format!("project root: {}", inner.display())
     );
+
     // From the outer project's own directories, it is still the root.
     assert_eq!(
         root(&outer.join("worktrees")),
@@ -2596,6 +2640,7 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
     )
     .expect("write a broken view file");
     let load_broken = format!("views load {}", broken.display());
+
     // The project is the one uscope runs in, from any of its directories,
     // wherever the program runs.
     let subdirectory = directory.path().join("src");
@@ -2672,6 +2717,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
             .output()
             .expect("run uscope views")
     };
+
     let clean = run(&["check".as_ref(), program.as_ref()]);
     assert_in_order(
         &assert_success(clean),
@@ -2698,6 +2744,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
             "app.views:5 `c widget`",
         ],
     );
+
     // A view file that cannot be used fails an explanation too.
     let broken = directory.path().join("broken.views");
     fs::write(
@@ -2753,6 +2800,7 @@ fn views_check_and_explain_show_drawings_and_their_renderers() {
             .output()
             .expect("run uscope views")
     };
+
     // The program carries its views and the renderer they name.
     let clean = run(&["check".as_ref(), program.as_ref()]);
     assert_in_order(
@@ -2873,6 +2921,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
             .output()
             .expect("run uscope views replay")
     };
+
     let kernel = directory.path().join("preorder.wasm");
     assert_in_order(
         &assert_success(replay(&["--kernel".as_ref(), kernel.as_os_str()])),
@@ -2881,6 +2930,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
             "run 2: kernel `preorder` reproduced",
         ],
     );
+
     // A run replays only with the kernel it recorded.
     let unknown = replay(&[]);
     assert!(!unknown.status.success(), "{unknown:?}");
@@ -3102,6 +3152,7 @@ fn floats_of_every_format_print_exactly() {
             ],
         );
     }
+
     let stdout = batch(
         &["build/test-programs/floats-rust"],
         &["break floats_target", "run", "print half", "print quad"],
@@ -3119,6 +3170,7 @@ fn info_symbol_and_x_describe_memory_by_address() {
     let executable = fixture("build/test-programs/variables-gcc-nopie");
     let main = symbol_address(&executable, "main");
     let data = symbol_address(&executable, "pointer_parameter_value");
+
     // _dl_relocate_static_pie is five bytes long and followed by padding.
     let padding = symbol_address(&executable, "_dl_relocate_static_pie") + 8;
     let commands = [
@@ -3145,6 +3197,7 @@ fn info_symbol_and_x_describe_memory_by_address() {
             "missing {expected:?} in:\n{stdout}"
         );
     }
+
     assert!(
         stdout.contains(&format!("{data:#018x}: 2a 00 00 00")),
         "{stdout}"
@@ -3172,6 +3225,7 @@ fn print_dereferences_pointer_chains_and_points_at_what_cannot_be() {
     assert!(stdout.contains("(int *) pointer = 0x"), "{stdout}");
     assert!(stdout.contains("(int) *pointer = 42"), "{stdout}");
     assert!(stdout.contains("(int) **pointer_pointer = 42"), "{stdout}");
+
     // A failed dereference is labeled with the pointee type (int), not the
     // operand's pointer type (int *).
     assert!(
@@ -3186,6 +3240,7 @@ fn print_dereferences_pointer_chains_and_points_at_what_cannot_be() {
         stdout.contains("*invalid_pointer = <unavailable:"),
         "{stdout}"
     );
+
     // Dereferencing what cannot be dereferenced is the expression's error,
     // pointed at.
     assert_in_order(
@@ -3274,6 +3329,7 @@ fn print_renders_symbolic_enums_variants_and_raw_unions() {
             "print",
         ],
     );
+
     // A sum type shows as its active variant.
     for expected in [
         "*value = Integer(42)",
@@ -3345,6 +3401,7 @@ fn goroutines_are_listed_by_the_code_the_program_wrote() {
     let reached = support::source_line(WORKERS, "func reached(");
     let stdout = at_go_checkpoint(&["goroutines"]);
     let lines = stdout.lines().collect::<Vec<_>>();
+
     // Main runs on the stopped thread, and is selected through it.
     let main = lines
         .iter()
@@ -3354,6 +3411,7 @@ fn goroutines_are_listed_by_the_code_the_program_wrote() {
         main.contains(&format!("workers/main.go:{reached} — running (thread ")),
         "{main}"
     );
+
     // A parked worker is where it waits, not in the runtime parking it.
     let workers = lines
         .iter()
@@ -3367,6 +3425,7 @@ fn goroutines_are_listed_by_the_code_the_program_wrote() {
             "{line}"
         );
     }
+
     assert!(!stdout.contains("in runtime.gopark"), "{stdout}");
     assert!(
         lines
@@ -3382,6 +3441,7 @@ fn goroutines_are_listed_by_the_code_the_program_wrote() {
             .filter(|line| line.starts_with("  [") || line.starts_with("* ["))
             .count()
     };
+
     assert!(listed(&all) > listed(&stdout), "{all}");
     assert!(!all.contains("lists them"), "{all}");
 
@@ -3455,6 +3515,7 @@ fn a_trimpath_programs_sources_say_why_they_are_missing() {
         &["build/test-programs/server-go-trimpath"],
         &["break main.greet", "run"],
     );
+
     // The import path the build recorded depends on where the checkout
     // that built it is, so it is read from the breakpoint's location.
     let greet = support::source_line(SERVER, "func greet(");
@@ -3499,6 +3560,7 @@ fn a_goroutine_is_selected_or_inspected_by_its_id() {
         "goroutine 1",
         "goroutine",
     ]);
+
     // Each goroutine's frames follow it, the runtime's own folded but
     // where it parked.
     assert_in_order(
@@ -3513,6 +3575,7 @@ fn a_goroutine_is_selected_or_inspected_by_its_id() {
             "unwind stopped",
         ],
     );
+
     // A command runs in the goroutine without keeping it selected.
     assert_in_order(
         &stdout,
@@ -3560,6 +3623,7 @@ fn a_cores_goroutines_show_their_labels_and_the_runtimes_their_entries() {
             && line.ends_with(r#"— chan receive {job: resize, tenant: "a b"}"#)),
         "{stdout}"
     );
+
     // The runtime numbers its goroutines in batches, so its own ids vary.
     assert!(
         stdout.lines().any(|line| line.starts_with("  [")
@@ -3675,6 +3739,7 @@ fn a_watched_goroutine_local_names_its_goroutine_and_follows_its_stack() {
             "continue",
         ],
     );
+
     // The address the watch is at, from its line.
     let watched = |prefix: &str| {
         let line = stdout
@@ -3689,8 +3754,10 @@ fn a_watched_goroutine_local_names_its_goroutine_and_follows_its_stack() {
             .expect("an address")
             .to_owned()
     };
+
     let set = watched("watchpoint 1 set on counter: ");
     let listed = watched("1 ");
+
     // Each round's deep calls grew the stack, which the runtime moved.
     assert_ne!(set, listed, "{stdout}");
     assert_in_order(
@@ -3741,6 +3808,7 @@ fn stops_and_list_show_source_from_any_working_directory() {
         .expect("run uscope");
     let stdout = assert_success(output);
     let line = format!("{}:6", fixture("tests/fixtures/c/basic.c").display());
+
     // The breakpoint, the stop, and the listing; a root of `/` holds every
     // path, so they stay absolute.
     assert_eq!(stdout.matches(&line).count(), 3, "{stdout}");
@@ -3773,6 +3841,7 @@ fn source_maps_read_sources_recorded_under_another_directory() {
         ],
         &commands,
     );
+
     // The mapped file is the repository's, shown relative to it.
     assert!(
         stdout.contains("\ntests/fixtures/c/basic.c:6\n"),
@@ -3955,6 +4024,7 @@ fn allowed_module_mismatches_are_named_and_reported() {
         stderr.contains("crash-gcc-o0-rebuilt does not match the dump (the build-id note differs); using its metadata anyway"),
         "{stderr}"
     );
+
     // The line names the file used when it is not at the recorded path.
     let stdout = assert_success(allowed);
     let rebuilt = fs::canonicalize(fixture("build/test-programs/crash-gcc-o0-rebuilt"))
@@ -3979,6 +4049,7 @@ fn core_module_searches_name_the_files_they_use_and_those_still_missing() {
         )
         .expect("copy module");
     }
+
     let module_path = directory.path().to_str().expect("UTF-8 scratch path");
     let partial = batch_output(
         &[
@@ -4047,6 +4118,7 @@ fn backtraces_and_where_name_code_without_debug_info_by_symbol_and_module() {
             .find(|line| line.starts_with('#') && line.contains(needle))
             .unwrap_or_else(|| panic!("no frame containing {needle:?}:\n{stdout}"))
     };
+
     // An unsized symbol says so; code no symbol names stays unknown, even
     // where stripping removed a static function between named ones.
     assert!(
@@ -4064,6 +4136,7 @@ fn backtraces_and_where_name_code_without_debug_info_by_symbol_and_module() {
         "{stdout}"
     );
     assert!(!stdout.contains("lib_static_helper"), "{stdout}");
+
     // Frames with source keep showing it instead of a module.
     assert!(frame(" in chain_gap at ").ends_with("tests/fixtures/c/elf-symbols/main.c:69"));
     assert!(frame(" in _start+0x").ends_with(" from elf-symbols-stripped"));
@@ -4104,6 +4177,7 @@ fn frame_commands_move_through_caller_frames_and_show_their_source() {
             && line.contains(" in frames_recurse at ")
             && line.ends_with(&recursive_call)
     });
+
     // The frame's source follows it, marking its call.
     let marked = line_index(&lines, frame, |line| line.starts_with("=> "));
     assert!(lines[marked].contains("frames_recurse(depth - 1, seed)"));
@@ -4177,6 +4251,7 @@ fn disassembly_and_finish_follow_the_selected_frame() {
     line_index(&lines, finished, |line| {
         line.starts_with("#0 ") && line.contains(" in frames_recurse at ")
     });
+
     // Depths 2 and 3 remain below main.
     line_index(&lines, finished, |line| {
         line.starts_with("#2 ") && line.contains(" in main at ")
@@ -4271,6 +4346,7 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
             "missing {old} -> {new}:\n{stdout}"
         );
     }
+
     // `watch` skips the store of 2 over 2; `watch -w` reports the failed
     // compare-exchange's store of the value already there.
     assert_eq!(
@@ -4392,6 +4468,7 @@ fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines(
         .iter()
         .position(|line| line.starts_with("=> "))
         .unwrap_or_else(|| panic!("no stopped instruction in:\n{listing}"));
+
     // The stop follows the frame setup, under its source line.
     assert!(lines[stopped].contains(" <main+0x4>: "), "{listing}");
     assert!(
@@ -4415,6 +4492,7 @@ fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines(
             "missing {expected:?} in:\n{listing}"
         );
     }
+
     assert_no_sgr(&stdout);
 }
 
@@ -4474,6 +4552,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
             .unwrap_or_else(|| panic!("no section {name}"))
             .address()
     };
+
     let (plt, got_plt) = (section(".plt"), section(".got.plt"));
     let commands = [
         format!("break {:#x}", address("disasm_call_method")),
@@ -4504,6 +4583,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
             .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{stdout}"))
             .to_owned()
     };
+
     // At the stop, registers hold the target or address its slot.
     assert!(
         find("call qword ptr [rax+8]", true).ends_with(&format!(
@@ -4522,6 +4602,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
     );
     let ret = find("ret  # ", true);
     assert!(ret.contains(" <main+0x"), "{ret}");
+
     // Away from the stop, only slots the instruction addresses are read.
     assert!(find("call rcx", false).ends_with("call rcx"), "{stdout}");
     assert!(
@@ -4540,6 +4621,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
         got.contains(" -> 0x7") && got.ends_with(" in libc.so.6>"),
         "{got}"
     );
+
     // Lazy binding has not yet filled the stub's slot, which is named once.
     let stub = find("jmp qword ptr [rip+", false);
     assert!(
@@ -4555,6 +4637,7 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
         find("jmp qword ptr [0]", false).ends_with("  # 0x0 -> memory inaccessible at 0x0"),
         "{stdout}"
     );
+
     // Far transfers, interrupt returns, and branches whose operand size
     // differs between Intel and AMD processors say they are not computed.
     for form in ["jmp far fword ptr [rax]", "jmp rax", "iretq"] {
@@ -4565,12 +4648,14 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
             "{stdout}"
         );
     }
+
     assert_no_sgr(&stdout);
 }
 
 #[test]
 fn disassemble_says_when_a_restarted_system_call_hides_a_stopped_target() {
     let target = support::ExternalProcess::spawn(&fixture("build/test-programs/attach-restart"));
+
     // Attaching must interrupt pause(2).
     support::wait_for_system_call(target.process_id(), 34);
     let process = target.process_id().get().to_string();
@@ -4635,6 +4720,7 @@ fn disassemble_reads_code_from_core_dumps() {
         stdout.lines().any(|line| line.starts_with("=> 0x")),
         "{stdout}"
     );
+
     // The optimized main has a cold range of its own.
     assert!(
         stdout.contains("range 1 of 2: 0x4010a0..0x4010a5"),
@@ -4685,6 +4771,7 @@ fn registers_show_the_selected_frames_own_values() {
     let innermost = line_index(&lines, 0, |line| line.starts_with("rdi "));
     assert!(!lines[innermost].contains("<not saved>"), "{stdout}");
     let selected = line_index(&lines, innermost, |line| line.starts_with("#5 "));
+
     // A callee may overwrite rdi without saving it, so frame 5's value is
     // unknown, while its instruction pointer is its own return address.
     let rdi = line_index(&lines, selected, |line| line.starts_with("rdi "));
@@ -4713,6 +4800,7 @@ fn handle_shows_and_changes_signal_policies_like_gdb() {
     let shown = |name: &str, stop: &str, print: &str, pass: &str| {
         format!("{name:<8}  {stop:<4}  {print:<5}  {pass}")
     };
+
     // `nostop` keeps printing; `noprint` implies `nostop`.
     for expected in [
         shown("SIGUSR1", "yes", "yes", "yes"),
@@ -4725,6 +4813,7 @@ fn handle_shows_and_changes_signal_policies_like_gdb() {
             "{expected:?}:\n{stdout}"
         );
     }
+
     // Received signals are reported in order before the program exits with
     // every handler but the discarded SIGALRM's.
     let usr1 = line_index(&lines, 0, |line| {
@@ -4790,6 +4879,7 @@ fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
 fn a_killed_session_leaves_its_flight_recording() {
     let scratch = support::ScratchDir::new("flight-recording");
     let recording = scratch.path().join("recording.log");
+
     // uscope keeps reading its open standard input after the script.
     let uscope = Uscope::spawn(
         uscope_command()
@@ -4803,6 +4893,7 @@ fn a_killed_session_leaves_its_flight_recording() {
         contents = fs::read_to_string(&recording).unwrap_or_default();
         contents.contains("event InferiorStopped")
     });
+
     // Dropping kills uscope and reaps it.
     drop(uscope);
 
@@ -4811,6 +4902,7 @@ fn a_killed_session_leaves_its_flight_recording() {
             .find(needle)
             .unwrap_or_else(|| panic!("the recording lacks {needle:?}:\n{contents}"))
     };
+
     let order = [
         "request add breakpoint",
         "request launch",
@@ -4829,6 +4921,7 @@ fn a_killed_session_leaves_its_flight_recording() {
         .lines()
         .find_map(|line| line.split_once("spawned ")?.1.parse::<u32>().ok())
         .expect("the recording names the inferior");
+
     // Once uscope is gone, init reaps the inferior, if it ever does.
     support::wait_until(&format!("inferior {inferior} dies with uscope"), || {
         matches!(process_state(inferior), None | Some('Z'))
@@ -4883,6 +4976,7 @@ fn expressions_print_compute_and_point_at_their_errors() {
             "missing `{expected}` in:\n{stdout}\nstderr:\n{stderr}"
         );
     }
+
     for expected in [
         "no variable is named `gone` here\n    gone + 1\n    ^^^^\n",
         "index 9 is outside the source bounds starting at 0 with 5 elements\n    f.arr[9]\n    ^^^^^^^^\n",
@@ -5022,6 +5116,7 @@ fn files_that_are_no_program_to_debug_say_what_they_are() {
     let basic = fs::read(fixture(BASIC)).expect("read basic");
     let truncated = scratch.path().join("truncated");
     fs::write(&truncated, &basic[..basic.len() / 2]).expect("write half a program");
+
     // `e_machine` names AArch64.
     let mut foreign = basic.clone();
     foreign[18..20].copy_from_slice(&183_u16.to_le_bytes());
@@ -5275,6 +5370,7 @@ fn sessions_cache_images_unless_told_not_to() {
                 .count()
         })
     };
+
     let session = |cache: &std::path::Path, arguments: &[&str]| {
         let mut all = vec!["--batch", "--eval", "break main"];
         all.extend_from_slice(arguments);
@@ -5399,6 +5495,7 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
     let mut lines = BufReader::new(recording.stderr.take().expect("stderr")).lines();
     let mut line = || lines.next().expect("a line").expect("read a line");
     assert!(line().contains("saves it"));
+
     // Until a saved window holds the first phase, which runs until the
     // program is released.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -5413,6 +5510,7 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
             break;
         }
     }
+
     let mut stdin = recording.stdin.take().expect("stdin");
     stdin.write_all(b"x").expect("release the program");
     drop(stdin);
@@ -5474,18 +5572,21 @@ fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
             })
             .count()
     };
+
     kill(Pid::from_raw(recording.id().cast_signed()), Signal::SIGUSR2).expect("signal");
     let deadline = Instant::now() + Duration::from_secs(20);
     while segments() == 0 {
         assert!(Instant::now() < deadline, "the signal wrote no segment");
         std::thread::yield_now();
     }
+
     // The second phase runs 300 ms, and the last segment holds it.
     let mut stdin = recording.stdin.take().expect("stdin");
     stdin.write_all(b"x").expect("release the program");
     drop(stdin);
     assert!(recording.wait().expect("wait").success());
     assert_eq!(segments(), 2);
+
     // The second phase's time is mostly in the clock it reads, so it is a
     // caller in the call tree rather than a function of its own.
     let report = assert_success(uscope(&["report", "--tree", &directory.to_string_lossy()]));

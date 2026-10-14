@@ -27,16 +27,22 @@ const VARIANTS: [(&str, &str); 5] = [
 enum Expected {
     /// Library code named by a symbol with a declared size.
     Library(&'static str),
+
     /// Library code named by an unsized symbol.
     UnsizedLibrary(&'static str),
+
     /// Library code that no symbol names.
     Unnamed,
+
     /// Main-image code that debug information describes.
     Debug(&'static str),
+
     /// C-library code that some symbol names.
     LibC,
+
     /// C-library code named by a known public symbol.
     LibCSymbol(&'static str),
+
     /// Main-image code that only its symbol names.
     MainSymbol(&'static str),
 }
@@ -50,6 +56,7 @@ fn expected_chain(library: &str) -> Vec<Expected> {
     } else {
         Library("lib_static_helper")
     };
+
     vec![
         Library("lib_fault"),
         Debug("chain_fault"),
@@ -101,6 +108,7 @@ impl Modules {
                     .await,
             );
         }
+
         Self { snapshot, images }
     }
 
@@ -174,6 +182,7 @@ fn assert_frame_symbols_are_consistent(trace: &Backtrace, modules: &Modules, con
         let Some(symbol) = &frame.symbol else {
             continue;
         };
+
         let module = frame
             .module
             .unwrap_or_else(|| panic!("{context}: symbolized frame without a module"));
@@ -200,6 +209,7 @@ fn assert_frame_symbols_are_consistent(trace: &Backtrace, modules: &Modules, con
         } else {
             image_instruction - 1
         };
+
         assert!(
             extent.range.contains(ImageAddress::new(lookup)),
             "{context}: frame #{} lookup {lookup:#x} is outside {extent:?}",
@@ -242,6 +252,7 @@ fn assert_fault_chain(trace: &Backtrace, modules: &Modules, executable: &str, li
                     },
                     "{frame_context}"
                 );
+
                 // Symbols never stand in for debug information.
                 assert!(frame.function.is_none(), "{frame_context}");
                 assert!(frame.source.is_none(), "{frame_context}");
@@ -257,6 +268,7 @@ fn assert_fault_chain(trace: &Backtrace, modules: &Modules, executable: &str, li
                 let function = frame.function.as_ref().expect("debug-info function");
                 assert_eq!(function.name.as_ref(), name, "{frame_context}");
                 assert!(frame.source.is_some(), "{frame_context}");
+
                 // Debug-info frames also carry their linkage symbol.
                 let symbol = frame_symbol(frame, &frame_context);
                 assert_eq!(symbol.name.as_ref(), name, "{frame_context}");
@@ -349,6 +361,7 @@ fn assert_library_layout(
     if library != "libelf-symbols-stripped.so" {
         expected_aliases.push(("asm_alias_0_local", SymbolBinding::Local));
     }
+
     expected_aliases.sort_unstable();
     assert_eq!(aliases, expected_aliases, "{context}");
 
@@ -389,6 +402,7 @@ fn assert_library_layout(
             .address()
             .get()
     };
+
     assert_eq!(leaf_extent.range.end.get(), next_function, "{context}");
     assert_eq!(leaf_extent.provenance, SymbolExtentProvenance::Inferred);
 
@@ -441,6 +455,7 @@ async fn live_processes_name_code_and_data_by_elf_symbols() {
             } else {
                 scenario.resume_to_stop().await
             };
+
             assert!(matches!(stop, StopReason::Breakpoint { .. }), "{stop:?}");
             let trace = scenario
                 .operation("backtrace", scenario.handle().backtrace())
@@ -519,6 +534,7 @@ fn gdb_backtrace(core: &str) -> Vec<GdbFrame> {
                 ),
                 _ => (None, rest),
             };
+
             // A versioned name, such as clock_gettime@GLIBC_2.2.5, names
             // its symbol without the version.
             let name = rest.split(" (").next().expect("frame name");
@@ -622,16 +638,19 @@ fn assert_agrees_with_gdb(trace: &Backtrace, modules: &Modules, gdb: &[GdbFrame]
                 "{context}"
             );
         }
+
         if gdb.has_source {
             let function = frame.function.as_ref().expect("debug-info frame");
             assert_eq!(function.name.as_ref(), gdb.name, "{context}");
             continue;
         }
+
         assert!(frame.function.is_none(), "{context}");
         if gdb.name == "??" {
             assert!(frame.symbol.is_none(), "{context}: {frame:#?}");
             continue;
         }
+
         let symbol = frame_symbol(frame, &context);
         let image = &modules.images[&frame.module.expect("symbolized module")];
         let chosen = image.symbol(symbol.symbol).expect("catalog symbol");
@@ -649,6 +668,7 @@ fn assert_agrees_with_gdb(trace: &Backtrace, modules: &Modules, gdb: &[GdbFrame]
 /// readelf's reading of one ELF file's sections and symbol tables.
 struct Oracle {
     files: Vec<OracleFile>,
+
     /// Data symbols defined in allocated, non-thread-local sections, each
     /// with the end of its section.
     data: Vec<(OracleSymbol, u64)>,
@@ -656,16 +676,21 @@ struct Oracle {
 
 struct OracleFile {
     executable_sections: BTreeMap<u32, (u64, u64)>,
+
     /// Every allocated section that occupies addresses, by section index:
     /// its name, range, and whether it is thread-local.
     allocated_sections: BTreeMap<u32, (String, u64, u64, bool)>,
+
     /// The flags of every allocated section, by name.
     section_flags: BTreeMap<String, String>,
     symbols: Vec<OracleSymbol>,
+
     /// The code range of every call-frame entry.
     unwind: Vec<(u64, u64)>,
+
     /// The entry size of every executable section, by section index.
     entry_sizes: BTreeMap<u32, u64>,
+
     /// The PLT stubs objdump names, as `name@plt`, with their addresses.
     plt: Vec<(String, u64)>,
 }
@@ -677,9 +702,11 @@ struct OracleSymbol {
     size: u64,
     kind: Option<SymbolKind>,
     binding: Option<SymbolBinding>,
+
     /// The defining section, or `None` for undefined, absolute, and common.
     section: Option<u32>,
     dynamic: bool,
+
     /// The version a dynamic symbol has, and whether it is the default.
     version: Option<(String, bool)>,
 }
@@ -692,6 +719,7 @@ impl Oracle {
             files: names.iter().map(|name| OracleFile::read(name)).collect(),
             data: Vec::new(),
         };
+
         oracle.distinguish_versions();
         oracle.add_plt_symbols();
         oracle.data = oracle
@@ -722,6 +750,7 @@ impl Oracle {
                         .insert(symbol.address);
                 }
             }
+
             for file in &mut self.files {
                 for symbol in &mut file.symbols {
                     if let Some((version, is_default)) = &symbol.version
@@ -773,6 +802,7 @@ impl Oracle {
                 ));
             }
         }
+
         for (index, stub) in stubs {
             self.files[index].symbols.push(stub);
         }
@@ -825,6 +855,7 @@ impl Oracle {
         let [address] = addresses.into_iter().collect::<Vec<_>>()[..] else {
             panic!("{name} does not have exactly one address");
         };
+
         address
     }
 }
@@ -849,14 +880,17 @@ impl OracleFile {
                 unwind.push(range);
                 continue;
             }
+
             if let Some(stub) = plt_stub(line) {
                 plt.push(stub);
                 continue;
             }
+
             if let Some(table) = trimmed.strip_prefix("Symbol table '") {
                 dynamic = table.starts_with(".dynsym'");
                 continue;
             }
+
             if let Some(section) = trimmed.strip_prefix('[')
                 && let Some((index, rest)) = section.split_once(']')
                 && let Ok(index) = index.trim().parse::<u32>()
@@ -871,7 +905,9 @@ impl OracleFile {
                         let entry_size = u64::from_str_radix(fields[5], 16).expect("entry size");
                         entry_sizes.insert(index, entry_size);
                     }
+
                     section_flags.insert(fields[0].to_owned(), fields[6].to_owned());
+
                     // A thread-local NOBITS section only describes a template.
                     let template = fields[6].contains('T') && fields[1] == "NOBITS";
                     if size != 0 && !template {
@@ -886,8 +922,10 @@ impl OracleFile {
                         );
                     }
                 }
+
                 continue;
             }
+
             // Num: Value Size Type Bind Vis Ndx Name
             let fields = trimmed.split_whitespace().collect::<Vec<_>>();
             if fields.len() < 8
@@ -896,8 +934,10 @@ impl OracleFile {
             {
                 continue;
             }
+
             symbols.push(symbol_row(&fields, dynamic));
         }
+
         Self {
             executable_sections,
             allocated_sections,
@@ -917,6 +957,7 @@ fn symbol_row(fields: &[&str], dynamic: bool) -> OracleSymbol {
         || fields[2].parse().expect("decimal symbol size"),
         |hex| u64::from_str_radix(hex, 16).expect("hex symbol size"),
     );
+
     // readelf appends versions to dynamic symbol names, `@@` for the
     // default. A static table may itself hold versioned names, which
     // are kept.
@@ -930,6 +971,7 @@ fn symbol_row(fields: &[&str], dynamic: bool) -> OracleSymbol {
         ),
         _ => (fields[7].to_owned(), None),
     };
+
     OracleSymbol {
         name,
         version,
@@ -995,6 +1037,7 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
                 .push(symbol);
         }
     }
+
     let catalog = image
         .symbols()
         .map(|symbol| ((symbol.name().to_string(), symbol.address().get()), symbol))
@@ -1024,6 +1067,7 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
             "{context}: {symbol:?}"
         );
     }
+
     assert_code_extents_match_oracle(image, oracle, &catalog, context);
     assert_data_storage_matches_oracle(oracle, &catalog, context);
     assert_sections_match_oracle(image, &oracle.files[0], context);
@@ -1077,6 +1121,7 @@ fn assert_data_storage_matches_oracle(
         if symbol.kind != Some(SymbolKind::Data) || symbol.binding.is_none() {
             continue;
         }
+
         let storage = symbol
             .section
             .and_then(|section| file.allocated_sections.get(&section))
@@ -1091,6 +1136,7 @@ fn assert_data_storage_matches_oracle(
             .entry((symbol.name.clone(), symbol.address))
             .or_insert(storage);
     }
+
     let (mut sized, mut unsized_count) = (0_usize, 0_usize);
     for (key, symbol) in catalog {
         let storage = symbol
@@ -1100,12 +1146,14 @@ fn assert_data_storage_matches_oracle(
             Some(expected) => assert_eq!(storage, *expected, "{context}: {symbol:?}"),
             None => assert_eq!(storage, None, "{context}: {symbol:?}"),
         }
+
         match storage {
             Some((start, end)) if start < end => sized += 1,
             Some(_) => unsized_count += 1,
             None => {}
         }
     }
+
     assert!(sized > 0, "{context}: no sized data symbols were compared");
     assert!(
         unsized_count > 0 || !context.contains("libelf-symbols"),
@@ -1133,12 +1181,14 @@ fn assert_code_extents_match_oracle(
         ) {
             continue;
         }
+
         let Some(&(start, end)) = symbol
             .section
             .and_then(|section| file.executable_sections.get(&section))
         else {
             continue;
         };
+
         code_starts.insert(symbol.address);
         code_symbols.push((symbol, start, end));
     }
@@ -1162,6 +1212,7 @@ fn assert_code_extents_match_oracle(
             assert!(symbol.extent().is_none(), "{context}: {symbol:?}");
             continue;
         };
+
         let extent = symbol
             .extent()
             .unwrap_or_else(|| panic!("{context}: code symbol without extent {symbol:?}"));
@@ -1189,6 +1240,7 @@ fn assert_code_extents_match_oracle(
             inferred += 1;
             continue;
         }
+
         assert_eq!(extent.provenance, SymbolExtentProvenance::Declared);
         assert_eq!(
             extent.range.end.get() - extent.range.start.get(),
@@ -1213,6 +1265,7 @@ fn assert_code_extents_match_oracle(
                 "{context}: {address:#x} in {symbol:?} selected {found:?}"
             );
         }
+
         if let Some(after) = image.symbolize(extent.range.end) {
             let after = image.symbol(after.symbol).expect("catalog symbol");
             assert_ne!(
@@ -1220,8 +1273,10 @@ fn assert_code_extents_match_oracle(
                 Some(extent.range)
             );
         }
+
         checked += 1;
     }
+
     assert!(
         checked > 0,
         "{context}: no sized code symbols were compared"
@@ -1248,9 +1303,11 @@ fn assert_catalogs_match_oracles(modules: &Modules, executable: &str, library: &
         } else {
             vec![file_name.as_str()]
         };
+
         if !Scenario::fixture(&format!("symbol-oracles/{file_name}.readelf")).exists() {
             continue;
         }
+
         assert_catalog_matches_oracle(
             &modules.images[&record.module.id],
             &Oracle::read(&oracles),
@@ -1258,6 +1315,7 @@ fn assert_catalogs_match_oracles(modules: &Modules, executable: &str, library: &
         );
         compared.insert(file_name);
     }
+
     for required in [executable, library, "libc.so.6", "ld-linux-x86-64.so.2"] {
         assert!(
             compared.contains(required),
@@ -1290,6 +1348,7 @@ async fn rust_frames_without_debug_info_are_named_by_demangled_symbols() {
             })
         })
         .collect::<Vec<_>>();
+
     // Optimization is off, so the volatile write is a call of its own.
     let executable = "crash-rust-nodebug".to_owned();
     assert_eq!(
@@ -1326,6 +1385,7 @@ async fn go_frames_without_dwarf_are_named_from_the_function_table() {
         .operation("backtrace", scenario.handle().backtrace())
         .await;
     assert_frame_symbols_are_consistent(&trace, &modules, "go");
+
     // Go's function table names the function and its line. The core holds
     // no stack, so the caller the table locates cannot be read, and the
     // debugger says so rather than guessing one.
@@ -1339,6 +1399,7 @@ async fn go_frames_without_dwarf_are_named_from_the_function_table() {
     let [frame] = &trace.frames[..] else {
         panic!("{trace:#?}");
     };
+
     assert_eq!(
         frame
             .function
@@ -1369,6 +1430,7 @@ async fn thread_local_symbols_have_no_runtime_address() {
     let mut scenario = Scenario::new("tls", Scenario::fixture("globals-tls-gcc"));
     scenario.add_breakpoint("main").await;
     scenario.run_to_stop().await;
+
     // A thread-local symbol's value is an offset into each thread's block,
     // so relocating it like an address would name unrelated memory.
     assert!(matches!(
@@ -1408,6 +1470,7 @@ async fn instructions_outside_every_module_have_no_location() {
         let [frame] = &trace.frames[..] else {
             panic!("{trace:#?}");
         };
+
         assert_eq!(
             frame
                 .instruction
@@ -1429,10 +1492,12 @@ async fn instructions_outside_every_module_have_no_location() {
 struct ExpectedDescription {
     /// The innermost allocated section containing the address.
     section: Option<String>,
+
     /// The data symbols, by name and address, that may name the address
     /// when no code symbol does: those with the innermost declared storage
     /// containing it or, failing that, unsized ones at exactly the address.
     data: Vec<(String, u64)>,
+
     /// Whether the data symbols are unsized.
     unsized_data: bool,
 }
@@ -1481,6 +1546,7 @@ impl Oracle {
                 true,
             )
         };
+
         ExpectedDescription {
             section,
             data,
@@ -1527,6 +1593,7 @@ async fn assert_module_descriptions(
         let Some(address) = bias.checked_add(probe) else {
             continue;
         };
+
         let description = scenario
             .operation(
                 "describe address",
@@ -1549,6 +1616,7 @@ async fn assert_module_descriptions(
             );
             continue;
         };
+
         assert!(found.path.ends_with(file_name), "{context}: {found:?}");
         assert_eq!(found.image.address.get(), probe, "{context}");
         assert_eq!(
@@ -1595,8 +1663,10 @@ async fn assert_module_descriptions(
                 "{context}: no symbol, but readelf expects one of {expected:?}"
             ),
         }
+
         described += 1;
     }
+
     described
 }
 
@@ -1634,16 +1704,19 @@ async fn assert_data_object_descriptions(
                 .map(|symbol| (symbol.name.to_string(), symbol.offset, symbol.provenance)),
         )
     };
+
     let named = |section: &str, name: &str, offset, provenance| {
         (
             Some(section.to_owned()),
             Some((name.to_owned(), offset, provenance)),
         )
     };
+
     assert_eq!(
         describe(library, "asm_data_outer", 4).await,
         named(".data", "asm_data_outer", 4, Declared)
     );
+
     // The innermost storage wins, and the outer object resumes after it.
     assert_eq!(
         describe(library, "asm_data_inner", 7).await,
@@ -1653,6 +1726,7 @@ async fn assert_data_object_descriptions(
         describe(library, "asm_data_inner", 8).await,
         named(".data", "asm_data_outer", 0x10, Declared)
     );
+
     // An unsized object names only its own address.
     assert_eq!(
         describe(library, "asm_data_unsized", 0).await,
@@ -1708,6 +1782,7 @@ async fn assert_descriptions(
         checked.push(("libc.so.6", vec!["libc.so.6"]));
         checked.push(("ld-linux-x86-64.so.2", vec!["ld-linux-x86-64.so.2"]));
     }
+
     for (file_name, oracles) in checked {
         let described = assert_module_descriptions(
             scenario,

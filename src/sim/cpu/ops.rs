@@ -13,6 +13,7 @@ use super::{
     Access, Accesses, CARRY, DIRECTION, FPE_INTDIV, Fault, Outcome, R11, RAX, RBP, RCX, RDI, RDX,
     RSI, RSP, Registers, SI_KERNEL, SIGFPE, SIGSEGV, Stop,
 };
+
 use crate::sim::memory::AddressSpace;
 
 type Step = Result<Outcome, Stop>;
@@ -71,17 +72,21 @@ pub(super) fn execute(
         memory,
         accesses,
     };
+
     if instruction.is_jcc_short_or_near() {
         if cpu.holds()? {
             cpu.registers.rip = instruction.near_branch_target();
         }
+
         return Ok(Outcome::Completed);
     }
+
     if SET_ON_CONDITION.contains(&instruction.mnemonic()) {
         let value = u64::from(cpu.holds()?);
         cpu.write(0, value)?;
         return Ok(Outcome::Completed);
     }
+
     if MOVE_ON_CONDITION.contains(&instruction.mnemonic()) {
         let value = cpu.read(1)?;
         if cpu.holds()? {
@@ -91,11 +96,13 @@ pub(super) fn execute(
             let unchanged = cpu.read(0)?;
             cpu.write(0, unchanged)?;
         }
+
         return Ok(Outcome::Completed);
     }
 
     match instruction.mnemonic() {
         Mnemonic::Nop => {}
+
         // Reads zero-extend from the source's width.
         Mnemonic::Mov | Mnemonic::Movzx => {
             let value = cpu.read(1)?;
@@ -142,6 +149,7 @@ pub(super) fn execute(
                 let release = cpu.read(0)?;
                 cpu.registers.general[RSP] = cpu.registers.general[RSP].wrapping_add(release);
             }
+
             cpu.registers.rip = target;
         }
         Mnemonic::Jmp => cpu.registers.rip = cpu.branch_target()?,
@@ -153,9 +161,11 @@ pub(super) fn execute(
             } else {
                 flags::sub(a, b, false, bits)
             };
+
             if instruction.mnemonic() != Mnemonic::Cmp {
                 cpu.write(0, result)?;
             }
+
             cpu.set_status(status);
         }
         Mnemonic::Adc | Mnemonic::Sbb => {
@@ -167,9 +177,11 @@ pub(super) fn execute(
             } else {
                 flags::sub(a, b, carry, bits)
             };
+
             cpu.write(0, result)?;
             cpu.set_status(status);
         }
+
         // A locked exchange-and-add is atomic here as every instruction is:
         // threads interleave whole instructions.
         Mnemonic::Xadd => {
@@ -188,9 +200,11 @@ pub(super) fn execute(
                 Mnemonic::Xor => a ^ b,
                 _ => a & b,
             };
+
             if instruction.mnemonic() != Mnemonic::Test {
                 cpu.write(0, result)?;
             }
+
             cpu.set_status(flags::logic(result, bits));
         }
         Mnemonic::Inc | Mnemonic::Dec => {
@@ -201,7 +215,9 @@ pub(super) fn execute(
             } else {
                 flags::sub(value, 1, false, bits)
             };
+
             cpu.write(0, result)?;
+
             // CF is the one status flag these keep.
             cpu.set_status((status & !CARRY) | (cpu.registers.rflags & CARRY));
         }
@@ -221,6 +237,7 @@ pub(super) fn execute(
                 } else {
                     flags::shift_left(value, count, bits)
                 };
+
                 cpu.write(0, result)?;
                 cpu.set_status(status);
             }
@@ -262,6 +279,7 @@ pub(super) fn execute(
         }
         _ => return Err(Stop::Unsupported),
     }
+
     Ok(Outcome::Completed)
 }
 
@@ -307,11 +325,13 @@ impl Cpu<'_> {
         if repeated && self.registers.general[RCX] == 0 {
             return Ok(());
         }
+
         let delta = if self.registers.rflags & DIRECTION == 0 {
             size as u64
         } else {
             (size as u64).wrapping_neg()
         };
+
         let destination = self.registers.general[RDI];
         let value = if copies {
             let source = self.registers.general[RSI];
@@ -321,6 +341,7 @@ impl Cpu<'_> {
         } else {
             self.registers.general[RAX] & mask(size * 8)
         };
+
         self.store(destination, size, value)?;
         self.registers.general[RDI] = destination.wrapping_add(delta);
         if repeated {
@@ -329,6 +350,7 @@ impl Cpu<'_> {
                 self.registers.rip = self.instruction.ip();
             }
         }
+
         Ok(())
     }
 
@@ -358,6 +380,7 @@ impl Cpu<'_> {
                 if size > 8 {
                     return Err(Stop::Unsupported);
                 }
+
                 self.load(address, size)
             }
             _ => {
@@ -379,6 +402,7 @@ impl Cpu<'_> {
                 if size > 8 {
                     return Err(Stop::Unsupported);
                 }
+
                 self.store(address, size, value)
             }
             _ => Err(Stop::Unsupported),
@@ -444,6 +468,7 @@ impl Cpu<'_> {
                 if bits != 64 {
                     return Err(Stop::Unsupported);
                 }
+
                 let product = signed(self.registers.general[RAX]) * signed(self.read(0)?);
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -468,6 +493,7 @@ impl Cpu<'_> {
                 (product, low)
             }
         };
+
         let fits = i128::from(sign_extend(low, bits).cast_signed()) == product;
         self.set_status(flags::sign_zero_parity(low, bits) | flags::multiply_overflow(!fits));
         Ok(())
@@ -479,6 +505,7 @@ impl Cpu<'_> {
         if bits < 16 {
             return Err(Stop::Unsupported);
         }
+
         let product =
             u128::from(self.registers.general[RAX] & mask(bits)) * u128::from(self.read(0)?);
         #[expect(clippy::cast_possible_truncation, reason = "the halves are wanted")]
@@ -497,6 +524,7 @@ impl Cpu<'_> {
         if bits < 16 {
             return Err(Stop::Unsupported);
         }
+
         let divisor = u128::from(self.read(0)?);
         let dividend = (u128::from(self.registers.general[RDX] & mask(bits)) << bits)
             | u128::from(self.registers.general[RAX] & mask(bits));
@@ -508,6 +536,7 @@ impl Cpu<'_> {
                 address: Some(self.instruction.ip()),
             }));
         };
+
         #[expect(
             clippy::cast_possible_truncation,
             reason = "both fit the operand width"
@@ -526,6 +555,7 @@ impl Cpu<'_> {
             64 => (Register::RAX, Register::RDX),
             _ => return Err(Stop::Unsupported),
         };
+
         self.registers
             .write(low_register, rax)
             .and_then(|()| self.registers.write(high_register, rdx))

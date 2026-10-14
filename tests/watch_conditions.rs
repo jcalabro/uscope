@@ -79,6 +79,7 @@ async fn wait_for_hits(scenario: &Scenario, id: WatchpointId, count: u64) {
         if hit_count >= count {
             return;
         }
+
         assert!(
             Instant::now() < deadline,
             "watchpoint {id} reached {hit_count} of {count} hits"
@@ -163,6 +164,7 @@ async fn conditions_and_hit_conditions_choose_which_hits_stop() {
             StopReason::Breakpoint { .. }
         ));
         scenario.remove_all_breakpoints().await;
+
         // The condition reads the storing function's parameter after the
         // store; the hit condition counts every changing store, including
         // the second of the two inlined additions per call.
@@ -204,6 +206,7 @@ async fn conditions_and_hit_conditions_choose_which_hits_stop() {
                     current: call,
                 });
             }
+
             last_call = call;
             for added in [call, call + 1000] {
                 total_hits += 1;
@@ -215,6 +218,7 @@ async fn conditions_and_hit_conditions_choose_which_hits_stop() {
                         current: total + added,
                     });
                 }
+
                 total += added;
             }
         }
@@ -225,15 +229,18 @@ async fn conditions_and_hit_conditions_choose_which_hits_stop() {
             if reason == StopReason::Exited(ExitStatus::Code(0)) {
                 break;
             }
+
             let [hit] = hits(&reason) else {
                 panic!("{fixture}: one hit per stop: {reason:?}");
             };
+
             stops.push(Expected {
                 watchpoint: hit.watchpoint,
                 hit_count: hit.hit_count,
                 previous: value(hit.previous.as_ref()),
                 current: value(hit.current.as_ref()),
             });
+
             // One thread, so the count is the stop's hit.
             assert_eq!(
                 watchpoint(&mut scenario, hit.watchpoint).await.hit_count,
@@ -244,6 +251,7 @@ async fn conditions_and_hit_conditions_choose_which_hits_stop() {
                 assert!(holds(&scenario, "call % 10 == 0").await, "{fixture}");
             }
         }
+
         assert_eq!(stops, expected, "{fixture}");
         scenario.shutdown().await;
     }
@@ -271,6 +279,7 @@ async fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
     let [hit] = hits(&reason) else {
         panic!("one hit: {reason:?}");
     };
+
     assert_eq!((hit.watchpoint, hit.hit_count), (watched.id, 1));
     let failures = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
@@ -316,12 +325,14 @@ async fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
             "{result:?}"
         );
     }
+
     assert_eq!(watchpoint(&mut scenario, watched.id).await, amended);
 
     let reason = scenario.resume_to_stop().await;
     let [hit] = hits(&reason) else {
         panic!("one hit: {reason:?}");
     };
+
     assert_eq!(hit.hit_count, 5);
     assert_eq!(
         value(hit.previous.as_ref()),
@@ -373,6 +384,7 @@ async fn concurrent_hits_are_each_counted_once_and_judged_in_their_thread() {
         if !matches!(reason, StopReason::Watchpoint { .. }) {
             break reason;
         }
+
         let reported = thread_hits(&mut scenario).await;
         assert!(reported.iter().any(|hit| hits(&reason).contains(hit)));
         for hit in reported {
@@ -387,10 +399,12 @@ async fn concurrent_hits_are_each_counted_once_and_judged_in_their_thread() {
             stopped.push((hit.thread, hit.hit_count));
         }
     };
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
     );
+
     // Each worker stops once, at its own hit's number.
     let mut threads = stopped
         .iter()
@@ -421,6 +435,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_declined_hits() {
     scenario.add_breakpoint("store_steady").await;
     scenario.run_to_stop().await;
     scenario.remove_all_breakpoints().await;
+
     // Every store keeps the value at 7, so every hit is declined.
     let watched = watch(
         &scenario,
@@ -443,6 +458,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_declined_hits() {
     );
     let at_pause = watchpoint(&mut scenario, watched.id).await.hit_count;
     let stores = global(&scenario, "stores").await;
+
     // A store is counted before the thread counts it in `stores`.
     assert!(
         stores <= at_pause && at_pause <= stores + 4,
@@ -462,6 +478,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_declined_hits() {
     let [hit] = hits(&reason) else {
         panic!("one hit: {reason:?}");
     };
+
     assert_eq!(hit.watchpoint, watched.id);
     assert!(hit.hit_count > amended.hit_count);
     assert_eq!(
@@ -502,8 +519,10 @@ async fn attached_processes_decline_hits_and_detach_mid_run_unharmed() {
         let [hit] = hits(&reason) else {
             panic!("one hit: {reason:?}");
         };
+
         assert_eq!((hit.watchpoint, hit.hit_count), (watched.id, 50 * stop));
     }
+
     let stores = global(&scenario, "stores").await;
 
     // Detaching while hits are being declined disarms every thread first:
@@ -536,6 +555,7 @@ async fn run_to(scenario: &mut Scenario, function: &str) {
         assert!(matches!(exception.code, 10 | 17), "{reason:?}");
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
@@ -577,12 +597,14 @@ async fn a_declined_store_stepped_over_at_a_breakpoint_is_transparent() {
             assert_eq!(scenario.step_to_stop(kind).await, StopReason::Step { kind });
             assert_eq!(watchpoint(&mut scenario, watched.id).await.hit_count, 1);
         }
+
         // The next store holds the condition, and changes the value the
         // declined store left.
         let reason = scenario.resume_to_stop().await;
         let [hit] = hits(&reason) else {
             panic!("one hit: {reason:?}");
         };
+
         assert_eq!(hit.hit_count, 2);
         assert_eq!(
             (value(hit.previous.as_ref()), value(hit.current.as_ref())),

@@ -17,14 +17,19 @@ pub struct Saved {
     /// The location as the user wrote it, with a path inside the project
     /// relative to its root.
     pub location: String,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hits: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+
     #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
     pub enabled: bool,
+
     /// A source breakpoint's line as it read when saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_text: Option<String>,
@@ -47,6 +52,7 @@ const fn is_enabled(enabled: &bool) -> bool {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SavedDisplay {
     pub expression: String,
+
     /// The format letters, as `display/` takes them.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub format: String,
@@ -63,8 +69,10 @@ pub struct Contents {
 #[serde(deny_unknown_fields)]
 struct File {
     version: u32,
+
     #[serde(default, rename = "breakpoint", skip_serializing_if = "Vec::is_empty")]
     breakpoints: Vec<Saved>,
+
     #[serde(default, rename = "display", skip_serializing_if = "Vec::is_empty")]
     displays: Vec<SavedDisplay>,
 }
@@ -85,6 +93,7 @@ pub fn read(path: &Path) -> Result<Contents, String> {
     let Some(text) = super::config::read_text(path)? else {
         return Ok(Contents::default());
     };
+
     let file: File = toml::from_str(&text).map_err(|error| error.to_string().trim().to_owned())?;
     if file.version != VERSION {
         return Err(format!(
@@ -92,6 +101,7 @@ pub fn read(path: &Path) -> Result<Contents, String> {
             file.version
         ));
     }
+
     Ok(Contents {
         breakpoints: file.breakpoints,
         displays: file.displays,
@@ -109,6 +119,7 @@ pub fn write(path: &Path, contents: &Contents) -> io::Result<()> {
         std::fs::create_dir_all(directory)?;
         std::fs::write(directory.join(".gitignore"), "*\n")?;
     }
+
     let text = toml::to_string(&File {
         version: VERSION,
         breakpoints: contents.breakpoints.clone(),
@@ -129,6 +140,7 @@ pub fn saved(breakpoint: &Breakpoint, root: &Path, line_text: Option<String>) ->
     if breakpoint.temporary {
         return None;
     }
+
     Some(Saved {
         location: location(&breakpoint.spec, root)?,
         condition: breakpoint.condition.as_ref().map(ToString::to_string),
@@ -149,6 +161,7 @@ pub fn location(spec: &BreakpointSpec, root: &Path) -> Option<String> {
             .display()
             .to_string()
     };
+
     Some(match spec {
         BreakpointSpec::Address(_) => return None,
         BreakpointSpec::Function(name) => name.clone(),
@@ -166,18 +179,22 @@ pub fn command(saved: &Saved) -> String {
         command.push_str(" hits ");
         command.push_str(hits);
     }
+
     if let Some(condition) = &saved.condition {
         command.push_str(" if ");
         command.push_str(condition);
     }
+
     if let Some(log) = &saved.log {
         command.push_str(" log \"");
         command.push_str(&log.replace('\\', "\\\\").replace('"', "\\\""));
         command.push('"');
     }
+
     if !saved.enabled {
         command.push_str(" disabled");
     }
+
     command
 }
 
@@ -185,15 +202,20 @@ pub fn command(saved: &Saved) -> String {
 #[derive(Debug, Default)]
 pub struct Kept {
     pub path: PathBuf,
+
     /// Whether the file could not be read, so that nothing overwrites it.
     pub blocked: bool,
+
     /// What the file holds now.
     pub written: Contents,
+
     /// Breakpoints the file holds that this session could not restore,
     /// which it keeps writing back.
     pub unrestored: Vec<Saved>,
+
     /// The line text of each source location, as first read or as saved.
     pub line_texts: std::collections::BTreeMap<String, String>,
+
     /// Where the session finds source files, which line texts are read from.
     pub source_paths: uscope::SourcePathMap,
 }
@@ -224,9 +246,11 @@ pub fn commands(breakpoints: &[Breakpoint], root: &Path) -> String {
         if breakpoint.temporary {
             text.push('t');
         }
+
         text.push_str(&line);
         text.push('\n');
     }
+
     text
 }
 

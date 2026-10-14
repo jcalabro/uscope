@@ -28,6 +28,7 @@ fn profile(samples: &[(Vec<usize>, u64)]) -> Profile {
                 declared: None,
                 role: 0,
             };
+
             builder.symbolize(frame, module, &[line]);
             frame
         })
@@ -43,6 +44,7 @@ fn profile(samples: &[(Vec<usize>, u64)]) -> Profile {
             NONE,
         );
     }
+
     builder.setting("weight", "nanoseconds");
     Profile {
         capture: builder.finish(),
@@ -62,9 +64,11 @@ fn paths(profile: &Profile) -> BTreeMap<Vec<String>, u64> {
             path.push(keys.name(tree.key[at as usize]));
             at = tree.parent[at as usize];
         }
+
         path.reverse();
         *paths.entry(path).or_default() += tree.own[node];
     }
+
     paths
 }
 
@@ -91,6 +95,7 @@ proptest! {
             let path = stack.iter().rev().map(|&at| NAMES[at].to_owned()).collect();
             *expected.entry(path).or_default() += weight;
         }
+
         prop_assert_eq!(&paths(&original), &expected);
 
         let pprof = original.export(Format::Pprof, StackView::Native).unwrap();

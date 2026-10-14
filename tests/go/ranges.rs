@@ -112,6 +112,7 @@ async fn stepping_over_a_loop_body_stays_in_the_loop() {
         ("counted break", 3),
         ("counted after", 0),
     ];
+
     // Inlined with its iterator, a body has no code on the loop's line.
     let evens = [
         ("evens end", 0),
@@ -142,6 +143,7 @@ async fn stepping_over_a_loop_body_stays_in_the_loop() {
         } else {
             &inlined_evens[..]
         };
+
         assert_walk(&walked, expected, fixture);
         scenario.shutdown().await;
     }
@@ -175,6 +177,7 @@ async fn stepping_over_a_loop_enters_its_body() {
                 })
                 .await;
             scenario.remove_breakpoint(breakpoint.id).await;
+
             // To the loop's line in the function, then into its body.
             loop {
                 let (here, at) = place(&scenario).await;
@@ -182,6 +185,7 @@ async fn stepping_over_a_loop_enters_its_body() {
                 if at == line(marker) {
                     break;
                 }
+
                 assert!(
                     at < line(marker),
                     "{context}: stepped past the loop to {at}"
@@ -189,6 +193,7 @@ async fn stepping_over_a_loop_enters_its_body() {
                 let reason = scenario.step_to_stop(StepKind::OverSource).await;
                 assert_eq!(reason, over(), "{context}");
             }
+
             let reason = scenario.step_to_stop(StepKind::OverSource).await;
             assert_eq!(reason, over(), "{context}");
             assert_eq!(
@@ -225,6 +230,7 @@ async fn finishing_a_loop_body_runs_the_rest_of_the_loop() {
                 },
                 "{context}"
             );
+
             // The loop is done. The step stops where the function goes on
             // after the call that ran it, on the loop's lines, or at the
             // line after the loop when the loop was inlined; the next line
@@ -241,6 +247,7 @@ async fn finishing_a_loop_body_runs_the_rest_of_the_loop() {
                     "{context}"
                 );
             }
+
             scenario.shutdown().await;
         }
     }
@@ -280,16 +287,19 @@ async fn a_backtrace_marks_the_iterators_between_a_body_and_its_loop() {
                 ),
                 "{context}"
             );
+
             // The iterator runs the loop of the frame that holds it; nothing
             // else iterates a loop.
             let mut expected = vec![None; trace.frames.len()];
             expected[1] = Some(2);
             assert_eq!(trace.loop_iterators(), expected, "{context}");
+
             // Unoptimized, the variables the body uses from its loop's
             // function are its own.
             if fixture.ends_with("o0") {
                 assert!(integer(&scenario, "total").await.is_some(), "{context}");
             }
+
             scenario.shutdown().await;
         }
     }

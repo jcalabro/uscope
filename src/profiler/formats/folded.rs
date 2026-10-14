@@ -24,6 +24,7 @@ pub fn import(text: &str) -> Result<Capture, String> {
         if line.is_empty() {
             continue;
         }
+
         let at = || format!("line {}", number + 1);
         let (names, weight) = line
             .rsplit_once(' ')
@@ -34,6 +35,7 @@ pub fn import(text: &str) -> Result<Capture, String> {
         if weight == 0 {
             continue;
         }
+
         total = total
             .checked_add(weight)
             .ok_or_else(|| format!("{} brings the weights past {}", at(), u64::MAX))?;
@@ -50,14 +52,17 @@ pub fn import(text: &str) -> Result<Capture, String> {
                     declared: None,
                     role: 0,
                 };
+
                 builder.symbolize(frame, NONE, &[line]);
                 frame
             });
             stack.push(frame);
         }
+
         let stack = builder.stack(&stack);
         builder.sample(thread, 0, weight, stack, NONE);
     }
+
     builder.setting("source", "folded stacks");
     builder.setting("weight", "samples");
     builder.setting("sample times", "none");
@@ -77,18 +82,22 @@ pub fn export(keys: &Keys<'_>, tree: &CallTree) -> String {
             path.push(tree.key[at as usize]);
             at = tree.parent[at as usize];
         }
+
         for (position, key) in path.iter().rev().enumerate() {
             if position > 0 {
                 out.push(';');
             }
+
             let name = names
                 .entry(*key)
                 .or_insert_with(|| keys.name(*key).replace(['\n', ';'], ":"));
             out.push_str(name);
         }
+
         out.push(' ');
         out.push_str(&tree.own[node].to_string());
         out.push('\n');
     }
+
     out
 }

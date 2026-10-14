@@ -18,6 +18,7 @@ const BUILDS: [&str; 2] = ["panic-go-o0", "panic-go-o2"];
 struct Dumped {
     status: String,
     labels: Vec<(String, String)>,
+
     /// Every frame, the runtime's own among them: a function and its
     /// `file:line`.
     frames: Vec<(String, String)>,
@@ -35,6 +36,7 @@ fn crash_dump(fixture: &str) -> BTreeMap<u64, Dumped> {
         let Some(header) = line.strip_prefix("goroutine ") else {
             continue;
         };
+
         let (id, rest) = header.split_once(' ').expect("a goroutine header");
         let (_, rest) = rest.split_once('[').expect("a status");
         let (status, rest) = rest.split_once(']').expect("a status");
@@ -60,10 +62,12 @@ fn crash_dump(fixture: &str) -> BTreeMap<u64, Dumped> {
             if call.starts_with("created by ") {
                 continue;
             }
+
             let function = &call[..call.rfind('(').expect("a call")];
             let position = position.split(' ').next().expect("a position");
             frames.push((function.to_owned(), position.to_owned()));
         }
+
         goroutines.insert(
             id.parse().expect("a goroutine id"),
             Dumped {
@@ -73,6 +77,7 @@ fn crash_dump(fixture: &str) -> BTreeMap<u64, Dumped> {
             },
         );
     }
+
     assert!(!goroutines.is_empty(), "{fixture}: no dump in {log}");
     goroutines
 }
@@ -113,8 +118,10 @@ async fn a_cores_goroutines_are_those_the_runtime_dumped_as_it_crashed() {
         else {
             panic!("{fixture}: not stopped");
         };
+
         let image = scenario.handle().module_image();
         let tasks = tasks(&scenario).await;
+
         // Tasks are listed as `allgs` holds them, and each P takes ids in
         // batches, so their order need not be their ids'.
         let mut listed = tasks.iter().map(|task| task.id.number).collect::<Vec<_>>();
@@ -173,6 +180,7 @@ async fn a_cores_goroutines_are_those_the_runtime_dumped_as_it_crashed() {
                 assert_eq!(frames, dumped.frames, "{context}");
             }
         }
+
         scenario.shutdown().await;
     }
 }
@@ -194,6 +202,7 @@ async fn a_goroutines_profiler_labels_are_its_own() {
             assert_eq!(&labels, expected, "{fixture}: {task:#?}");
             labelled += usize::from(!labels.is_empty());
         }
+
         assert_eq!(labelled, 1, "{fixture}");
         scenario.shutdown().await;
     }
@@ -217,6 +226,7 @@ async fn a_crashing_panic_stops_then_raises_sigabrt() {
         let StopReason::LanguageException(exception) = &reason else {
             panic!("{fixture}: {reason:?}");
         };
+
         assert_eq!(
             exception.kind,
             LanguageExceptionKind::Unhandled,

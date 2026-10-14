@@ -25,6 +25,7 @@ use crate::sim::kernel::{Kernel, Options, Tgid, Tid, WaitStatus};
 
 /// The simulated debugger's process identifier.
 const TRACER: i32 = 100;
+
 /// How many instructions a simulated wait may run before it gives up.
 const MAX_WAIT_STEPS: u64 = 10_000_000;
 
@@ -32,63 +33,97 @@ const MAX_WAIT_STEPS: u64 = 10_000_000;
 /// name the thread they address.
 pub(super) trait Tracee {
     fn leader(&self) -> Tid;
+
     fn tracer(&self) -> i32;
+
     /// Waits for `thread`'s next status.
     fn wait(&mut self, thread: Tid) -> WaitStatus;
+
     /// Whether `thread` has a status to report, without reaping it.
     fn has_report(&mut self, thread: Tid) -> bool;
+
     /// Lets running threads run a little while a script polls for what
     /// they do: real ones run by themselves.
     fn pass_time(&mut self);
+
     /// Whether `thread` finished exiting and awaits reaping.
     fn is_zombie(&self, thread: Tid) -> bool;
+
     /// The registers, and `orig_rax`.
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno>;
+
     fn set_registers(&mut self, thread: Tid, registers: &Registers) -> Result<(), Errno>;
+
     /// The signal, code, sender, and fault address, as the controller sees
     /// them.
     fn signal(&self, thread: Tid) -> Result<(i32, i32, Option<i32>, Option<u64>), Errno>;
+
     fn event_message(&self, thread: Tid) -> Result<u64, Errno>;
+
     fn set_options(&mut self, thread: Tid) -> Result<(), Errno>;
+
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno>;
+
     fn kill(&mut self) -> Result<(), Errno>;
+
     /// `kill(process, signal)`, from the tracer.
     fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno>;
+
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno>;
+
     /// The tracer's `tgkill(SIGSTOP)` of `thread` of `process`.
     fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno>;
+
     /// Whether `thread` is in a job-control stop, untraced.
     fn job_stopped(&self, thread: Tid) -> bool;
+
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno>;
+
     fn poke(&mut self, thread: Tid, address: u64, value: u64) -> Result<(), Errno>;
+
     fn name(&self, thread: Tid) -> String;
+
     /// The thread group `/proc` names, or `None` once the thread is gone.
     fn thread_group(&self, thread: Tid) -> Option<Tid>;
+
     /// `/proc/<thread>/maps`.
     fn maps(&self, thread: Tid) -> Option<String>;
+
     fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno>;
+
     fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno>;
+
     /// Lets something other than the tracer hold `count` of `thread`'s
     /// hardware breakpoints, watching `address`.
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64);
+
     /// Samples every thread of the process each time it reaches
     /// `address`, copying `stack_bytes` of stack (K-PERF-4).
     fn sample_at(&mut self, address: u64, stack_bytes: u32);
+
     /// The records the samples wrote since the last call.
     fn samples(&mut self) -> Vec<u8>;
+
     /// Takes on `child`, which the process forked, to end it with the
     /// process.
     fn adopt(&mut self, child: Tid);
+
     fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno>;
+
     /// `PTRACE_SEIZE` of an untraced thread, with the controller's options.
     fn seize(&mut self, thread: Tid) -> Result<(), Errno>;
+
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno>;
+
     /// A register read and a seize of `thread` by another tracer.
     fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>);
+
     /// The children `thread` forked that are not reaped.
     fn children(&self, thread: Tid) -> Vec<Tid>;
+
     /// `PTRACE_SYSCALL`.
     fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno>;
+
     /// `PTRACE_GET_SYSCALL_INFO`.
     fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno>;
 }
@@ -97,18 +132,23 @@ impl Tracee for NativeTracee {
     fn leader(&self) -> Tid {
         self.pid()
     }
+
     fn tracer(&self) -> i32 {
         i32::try_from(std::process::id()).expect("a process identifier fits i32")
     }
+
     fn wait(&mut self, thread: Tid) -> WaitStatus {
         Self::wait(self, thread)
     }
+
     fn has_report(&mut self, thread: Tid) -> bool {
         Self::has_report(self, thread)
     }
+
     fn pass_time(&mut self) {
         std::thread::yield_now();
     }
+
     fn is_zombie(&self, thread: Tid) -> bool {
         std::fs::read_to_string(format!("/proc/{}/task/{thread}/stat", self.pid()))
             .ok()
@@ -118,96 +158,125 @@ impl Tracee for NativeTracee {
             })
             .unwrap_or(false)
     }
+
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno> {
         Ok((
             Self::registers(self, thread)?,
             Self::system_call(self, thread)?,
         ))
     }
+
     fn set_registers(&mut self, thread: Tid, registers: &Registers) -> Result<(), Errno> {
         Self::set_registers(self, thread, registers)
     }
+
     fn signal(&self, thread: Tid) -> Result<(i32, i32, Option<i32>, Option<u64>), Errno> {
         self.signal_view(thread)
     }
+
     fn event_message(&self, thread: Tid) -> Result<u64, Errno> {
         Self::event_message(self, thread)
     }
+
     fn set_options(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::set_options(self, thread, true)
     }
+
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno> {
         Self::resume(self, thread, signal, single_step)
     }
+
     fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
         Self::resume_to_call(self, thread, signal)
     }
+
     fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno> {
         Self::call_info(self, thread)
     }
+
     fn kill(&mut self) -> Result<(), Errno> {
         Self::kill(self, libc::SIGKILL)
     }
+
     fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno> {
         Self::signal_process(self, process, signal)
     }
+
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::request_stop(self, thread)
     }
+
     fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno> {
         Self::request_stop_of(self, process, thread)
     }
+
     fn job_stopped(&self, thread: Tid) -> bool {
         Self::job_stopped(self, thread)
     }
+
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno> {
         Self::peek(self, thread, address)
     }
+
     fn poke(&mut self, thread: Tid, address: u64, value: u64) -> Result<(), Errno> {
         Self::poke(self, thread, address, value)
     }
+
     fn name(&self, thread: Tid) -> String {
         std::fs::read_to_string(format!("/proc/{}/task/{thread}/comm", self.pid()))
             .expect("read the thread's name")
             .trim_end()
             .to_owned()
     }
+
     fn thread_group(&self, thread: Tid) -> Option<Tid> {
         Self::thread_group(self, thread)
     }
+
     fn maps(&self, thread: Tid) -> Option<String> {
         Self::maps(self, thread)
     }
+
     fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno> {
         self.read_debug_register(thread, index)
     }
+
     fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno> {
         self.write_debug_register(thread, index, value)
     }
+
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64) {
         Self::hold_debug_slots(self, thread, count, address);
     }
+
     fn sample_at(&mut self, address: u64, stack_bytes: u32) {
         Self::sample_at(self, address, stack_bytes);
     }
+
     fn samples(&mut self) -> Vec<u8> {
         Self::samples(self)
     }
+
     fn adopt(&mut self, child: Tid) {
         Self::adopt(self, child);
     }
+
     fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
         Self::detach(self, thread, signal)
     }
+
     fn seize(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::seize(self, thread)
     }
+
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::interrupt(self, thread)
     }
+
     fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>) {
         Self::as_another_tracer(self, thread)
     }
+
     fn children(&self, thread: Tid) -> Vec<Tid> {
         Self::children(self, thread)
     }
@@ -253,12 +322,14 @@ impl SimTracee {
                     }
                 };
             }
+
             let runnable = self.kernel.runnable().collect::<Vec<_>>();
             assert!(!runnable.is_empty(), "the program can never end");
             for tid in runnable {
                 steps += self.kernel.run(tid, 16).executed.max(1);
                 self.check_gap();
             }
+
             assert!(steps < MAX_WAIT_STEPS, "the program never ended");
         }
     }
@@ -268,9 +339,11 @@ impl Tracee for SimTracee {
     fn leader(&self) -> Tid {
         self.pid
     }
+
     fn tracer(&self) -> i32 {
         TRACER
     }
+
     /// Runs every thread that can run, a few instructions each in turn,
     /// until `thread` reports.
     fn wait(&mut self, thread: Tid) -> WaitStatus {
@@ -279,6 +352,7 @@ impl Tracee for SimTracee {
             if let Some(status) = self.kernel.collect(thread) {
                 return status;
             }
+
             let runnable = self.kernel.runnable().collect::<Vec<_>>();
             assert!(
                 !runnable.is_empty(),
@@ -288,12 +362,15 @@ impl Tracee for SimTracee {
                 steps += self.kernel.run(tid, 16).executed.max(1);
                 self.check_gap();
             }
+
             assert!(steps < MAX_WAIT_STEPS, "{thread} never reported");
         }
     }
+
     fn has_report(&mut self, thread: Tid) -> bool {
         self.kernel.reportable(TRACER).any(|tid| tid == thread)
     }
+
     fn pass_time(&mut self) {
         let runnable = self.kernel.runnable().collect::<Vec<_>>();
         for tid in runnable {
@@ -301,24 +378,30 @@ impl Tracee for SimTracee {
             self.check_gap();
         }
     }
+
     fn is_zombie(&self, thread: Tid) -> bool {
         self.kernel
             .threads
             .get(&thread)
             .is_some_and(|thread| matches!(thread.state, crate::sim::kernel::State::Zombie(_)))
     }
+
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno> {
         self.kernel.get_registers_and_call(thread)
     }
+
     fn set_registers(&mut self, thread: Tid, registers: &Registers) -> Result<(), Errno> {
         self.kernel.set_registers(thread, *registers)
     }
+
     fn signal(&self, thread: Tid) -> Result<(i32, i32, Option<i32>, Option<u64>), Errno> {
         self.kernel.signal_info(thread).map(signal_view)
     }
+
     fn event_message(&self, thread: Tid) -> Result<u64, Errno> {
         self.kernel.event_message(thread)
     }
+
     fn set_options(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel.set_options(
             thread,
@@ -330,43 +413,54 @@ impl Tracee for SimTracee {
             },
         )
     }
+
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno> {
         self.kernel.resume(thread, signal, single_step)
     }
+
     fn resume_to_call(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
         let result = self.kernel.resume_to_call(thread, signal);
         self.check_gap();
         result
     }
+
     fn call_info(&self, thread: Tid) -> Result<CallInfo, Errno> {
         self.kernel.call_info(thread)
     }
+
     fn kill(&mut self) -> Result<(), Errno> {
         self.kernel.kill(Tgid::led_by(self.pid), libc::SIGKILL)
     }
+
     fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno> {
         self.kernel.kill(Tgid::new(process), signal)
     }
+
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel
             .tgkill(Tgid::led_by(self.pid), thread, libc::SIGSTOP)
     }
+
     fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno> {
         self.kernel
             .tgkill(Tgid::new(process), thread, libc::SIGSTOP)
     }
+
     fn job_stopped(&self, thread: Tid) -> bool {
         self.kernel
             .threads
             .get(&thread)
             .is_some_and(|thread| thread.state == crate::sim::kernel::State::JobStopped)
     }
+
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno> {
         self.kernel.peek(thread, address)
     }
+
     fn poke(&mut self, thread: Tid, address: u64, value: u64) -> Result<(), Errno> {
         self.kernel.poke(thread, address, value)
     }
+
     fn name(&self, thread: Tid) -> String {
         self.kernel
             .process_of(thread)
@@ -374,21 +468,27 @@ impl Tracee for SimTracee {
             .name
             .to_string()
     }
+
     fn thread_group(&self, thread: Tid) -> Option<Tid> {
         self.kernel.thread_group(thread).map(Tgid::id)
     }
+
     fn maps(&self, thread: Tid) -> Option<String> {
         self.kernel.maps(thread)
     }
+
     fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno> {
         self.kernel.peek_debug(thread, index)
     }
+
     fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno> {
         self.kernel.poke_debug(thread, index, value)
     }
+
     fn hold_debug_slots(&mut self, thread: Tid, count: usize, _address: u64) {
         self.kernel.hold_debug_slots(thread, count);
     }
+
     fn sample_at(&mut self, address: u64, stack_bytes: u32) {
         self.kernel.perf = Some(crate::sim::kernel::perf::Breakpoint {
             tgid: Tgid::led_by(self.pid),
@@ -397,6 +497,7 @@ impl Tracee for SimTracee {
             records: Vec::new(),
         });
     }
+
     fn samples(&mut self) -> Vec<u8> {
         self.kernel
             .perf
@@ -404,10 +505,12 @@ impl Tracee for SimTracee {
             .map(|breakpoint| std::mem::take(&mut breakpoint.records))
             .unwrap_or_default()
     }
+
     fn adopt(&mut self, _child: Tid) {}
     fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
         self.kernel.detach(thread, signal)
     }
+
     fn seize(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel.seize(
             thread,
@@ -419,9 +522,11 @@ impl Tracee for SimTracee {
             },
         )
     }
+
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel.interrupt(thread)
     }
+
     fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>) {
         self.kernel.serve(TRACER + 1);
         let read = self.kernel.get_registers_and_call(thread).map(drop);
@@ -429,6 +534,7 @@ impl Tracee for SimTracee {
         self.kernel.serve(TRACER);
         (read, seize)
     }
+
     fn children(&self, thread: Tid) -> Vec<Tid> {
         self.kernel.children(thread)
     }
@@ -440,10 +546,13 @@ pub(super) struct Landmarks {
     /// Where the image loaded, above its own addresses.
     pub(super) bias: u64,
     pub(super) entry: u64,
+
     /// The first `syscall` instruction.
     pub(super) syscall: u64,
+
     /// An address nothing maps.
     pub(super) unmapped: u64,
+
     /// The addresses the image's segments span.
     pub(super) image: std::ops::Range<u64>,
     symbols: BTreeMap<&'static str, u64>,
@@ -534,6 +643,7 @@ struct Decoded {
     tid: Tid,
     chain: Vec<u64>,
     registers: Vec<u64>,
+
     /// The bytes of stack it asked for, and those it copied.
     size: u64,
     stack: Vec<u8>,
@@ -552,8 +662,10 @@ const PERF_REGISTER_NAMES: [&str; 18] = [
 pub(super) struct Record<'a> {
     pub(super) tracee: &'a mut dyn Tracee,
     pub(super) landmarks: &'a Landmarks,
+
     /// Threads by creation order, the leader first.
     threads: Vec<Tid>,
+
     /// Forked processes by creation order.
     children: Vec<Tid>,
     pub(super) lines: Vec<String>,
@@ -743,6 +855,7 @@ impl Record<'_> {
             );
             self.tracee.pass_time();
         }
+
         let name = self.name_of(thread);
         self.note(format!("{name} is in a job-control stop"));
     }
@@ -778,6 +891,7 @@ impl Record<'_> {
     pub(super) fn call(&mut self, thread: Tid) -> Option<CallInfo> {
         let info = self.tracee.call_info(thread);
         let image = &self.landmarks.image;
+
         // A call that returns a thread names it.
         let value = info.ok().map(|info| {
             Tid::try_from(info.value)
@@ -901,8 +1015,10 @@ impl Record<'_> {
                     stack: sample.stack.to_vec(),
                 });
             }
+
             rest = &rest[length..];
         }
+
         samples
     }
 
@@ -928,6 +1044,7 @@ impl Record<'_> {
             self.note(format!("{name} wrote {} samples", samples.len()));
             return;
         };
+
         let (mut registers, _) = self.tracee.registers(thread).expect("registers at a trap");
         registers.rip -= 1;
         let differ = perf_registers(&registers)
@@ -969,6 +1086,7 @@ impl Record<'_> {
                 })
                 .collect::<Vec<_>>();
             let copied = sample.stack.len() as u64;
+
             // A sample asks for no more than reaches the end of user
             // memory, which the environment's size moves.
             let asked = if sample.size == USER_END - sp {
@@ -976,6 +1094,7 @@ impl Record<'_> {
             } else {
                 format!("{} bytes", sample.size)
             };
+
             let copy = if copied == sample.size {
                 "whole".to_owned()
             } else if (sp + copied).is_multiple_of(4096) {
@@ -983,6 +1102,7 @@ impl Record<'_> {
             } else {
                 format!("{copied} bytes")
             };
+
             lines.push(format!(
                 "sample of {}: chain {}; rbp {}; asked {asked}, copied {copy}",
                 self.name_of(sample.tid),
@@ -990,6 +1110,7 @@ impl Record<'_> {
                 self.word(sample.registers[6], sp),
             ));
         }
+
         lines.sort();
         self.lines.extend(lines);
     }
@@ -1040,6 +1161,7 @@ fn run_both(
     for variant in &program.variants {
         let observe = |tracee: &mut dyn Tracee, first: WaitStatus| {
             let leader = tracee.leader();
+
             // A position-independent program loads wherever the kernel put
             // it, which K-EXEC-2 checks; the other rules are described
             // relative to that.
@@ -1055,10 +1177,12 @@ fn run_both(
                 children: Vec::new(),
                 lines: Vec::new(),
             };
+
             record.note(format!("first: {first:?}").replace(&leader.to_string(), "leader"));
             script(&mut record);
             record.lines
         };
+
         let native_lines = if tracer_exits {
             let (mut lines, process) = std::thread::scope(|scope| {
                 scope
@@ -1077,11 +1201,13 @@ fn run_both(
             let (mut native, first) = NativeTracee::spawn(&variant.file, &arguments);
             observe(&mut native, first)
         };
+
         let (mut simulated, first) = SimTracee::spawn(variant, &arguments);
         let mut simulated_lines = observe(&mut simulated, first);
         if tracer_exits {
             simulated_lines.push(format!("the parent reaps: {}", simulated.end()));
         }
+
         assert_eq!(
             simulated_lines, native_lines,
             "{} behaves differently simulated (left) and on Linux (right)",
@@ -1103,11 +1229,13 @@ fn reap_native(process: Tid) -> String {
             Ok(_) => {}
             Err(errno) => panic!("waiting for {process} failed: {errno}"),
         }
+
         if started.elapsed() > std::time::Duration::from_secs(10) {
             let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
             let _ = waitpid(pid, None);
             panic!("{process} did not end once its tracer exited");
         }
+
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

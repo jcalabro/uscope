@@ -161,6 +161,7 @@ pub(super) fn x86_64_caller_variable_register(
             None => Err(VariableUnavailableReason::RegisterNotSaved(descriptor.name).into()),
         };
     }
+
     let number = dwarf.number();
     if (17..=32).contains(&number) {
         // Callees may overwrite every SSE register without saving it.
@@ -169,6 +170,7 @@ pub(super) fn x86_64_caller_variable_register(
         )
         .into());
     }
+
     Err(VariableUnavailableReason::Unsupported(UnsupportedVariableFeature::RegisterClass).into())
 }
 

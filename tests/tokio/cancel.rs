@@ -103,6 +103,7 @@ async fn a_step_whose_future_is_dropped_ends_on_the_droppers_next_line() {
             } else {
                 after
             };
+
             for kind in [StepKind::OverSource, StepKind::Out] {
                 let context = format!("{fixture} {mode} {kind:?}");
                 let (mut scenario, task) = waiting(fixture, mode).await;
@@ -140,6 +141,7 @@ async fn a_pause_ends_a_waiting_step_and_a_new_one_waits_again() {
         )
         .await;
         let stepping = scenario.start_stepping(StepKind::OverSource).await;
+
         // Paused once no thread runs the task, the next step begins in it
         // rather than on a thread.
         let held = tokio::task::spawn_blocking(move || {
@@ -236,6 +238,7 @@ impl Printed {
         {
             lines.push(line);
         }
+
         lines
     }
 }
@@ -282,6 +285,7 @@ async fn a_waiting_step_ends_with_its_session() {
                     "{fixture}"
                 );
             }
+
             scenario.shutdown().await;
         }
 
@@ -311,6 +315,7 @@ async fn a_waiting_step_ends_with_its_session() {
                 let _stepping = scenario.start_stepping(StepKind::OverSource).await;
                 scenario.shutdown().await;
             }
+
             std::io::Write::write_all(&mut answer, b"open\n").expect("the program reads");
             lines.extend(printed.rest().await);
             let status = process.wait();
@@ -320,6 +325,7 @@ async fn a_waiting_step_ends_with_its_session() {
             );
             runs.push(lines);
         }
+
         assert_eq!(runs[0], runs[1], "{fixture}");
     }
 }

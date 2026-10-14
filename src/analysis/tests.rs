@@ -44,12 +44,14 @@ fn capture(
         builder.symbolize(frame, module, &[line(name)]);
         frames.push(frame);
     }
+
     frames.push(builder.frame(FrameKind::Native, module, 0x500, 0));
     for (address, (inner, outer)) in [(0x600, ("b", "a")), (0x700, ("a", "c"))] {
         let frame = builder.frame(FrameKind::Native, module, address, 0);
         builder.symbolize(frame, module, &[line(inner), line(outer)]);
         frames.push(frame);
     }
+
     let truncation = builder.truncation(Truncation::FramePointerNotKept, NONE);
     let stacks: Vec<u32> = stacks
         .iter()
@@ -58,6 +60,7 @@ fn capture(
             if *truncated {
                 stack.push(truncation);
             }
+
             builder.stack(&stack)
         })
         .collect();
@@ -79,9 +82,11 @@ fn capture(
             task_row(task),
         );
     }
+
     for &(time, weight, stack, task) in waits {
         builder.task_wait(task_row(task), time, weight, stacks[stack], "chan receive");
     }
+
     builder.finish()
 }
 
@@ -119,18 +124,22 @@ fn naive_path(
             path.push("[frame pointer not kept]".to_owned());
             continue;
         }
+
         let lines = capture.frame_lines(frame);
         if lines.is_empty() {
             path.push(format!("app+{:#x}", record.address.get()));
         }
+
         for line in lines {
             let function = &capture.functions[line.function.get() as usize];
             path.push(capture.string(function.name.get()).to_owned());
         }
     }
+
     if !invert {
         path.reverse();
     }
+
     for transform in transforms {
         match transform {
             Named::Focus(name) => {
@@ -150,10 +159,12 @@ fn naive_path(
                         collapsed.push(step);
                     }
                 }
+
                 path = collapsed;
             }
         }
     }
+
     Some(path)
 }
 
@@ -165,6 +176,7 @@ fn key_named(keys: &Keys<'_>, name: &str) -> Option<u32> {
 type Stacks = Vec<(Vec<usize>, bool)>;
 type Samples = Vec<(u32, i64, u64, usize, u32)>;
 type Waits = Vec<(i64, u64, usize, u32)>;
+
 /// A range, threads, transforms by kind and function, and inversion; and
 /// whether waits are queried, tasks by choice, and whether by task.
 type Selection = (
@@ -217,18 +229,22 @@ fn selected(
                 chosen.push((wait.task.get(), wait.stack.get(), wait.weight.get()));
             }
         }
+
         return chosen;
     }
+
     for range_row in &capture.sample_ranges {
         if threads.is_some_and(|threads| !threads.contains(&range_row.thread.get())) {
             continue;
         }
+
         for sample in capture.thread_samples(range_row) {
             if in_range(sample.time.get()) && task_kept(sample.task.get()) {
                 chosen.push((sample.task.get(), sample.stack.get(), sample.weight.get()));
             }
         }
     }
+
     chosen
 }
 
@@ -255,6 +271,7 @@ proptest! {
                 }
             })
             .collect();
+
         // A transform of a function no frame has removes nothing, or, as a
         // focus, everything; the engine can only name functions it has.
         let known = |name: &str| key_named(&keys, name);
@@ -267,6 +284,7 @@ proptest! {
             by_task,
             ..Query::default()
         };
+
         let mut naive_transforms = Vec::new();
         for transform in &named {
             let (Named::Focus(name) | Named::Merge(name) | Named::Drop(name) | Named::Collapse(name)) = transform;
@@ -289,6 +307,7 @@ proptest! {
                 let Some(mut path) = naive_path(&capture, stack, invert, &naive_transforms) else {
                     continue;
                 };
+
                 if by_task {
                     let choice = if task == NONE { UNNAMED } else { task };
                     if invert {
@@ -297,14 +316,17 @@ proptest! {
                         path.insert(0, group_name(choice));
                     }
                 }
+
                 expected_weight += weight;
                 for depth in 1..=path.len() {
                     *expected_totals.entry(path[..depth].to_vec()).or_default() += weight;
                 }
+
                 let innermost = if invert { path.first() } else { path.last() };
                 if let Some(innermost) = innermost {
                     expected_functions.entry(innermost.clone()).or_default().0 += weight;
                 }
+
                 let mut seen: Vec<&String> = Vec::new();
                 for step in &path {
                     if !seen.contains(&step) {
@@ -325,14 +347,17 @@ proptest! {
                 path.push(keys.name(tree.key[at as usize]));
                 at = tree.parent[at as usize];
             }
+
             path.reverse();
             totals.insert(path, tree.total[node]);
+
             // A node's subtree is the run of deeper nodes after it.
             let end = tree.end[node] as usize;
             prop_assert!(end > node && end <= tree.len());
             prop_assert!((node + 1..end).all(|inner| tree.depth[inner] > tree.depth[node]));
             prop_assert!(end == tree.len() || tree.depth[end] <= tree.depth[node]);
         }
+
         prop_assert_eq!(totals, expected_totals);
 
         let costs = functions(&capture, &keys, &query);
@@ -367,6 +392,7 @@ fn density_buckets_kept_samples_by_lane_and_time() {
         range: Some((0, 10)),
         ..Query::default()
     };
+
     // The sample at 10 lies outside [0, 10).
     assert_eq!(
         density(&capture, &keys, &all, 2, Lanes::Threads),
@@ -380,6 +406,7 @@ fn density_buckets_kept_samples_by_lane_and_time() {
         source: Source::Waits,
         ..all.clone()
     };
+
     assert_eq!(
         density(&capture, &keys, &waits, 2, Lanes::Threads),
         [(1, vec![7, 0])]
@@ -388,6 +415,7 @@ fn density_buckets_kept_samples_by_lane_and_time() {
         transforms: vec![Transform::Drop(key_named(&keys, "b").expect("b"))],
         ..all
     };
+
     assert_eq!(
         density(&capture, &keys, &without_b, 2, Lanes::Threads),
         [(0, vec![1, 2])]
@@ -410,6 +438,7 @@ fn off_cpu_time_falls_in_each_slice_it_overlaps() {
         range: Some((0, 40)),
         ..Query::default()
     };
+
     // Slices of ten from 0; b was off from before the range to after it.
     assert_eq!(
         off_cpu(&capture, &query, 4),
@@ -426,12 +455,14 @@ fn off_cpu_time_falls_in_each_slice_it_overlaps() {
             },
         ]
     );
+
     // Slices of an uneven range share it out without losing any.
     let uneven = Query {
         range: Some((0, 10)),
         threads: Some(vec![b]),
         ..Query::default()
     };
+
     let lanes = off_cpu(&capture, &uneven, 3);
     assert_eq!(lanes.len(), 1);
     assert_eq!(lanes[0].blocked.iter().sum::<u64>(), 10, "{lanes:?}");
@@ -461,6 +492,7 @@ fn the_analysis_stays_pure() {
         if path.file_name().is_some_and(|name| name == "tests.rs") {
             continue;
         }
+
         let source = std::fs::read_to_string(&path).expect("read a source file");
         let source = source.split("#[cfg(test)]").next().unwrap_or_default();
         for forbidden in FORBIDDEN {
@@ -470,8 +502,10 @@ fn the_analysis_stays_pure() {
                 path.display()
             );
         }
+
         checked += 1;
     }
+
     assert!(checked >= 3, "the analysis's sources were found");
 }
 
@@ -487,6 +521,7 @@ fn ending_paths(tree: &CallTree, keys: &Keys<'_>) -> BTreeMap<Vec<String>, u64> 
                 path.push(keys.name(tree.key[at as usize]));
                 at = tree.parent[at as usize];
             }
+
             path.reverse();
             (path, tree.own[node])
         })
@@ -511,6 +546,7 @@ fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
         );
         frame
     };
+
     let leaf = frame("decode", Ordinary);
     let pinned = frame("<Pin<Box<F>> as Future>::poll", Wrapper);
     let handler = frame("handler::{closure#0}", Ordinary);
@@ -535,6 +571,7 @@ fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
             NONE,
         );
     }
+
     let capture = builder.finish();
     let keys = Keys::new(&capture, Granularity::Function);
     let names = |path: &[&str]| {
@@ -567,6 +604,7 @@ fn a_logical_stack_is_a_tasks_own_under_its_dispatch() {
             (names(&["Harness::poll", "coop::budget"]), 4),
         ])
     );
+
     // The native stacks are one switch away.
     let native = aggregate(&capture, &keys, &Query::default());
     assert_eq!(
@@ -617,6 +655,7 @@ fn labeled(spans: &[(u32, i64, i64, u32)], samples: &[Sample]) -> Capture {
             },
         );
     }
+
     for &(thread, time, weight, task) in samples {
         builder.sample(
             threads[thread as usize],
@@ -626,6 +665,7 @@ fn labeled(spans: &[(u32, i64, i64, u32)], samples: &[Sample]) -> Capture {
             task_row(task),
         );
     }
+
     builder.finish()
 }
 
@@ -643,6 +683,7 @@ proptest! {
     ) {
         let capture = labeled(&spans, &samples);
         let keys = Keys::new(&capture, Granularity::Function);
+
         // The innermost route a sample carries: the latest-starting span
         // that covers it, of two that start together the shorter, and of
         // two alike the first recorded, which the capture nests inside.
@@ -654,19 +695,23 @@ proptest! {
                 .max_by_key(|(order, (_, start, length, _))| (*start, std::cmp::Reverse(*length), std::cmp::Reverse(*order)))
                 .map(|(_, (_, _, _, value))| *value)
         };
+
         let carries = |sample: &Sample, value: u32| {
             spans.iter().any(|(on, start, length, carried)| {
                 *on == sample.0 && *start <= sample.1 && sample.1 < start + length && *carried == value
             })
         };
+
         let weight = |keep: &dyn Fn(&Sample) -> bool| -> u64 {
             samples.iter().filter(|sample| keep(sample)).map(|sample| sample.2).sum()
         };
+
         let query = |labels: Vec<(&str, String)>, by: Option<&str>| Query {
             labels: labels.into_iter().map(|(key, value)| (key.to_owned(), value)).collect(),
             by_label: by.map(str::to_owned),
             ..Query::default()
         };
+
         let routed = keys.aggregate(&query(vec![("route", format!("v{wanted}"))], None));
         prop_assert_eq!(routed.weight, weight(&|sample| carries(sample, wanted)));
         let spun = keys.aggregate(&query(vec![("phase", "spin".to_owned())], None));
@@ -676,15 +721,18 @@ proptest! {
         for node in (0..by.len()).filter(|&node| by.depth[node] == 0) {
             roots.insert(keys.name(by.key[node]), by.total[node]);
         }
+
         let mut expected = BTreeMap::new();
         for sample in &samples {
             let name = route(sample).map_or_else(|| "[no route]".to_owned(), |value| format!("route=v{value}"));
             *expected.entry(name).or_insert(0) += sample.2;
         }
+
         if spans.is_empty() {
             // A key no label has roots every sample at its absence.
             expected = expected.into_values().map(|weight| ("[no such label]".to_owned(), weight)).collect();
         }
+
         prop_assert_eq!(roots, expected);
     }
 
@@ -705,10 +753,12 @@ proptest! {
                 prop_assert!(pair[0].end <= pair[1].start, "{:?}", pair);
             }
         }
+
         for block in &blocks {
             *drawn.entry((block.thread, block.depth)).or_default() += block.count;
             prop_assert!(block.count == 1 || block.end - block.start < fold * i64::from(2 * block.count));
         }
+
         let mut expected: BTreeMap<(u32, u32), u32> = BTreeMap::new();
         for zones in &capture.zone_ranges {
             let start = zones.start.get() as usize;
@@ -718,6 +768,7 @@ proptest! {
                 }
             }
         }
+
         prop_assert_eq!(drawn, expected);
     }
 }
@@ -750,6 +801,7 @@ fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
     ] {
         builder.plot(thread, sites[site], time, value);
     }
+
     let capture = builder.finish();
     let series = plot_series(&capture, (0, 20), None, 2);
     let named: Vec<&str> = series
@@ -818,6 +870,7 @@ fn stacks_of(samples: &[(Vec<usize>, u64)]) -> Capture {
             NONE,
         );
     }
+
     builder.finish()
 }
 
@@ -828,6 +881,7 @@ fn path_weights(samples: &[(Vec<usize>, u64)]) -> BTreeMap<Vec<&'static str>, u6
         let path = stack.iter().rev().map(|&at| FUNCTIONS[at]).collect();
         *paths.entry(path).or_default() += weight;
     }
+
     paths
 }
 
@@ -866,6 +920,7 @@ proptest! {
             Side::Current => current_keys.name(diff.key[node]),
             Side::Base => base_keys.name(diff.key[node]),
         };
+
         let (mut now, mut before) = (BTreeMap::new(), BTreeMap::new());
         for node in 0..diff.len() {
             let mut path = Vec::new();
@@ -874,6 +929,7 @@ proptest! {
                 path.push(name(at as usize));
                 at = diff.parent[at as usize];
             }
+
             path.reverse();
             let shown: Vec<&'static str> = path
                 .iter()
@@ -883,9 +939,11 @@ proptest! {
             if diff.own[node] > 0 {
                 now.insert(shown.clone(), diff.own[node]);
             }
+
             if diff.base_own[node] > 0 {
                 before.insert(shown, diff.base_own[node]);
             }
+
             let inner = (node + 1..diff.end[node] as usize).filter(|&child| diff.parent[child] == index(node));
             let (total, base_total) = inner.fold((diff.own[node], diff.base_own[node]), |sum, child| {
                 (sum.0 + diff.total[child], sum.1 + diff.base_total[child])
@@ -893,6 +951,7 @@ proptest! {
             prop_assert_eq!((diff.total[node], diff.base_total[node]), (total, base_total));
             prop_assert!((node + 1..diff.end[node] as usize).all(|inside| diff.depth[inside] > diff.depth[node]));
         }
+
         prop_assert_eq!(now, path_weights(&ours));
         prop_assert_eq!(before, path_weights(&theirs));
 
@@ -905,9 +964,11 @@ proptest! {
                 Side::Current => current_keys.name(cost.key),
                 Side::Base => base_keys.name(cost.key),
             };
+
             let own = |samples: &[(Vec<usize>, u64)]| -> u64 {
                 samples.iter().filter(|(stack, _)| FUNCTIONS[stack[0]] == name).map(|(_, weight)| weight).sum()
             };
+
             prop_assert_eq!((cost.own, cost.base_own), (own(&ours), own(&theirs)), "{}", name);
         }
     }

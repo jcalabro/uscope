@@ -24,12 +24,14 @@ fn trace(directory: &Path, mode: &str) -> PathBuf {
         .current_dir(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null());
+
     // A failing test keeps the tracer's recording beside the server's.
     let recording = flight_recordings::watch_adapter(&mut command);
     let status = command.status().expect("run uscope syscalls");
     if let Some(recording) = &recording {
         flight_recordings::adapter_finished(recording);
     }
+
     assert!(status.code().is_some(), "{status}");
     path
 }
@@ -88,6 +90,7 @@ async fn a_trace_is_served_as_costs_lines_callers_files_and_lanes() {
             .find(|row| row["name"] == name)
             .map(|row| row["calls"].as_u64().expect("calls"))
     };
+
     assert_eq!(
         (calls("write"), calls("unlink")),
         (Some(1), Some(1)),
@@ -199,6 +202,7 @@ async fn files_and_charts(tab: &mut Client, id: &str, scratch: &Path) {
             .cloned()
             .unwrap_or_else(|| panic!("{path}: {files}"))
     };
+
     let written = file(&present);
     assert_eq!(
         (&written["opens"], &written["written"], &written["read"]),
@@ -312,6 +316,7 @@ async fn a_familys_processes_and_threads_are_served_in_order() {
             json!({"profile": id, "filter": "trace=wait4", "offset": 0, "limit": 10}),
         )
         .await;
+
     // Exit lines show whatever the selection, as strace prints them.
     let wait = waits["lines"]
         .as_array()
@@ -387,6 +392,7 @@ async fn a_live_trace_shows_what_its_program_is_blocked_in() {
             break call.clone();
         }
     };
+
     assert!(
         blocked["blockedNs"].as_u64() >= Some(1_000_000),
         "{blocked}"

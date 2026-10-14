@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 pub struct Allocated {
     /// Blocks allocated, each growth of a block counting as one.
     pub blocks: u64,
+
     /// Bytes allocated, a block's growth counting only what it added.
     pub bytes: u64,
 }
@@ -35,9 +36,11 @@ impl Allocated {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Totals {
     pub allocated: Allocated,
+
     /// How much the heap grew, net of blocks freed, since the process
     /// began.
     pub live_bytes: i64,
+
     /// The most the heap had grown, while a measurement tracked it, to
     /// within [`PEAK_GRANULARITY`] for each thread.
     pub peak_bytes: i64,
@@ -59,11 +62,14 @@ impl Totals {
 #[derive(Clone, Copy)]
 struct ThreadCounts {
     allocated: Allocated,
+
     /// Bytes this thread allocated less those it freed; negative when it
     /// freed others' blocks.
     live: i64,
+
     /// Growth not yet added to the process's peak counter.
     pending: i64,
+
     /// This thread's slot, plus one; zero until its first count.
     slot: usize,
 }
@@ -99,6 +105,7 @@ impl Slot {
 }
 
 const SLOTS: usize = 256;
+
 /// A slot for each of the first threads to count, which each stores its
 /// own totals; every later thread adds to the last, shared one.
 static COUNTS: [Slot; SLOTS] = [const { Slot::new() }; SLOTS];
@@ -111,9 +118,11 @@ pub const PEAK_GRANULARITY: i64 = 64 << 10;
 
 /// Whether some binary counts its allocations with [`Counting`].
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+
 /// How many measurements want the peak; tracking it costs threads a shared
 /// counter, so it is tracked only while wanted.
 static TOTALS_WANTED: AtomicU64 = AtomicU64::new(0);
+
 /// The heap's growth as threads have reported it, and its most.
 static REPORTED: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
@@ -157,6 +166,7 @@ pub fn totals() -> Totals {
         totals.allocated.bytes += slot.bytes.load(Ordering::Relaxed);
         totals.live_bytes += slot.live.load(Ordering::Relaxed);
     }
+
     totals.peak_bytes = PEAK.load(Ordering::Relaxed).max(totals.live_bytes);
     totals
 }
@@ -177,6 +187,7 @@ pub fn thread_counts() -> Option<(Allocated, i64)> {
                 blocks: slot.blocks.load(Ordering::Relaxed),
                 bytes: slot.bytes.load(Ordering::Relaxed),
             };
+
             Some((allocated, slot.live.load(Ordering::Relaxed)))
         }
     }
@@ -203,10 +214,12 @@ fn count(bytes: i64, new_block: bool) {
             counts.allocated.blocks += u64::from(new_block);
             counts.allocated.bytes += bytes.unsigned_abs();
         }
+
         counts.live += bytes;
         if counts.slot == 0 {
             counts.slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed).min(SLOTS - 1) + 1;
         }
+
         let slot = &COUNTS[counts.slot - 1];
         if counts.slot < SLOTS {
             // Only this thread writes its slot.
@@ -221,8 +234,10 @@ fn count(bytes: i64, new_block: bool) {
                 slot.bytes
                     .fetch_add(bytes.unsigned_abs(), Ordering::Relaxed);
             }
+
             slot.live.fetch_add(bytes, Ordering::Relaxed);
         }
+
         if TOTALS_WANTED.load(Ordering::Relaxed) != 0 {
             counts.pending += bytes;
             if counts.pending.abs() >= PEAK_GRANULARITY {
@@ -233,6 +248,7 @@ fn count(bytes: i64, new_block: bool) {
                 counts.pending = 0;
             }
         }
+
         cell.set(counts);
     });
 }
@@ -278,6 +294,7 @@ impl<A> Counting<A> {
 /// instead, for heap profilers that cannot see mimalloc.
 #[cfg(not(feature = "system-alloc"))]
 pub type Selected = mimalloc::MiMalloc;
+
 #[cfg(feature = "system-alloc")]
 pub type Selected = std::alloc::System;
 
@@ -298,6 +315,7 @@ pub fn return_freed_memory_promptly() {
         // mimalloc's `mi_option_purge_delay`, in its second and third
         // versions alike.
         const PURGE_DELAY: std::ffi::c_int = 15;
+
         #[allow(
             unsafe_code,
             reason = "mimalloc's options are set through its C interface"
@@ -311,6 +329,7 @@ pub fn return_freed_memory_promptly() {
             unsafe extern "C" {
                 fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
             }
+
             mi_option_set_default(PURGE_DELAY, 10);
         }
     }
@@ -335,6 +354,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
             installing();
             grew(layout.size(), true);
         }
+
         block
     }
 
@@ -345,6 +365,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
             installing();
             grew(layout.size(), true);
         }
+
         block
     }
 
@@ -359,6 +380,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         // SAFETY: the caller passes a block `inner` returned, its layout, and
         // a valid new size.
         let moved = unsafe { self.inner.realloc(block, layout, new_size) };
+
         // A failed reallocation leaves the old block as it was.
         if !moved.is_null() {
             match new_size.checked_sub(layout.size()) {
@@ -366,6 +388,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
                 None => shrank(layout.size() - new_size),
             }
         }
+
         moved
     }
 }

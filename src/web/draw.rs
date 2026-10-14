@@ -20,15 +20,19 @@ use super::inspect;
 use super::protocol::{
     self, Datum, DrawInput, Drawing, ErrorKind, NumberKind, RendererInfo, RendererSource,
 };
+
 use super::session::Failure;
 use super::values::expression_failure;
 
 /// The most values one drawing's inputs may hold.
 const MOST_VALUES: u64 = 65_536;
+
 /// How deeply one drawing's inputs may nest.
 const MOST_DEPTH: usize = 16;
+
 /// The largest integer a double holds exactly, `Number.MAX_SAFE_INTEGER`.
 const MOST_EXACT: u128 = (1 << 53) - 1;
+
 /// How many children one request reads.
 const PAGE: u32 = 256;
 
@@ -59,6 +63,7 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
             "a range of elements is drawn one element at a time",
         ));
     };
+
     let value = pointee_with_drawings(handle, context, &request.path, value).await;
     let offered = match &value.state {
         VariableState::Available {
@@ -71,12 +76,14 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
             .cloned(),
         _ => None,
     };
+
     let is_offered = offered.is_some();
     let mut walk = Walk {
         handle,
         bytes: Vec::new(),
         values: 0,
     };
+
     let (renderer, inputs) = if let Some(visualizer) = offered {
         let inputs = handle
             .visualizer_inputs(Arc::clone(&visualizer.inputs), input_limits())
@@ -98,12 +105,14 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
         let datum = walk
             .value(value.type_info.as_ref(), &value.state, "values", 0)
             .await;
+
         // As `visualize "NAME" { values = self }`.
         (
             renderer,
             vec![("values".to_owned(), datum, Some(String::new()))],
         )
     };
+
     let mut problem = None;
     let mut drawn = Vec::new();
     for (name, datum, path) in inputs {
@@ -115,11 +124,13 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
             }
         }
     }
+
     let bytes = if problem.is_some() {
         Vec::new()
     } else {
         walk.bytes
     };
+
     Ok(Drawn {
         drawing: Drawing {
             renderer: info(&renderer),
@@ -177,6 +188,7 @@ pub async fn renderers(handle: &DebuggerHandle) -> Result<protocol::RendererList
             list.push(info(renderer));
         }
     }
+
     Ok(protocol::RendererList { renderers: list })
 }
 
@@ -202,8 +214,10 @@ pub async fn renderer(handle: &DebuggerHandle, digest: &str) -> Result<RendererS
 /// One drawing's walk through its inputs.
 struct Walk<'a> {
     handle: &'a DebuggerHandle,
+
     /// The bytes the inputs' numbers and bytes lie in.
     bytes: Vec<u8>,
+
     /// How many values the walk has read.
     values: u64,
 }
@@ -217,6 +231,7 @@ impl Walk<'_> {
         while !self.bytes.len().is_multiple_of(8) {
             self.bytes.push(0);
         }
+
         let offset = self.bytes.len() as u64;
         self.bytes.extend_from_slice(bytes);
         offset
@@ -237,6 +252,7 @@ impl Walk<'_> {
                 "`{path}`: the inputs hold more than {MOST_VALUES} values; hand over bulk data with `bytes(PTR, LEN)` or name less"
             ));
         }
+
         Ok(())
     }
 
@@ -261,12 +277,14 @@ impl Walk<'_> {
                     Err(format!("`{}`: {problem}", input.name))
                 }
             };
+
             read.push((
                 input.name.to_string(),
                 datum,
                 input.path.as_deref().map(str::to_owned),
             ));
         }
+
         read
     }
 
@@ -284,6 +302,7 @@ impl Walk<'_> {
                     "`{path}`: the inputs nest more than {MOST_DEPTH} deep"
                 ));
             }
+
             self.count(path, 1)?;
             let VariableState::Available {
                 value: raw,
@@ -295,6 +314,7 @@ impl Walk<'_> {
             else {
                 return Err(format!("`{path}`: {}", unreadable(state)));
             };
+
             if let Some(text) = text {
                 return match &text.completion {
                     TextCompletion::Complete => Ok(Datum::Text {
@@ -311,9 +331,11 @@ impl Walk<'_> {
                     }
                 };
             }
+
             if let VariableValue::Variant { active, .. } = raw {
                 return self.sum(active.as_deref(), children, path, depth).await;
             }
+
             // A view decides first: a Go map or a smart pointer is stored as an
             // address but presents what it holds.
             if let Some(presentation) = presentation {
@@ -335,6 +357,7 @@ impl Walk<'_> {
                                 .value(inner.type_info.as_ref(), &inner.state, path, depth + 1)
                                 .await;
                         }
+
                         return self.record(&presentation.children, path, depth).await;
                     }
                     PresentedShape::Dynamic | PresentedShape::Record => {
@@ -353,6 +376,7 @@ impl Walk<'_> {
                     _ => return Err(format!("`{path}`: a value of this kind cannot be drawn")),
                 }
             }
+
             // Pointers no view presents stay addresses: the walk follows none.
             match raw {
                 VariableValue::Address(address) => {
@@ -367,6 +391,7 @@ impl Walk<'_> {
                 }
                 _ => {}
             }
+
             self.stored(type_info, raw, children, path, depth).await
         })
     }
@@ -435,6 +460,7 @@ impl Walk<'_> {
         let Some(active) = active else {
             return Err(format!("`{path}`: it holds no variant its type describes"));
         };
+
         let members = active.members.len();
         let variant = active
             .name
@@ -450,8 +476,10 @@ impl Walk<'_> {
                 value: None,
             });
         }
+
         let children = self.children(children, path).await?;
         let mut payload = children[children.len().saturating_sub(members)..].to_vec();
+
         // A Rust variant's one member is a structure named for the variant,
         // which holds the variant's fields as stored.
         if let [only] = &payload[..]
@@ -467,12 +495,14 @@ impl Walk<'_> {
         {
             payload = self.children(children, path).await?;
         }
+
         if payload.is_empty() {
             return Ok(Datum::Sum {
                 variant,
                 value: None,
             });
         }
+
         let payload = if let [only] = &payload[..] {
             self.value(
                 Some(&only.type_info),
@@ -495,8 +525,10 @@ impl Walk<'_> {
                     .await?;
                 fields.push((name, datum));
             }
+
             tuple_or_record(fields)
         };
+
         Ok(Datum::Sum {
             variant,
             value: Some(Box::new(payload)),
@@ -511,6 +543,7 @@ impl Walk<'_> {
             let Some(name) = child_name(child) else {
                 continue;
             };
+
             let datum = self
                 .value(
                     Some(&child.type_info),
@@ -521,6 +554,7 @@ impl Walk<'_> {
                 .await?;
             members.push((name, datum));
         }
+
         Ok(tuple_or_record(members))
     }
 
@@ -535,12 +569,14 @@ impl Walk<'_> {
         let ValueChildren::Available(reference) = children else {
             return Err(format!("`{path}`: its entries cannot be read"));
         };
+
         self.count(path, count.saturating_mul(2))?;
         let mut entries = Vec::new();
         for child in self.page(reference, 0, count, path).await? {
             let ValueChildRelationship::Entry { index, key } = &child.relationship else {
                 continue;
             };
+
             let at = format!("{path}[{index}]");
             let key = self
                 .value(Some(&key.type_info), &key.state, &at, depth + 1)
@@ -550,6 +586,7 @@ impl Walk<'_> {
                 .await?;
             entries.push((key, value));
         }
+
         Ok(Datum::Entries { entries })
     }
 
@@ -571,6 +608,7 @@ impl Walk<'_> {
                 Err(format!("`{path}`: its elements cannot be read"))
             };
         };
+
         let room = uscope::MAX_DRAWING_BYTES.saturating_sub(self.bytes.len() as u64);
         let numbers = self
             .handle
@@ -587,8 +625,10 @@ impl Walk<'_> {
                 dimensions.unwrap_or(&[count]),
             ));
         }
+
         self.count(path, count)?;
         let children = self.page(reference, 0, count, path).await?;
+
         // Numbers of one kind are an array of that kind.
         let kinds = children
             .iter()
@@ -606,11 +646,14 @@ impl Walk<'_> {
                 else {
                     return Err(format!("`{path}`: its numbers are not all scalars"));
                 };
+
                 number_bytes(*first, scalar, &mut bytes);
             }
+
             let offset = self.append(&bytes);
             return Ok(rows(*first, offset, count, dimensions.unwrap_or(&[count])));
         }
+
         let mut items = Vec::with_capacity(children.len());
         for (index, child) in children.iter().enumerate() {
             items.push(
@@ -623,6 +666,7 @@ impl Walk<'_> {
                 .await?,
             );
         }
+
         Ok(nest(items, dimensions.unwrap_or(&[count])))
     }
 
@@ -673,9 +717,11 @@ impl Walk<'_> {
                     page.completion
                 ));
             }
+
             next += page.children.len() as u64;
             children.extend(page.children.iter().cloned());
         }
+
         Ok(children)
     }
 }
@@ -710,6 +756,7 @@ fn integer_datum(value: uscope::IntegerValue, size: u64) -> Datum {
         uscope::IntegerValue::Unsigned(value) => (i64::try_from(value).ok(), value.to_string()),
         _ => (None, String::new()),
     };
+
     match wide {
         Some(i) if size <= 4 => Datum::Int { i },
         _ => Datum::Big { big: text },
@@ -805,9 +852,11 @@ fn number_kind(type_info: &TypeInfo, state: &VariableState) -> Option<NumberKind
     else {
         return None;
     };
+
     if wide_character(type_info) {
         return None;
     }
+
     Some(match (scalar, type_info.byte_size?) {
         (ScalarValue::Signed(_), 1) => NumberKind::I8,
         (ScalarValue::Unsigned(_), 1) => NumberKind::U8,
@@ -832,6 +881,7 @@ fn number_bytes(kind: NumberKind, scalar: &ScalarValue, bytes: &mut Vec<u8>) {
         ScalarValue::Floating(FloatValue::Binary64(bits)) => u128::from(*bits),
         _ => 0,
     };
+
     let size = number_size(kind);
     bytes.extend_from_slice(&integer.to_le_bytes()[..size]);
 }
@@ -860,6 +910,7 @@ fn scalar_datum(scalar: &ScalarValue, type_info: Option<&TypeInfo>) -> Datum {
                 ScalarValue::Unsigned(value) => *value <= MOST_EXACT,
                 _ => false,
             };
+
             if exact { 4 } else { 8 }
         });
     let character = type_info.is_some_and(wide_character);
@@ -916,6 +967,7 @@ fn float(value: FloatValue) -> String {
         FloatValue::Binary64(bits) => Some(f64::from_bits(bits)),
         _ => None,
     };
+
     let text = double.map_or_else(|| uscope::float_text(value), |double| double.to_string());
     match text.as_str() {
         "inf" => "Infinity".to_owned(),

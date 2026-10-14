@@ -60,6 +60,7 @@ impl CappedAllocator {
                 b"an allocation exceeds the test memory cap (tests/support/memory_cap.rs)\n",
             );
         }
+
         reserved
     }
 
@@ -77,11 +78,13 @@ unsafe impl GlobalAlloc for CappedAllocator {
         if !self.reserve(layout.size()) {
             return std::ptr::null_mut();
         }
+
         // SAFETY: the caller's layout satisfies `alloc`'s requirements.
         let block = unsafe { self.inner.alloc(layout) };
         if block.is_null() {
             self.release(layout.size());
         }
+
         block
     }
 
@@ -89,11 +92,13 @@ unsafe impl GlobalAlloc for CappedAllocator {
         if !self.reserve(layout.size()) {
             return std::ptr::null_mut();
         }
+
         // SAFETY: the caller's layout satisfies `alloc_zeroed`'s requirements.
         let block = unsafe { self.inner.alloc_zeroed(layout) };
         if block.is_null() {
             self.release(layout.size());
         }
+
         block
     }
 
@@ -109,6 +114,7 @@ unsafe impl GlobalAlloc for CappedAllocator {
         if !self.reserve(growth) {
             return std::ptr::null_mut();
         }
+
         // SAFETY: the caller passes a block `MiMalloc` returned, its layout,
         // and a valid new size.
         let moved = unsafe { self.inner.realloc(block, layout, new_size) };
@@ -117,6 +123,7 @@ unsafe impl GlobalAlloc for CappedAllocator {
         } else {
             self.release(layout.size().saturating_sub(new_size));
         }
+
         moved
     }
 }

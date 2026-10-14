@@ -11,6 +11,7 @@ use crate::unwind::{
     DwarfRegister, FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile,
     UnwindStep,
 };
+
 use crate::{ImageAddress, UnwindTermination, VirtualAddress};
 
 /// What a frame's caller had in its frame-pointer register.
@@ -18,9 +19,11 @@ use crate::{ImageAddress, UnwindTermination, VirtualAddress};
 pub enum CallerFramePointer {
     /// The prologue saved it in the word at this address.
     Saved(VirtualAddress),
+
     /// The function has not changed it: Go code compiled by Go allocates
     /// no register to rbp, and it has not yet pushed it or has popped it.
     Unchanged,
+
     /// Nothing proves where it is.
     Unknown,
 }
@@ -29,6 +32,7 @@ pub enum CallerFramePointer {
 #[derive(Debug)]
 pub struct GoUnwind {
     table: Arc<GoTable>,
+
     /// Where each function keeps its caller's frame pointer saved, by index.
     frame_pointer_saved: Vec<Option<std::ops::Range<u64>>>,
 }
@@ -146,6 +150,7 @@ impl GoUnwind {
             Ok(cfa) => cfa,
             Err(termination) => return Some(Err(termination)),
         };
+
         Some((|| {
             let slot = VirtualAddress::new(cfa.get() - 8);
             let return_address = memory
@@ -155,6 +160,7 @@ impl GoUnwind {
             for register in clobbered {
                 caller.remove(*register);
             }
+
             caller.set(RETURN_ADDRESS, return_address);
             caller.set(RSP, cfa.get());
             Ok(UnwindStep {
@@ -184,6 +190,7 @@ impl GoUnwind {
         let Ok(delta) = self.sp_delta(function, address) else {
             return Some(CallerFramePointer::Unknown);
         };
+
         let saved = self
             .frame_pointer_saved
             .get(index)

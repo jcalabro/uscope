@@ -28,13 +28,17 @@ pub(super) struct BeforeExec {
     /// Die with the thread that launched it, and fail if its process has
     /// already exited.
     pub dies_with_parent: bool,
+
     /// Run without address space randomization.
     pub fixed_addresses: bool,
+
     /// Wait at a gate before going on.
     pub gate: Option<Gate>,
+
     /// A seccomp filter to install. It is built before the fork, because
     /// the child may not allocate.
     pub filter: Option<Vec<libc::sock_filter>>,
+
     /// Ask its parent to trace it.
     pub traced: bool,
 }
@@ -60,6 +64,7 @@ pub(super) struct Gate {
 )]
 pub(super) fn before_exec(command: &mut Command, plan: BeforeExec) {
     let parent = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+
     // SAFETY: after fork, `in_child` makes only async-signal-safe system
     // calls on the descriptors the child inherited and on the plan built
     // before the fork, and builds errors from fixed numbers. It does not
@@ -76,21 +81,26 @@ fn in_child(plan: &BeforeExec, parent: i32) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(libc::ECHILD));
         }
     }
+
     if plan.fixed_addresses {
         super::native::disable_address_randomization();
     }
+
     if let Some(gate) = plan.gate {
         wait_at(gate)?;
     }
+
     if let Some(filter) = &plan.filter {
         // An unprivileged process may install a filter only once it can
         // gain no privileges by executing.
         rustix::thread::set_no_new_privs(true)?;
         install_filter(filter)?;
     }
+
     if plan.traced {
         nix::sys::ptrace::traceme().map_err(|error| io::Error::from_raw_os_error(error as i32))?;
     }
+
     Ok(())
 }
 
@@ -109,6 +119,7 @@ fn wait_at(gate: Gate) -> io::Result<()> {
             OwnedFd::from_raw_fd(gate.go_write),
         )
     };
+
     let me = rustix::process::getpid()
         .as_raw_nonzero()
         .get()
@@ -116,11 +127,13 @@ fn wait_at(gate: Gate) -> io::Result<()> {
     if rustix::io::write(pid, &me) != Ok(me.len()) {
         return Err(io::Error::from_raw_os_error(libc::EPIPE));
     }
+
     drop(go_write);
     let mut go = [0_u8];
     if rustix::io::read(go_read, &mut go) != Ok(1) {
         return Err(io::Error::from_raw_os_error(libc::ECANCELED));
     }
+
     Ok(())
 }
 
@@ -130,6 +143,7 @@ fn install_filter(filter: &[libc::sock_filter]) -> io::Result<()> {
         len: u16::try_from(filter.len()).unwrap_or(u16::MAX),
         filter: filter.as_ptr().cast_mut(),
     };
+
     // SAFETY: the kernel reads the program and its instructions, which
     // outlive the call, and copies them before it returns.
     let installed = unsafe {
@@ -140,9 +154,11 @@ fn install_filter(filter: &[libc::sock_filter]) -> io::Result<()> {
             std::ptr::from_ref(&program),
         )
     };
+
     if installed == -1 {
         return Err(io::Error::last_os_error());
     }
+
     Ok(())
 }
 
@@ -158,6 +174,7 @@ pub(super) fn ptrace_with_signal(
         None => 0,
         Some(signal) => usize::try_from(signal).map_err(|_| Errno::EINVAL)?,
     };
+
     // SAFETY: continuing, single-stepping, and detaching ignore `addr` and
     // read no memory; `data` carries only the signal number to deliver.
     let result = unsafe {
@@ -168,6 +185,7 @@ pub(super) fn ptrace_with_signal(
             std::ptr::without_provenance_mut::<libc::c_void>(data),
         )
     };
+
     Errno::result(result).map(drop)
 }
 
@@ -196,6 +214,7 @@ fn signal_mask_request(request: u16, pid: Pid, mask: &mut u64) -> Result<(), Err
             std::ptr::from_mut(mask).cast::<libc::c_void>(),
         )
     };
+
     Errno::result(result).map(drop)
 }
 
@@ -204,6 +223,7 @@ fn signal_mask_request(request: u16, pid: Pid, mask: &mut u64) -> Result<(), Err
 #[allow(unsafe_code, reason = "a raw ptrace request")]
 pub(super) fn siginfo(pid: Pid) -> Result<[u8; 128], Errno> {
     let mut buffer = [0_u8; 128];
+
     // SAFETY: PTRACE_GETSIGINFO writes one siginfo_t, 128 bytes on every
     // Linux architecture, into the buffer, which outlives the call.
     let result = unsafe {
@@ -214,6 +234,7 @@ pub(super) fn siginfo(pid: Pid) -> Result<[u8; 128], Errno> {
             buffer.as_mut_ptr().cast::<libc::c_void>(),
         )
     };
+
     Errno::result(result).map(|_| buffer)
 }
 
@@ -222,6 +243,7 @@ pub(super) fn siginfo(pid: Pid) -> Result<[u8; 128], Errno> {
 #[allow(unsafe_code, reason = "a raw ptrace request")]
 pub(super) fn syscall_info(pid: Pid) -> Result<[u8; 88], Errno> {
     let mut buffer = [0_u8; 88];
+
     // SAFETY: the kernel writes at most `buffer.len()` bytes, the size the
     // request passes, into the buffer, which outlives the call.
     let result = unsafe {
@@ -232,6 +254,7 @@ pub(super) fn syscall_info(pid: Pid) -> Result<[u8; 88], Errno> {
             buffer.as_mut_ptr().cast::<libc::c_void>(),
         )
     };
+
     Errno::result(result).map(|_| buffer)
 }
 
@@ -240,6 +263,7 @@ pub(super) fn syscall_info(pid: Pid) -> Result<[u8; 88], Errno> {
 #[allow(unsafe_code, reason = "a raw ptrace request")]
 pub(super) fn floating_registers(pid: Pid) -> Result<[u8; FXSAVE_SIZE], Errno> {
     let mut buffer = [0_u8; FXSAVE_SIZE];
+
     // SAFETY: PTRACE_GETFPREGS writes one 512-byte FXSAVE image on x86-64
     // into the buffer, which is that size and outlives the call.
     let result = unsafe {
@@ -250,6 +274,7 @@ pub(super) fn floating_registers(pid: Pid) -> Result<[u8; FXSAVE_SIZE], Errno> {
             buffer.as_mut_ptr().cast::<libc::c_void>(),
         )
     };
+
     Errno::result(result).map(|_| buffer)
 }
 

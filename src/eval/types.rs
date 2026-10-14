@@ -15,22 +15,30 @@ use crate::{
 pub enum Ty {
     /// A type the program's debug information describes.
     Program(TypeReference),
+
     /// An exact integer: unsuffixed literals and arithmetic results.
     Exact,
+
     /// A built-in integer type, `iN` or `uN`.
     Int(IntType),
+
     /// A built-in float type.
     Float(FloatFormat),
+
     /// A C base type the program does not describe, as the target lays it
     /// out.
     C(CBaseType),
     Bool,
+
     /// A pointer the expression derived, by `&` or a cast.
     Pointer(Arc<Self>),
+
     /// What `void*` points to.
     Void,
+
     /// The type of `null`.
     Null,
+
     /// The type of a string literal.
     Text,
 }
@@ -46,8 +54,10 @@ pub enum Category {
     },
     Float(FloatFormat),
     Bool,
+
     /// A pointer, to `void` when the pointee is `None`.
     Pointer(Option<Ty>),
+
     /// A language reference, which stands for what it refers to.
     Reference,
     Array {
@@ -55,13 +65,16 @@ pub enum Category {
         dimensions: Arc<[ArrayDimension]>,
     },
     Slice(TypeReference),
+
     /// An array bounded at run time, whose value finds its bounds.
     RuntimeArray,
+
     /// A record, union, or variant, whose members are reached with `.`.
     Record,
     Void,
     Null,
     Text,
+
     /// A type the debugger cannot compute with, and why.
     Opaque(Arc<str>),
 }
@@ -116,6 +129,7 @@ pub fn representation(
             _ => return Ok((ty, info)),
         }
     }
+
     Err("the type's typedefs nest too deeply".into())
 }
 
@@ -152,6 +166,7 @@ fn program_category(types: &dyn TypeSource, ty: TypeReference) -> Category {
         Ok(found) => found,
         Err(reason) => return Category::Opaque(reason),
     };
+
     match &info.kind {
         TypeKind::Base(base) => base_category(base),
         TypeKind::Enumeration {
@@ -216,6 +231,7 @@ fn base_category(base: &BaseType) -> Category {
                 },
             )
     };
+
     match base.encoding {
         BaseTypeEncoding::Boolean => Category::Bool,
         BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => int(true),
@@ -248,9 +264,11 @@ pub fn is_character(types: &dyn TypeSource, ty: &Ty) -> bool {
             )
         });
     }
+
     let Ty::Program(reference) = ty else {
         return false;
     };
+
     matches!(
         representation(types, *reference),
         Ok((
@@ -312,11 +330,13 @@ fn pointer_name(pointee: &str) -> String {
     if let Some((index, _)) = hole {
         return format!("{}*{}", &pointee[..=index], &pointee[index + 1..]);
     }
+
     if pointee.ends_with(']')
         && let Some(index) = pointee.find('[')
     {
         return format!("{} (*){}", pointee[..index].trim_end(), &pointee[index..]);
     }
+
     format!("{pointee}*")
 }
 
@@ -355,6 +375,7 @@ fn language_type_id(leaf: &Ty, depth: u32) -> Option<u32> {
         Ty::C(c) => 512 + *c as u32,
         Ty::Program(_) | Ty::Pointer(_) => return None,
     };
+
     Some((depth << 20) + leaf)
 }
 
@@ -366,22 +387,27 @@ pub fn type_reference(ty: &Ty) -> TypeReference {
         depth += 1;
         leaf = pointee;
     }
+
     debug_assert!(depth < POINTER_DEPTHS, "a pointer {depth} deep");
+
     // A type without an identity of its own claims one no language or program
     // type has.
     let unidentified = TypeReference {
         image: LANGUAGE_IMAGE,
         id: TypeId::new(u32::MAX),
     };
+
     let Ty::Program(reference) = leaf else {
         return language_type_id(leaf, depth).map_or(unidentified, |id| TypeReference {
             image: LANGUAGE_IMAGE,
             id: TypeId::new(id),
         });
     };
+
     if depth == 0 {
         return *reference;
     }
+
     let image = u64::from(reference.image.get()) * u64::from(POINTER_DEPTHS) + u64::from(depth);
     u32::try_from(image)
         .ok()
@@ -400,6 +426,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
     {
         return info.clone();
     }
+
     let name: Arc<str> = type_name(types, ty).into();
     let base = |encoding, byte_size| {
         TypeKind::Base(BaseType {
@@ -410,6 +437,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
             bit_size: None,
         })
     };
+
     let kind = match ty {
         Ty::C(c) => types
             .c_base_type(*c)
@@ -437,6 +465,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
         },
         Ty::Program(_) | Ty::Void | Ty::Null | Ty::Text => TypeKind::Unspecified,
     };
+
     TypeInfo {
         reference: type_reference(ty),
         name,
@@ -457,6 +486,7 @@ pub fn c_type_key(words: &[CWord]) -> Option<String> {
     if words.is_empty() || signed + unsigned > 1 || int > 1 || char > 1 || short > 1 {
         return None;
     }
+
     let sign = if unsigned == 1 { "unsigned " } else { "" };
     let key = match (short, long, char, float, double) {
         (0, 0, 0, 1, 0) if signed + unsigned + int == 0 => "float".to_owned(),
@@ -473,6 +503,7 @@ pub fn c_type_key(words: &[CWord]) -> Option<String> {
         (0, 0, 0, 0, 0) => format!("{sign}int"),
         _ => return None,
     };
+
     Some(key)
 }
 
@@ -495,15 +526,18 @@ pub fn builtin(name: &str, pointer_size: u8) -> Option<Ty> {
         }
         _ => {}
     }
+
     let signed = match name.as_bytes().first()? {
         b'i' => true,
         b'u' => false,
         _ => return None,
     };
+
     let digits = &name[1..];
     if digits.starts_with('0') {
         return None;
     }
+
     digits
         .parse::<u8>()
         .ok()

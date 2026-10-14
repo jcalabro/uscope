@@ -19,6 +19,7 @@ use nix::unistd::Pid;
 use crate::protocol::{
     FrameScopeEvidence, InvalidatedWatchpoint, WatchScope, WatchpointId, WatchpointInvalidation,
 };
+
 use crate::unwind::DEFAULT_MAX_FRAMES;
 use crate::{AddressRange, Error, Result, RuntimeId, TaskId, VirtualAddress};
 
@@ -44,10 +45,13 @@ pub(super) struct StackMoves {
     /// The entry of each runtime's stack mover, planted while a task of
     /// that runtime has a watch.
     movers: BTreeMap<VirtualAddress, RuntimeId>,
+
     /// The moves of watched tasks' stacks under way.
     moving: Vec<Move>,
+
     /// Where the moves under way return, each planted.
     returns: BTreeSet<VirtualAddress>,
+
     /// Whether a stack moved that the runtime could not name the task of,
     /// which may have been any watched task's.
     unknown: bool,
@@ -103,6 +107,7 @@ struct Move {
     task: TaskId,
     returns_to: VirtualAddress,
     stack: u64,
+
     /// Whether the mover returned, so the task's stack is where it goes.
     returned: bool,
 }
@@ -120,6 +125,7 @@ impl<P: InspectionOps> Controller<P> {
         let WatchScope::Task { task, .. } = *scope else {
             return Ok(None);
         };
+
         let bounds = self
             .task_stack_bounds(inferior, task)
             .map_err(|reason| Error::TaskUnavailable { task, reason })?
@@ -129,6 +135,7 @@ impl<P: InspectionOps> Controller<P> {
                 "the object is not on its task's stack".into(),
             ));
         }
+
         Ok(Some(TaskWatch {
             task,
             below_top: bounds.end - address.get(),
@@ -148,6 +155,7 @@ impl<P: InspectionOps> Controller<P> {
         let bounds = match self.task_stack_bounds(inferior, task) {
             Ok(Some(bounds)) => bounds,
             Ok(None) => return Ok(Some(WatchpointInvalidation::ScopeExited)),
+
             #[cfg_attr(
                 not(debug_assertions),
                 expect(unused_variables, reason = "only recorded")
@@ -157,6 +165,7 @@ impl<P: InspectionOps> Controller<P> {
                 return Ok(Some(WatchpointInvalidation::StackMoved));
             }
         };
+
         // A watch not set aside for a move is where its task's stack is;
         // anywhere else, the stack moved where the debugger did not see.
         let suspended = inferior
@@ -171,9 +180,11 @@ impl<P: InspectionOps> Controller<P> {
             record!("task {task}'s stack moved unseen to {bounds:#x?}");
             return Ok(Some(WatchpointInvalidation::StackMoved));
         }
+
         let Some(root) = self.task_root(inferior, task, inferior.memory_thread())? else {
             return Ok(Some(WatchpointInvalidation::ScopeExited));
         };
+
         let view = StackView::task(
             root.thread().unwrap_or_else(|| root.reader()),
             TaskStack {
@@ -211,12 +222,15 @@ impl<P: InspectionOps> Controller<P> {
         else {
             return Ok(false);
         };
+
         let stack = self.physical_stack(inferior, root, DEFAULT_MAX_FRAMES)?;
+
         // Each frame's caller carries the frame's canonical frame address.
         for (index, caller) in stack.frames.iter().enumerate().skip(1) {
             let Some(cfa) = caller.context.cfa else {
                 continue;
             };
+
             let frame = view.activation(cfa);
             if frame == activation {
                 let Some(address) = stack
@@ -226,14 +240,17 @@ impl<P: InspectionOps> Controller<P> {
                 else {
                     return Ok(false);
                 };
+
                 let location = module.image.locate(address);
                 return Ok(location.physical_instance == Some(evidence.function)
                     && evidence.ranges.iter().any(|range| range.contains(address)));
             }
+
             if activation.is_callee_of(frame) {
                 return Ok(false);
             }
         }
+
         Ok(stack.termination != crate::UnwindTermination::Complete)
     }
 }
@@ -246,6 +263,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
+
         let watched = watched_tasks(inferior);
         let wanted = self
             .runtimes(inferior)
@@ -273,6 +291,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .chain(&returns)
             .copied()
             .collect::<BTreeSet<_>>();
+
         // The record changes with each site, so that a failed edit leaves
         // it naming exactly the sites planted.
         for &address in planted.difference(&needed) {
@@ -284,6 +303,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             )?;
             inferior.stack_moves.forget(address);
         }
+
         let pid = inferior.memory_thread();
         for &address in needed.difference(&planted) {
             self.ptrace.install_breakpoint(
@@ -301,6 +321,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         inferior.stack_moves.movers = wanted;
         inferior.stack_moves.returns = returns;
         Ok(())
@@ -315,6 +336,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !moves.movers.contains_key(&address) && !moves.returns.contains(&address) {
             return Ok(());
         }
+
         let registers = self.ptrace.registers(pid)?;
         if let Some(&runtime) = moves.movers.get(&address) {
             let Some(runtime) = self
@@ -324,6 +346,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             else {
                 return Ok(());
             };
+
             let task = self.with_runtime_stop(inferior, &runtime, pid, |stop| {
                 runtime
                     .model
@@ -347,9 +370,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     return self.queue_stack_follow();
                 }
             };
+
             if !watched_tasks(inferior).contains(&task) {
                 return Ok(());
             }
+
             let returns_to = VirtualAddress::new(self.ptrace.read_word(pid, registers.rsp)?);
             record!("task {task}'s stack moves on {pid}, returning to {returns_to}");
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -362,6 +387,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             });
             return self.queue_stack_follow();
         }
+
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if let Some(moving) = inferior.stack_moves.moving.iter_mut().find(|moving| {
             moving.thread == pid
@@ -373,6 +399,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             moving.returned = true;
             return self.queue_stack_follow();
         }
+
         Ok(())
     }
 
@@ -407,6 +434,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if std::mem::take(&mut inferior.stack_moves.unknown) {
             return self.end_task_watches(|_| true);
         }
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let moving = inferior
             .stack_moves
@@ -421,10 +449,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(watch) = record.task else {
                 continue;
             };
+
             if moving.contains(&watch.task) {
                 placed.push((id, None));
                 continue;
             }
+
             match self.task_stack_bounds(inferior, watch.task) {
                 Ok(Some(bounds)) => match bounds.end.checked_sub(watch.below_top) {
                     Some(address) => placed.push((id, Some(VirtualAddress::new(address)))),
@@ -433,6 +463,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 // A task that is gone ended its activation; the next stop
                 // says so.
                 Ok(None) => {}
+
                 #[cfg_attr(
                     not(debug_assertions),
                     expect(unused_variables, reason = "only recorded")
@@ -443,6 +474,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         }
+
         let mut plan = inferior.watch.plan.clone();
         let mut moved = BTreeMap::new();
         for (id, address) in placed {
@@ -451,7 +483,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Some(address) = address else {
                 continue;
             };
+
             let access = super::watchpoints::slot_access(record.watchpoint.access);
+
             // A disabled watch follows its stack too, so that enabling it
             // watches where the value is, but holds no slots meanwhile.
             let placed = debug_registers::split_range(address.get(), record.watchpoint.byte_size)
@@ -460,6 +494,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     if !record.watchpoint.enabled {
                         return Some((None, chunks));
                     }
+
                     plan.with_watchpoint(id, &chunks, access)
                         .ok()
                         .map(|next| (Some(next), chunks))
@@ -469,6 +504,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     if let Some(next) = next {
                         plan = next;
                     }
+
                     if address != record.watchpoint.address {
                         moved.insert(id, (address, chunks));
                     }
@@ -476,6 +512,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 None => lost.push(id),
             }
         }
+
         self.arm_all_threads(plan)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for (id, (address, chunks)) in &moved {
@@ -498,9 +535,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .collect::<Vec<_>>()
                 .into();
         }
+
         if !moved.is_empty() {
             self.publish_watchpoints_changed();
         }
+
         self.end_task_watches(|id| lost.contains(&id))?;
         self.sync_stack_movers()
     }

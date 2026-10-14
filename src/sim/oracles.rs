@@ -24,18 +24,21 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
     let Some(process) = truth.inferior.and_then(|tgid| kernel.processes.get(&tgid)) else {
         return Ok(());
     };
+
     // Every trap the controller installed is in memory, over the byte it
     // remembers.
     for (&address, site) in &truth.sites {
         let Some(byte) = process.space.peek_bytes(address, 1) else {
             continue;
         };
+
         if site.installed && byte[0] != BREAKPOINT {
             return Err(format!(
                 "the controller installed a trap at {address:#x}, but memory holds {:#04x}",
                 byte[0]
             ));
         }
+
         if let Some(was) = image.original_byte(address)
             && site.original_byte != was
         {
@@ -46,6 +49,7 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
             ));
         }
     }
+
     // Every other byte of code is the program's own. A page still shared
     // with the image was never written.
     for (page_address, original_page) in image.code() {
@@ -56,10 +60,12 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
         {
             continue;
         }
+
         let current = process
             .space
             .peek_page(page_address)
             .ok_or_else(|| format!("code page {page_address:#x} is no longer mapped"))?;
+
         // Most of a page with traps in it is unchanged, which comparing it a
         // line at a time skips quickly.
         let lines = current.chunks(LINE).zip(original_page.chunks(LINE));
@@ -67,10 +73,12 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
             if now == was {
                 continue;
             }
+
             for (offset, (&now, &was)) in now.iter().zip(was).enumerate() {
                 if now == was {
                     continue;
                 }
+
                 let address = page_address + (line * LINE + offset) as u64;
                 let site = truth.sites.get(&address);
                 if now != BREAKPOINT || !site.is_some_and(|site| site.installed) {
@@ -82,6 +90,7 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
             }
         }
     }
+
     Ok(())
 }
 
@@ -92,10 +101,12 @@ pub fn site_ownership(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
     if truth.inferior.is_some_and(|tgid| ending(kernel, tgid)) {
         return Ok(());
     }
+
     for (&address, site) in &truth.sites {
         if site.owners == 0 {
             return Err(format!("site {address:#x} has no owner"));
         }
+
         for &execution in &site.plans {
             if Some(execution) != truth.active_execution {
                 return Err(format!(
@@ -106,12 +117,14 @@ pub fn site_ownership(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
             }
         }
     }
+
     if truth.public_stop.is_some() && !truth.plan_sites.is_empty() {
         return Err(format!(
             "stop {:?} is published while plans still record sites: {:?}",
             truth.public_stop, truth.plan_sites
         ));
     }
+
     Ok(())
 }
 
@@ -132,9 +145,11 @@ pub fn all_stop(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
     let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
         return Ok(());
     };
+
     if ending(kernel, tgid) {
         return Ok(());
     }
+
     let mut stopped = BTreeSet::new();
     let mut ended = BTreeSet::new();
     for thread in kernel.threads_of(tgid) {
@@ -153,6 +168,7 @@ pub fn all_stop(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
             }
         }
     }
+
     let unknown = stopped.difference(&truth.threads).next().is_some();
     let vanished = truth
         .threads
@@ -165,6 +181,7 @@ pub fn all_stop(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
             truth.threads
         ));
     }
+
     Ok(())
 }
 
@@ -186,10 +203,12 @@ pub fn unseen_hits(kernel: &Kernel) -> Result<(), String> {
 pub struct HeardTrap {
     pub tid: Tid,
     pub address: u64,
+
     /// When the thread executes the trap again, having executed nothing
     /// since it last trapped there, the breakpoints that counted its
     /// arrival and have owned the site ever since.
     pub again: Option<BTreeSet<u64>>,
+
     /// Whether the controller had begun to shut down.
     pub in_shutdown: bool,
 }
@@ -233,6 +252,7 @@ pub fn hit_counts(
         } else {
             now == previous + 1
         };
+
         if !allowed {
             let reason = trap.map_or_else(
                 || "the message reported no trap".to_owned(),
@@ -252,6 +272,7 @@ pub fn hit_counts(
             ));
         }
     }
+
     Ok(())
 }
 
@@ -275,15 +296,18 @@ pub fn user_breakpoints(
     let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
         return Ok(());
     };
+
     if ending(kernel, tgid) {
         return Ok(());
     }
+
     for (&id, addresses) in intent {
         let Some(breakpoint) = truth.breakpoints.get(&id) else {
             return Err(format!(
                 "stop {stop}: the controller forgot breakpoint {id} at {addresses:x?}"
             ));
         };
+
         if breakpoint.addresses != *addresses {
             return Err(format!(
                 "stop {stop}: breakpoint {id} was added at {addresses:x?}, but the controller \
@@ -291,6 +315,7 @@ pub fn user_breakpoints(
                 breakpoint.addresses
             ));
         }
+
         for address in addresses {
             if !truth
                 .sites
@@ -304,6 +329,7 @@ pub fn user_breakpoints(
             }
         }
     }
+
     Ok(())
 }
 
@@ -319,6 +345,7 @@ pub fn disabled_breakpoints(
     if truth.inferior.is_some_and(|tgid| ending(kernel, tgid)) {
         return Ok(());
     }
+
     for (&address, site) in &truth.sites {
         if let Some(id) = site.users.intersection(disabled).next() {
             return Err(format!(
@@ -326,6 +353,7 @@ pub fn disabled_breakpoints(
             ));
         }
     }
+
     Ok(())
 }
 
@@ -341,6 +369,7 @@ pub fn output_so_far(kernel: &Kernel, run: &Run) -> Result<(), String> {
             ));
         }
     }
+
     Ok(())
 }
 
@@ -352,9 +381,11 @@ pub fn held(kernel: &Kernel, tgid: Tgid) -> Result<bool, String> {
     let Some(thread) = kernel.threads.get(&tgid.leader()) else {
         return Err(format!("held child {tgid} is gone"));
     };
+
     if thread.traced() {
         return Ok(false);
     }
+
     let stopping = thread.state == State::JobStopped
         || (thread.state == State::Running && thread.pending.contains(signals::SIGSTOP));
     if !stopping {
@@ -363,17 +394,20 @@ pub fn held(kernel: &Kernel, tgid: Tgid) -> Result<bool, String> {
             thread.state, thread.pending
         ));
     }
+
     if thread.retired != 0 {
         return Err(format!(
             "held child {tgid} ran {} instructions before a session took it",
             thread.retired
         ));
     }
+
     if let Some((address, now, was)) = kernel.planted(tgid) {
         return Err(format!(
             "held child {tgid} has {now:#04x} at {address:#x}, where the program has {was:#04x}"
         ));
     }
+
     Ok(true)
 }
 
@@ -386,12 +420,14 @@ pub fn clean_exit(kernel: &Kernel) -> Result<(), String> {
             thread.tid, thread.tgid, thread.state
         ));
     }
+
     if let Some((tgid, zombie)) = kernel.zombies.iter().next() {
         return Err(format!(
             "process {tgid} outlived the session unreaped by {}",
             zombie.parent
         ));
     }
+
     Ok(())
 }
 
@@ -413,6 +449,7 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
             }
             Parent::Init | Parent::Process(_) => continue,
         }
+
         let status = &ended.status;
         let output = kernel
             .outputs
@@ -425,6 +462,7 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
                 run.output
             ));
         }
+
         if let ExitStatus::Code(code) = *status
             && (code & 0xff != run.exit_code || output != run.output.as_bytes())
         {
@@ -437,6 +475,7 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
             ));
         }
     }
+
     Ok(())
 }
 
@@ -513,6 +552,7 @@ mod tests {
             sites: BTreeMap::from([(0x1000, site(0x55, true, plans))]),
             ..Truth::default()
         };
+
         assert_eq!(
             site_ownership(
                 &Kernel::new(100),
@@ -558,6 +598,7 @@ mod tests {
             exit_code: 2,
             output: "total 202\n".into(),
         };
+
         let ended = |status, output: &str| {
             let mut kernel = Kernel::new(100);
             kernel.ended.insert(
@@ -572,6 +613,7 @@ mod tests {
             kernel.outputs.insert(1000, output.as_bytes().to_vec());
             transparency(&kernel, &run)
         };
+
         assert_eq!(ended(ExitStatus::Code(2), "total 202\n"), Ok(()));
         assert_eq!(ended(ExitStatus::Signal(9, false), "tot"), Ok(()));
         assert!(ended(ExitStatus::Code(3), "total 202\n").is_err());
@@ -618,6 +660,7 @@ mod tests {
             again: None,
             in_shutdown: false,
         };
+
         let trap = Some(&arrival);
         assert_eq!(
             hit_counts(&before, &with_hits([5, 1, 7]), trap, false),
@@ -631,12 +674,14 @@ mod tests {
             again: Some(BTreeSet::from([1])),
             ..arrival.clone()
         };
+
         for after in [[4, 0, 7], [4, 1, 7]] {
             assert_eq!(
                 hit_counts(&before, &with_hits(after), Some(&again), false),
                 Ok(())
             );
         }
+
         for after in [[5, 0, 7], [4, 2, 7], [4, 0, 8]] {
             assert!(hit_counts(&before, &with_hits(after), Some(&again), false).is_err());
         }
@@ -647,6 +692,7 @@ mod tests {
             inferior: Some(Tgid::new(1002)),
             ..with_hits(hits)
         };
+
         assert_eq!(
             hit_counts(&before, &relaunched([0, 0, 0]), None, false),
             Ok(())
@@ -659,6 +705,7 @@ mod tests {
             in_shutdown: true,
             ..arrival
         };
+
         assert_eq!(
             hit_counts(&before, &before, Some(&in_shutdown), false),
             Ok(())
@@ -679,6 +726,7 @@ mod tests {
             threads: threads.into_iter().collect(),
             ..Truth::default()
         };
+
         assert_eq!(all_stop(&kernel, &truth(vec![tgid])), Ok(()));
         assert!(all_stop(&kernel, &truth(vec![])).is_err(), "unknown thread");
         assert!(
@@ -725,18 +773,21 @@ mod tests {
             inferior: Some(Tgid::led_by(tgid)),
             ..with_hits([0, 0, 0])
         };
+
         let intent = |entries: Vec<(u64, u64)>| {
             entries
                 .into_iter()
                 .map(|(id, address)| (id, BTreeSet::from([address])))
                 .collect::<BTreeMap<_, _>>()
         };
+
         assert_eq!(
             user_breakpoints(&kernel, &truth, &intent(vec![(1, 0x1000), (2, 0x1000)])),
             Ok(())
         );
         assert!(user_breakpoints(&kernel, &truth, &intent(vec![(4, 0x1000)])).is_err());
         assert!(user_breakpoints(&kernel, &truth, &intent(vec![(1, 0x3000)])).is_err());
+
         // Breakpoint 3's location has no site.
         assert!(user_breakpoints(&kernel, &truth, &intent(vec![(3, 0x2000)])).is_err());
     }
@@ -752,6 +803,7 @@ mod tests {
             inferior: Some(Tgid::led_by(tgid)),
             ..with_hits([0, 0, 0])
         };
+
         assert_eq!(
             disabled_breakpoints(&kernel, &truth, &BTreeSet::from([3])),
             Ok(())

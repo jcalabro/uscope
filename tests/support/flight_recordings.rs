@@ -13,6 +13,7 @@
 
 #[cfg(debug_assertions)]
 pub use recording::{adapter_finished, recording_path, watch_adapter, watch_scenarios};
+
 #[cfg(not(debug_assertions))]
 pub use stubs::{adapter_finished, watch_adapter, watch_scenarios};
 
@@ -56,6 +57,7 @@ mod recording {
                 0 => recordings.path(".adapter"),
                 count => recordings.path(&format!(".adapter-{}", count + 1)),
             };
+
             recordings.adapters.push(Adapter {
                 path: path.clone(),
                 finished: None,
@@ -73,6 +75,7 @@ mod recording {
             if recordings.kept {
                 return;
             }
+
             let Some(adapter) = recordings
                 .adapters
                 .iter_mut()
@@ -80,6 +83,7 @@ mod recording {
             else {
                 return;
             };
+
             if let Ok(contents) = fs::read(path) {
                 let _ = fs::remove_file(path);
                 adapter.finished = Some(contents);
@@ -96,15 +100,18 @@ mod recording {
     struct Recordings {
         /// The path every recording of this test starts with.
         stem: PathBuf,
+
         /// Whether a scenario ran in this process.
         scenarios: bool,
         adapters: Vec<Adapter>,
+
         /// Whether the test failed, so recordings stay where they are.
         kept: bool,
     }
 
     struct Adapter {
         path: PathBuf,
+
         /// The recording of an adapter that exited, held until the test
         /// either fails or ends.
         finished: Option<Vec<u8>>,
@@ -137,6 +144,7 @@ mod recording {
                     Err(error) => eprintln!("cannot keep {}: {error}", path.display()),
                 }
             }
+
             for adapter in &mut self.adapters {
                 if let Some(contents) = adapter.finished.take()
                     && let Err(error) = fs::write(&adapter.path, contents)
@@ -144,8 +152,10 @@ mod recording {
                     eprintln!("cannot keep {}: {error}", adapter.path.display());
                     continue;
                 }
+
                 kept.push(adapter.path.clone());
             }
+
             for path in kept {
                 eprintln!("flight recording: {}", path.display());
             }
@@ -154,6 +164,7 @@ mod recording {
 
     fn with<T>(change: impl FnOnce(&mut Recordings) -> T) -> T {
         struct Holding;
+
         impl Drop for Holding {
             fn drop(&mut self) {
                 HOLDING.set(false);
@@ -189,6 +200,7 @@ mod recording {
         std::panic::set_hook(Box::new(move |info| {
             // The debugger's own hook records the panic before reporting it.
             previous(info);
+
             // Another thread may hold the recordings briefly, so wait for
             // them unless this thread holds them.
             if !HOLDING.get() {

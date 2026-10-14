@@ -136,6 +136,7 @@ async fn record_page(
             usage: uscope::InspectionUsage::default(),
         };
     }
+
     child_page(scenario, state, 0, limit).await
 }
 
@@ -189,6 +190,7 @@ async fn dereference_named(
             } => reference,
             other => panic!("{name} is not dereferenceable: {other:?}"),
         };
+
         let value = scenario
             .operation(
                 "dereference pointer",
@@ -198,6 +200,7 @@ async fn dereference_named(
         state = value.state.clone();
         result = Some(value);
     }
+
     result.expect("positive dereference depth")
 }
 
@@ -215,6 +218,7 @@ async fn assert_slice_values(
     else {
         panic!("{fixture}: expected decoded slice, got {variable:?}");
     };
+
     assert_eq!(*length, u64::try_from(expected.len()).unwrap(), "{fixture}");
     assert_eq!(*actual_capacity, capacity, "{fixture}");
     let page = if expected.is_empty() {
@@ -230,6 +234,7 @@ async fn assert_slice_values(
             .await,
         )
     };
+
     let values: Vec<i128> = page
         .as_ref()
         .map_or(&[][..], |page| page.children.as_ref())
@@ -429,6 +434,7 @@ async fn run_go_to_breakpoint(scenario: &mut Scenario, fixture: &str) {
             _ => panic!("{fixture} stopped unexpectedly before its user breakpoint: {reason:?}"),
         }
     }
+
     panic!("{fixture} did not reach its user breakpoint after 32 runtime signals");
 }
 
@@ -440,10 +446,12 @@ async fn resume_go_to_exit(scenario: &mut Scenario, fixture: &str) {
             StopReason::Breakpoint { .. } => {
                 reason = scenario.resume_to_stop().await;
             }
+
             // The runtime's SIGURG preemption never stops the program.
             _ => panic!("{fixture} stopped unexpectedly while exiting: {reason:?}"),
         }
     }
+
     panic!("{fixture} did not exit after 32 breakpoint stops");
 }
 
@@ -463,6 +471,7 @@ fn text_of(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSum
     let VariableState::Available { text, .. } = &variable.state else {
         panic!("{name} is not available: {:?}", variable.state);
     };
+
     text.as_deref().cloned()
 }
 

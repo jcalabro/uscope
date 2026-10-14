@@ -837,8 +837,10 @@ pub(super) fn schema_text() -> String {
         for (name, offset, size) in table.fields {
             let _ = write!(text, " {name}@{offset}:{size}");
         }
+
         text.push('\n');
     }
+
     text
 }
 

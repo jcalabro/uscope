@@ -14,6 +14,7 @@ use std::time::Duration;
 pub struct Budget {
     /// A share of one CPU: 0.01 is 1%.
     pub cpu: f64,
+
     /// How often the budget is checked; each period is sampled for its
     /// share, in one span at a random offset.
     pub period: Duration,
@@ -36,8 +37,10 @@ pub struct Observation {
     /// CPU time recording took in the period, less what loading programs'
     /// debug information took, which no pause makes cheaper.
     pub cpu: Duration,
+
     /// How long sampling was on.
     pub sampled: Duration,
+
     /// How long the period lasted.
     pub period: Duration,
 }
@@ -47,6 +50,7 @@ pub struct Observation {
 pub struct Decision {
     /// Sixty-fourths of each period now sampled.
     pub steps: u32,
+
     /// The share of a CPU the period that led to it used.
     pub used: f64,
 }
@@ -55,6 +59,7 @@ pub struct Decision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Controller {
     steps: u32,
+
     /// Whether a period has passed: the first warms what recording builds
     /// once, such as each module's unwind tables, and is not judged.
     warm: bool,
@@ -89,10 +94,13 @@ impl Controller {
         if observed.sampled.is_zero() || observed.period.is_zero() {
             return None;
         }
+
         if !std::mem::replace(&mut self.warm, true) {
             return None;
         }
+
         let used = observed.cpu.as_secs_f64() / observed.period.as_secs_f64();
+
         // CPU per second of sampling, and the share of a period that fits.
         let cost = observed.cpu.as_secs_f64() / observed.sampled.as_secs_f64();
         let fits = if cost > 0.0 {
@@ -100,11 +108,13 @@ impl Controller {
         } else {
             STEPS
         };
+
         let steps = if used > budget.cpu {
             fits.min(self.steps)
         } else {
             fits.min(self.steps.saturating_mul(2)).max(self.steps)
         };
+
         (steps != self.steps).then(|| {
             self.steps = steps;
             Decision { steps, used }
@@ -144,6 +154,7 @@ mod tests {
                     changes.push((index, decision.steps));
                 }
             }
+
             let steps = controller.steps();
             let used = cost * f64::from(steps) / f64::from(STEPS);
             assert!(
@@ -170,6 +181,7 @@ mod tests {
             controller.step(BUDGET, period(0.0125, controller.steps()));
             shares.push(controller.steps());
         }
+
         // 0.9 of the budget fits 0.72 of a period: 46 sixty-fourths.
         assert_eq!(shares, [2, 4, 8, 16, 32, 46, 46, 46]);
     }
@@ -193,6 +205,7 @@ mod tests {
             sampled: Duration::ZERO,
             period: BUDGET.period,
         };
+
         assert_eq!(controller.step(BUDGET, idle), None);
         assert_eq!(controller.steps(), STEPS);
     }

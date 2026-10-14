@@ -79,10 +79,13 @@ impl std::fmt::Display for Tgid {
 
 /// The identifier the first simulated process gets.
 const FIRST_TID: Tid = 1000;
+
 /// The user every simulated process runs as.
 const UID: u32 = 1000;
+
 /// `orig_rax` outside any system call.
 pub const NO_SYSTEM_CALL: u64 = u64::MAX;
+
 /// What `rax` holds while a thread is inside a system call.
 const ENOSYS_RESULT: u64 = (-(libc::ENOSYS as i64)).cast_unsigned();
 
@@ -90,15 +93,20 @@ const ENOSYS_RESULT: u64 = (-(libc::ENOSYS as i64)).cast_unsigned();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitStatus {
     Exited(Tid, i32),
+
     /// Killed by a signal, and whether it dumped core.
     Signaled(Tid, i32, bool),
+
     /// A signal-delivery-stop.
     Stopped(Tid, i32),
+
     /// A `PTRACE_EVENT_*` stop.
     Event(Tid, i32),
+
     /// A seized thread's group-stop: `PTRACE_EVENT_STOP` with the signal
     /// that stopped its process (K-STOP-2).
     GroupStop(Tid, i32),
+
     /// A system-call-stop, as `PTRACE_O_TRACESYSGOOD` reports it:
     /// `SIGTRAP | 0x80` (K-SYS-1).
     Syscall(Tid),
@@ -149,8 +157,10 @@ impl fmt::Display for WaitStatus {
 pub struct SigInfo {
     pub signal: i32,
     pub code: i32,
+
     /// `si_pid`: the sending process, for codes that name one.
     pub pid: i32,
+
     /// `si_addr`: the faulting address, for synchronous faults.
     pub address: u64,
 }
@@ -192,6 +202,7 @@ impl SigInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
     Code(i32),
+
     /// The signal that killed it, and whether it dumped core.
     Signal(i32, bool),
 }
@@ -221,14 +232,18 @@ impl ExitStatus {
 pub enum StopKind {
     /// A signal-delivery-stop: the signal waits for the tracer's verdict.
     Signal(i32),
+
     /// A `PTRACE_EVENT_*` stop other than the exit event, with the message
     /// `PTRACE_GETEVENTMSG` reports.
     Event(i32, u64),
+
     /// The `PTRACE_EVENT_EXIT` stop of a thread ending this way.
     Exit(ExitStatus),
+
     /// A seized thread's group-stop, for the signal that stopped its
     /// process (K-STOP-2).
     Group(i32),
+
     /// A system-call-stop at a call's entry, or at its exit (K-SYS-1,
     /// K-SYS-2).
     Syscall { exit: bool },
@@ -239,14 +254,18 @@ pub enum StopKind {
 pub enum State {
     /// Executing instructions whenever the world runs it.
     Running,
+
     /// In a ptrace-stop, answering the tracer's requests.
     Stopped { kind: StopKind, info: SigInfo },
+
     /// Untraced, in its process's job-control stop, until SIGCONT ends it
     /// or a tracer seizes it (K-STOP-1 to K-STOP-3).
     JobStopped,
+
     /// On its way out, which takes it to its exit event the next time it
     /// runs, or straight to a zombie when exits are not traced.
     Exiting(ExitStatus),
+
     /// Gone, having ended this way, but not yet reaped.
     Zombie(ExitStatus),
 }
@@ -291,8 +310,10 @@ pub enum Tracing {
     /// Not at all: the thread runs as if no debugger were there, as one the
     /// tracer detached does (K-FORK-2).
     Untraced,
+
     /// Attached, as a launched program and the threads it creates are.
     Attached { tracer: i32 },
+
     /// Seized, or created by a seized thread: interrupts reach it, the
     /// threads and processes it creates first stop for one, and one may
     /// wait to stop it, which any stop takes the place of (K-SEIZE-1,
@@ -309,40 +330,53 @@ pub struct Thread {
     pub tgid: Tgid,
     pub tracing: Tracing,
     pub registers: Registers,
+
     /// `orig_rax`: the system call the thread entered last, until it runs
     /// another instruction or takes an exception, or [`NO_SYSTEM_CALL`].
     pub orig_rax: u64,
+
     /// The result of a system call the thread stopped inside. `rax` holds
     /// `-ENOSYS` until the call returns it.
     pub returning: Option<u64>,
     pub state: State,
     pub options: Options,
+
     /// Signals pending for this thread alone.
     pub pending: Pending,
+
     /// Whether the thread stops after its next instruction.
     pub single_step: bool,
+
     /// Whether the tracer resumed it with `PTRACE_SYSCALL`, to stop at
     /// each system call's entry and exit (K-SYS-1).
     pub syscall_stops: bool,
+
     /// Whether the thread stopped at a system call's entry and makes the
     /// call when it next runs (K-SYS-2).
     pub entered: bool,
+
     /// Whether its tracer has resumed it, as it has not a thread it seized
     /// running, which makes calls before the tracer can catch them.
     pub resumed: bool,
+
     /// The status a wait would report now, until one reaps it.
     pub report: Option<WaitStatus>,
+
     /// The address of the trap the thread executed, until it executes
     /// another instruction.
     pub trapped_at: Option<u64>,
+
     /// Where the thread last executed a trap, and how many instructions it
     /// had completed then.
     pub last_trap: Option<(u64, u64)>,
+
     /// How many instructions the thread completed, `syscall` among them.
     pub retired: u64,
+
     /// The calls the thread made and has not returned from.
     pub shadow: Shadow,
     pub debug: DebugRegisters,
+
     /// The hardware breakpoints of this thread others hold, as perf can.
     pub debug_held: usize,
 }
@@ -422,6 +456,7 @@ impl Thread {
                 address: 0,
             });
         }
+
         Self {
             tid: id,
             tgid: group,
@@ -467,33 +502,43 @@ impl Thread {
 
 pub struct Process {
     pub tgid: Tgid,
+
     /// The name `comm` reports: the executable's file name, cut to fifteen
     /// bytes.
     pub name: Arc<str>,
     pub space: AddressSpace,
     pub image: Arc<Image>,
+
     /// Who reaps the process once it ends.
     pub parent: Parent,
+
     /// The thread that forked it, which `/proc` lists it under, until that
     /// thread exits and another of its group takes it on.
     pub creator: Option<Tid>,
+
     /// The process the tracer launched whose standard output and error
     /// this one shares, its own included.
     pub root: Tid,
+
     /// Signals pending for the whole process, which whichever of its
     /// threads looks first takes.
     pub shared: Pending,
+
     /// The status of the group exit: from `exit_group`, a fatal signal, or
     /// the thread that began to exit last (K-EXIT-6).
     pub group_exit: Option<ExitStatus>,
+
     /// Whether something outside the session killed the process.
     pub killed_externally: bool,
+
     /// The signal that stopped the process, while it is job-control
     /// stopped (K-STOP-1).
     pub stopped: Option<i32>,
+
     /// Whether SIGCONT ended the process's stop, which its parent hears of
     /// once one of its threads next runs (K-STOP-3).
     pub continued: bool,
+
     /// When the process started, as `/proc/<pid>/stat` counts it: no two
     /// processes share one.
     pub start_time: u64,
@@ -504,11 +549,14 @@ pub struct Process {
 pub enum Parent {
     /// The tracer, which launched it.
     Tracer,
+
     /// Whoever started it untraced, for the tracer to attach to later,
     /// which reaps it at once.
     Launcher,
+
     /// The process that forked it, with `wait4`, after SIGCHLD.
     Process(Tgid),
+
     /// The reaper orphans pass to, which reaps them at once (K-FORK-3).
     Init,
 }
@@ -528,9 +576,11 @@ impl fmt::Display for Parent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
     pub status: ExitStatus,
+
     /// The process the tracer launched whose output this one shared.
     pub root: Tid,
     pub reaper: Parent,
+
     /// Whether something outside the session killed it.
     pub killed_externally: bool,
 }
@@ -555,16 +605,22 @@ pub struct ModelGap(pub String);
 pub enum Happening {
     /// A thread created another.
     Cloned { parent: Tid, child: Tid },
+
     /// A thread called `exit_group`.
     GroupExit { tid: Tid },
+
     /// A group exit or SIGKILL took a thread out of a ptrace-stop.
     PulledFromStop { tid: Tid },
+
     /// A group leader exited while other threads ran on.
     LeaderExitedAlone { tid: Tid },
+
     /// A thread yielded the CPU.
     Yielded { tid: Tid },
+
     /// A thread forked a process.
     Forked { parent: Tid, child: Tid },
+
     /// `tracer` detached a thread, leaving the first byte of its code that
     /// differs from the program's, as its address, the byte, and the
     /// program's.
@@ -573,22 +629,30 @@ pub enum Happening {
         tracer: i32,
         planted: Option<Planted>,
     },
+
     /// A process reaped a child it forked.
     ReapedChild { parent: Tid, child: Tid },
+
     /// Init reaped a process whose parent was gone.
     ReapedOrphan { tgid: Tgid },
+
     /// The tracer tried to seize a thread that had finished exiting.
     SeizeRefused { tid: Tid },
+
     /// An interrupt reached a thread already stopped, which it stops again
     /// as soon as it resumes.
     InterruptWaits { tid: Tid },
+
     /// An untraced thread entered its process's job-control stop.
     JobStopped { tid: Tid },
+
     /// SIGCONT ended a process's job-control stop.
     Continued { tgid: Tgid },
+
     /// The tracer resumed a thread from a signal-delivery-stop without
     /// its signal.
     Suppressed { tid: Tid, signal: i32 },
+
     /// A signal reached the program, untraced or passed on by its tracer,
     /// and the thread took its default action.
     Delivered { tid: Tid, signal: i32 },
@@ -607,6 +671,7 @@ pub struct Kernel {
     /// The process identifier of the simulated debugger that launches
     /// programs, as their parent.
     tracer: i32,
+
     /// The tracer whose request the kernel serves, as `current` names the
     /// calling task in Linux: its requests reach only the threads it
     /// traces, and the signals it sends name it.
@@ -614,62 +679,85 @@ pub struct Kernel {
     next_tid: Tid,
     pub processes: BTreeMap<Tgid, Process>,
     pub threads: BTreeMap<Tid, Thread>,
+
     /// Processes reaped, with how they ended.
     pub ended: BTreeMap<Tgid, Ended>,
+
     /// Processes that ended and wait for their parents to reap them.
     pub zombies: BTreeMap<Tgid, Zombie>,
+
     /// What each process the tracer launched, and the processes it forked,
     /// wrote to standard output and error, in order, by launched process.
     pub outputs: BTreeMap<Tid, Vec<u8>>,
+
     /// The status each reaped thread reported.
     pub reaped: BTreeMap<Tid, WaitStatus>,
+
     /// The code each group leader passed to `exit`: its own status, which
     /// the process's replaces when it is reaped (K-EXIT-6).
     pub leader_exits: BTreeMap<Tid, i32>,
+
     /// The first model gap the run hit.
     pub gap: Option<ModelGap>,
+
     /// What happened since the world last looked.
     pub happenings: Vec<Happening>,
+
     /// The process the debugger controls, whose memory the user's
     /// breakpoints and watches are in.
     pub debugged: Option<Tgid>,
+
     /// Addresses where the user's breakpoints are certainly enabled, as
     /// the client last knew them. The breakpoint-accounting oracle watches
     /// executions there.
     pub user_breakpoints: BTreeSet<u64>,
+
     /// Executions at those addresses no trap reported.
     pub unseen_hits: Vec<UnseenHit>,
+
     /// Where the thread the client steps has been, while it steps.
     pub tracking: Option<Tracking>,
+
     /// What the kernel follows of the client's watchpoints.
     pub watching: Watching,
+
     /// What the kernel follows of the client's catchpoints.
     pub catching: Catching,
+
     /// The calls served since the world last took them.
     pub served: Vec<syscalls::Served>,
+
     /// How the debug registers answer the tracer.
     pub debug_behavior: DebugBehavior,
+
     /// The execute breakpoint a probe armed to sample a process.
     pub perf: Option<perf::Breakpoint>,
+
     /// The identifier the next activation takes.
     next_activation: u64,
+
     /// The start time the next process takes.
     next_start_time: u64,
+
     /// A deliberate defect, so tests can check that the oracles notice.
     #[cfg(test)]
     pub sabotage: Option<Sabotage>,
+
     /// The thread whose single step went on past one instruction, under
     /// [`Sabotage::LateSingleSteps`].
     #[cfg(test)]
     late_step: Option<Tid>,
+
     /// The slots each thread's next instruction reports hit again, under
     /// [`Sabotage::RepeatWatchTraps`].
     #[cfg(test)]
     repeat_watch: BTreeMap<Tid, u64>,
+
     /// How many small stack words ptrace has read, under
     /// [`Sabotage::FlickeringStackWords`].
     #[cfg(test)]
     flickers: std::cell::Cell<u64>,
+
     /// The debug registers the tracer believes it wrote, under
     /// [`Sabotage::PhantomArming`].
     #[cfg(test)]
@@ -681,9 +769,11 @@ pub struct Kernel {
 pub enum DebugBehavior {
     /// As Linux's do (K-DR-*).
     Faithful,
+
     /// Writes succeed and change nothing, and reads give zero, as under
     /// gVisor.
     Discarding,
+
     /// Others hold this many hardware breakpoints of every thread the
     /// program creates, as a perf session following new threads can, so
     /// fewer of their slots take an address (K-DR-4).
@@ -695,6 +785,7 @@ pub enum DebugBehavior {
 pub struct Ran {
     /// How many instructions it executed.
     pub executed: u64,
+
     /// Whether it gave up the CPU with `sched_yield`.
     pub yielded: bool,
 }
@@ -729,14 +820,19 @@ impl Kernel {
             perf: None,
             next_activation: 1,
             next_start_time: 1,
+
             #[cfg(test)]
             sabotage: None,
+
             #[cfg(test)]
             phantom_debug: BTreeMap::new(),
+
             #[cfg(test)]
             late_step: None,
+
             #[cfg(test)]
             repeat_watch: BTreeMap::new(),
+
             #[cfg(test)]
             flickers: std::cell::Cell::new(0),
         }
@@ -850,6 +946,7 @@ impl Kernel {
             pid: tid,
             address: 0,
         };
+
         self.threads.insert(
             tid,
             Thread {
@@ -929,6 +1026,7 @@ impl Kernel {
         if thread.report.is_none() || self.delayed(thread) {
             return None;
         }
+
         let thread = self.threads.get_mut(&tid).expect("the thread exists");
         let mut status = thread.report.take().expect("a report");
         if let State::Zombie(own) = thread.state {
@@ -936,6 +1034,7 @@ impl Kernel {
             let leader = tid == group.leader();
             self.threads.remove(&tid);
             let process = self.processes.get(&group).expect("a zombie's process");
+
             // K-EXIT-6: a group exit decides every status reaped after it.
             let exit = process.group_exit.unwrap_or(own);
             status = exit.wait_status(tid);
@@ -946,6 +1045,7 @@ impl Kernel {
                 self.end_with_untraced_leader(group);
             }
         }
+
         Some(status)
     }
 
@@ -956,10 +1056,12 @@ impl Kernel {
             executed: 0,
             yielded: false,
         };
+
         while ran.executed < budget && self.gap.is_none() {
             let Some(thread) = self.threads.get_mut(&tid) else {
                 break;
             };
+
             match thread.state {
                 State::Exiting(exit) => {
                     self.reach_exit(tid, exit);
@@ -968,6 +1070,7 @@ impl Kernel {
                 State::Running => {}
                 State::Stopped { .. } | State::JobStopped | State::Zombie(_) => break,
             }
+
             if let Some(result) = thread.returning.take() {
                 // The system call the thread stopped inside returns.
                 thread.registers.general[RAX] = result;
@@ -977,14 +1080,17 @@ impl Kernel {
                     self.note_return(tid);
                     break;
                 }
+
                 if thread.syscall_stops {
                     // K-SYS-3: the call stops at its exit as it returns.
                     self.syscall_stop(tid, true);
                     break;
                 }
+
                 self.note_return(tid);
                 continue;
             }
+
             if std::mem::take(&mut thread.entered) {
                 // K-SYS-2: the call the thread stopped at the entry of runs
                 // before anything else can happen to the thread.
@@ -999,10 +1105,12 @@ impl Kernel {
                     }
                 }
             }
+
             self.report_continued(tid);
             if self.stop_for_interrupt(tid) || self.deliver_pending(tid) {
                 break;
             }
+
             ran.executed += 1;
             match self.execute(tid) {
                 Executed::Continue => {}
@@ -1014,6 +1122,7 @@ impl Kernel {
                 }
             }
         }
+
         ran
     }
 
@@ -1021,12 +1130,14 @@ impl Kernel {
     fn execute(&mut self, tid: Tid) -> Executed {
         self.sample_breakpoint(tid);
         let thread = &self.threads[&tid];
+
         // What a thread does is the debugger's to report only while it
         // traces the thread, in the process it debugs.
         let debugged = thread.traced() && self.debugged == Some(thread.tgid);
         if debugged {
             self.watching.resume(tid);
         }
+
         let thread = self.threads.get_mut(&tid).expect("running thread exists");
         let process = self
             .processes
@@ -1042,6 +1153,7 @@ impl Kernel {
         if user_breakpoint && thread.trapped_at != Some(address) && (!trap || skipped) {
             self.unseen_hits.push(UnseenHit { tid, address });
         }
+
         thread.trapped_at = None;
         let single_step = thread.single_step;
         let before = self.watching.bytes(debugged, &process.space);
@@ -1055,12 +1167,14 @@ impl Kernel {
         } else {
             cpu::execute(&mut thread.registers, &mut process.space)
         };
+
         #[cfg(not(test))]
         let cpu::Executed {
             outcome,
             flow,
             accesses,
         } = cpu::execute(&mut thread.registers, &mut process.space);
+
         // K-DR-1: an access an enabled slot covers raises a debug
         // exception once the instruction completes.
         let watch_hits = if outcome == Outcome::Completed {
@@ -1068,6 +1182,7 @@ impl Kernel {
         } else {
             0
         };
+
         #[cfg(test)]
         let watch_hits = if self.sabotage == Some(Sabotage::MissWatchTraps)
             && tid != thread.tgid.leader()
@@ -1079,35 +1194,42 @@ impl Kernel {
             if watch_hits != 0 {
                 self.repeat_watch.insert(tid, watch_hits);
             }
+
             watch_hits | repeated
         } else {
             watch_hits
         };
+
         if thread.debug.breaks_on_execution() {
             self.gap("debug registers breaking on execution");
             return Executed::Stopped;
         }
+
         let after = if accesses.iter().any(|access| access.write) {
             self.watching.bytes(debugged, &process.space)
         } else {
             before.clone()
         };
+
         self.watching
             .follow(tid, &thread.debug, &accesses, &before, &after);
         if matches!(outcome, Outcome::Completed | Outcome::Syscall) {
             if let Some(tracking) = &mut self.tracking {
                 tracking.note(tid, &thread.shadow, address);
             }
+
             thread.retired += 1;
             thread
                 .shadow
                 .follow(flow, &thread.registers, &mut self.next_activation);
         }
+
         if outcome != Outcome::Syscall {
             // Instructions and exceptions enter the kernel, if at all, outside
             // any system call.
             thread.orig_rax = NO_SYSTEM_CALL;
         }
+
         match outcome {
             Outcome::Completed => self.complete(tid, single_step, watch_hits),
             Outcome::Syscall => {
@@ -1140,6 +1262,7 @@ impl Kernel {
             self.syscall_stop(tid, false);
             return Executed::Stopped;
         }
+
         if caught {
             self.catching.unseen.push(UnseenCatch {
                 tid,
@@ -1147,6 +1270,7 @@ impl Kernel {
                 exit: false,
             });
         }
+
         let executed = self.serve_syscall(tid, single_step);
         self.note_return(tid);
         executed
@@ -1164,7 +1288,9 @@ impl Kernel {
             if executed == Executed::Stopped {
                 return executed;
             }
+
             self.syscall_stop(tid, true);
+
             // A yield gave up the CPU before the exit stopped the thread.
             return if executed == Executed::Yielded {
                 executed
@@ -1172,6 +1298,7 @@ impl Kernel {
                 Executed::Stopped
             };
         }
+
         self.note_return(tid);
         executed
     }
@@ -1184,6 +1311,7 @@ impl Kernel {
         let Some(thread) = self.threads.get(&tid) else {
             return;
         };
+
         let inside = matches!(
             thread.state,
             State::Stopped {
@@ -1214,6 +1342,7 @@ impl Kernel {
         if !exit {
             thread.registers.general[RAX] = ENOSYS_RESULT;
         }
+
         thread.enter_stop(
             StopKind::Syscall { exit },
             SigInfo::syscall(tid),
@@ -1224,6 +1353,7 @@ impl Kernel {
     /// Serves the system call a thread just entered.
     fn serve_syscall(&mut self, tid: Tid, single_step: bool) -> Executed {
         let yielded = syscalls::serve(self, tid);
+
         // An untraced thread that exited is reaped at once.
         if !self
             .threads
@@ -1232,15 +1362,18 @@ impl Kernel {
         {
             return Executed::Stopped;
         }
+
         if single_step {
             // A yield gives up the CPU even under a single step.
             if yielded {
                 self.happenings.push(Happening::Yielded { tid });
             }
+
             // K-TRAP-1: a step across `syscall` reports TRAP_BRKPT.
             self.trap(tid, signals::TRAP_BRKPT);
             return Executed::Stopped;
         }
+
         if yielded {
             Executed::Yielded
         } else {
@@ -1265,6 +1398,7 @@ impl Kernel {
                     code: cpu::SI_KERNEL,
                     ..SigInfo::default()
                 };
+
                 self.signal_stop(tid, info);
             }
             Outcome::Fault(fault) => {
@@ -1274,6 +1408,7 @@ impl Kernel {
                     pid: 0,
                     address: fault.address.unwrap_or(0),
                 };
+
                 self.signal_stop(tid, info);
             }
             Outcome::Unsupported(instruction) => {
@@ -1283,6 +1418,7 @@ impl Kernel {
                 unreachable!("{outcome:?} raises no exception")
             }
         }
+
         Executed::Stopped
     }
 
@@ -1294,6 +1430,7 @@ impl Kernel {
             if watch_hits == 0 && self.step_late(tid) {
                 return Executed::Continue;
             }
+
             // K-TRAP-1: a single step reports TRAP_TRACE. K-DR-2: with DR6
             // holding the step and any slot that hit.
             self.threads
@@ -1304,6 +1441,7 @@ impl Kernel {
             self.trap(tid, signals::TRAP_TRACE);
             return Executed::Stopped;
         }
+
         if watch_hits != 0 {
             // K-DR-1: TRAP_HWBKPT with `rip` after the instruction.
             self.threads
@@ -1314,6 +1452,7 @@ impl Kernel {
             self.trap(tid, signals::TRAP_HWBKPT);
             return Executed::Stopped;
         }
+
         Executed::Continue
     }
 
@@ -1328,6 +1467,7 @@ impl Kernel {
         if self.sabotage != Some(Sabotage::LateSingleSteps) || !stepped {
             return false;
         }
+
         self.late_step.take() != Some(tid) && {
             self.late_step = Some(tid);
             true
@@ -1350,10 +1490,12 @@ impl Kernel {
         else {
             return word;
         };
+
         let rip = thread.registers.rip;
         let Some(offset) = rip.checked_sub(address).filter(|offset| *offset < 8) else {
             return word;
         };
+
         let calls = self.processes.get(&tgid).is_some_and(|process| {
             crate::sim::cpu::decode(rip, &process.space)
                 .is_ok_and(|instruction| instruction.mnemonic() == iced_x86::Mnemonic::Call)
@@ -1361,6 +1503,7 @@ impl Kernel {
         if !calls {
             return word;
         }
+
         let shift = offset * 8;
         (word & !(0xff << shift)) | (0x90 << shift)
     }
@@ -1377,6 +1520,7 @@ impl Kernel {
                     .any(|call| call.slot == address && (!exact || call.return_address == word))
             })
         };
+
         let small_on_stack = || {
             (1..0x1000).contains(&word)
                 && !return_slot(false)
@@ -1390,6 +1534,7 @@ impl Kernel {
                     }
                 })
         };
+
         match self.sabotage {
             Some(Sabotage::SkipLinkedNodes) if address.checked_add(8) == Some(word) => word + 16,
             Some(Sabotage::HideSteppedCalls) => self.hide_stepped_call(tgid, address, word),
@@ -1426,6 +1571,7 @@ impl Kernel {
             self.act_by_default(tid, info.signal);
             return;
         }
+
         thread.enter_stop(
             StopKind::Signal(info.signal),
             info,
@@ -1461,6 +1607,7 @@ impl Kernel {
         ) {
             return false;
         }
+
         thread.enter_stop(
             StopKind::Event(libc::PTRACE_EVENT_STOP, 0),
             SigInfo::event(tid, libc::PTRACE_EVENT_STOP),
@@ -1483,6 +1630,7 @@ impl Kernel {
             {
                 return None;
             }
+
             let current = process.space.peek_bytes(page_address, original.len())?;
             current
                 .iter()
@@ -1507,6 +1655,7 @@ impl Kernel {
         if matches!(thread.state, State::Zombie(_)) {
             return Some(String::new());
         }
+
         Some(self.processes.get(&thread.tgid)?.space.maps())
     }
 

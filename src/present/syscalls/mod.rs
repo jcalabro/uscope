@@ -33,20 +33,27 @@ pub enum Kind {
     Punctuation,
     Number,
     String,
+
     /// A named constant: a flag, an enumeration value, `NULL`.
     Constant,
+
     /// A descriptor's number.
     Fd,
+
     /// What a descriptor refers to, between `<` and `>`.
     Path,
     Address,
+
     /// An error's name and message.
     Error,
+
     /// A note about the decoding, as `/* 23 vars */`.
     Comment,
+
     /// A timestamp or duration.
     Time,
     Pid,
+
     /// Something the engine could not see: `<unreadable>`, `?`.
     Missing,
     Text,
@@ -96,8 +103,10 @@ pub enum Constants {
     /// Names, as `O_RDONLY|O_CLOEXEC`.
     #[default]
     Abbrev,
+
     /// Numbers only.
     Raw,
+
     /// Numbers with their names in comments.
     Verbose,
 }
@@ -118,11 +127,14 @@ pub struct Style {
     pub string_limit: usize,
     pub hex: Hex,
     pub constants: Constants,
+
     /// `-v`: whole structures and environments.
     pub verbose: bool,
     pub fds: FdStyle,
+
     /// `-N`: arguments named as the kernel names them.
     pub arg_names: bool,
+
     /// `-e raw=`: this call prints raw words.
     pub raw: bool,
 }
@@ -150,6 +162,7 @@ impl Tokens {
         if text.as_ref().is_empty() {
             return;
         }
+
         // Neighbors of one kind merge, which keeps lines short on the wire.
         if let Some(last) = self.0.last_mut()
             && last.kind == kind
@@ -157,6 +170,7 @@ impl Tokens {
             last.text.push_str(text.as_ref());
             return;
         }
+
         self.0.push(Token {
             kind,
             text: text.into(),
@@ -205,6 +219,7 @@ pub fn errno(Errno(number): Errno) -> (String, &'static str) {
     if let Some(&(_, name, message)) = names::ERRNOS.iter().find(|&&(n, _, _)| n == number) {
         return (name.to_owned(), message);
     }
+
     match number {
         512 => (
             "ERESTARTSYS".to_owned(),
@@ -243,6 +258,7 @@ pub fn signal(number: i32) -> String {
     if let Some(&(_, name)) = names::SIGNALS.iter().find(|&&(n, _)| n == number) {
         return format!("SIG{name}");
     }
+
     match number {
         32 => "SIGRTMIN".to_owned(),
         33..=64 => format!("SIGRT_{}", number - 32),
@@ -274,6 +290,7 @@ pub fn signal_named(name: &str) -> Option<i32> {
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub fds: Option<&'a FdTable>,
+
     /// Descriptors as they were before the call: true for its arguments,
     /// false for what it returned.
     pub before: bool,
@@ -297,11 +314,13 @@ pub fn caught(stop: &uscope::SyscallStop) -> String {
         stack: None,
         flags: uscope::syscalls::EventFlags::default(),
     };
+
     let style = Style::default();
     let context = Context {
         fds: None,
         before: true,
     };
+
     if stop.returned.is_some() {
         call(&event, &style, context).text()
     } else {
@@ -348,6 +367,7 @@ pub fn argument_values(
             })
             .collect();
     };
+
     let names = specs::arg_names(event.call);
     let shown = shown_arguments(event, spec);
     spec.args
@@ -381,10 +401,12 @@ pub fn entry(event: &SyscallEvent, style: &Style, context: Context<'_>) -> Token
                 if index > 0 {
                     out.punct(", ");
                 }
+
                 hex(&mut out, word);
             }
         }
     }
+
     out.punct(")");
     out
 }
@@ -431,11 +453,13 @@ fn clone_arguments(out: &mut Tokens, event: &SyscallEvent, style: &Style) {
         out.field("parent_tid");
         pointer(out, parent_tid);
     }
+
     if flag_word & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0 {
         out.punct(", ");
         out.field("child_tidptr");
         pointer(out, child_tid);
     }
+
     if flag_word & CLONE_SETTLS != 0 {
         out.punct(", ");
         out.field("tls");
@@ -457,6 +481,7 @@ fn arguments(
         clone_arguments(out, event, style);
         return;
     }
+
     let names = style
         .arg_names
         .then(|| specs::arg_names(event.call))
@@ -466,9 +491,11 @@ fn arguments(
         if index > 0 {
             out.punct(", ");
         }
+
         if let Some(name) = names.and_then(|names| names.get(index)) {
             out.field(name);
         }
+
         argument(out, event, index, *arg, spec, style, context);
     }
 }
@@ -522,6 +549,7 @@ pub(super) fn descriptor(
     if style.fds == FdStyle::Number || fd < 0 {
         return;
     }
+
     let described = context.fds.and_then(|table| {
         if context.before {
             table.describe_before(process, fd)
@@ -532,6 +560,7 @@ pub(super) fn descriptor(
     if described.is_none() && closed(process, context) {
         return;
     }
+
     out.punct("<");
     match described {
         Some(description) => {
@@ -552,6 +581,7 @@ pub(super) fn descriptor(
         }
         None => out.push(Kind::Missing, "?"),
     }
+
     out.punct(">");
 }
 
@@ -571,6 +601,7 @@ fn argument(
     context: Context<'_>,
 ) {
     let word = event.args[index];
+
     // -X raw changes only names: numbers, sizes, and NULL print as ever.
     match arg {
         Arg::Int | Arg::Pid | Arg::Uid | Arg::Gid => out.number(int(word)),
@@ -591,6 +622,7 @@ fn argument(
                         out.push(Kind::Comment, " /* AT_FDCWD */");
                     }
                 }
+
                 // strace names the working directory under -y.
                 if style.fds != FdStyle::Number
                     && let Some(cwd) = context
@@ -647,9 +679,11 @@ fn named_bits(names: &[(u64, &str)], mut value: u64) -> Vec<String> {
             value &= !bit;
         }
     }
+
     if value != 0 {
         parts.push(format!("{value:#x}"));
     }
+
     parts
 }
 
@@ -658,11 +692,13 @@ fn flags(out: &mut Tokens, event: &SyscallEvent, set: &str, word: u64, style: &S
         hex(out, word);
         return;
     };
+
     let value = if definition.narrow {
         word & 0xffff_ffff
     } else {
         word
     };
+
     let mut parts = Vec::new();
     let mut rest = value;
     match set {
@@ -675,11 +711,13 @@ fn flags(out: &mut Tokens, event: &SyscallEvent, set: &str, word: u64, style: &S
                     .map_or_else(|| format!("{mode:#x}"), |&(_, name)| name.to_owned()),
             );
             rest &= !3;
+
             // O_SYNC is O_DSYNC with a bit of its own.
             if rest & 0o4_010_000 == 0o4_010_000 {
                 parts.push("O_SYNC".to_owned());
                 rest &= !0o4_010_000;
             }
+
             // O_TMPFILE includes O_DIRECTORY.
             if rest & 0o20_200_000 == 0o20_200_000 {
                 parts.push("O_TMPFILE".to_owned());
@@ -714,11 +752,13 @@ fn flags(out: &mut Tokens, event: &SyscallEvent, set: &str, word: u64, style: &S
             if exit != 0 {
                 named.push(signal(i32::try_from(exit).unwrap_or_default()));
             }
+
             parts = named;
             rest = 0;
         }
         _ => {}
     }
+
     if rest != 0 || parts.is_empty() {
         parts.extend(
             named_bits(definition.names, rest)
@@ -726,6 +766,7 @@ fn flags(out: &mut Tokens, event: &SyscallEvent, set: &str, word: u64, style: &S
                 .filter(|part| part != "0x0"),
         );
     }
+
     if parts.is_empty() {
         match set {
             "access" => parts.push("F_OK".to_owned()),
@@ -736,6 +777,7 @@ fn flags(out: &mut Tokens, event: &SyscallEvent, set: &str, word: u64, style: &S
             }
         }
     }
+
     constant(out, &parts.join("|"), value, style);
 }
 
@@ -744,11 +786,13 @@ fn enumeration(out: &mut Tokens, set: &str, word: u64, style: &Style) {
         hex(out, word);
         return;
     };
+
     let value = if definition.narrow {
         word & 0xffff_ffff
     } else {
         word
     };
+
     if set == "futex" {
         // The operation, then its modifiers.
         let operation = value & 0x7f;
@@ -757,16 +801,20 @@ fn enumeration(out: &mut Tokens, set: &str, word: u64, style: &Style) {
             hex(out, value);
             return;
         };
+
         let mut text = base.to_owned();
         if value & 128 != 0 {
             text.push_str("_PRIVATE");
         }
+
         if value & 256 != 0 {
             text.push_str("|FUTEX_CLOCK_REALTIME");
         }
+
         constant(out, &text, value, style);
         return;
     }
+
     match definition.names.iter().find(|&&(v, _)| v == value) {
         Some(&(_, name)) => constant(out, name, value, style),
         None if definition.shape == Shape::Enum => {
@@ -795,6 +843,7 @@ fn quote(out: &mut Tokens, bytes: &[u8], limit: Option<usize>, truncated: bool, 
             let _ = write!(text, "\\x{byte:02x}");
             continue;
         }
+
         match byte {
             b'"' => text.push_str("\\\""),
             b'\\' => text.push_str("\\\\"),
@@ -815,6 +864,7 @@ fn quote(out: &mut Tokens, bytes: &[u8], limit: Option<usize>, truncated: bool, 
             }
         }
     }
+
     text.push('"');
     out.push(Kind::String, text);
     if truncated || shown.len() < bytes.len() {
@@ -853,6 +903,7 @@ fn string_argument(
                 .next()
                 .unwrap_or_default();
             let truncated = matches!(capture.state, CaptureState::Truncated { .. });
+
             // Paths print whole, as strace prints them.
             quote(
                 out,
@@ -878,7 +929,9 @@ fn string_array(out: &mut Tokens, event: &SyscallEvent, index: usize, word: u64,
         unread(out, word, capture);
         return;
     };
+
     let (count, elements) = blobs::strings(&capture.bytes);
+
     // The environment, the second array, abbreviates to its size.
     if index == 2
         && !style.verbose
@@ -892,20 +945,25 @@ fn string_array(out: &mut Tokens, event: &SyscallEvent, index: usize, word: u64,
         out.push(Kind::Comment, format!(" /* {vars} vars */"));
         return;
     }
+
     out.punct("[");
     for (position, element) in elements.iter().enumerate() {
         if position > 0 {
             out.punct(", ");
         }
+
         quote(out, element, Some(style.string_limit), false, style);
     }
+
     let complete = count.is_some_and(|count| count as usize == elements.len());
     if !complete {
         if !elements.is_empty() {
             out.punct(", ");
         }
+
         out.punct("...");
     }
+
     out.punct("]");
 }
 
@@ -927,6 +985,7 @@ fn memory(
     let word = event.args[index];
     #[expect(clippy::cast_possible_truncation, reason = "six arguments")]
     let capture = event.capture(index as u8);
+
     // What a failed call would have written is not there.
     let failed = !matches!(event.outcome, Outcome::Returned(_));
     let readable = capture.filter(|capture| {
@@ -940,6 +999,7 @@ fn memory(
         unread(out, word, capture);
         return;
     };
+
     match kind {
         MemKind::Bytes => {
             let length = match count {
@@ -952,19 +1012,23 @@ fn memory(
                 }
                 Count::PointedBy(_) | Count::One => capture.bytes.len(),
             };
+
             let shown = &capture.bytes[..capture.bytes.len().min(length)];
             let truncated =
                 matches!(capture.state, CaptureState::Truncated { .. }) || shown.len() < length;
+
             // Random bytes are not text; strace prints them in hex.
             let random = Style {
                 hex: Hex::All,
                 ..style.clone()
             };
+
             let style = if event.call.name() == Some("getrandom") {
                 &random
             } else {
                 style
             };
+
             quote(out, shown, Some(style.string_limit), truncated, style);
         }
         MemKind::Struct(structure) if event.call.abi != Abi::X86_64 => {
@@ -981,6 +1045,7 @@ fn memory(
                     .raw()
                     .map_or(0, |value| usize::try_from(value).unwrap_or(0)),
             };
+
             let decoded = structs::Decode {
                 out,
                 event,
@@ -989,6 +1054,7 @@ fn memory(
                 style,
                 context,
             };
+
             decoded.structure(
                 structure,
                 &capture.bytes,
@@ -1025,6 +1091,7 @@ fn result(
             } else {
                 out.number("-1");
             }
+
             out.punct(" ");
             out.push(Kind::Error, format!("{name} ({message})"));
         }
@@ -1038,9 +1105,11 @@ fn result(
             out.push(Kind::Comment, " <unavailable>");
         }
     }
+
     if event.flags.contains(EventFlags::ENTRY_UNSEEN) {
         out.push(Kind::Comment, " /* entry unseen */");
     }
+
     if event.flags.contains(EventFlags::ABI_UNCERTAIN) {
         out.push(Kind::Comment, " /* ABI uncertain */");
     }
@@ -1088,6 +1157,7 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
             structs::siginfo(&mut out, info.as_deref().unwrap_or_default())?;
             out.punct(" ---");
         }
+
         TraceEvent::Signal {
             signal: number,
             code,
@@ -1105,11 +1175,13 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
                 out.field("si_code");
                 out.push(Kind::Constant, structs::si_code(number, code));
             }
+
             if let Some(sender) = sender {
                 out.punct(", ");
                 out.field("si_pid");
                 out.push(Kind::Pid, sender.to_string());
             }
+
             out.punct("} ---");
         }
         TraceEvent::Exit { end, .. } | TraceEvent::ThreadExit { end, .. } => {
@@ -1127,6 +1199,7 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
                     }
                 }
             }
+
             out.punct(" +++");
         }
         TraceEvent::Lost { count, .. } => {
@@ -1134,10 +1207,12 @@ pub fn other(event: &TraceEvent) -> Option<Tokens> {
             out.push(Kind::Missing, format!("lost {count} events"));
             out.punct(" ---");
         }
+
         TraceEvent::Call(_)
         | TraceEvent::Spawn { .. }
         | TraceEvent::Exec { .. }
         | TraceEvent::Descriptor { .. } => return None,
     }
+
     Some(out)
 }

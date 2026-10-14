@@ -12,6 +12,7 @@ use super::{
     IndirectTarget, InstructionContent, InstructionDecoder, RawDecode, RawIndirect, TargetBoundary,
     Window, decoder_for,
 };
+
 use crate::unwind::{DwarfRegister, RAX, RegisterFile};
 use crate::{
     AddressRange, Architecture, ByteOrder, PointerWidth, TargetDescription, VirtualAddress,
@@ -24,16 +25,20 @@ pub fn run(data: &[u8]) {
     let Some((header, rest)) = data.split_first_chunk::<8>() else {
         return;
     };
+
     let starts = usize::from(header[0] % 16);
     let Some((starts, code)) = rest.split_at_checked(starts * 2) else {
         return;
     };
+
     if code.is_empty() {
         return;
     }
+
     let length = code.len() as u64;
     let offset = |value: u16| u64::from(value) % length;
     let mut source = FakeSource::new(BASE, code.to_vec());
+
     // An unreadable hole, possibly empty, splits the readable bytes.
     let hole_start = BASE + offset(u16::from_le_bytes([header[1], header[2]]));
     let hole_end = (hole_start + u64::from(header[3] % 32)).min(BASE + length);
@@ -59,28 +64,33 @@ pub fn run(data: &[u8]) {
             source.stopped = Some((VirtualAddress::new(address), registers(code, header[4])));
         }
     }
+
     let syntax = if header[4] & 1 == 0 {
         AssemblySyntax::Intel
     } else {
         AssemblySyntax::Att
     };
+
     let target = TargetDescription {
         architecture: Architecture::X86_64,
         byte_order: ByteOrder::Little,
         pointer_width: PointerWidth::Bits64,
     };
+
     let mut decoder = decoder_for(target, syntax).expect("x86-64 decoder");
 
     let range = AddressRange {
         start: VirtualAddress::new(BASE + offset(u16::from(header[5]))),
         end: VirtualAddress::new(BASE + length),
     };
+
     let blocks = Engine::new(&mut source, decoder.as_mut())
         .function(&[range])
         .expect("fake reads never fail");
     let [block] = blocks.as_slice() else {
         panic!("one range yields one block");
     };
+
     check_block(&source, block, true);
     check_indirect(&source, decoder.as_mut(), block);
 
@@ -105,6 +115,7 @@ fn registers(code: &[u8], flags: u8) -> RegisterFile {
         let raw = u16::from_le_bytes([code[index % code.len()], code[(index + 1) % code.len()]]);
         BASE + u64::from(raw) % (length + 16)
     };
+
     let mut registers = RegisterFile::new(
         (0..16)
             .chain([58, 59])
@@ -113,6 +124,7 @@ fn registers(code: &[u8], flags: u8) -> RegisterFile {
     if flags & 2 != 0 {
         registers.remove(RAX);
     }
+
     registers
 }
 
@@ -129,6 +141,7 @@ fn check_indirect(
         let InstructionContent::Decoded(decoded) = &instruction.content else {
             continue;
         };
+
         let indirect = matches!(
             decoded.flow,
             ControlFlow::IndirectJump | ControlFlow::IndirectCall | ControlFlow::Return
@@ -168,14 +181,17 @@ fn check_indirect(
             }
             Some(IndirectTarget::Unsupported) | None => {}
         }
+
         if stopped.is_none() {
             continue;
         }
+
         let RawDecode::Instruction { indirect, .. } =
             architecture.decode(instruction.address.get(), &instruction.bytes, None)
         else {
             panic!("{instruction:?} decoded differently");
         };
+
         match indirect {
             Some(RawIndirect::Load { address, .. }) => assert!(
                 matches!(
@@ -213,11 +229,13 @@ fn check_block(source: &FakeSource, block: &DisassemblyBlock, bounded: bool) {
                 "{instruction:?}"
             );
         }
+
         match instruction.content {
             InstructionContent::Invalid => assert_eq!(length, 1),
             InstructionContent::Truncated => {
                 let end = instruction.end().get();
                 assert_eq!(source.byte(end), None, "truncation needs unreadable memory");
+
                 // Only a known start inside the truncated bytes resumes
                 // decoding; otherwise truncation ends the block.
                 let resumes = block
@@ -234,12 +252,15 @@ fn check_block(source: &FakeSource, block: &DisassemblyBlock, bounded: bool) {
             }
             InstructionContent::Decoded(_) => {}
         }
+
         let Some(next) = instructions.get(index + 1) else {
             continue;
         };
+
         if next.address == instruction.end() {
             continue;
         }
+
         assert!(
             block.conflicts.iter().any(|conflict| {
                 conflict.instruction == instruction.address && conflict.boundary == next.address
@@ -248,11 +269,13 @@ fn check_block(source: &FakeSource, block: &DisassemblyBlock, bounded: bool) {
         );
         assert!(instruction.address < next.address && next.address < instruction.end());
     }
+
     for conflict in block.conflicts.iter() {
         if conflict.evidence == BoundaryEvidence::RangeEnd {
             assert_eq!(conflict.boundary, block.range.end);
             continue;
         }
+
         // Decoding resumes at the boundary unless the conflicting
         // instruction ends the block: the boundary is unreadable or the
         // requested count is reached.
@@ -268,6 +291,7 @@ fn check_block(source: &FakeSource, block: &DisassemblyBlock, bounded: bool) {
             assert_eq!(address, conflict.boundary);
         }
     }
+
     if bounded {
         // Every known start inside the range begins an instruction unless
         // decoding stopped before reaching it.
@@ -284,6 +308,7 @@ fn check_block(source: &FakeSource, block: &DisassemblyBlock, bounded: bool) {
                 );
             }
         }
+
         if block.completion == BlockCompletion::Complete {
             let crossed = block
                 .conflicts
@@ -309,6 +334,7 @@ fn check_window(
         .collect::<Vec<_>>();
     assert!(leading.len() <= before as usize);
     assert_eq!(shortfall.is_some(), leading.len() < before as usize);
+
     // Leading instructions are contiguous and end exactly at the address.
     if let Some(last) = leading.last() {
         assert_eq!(last.end(), address, "{block:#?}");
@@ -322,6 +348,7 @@ fn check_window(
             TargetBoundary::Known(_) | TargetBoundary::Reached { .. }
         ));
     }
+
     match boundary {
         TargetBoundary::Known(_) => assert!(source.starts.contains_key(&address)),
         TargetBoundary::Reached { from, .. } | TargetBoundary::Crossed { from, .. } => {
@@ -330,9 +357,11 @@ fn check_window(
         }
         TargetBoundary::Unverified(_) => assert!(!source.starts.contains_key(&address)),
     }
+
     if let TargetBoundary::Crossed { instruction, .. } = boundary {
         assert!(instruction < address);
     }
+
     if after != 0 && source.byte(address.get()).is_some() {
         assert_eq!(
             block

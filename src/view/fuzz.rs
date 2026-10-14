@@ -31,6 +31,7 @@ impl Input<'_> {
         } else {
             self.data[self.position % self.data.len()]
         };
+
         self.position = self.position.wrapping_add(1);
         byte
     }
@@ -250,6 +251,7 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
         );
         vector
     };
+
     let ints = rust_vector(&mut world, i32);
     variables.push(("Vec<i32>".to_owned(), ints));
     let bytes = rust_vector(&mut world, u8);
@@ -305,6 +307,7 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
         let object = input.object(words.max(1));
         world.variable(name, *ty, &object);
     }
+
     (world, variables)
 }
 
@@ -754,6 +757,7 @@ fn go_library(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
     let go = |world: &mut World, ty, path: &[&str], base: &str| {
         world.identify(ty, SourceLanguage::Go, path, base, Vec::new());
     };
+
     let uint8 = world.base("uint8", E::Unsigned, 1);
     let int32 = world.base("int32", E::Signed, 4);
     let uint32 = world.base("uint32", E::Unsigned, 4);
@@ -825,6 +829,7 @@ pub fn hostile(data: &[u8]) {
     // read, never more than they hold.
     let embedded = super::embedded::view_set("fuzz", data);
     assert!(embedded.views().len() <= data.len());
+
     // A budget, the length of a view file of the input's own, which is
     // tried first, the file, and then memory.
     let (&budget, data) = data.split_first().unwrap_or((&0, &[]));
@@ -834,6 +839,7 @@ pub fn hostile(data: &[u8]) {
         data: memory,
         position: 0,
     };
+
     let work = u64::from(budget) * 256 + 16;
     let (mut world, variables) = containers(&mut input);
     let text = String::from_utf8_lossy(text).into_owned();
@@ -842,6 +848,7 @@ pub fn hostile(data: &[u8]) {
     } else {
         format!("uscope-views 1\n{text}")
     };
+
     let fuzzed = ViewSet::new([("fuzz.views", text.as_str())]);
     let built_in = ViewSet::built_in();
     for (name, ty) in &variables {
@@ -851,10 +858,12 @@ pub fn hostile(data: &[u8]) {
         else {
             continue;
         };
+
         let this = Place::Memory {
             address: world.address_of(name),
             ty: *ty,
         };
+
         world.work = Some(work.min(MAX_WORK));
         let mut checkpoints = Checkpoints::default();
         let mut elements = 0;
@@ -863,6 +872,7 @@ pub fn hostile(data: &[u8]) {
                 if let Some(text) = &presented.text {
                     assert!(text.bytes.len() <= crate::TextSummary::MAX_BYTES, "{name}");
                 }
+
                 assert!(
                     presented.summary.len() <= 64 * 1024,
                     "{name}: {}",
@@ -873,6 +883,7 @@ pub fn hostile(data: &[u8]) {
             Err(Failure::Problem(_)) => {}
             Err(Failure::Debugger(error)) => panic!("{name}: {error}"),
         }
+
         world.work = Some(work.min(MAX_WORK));
         let offset = u64::from(input.byte()) * 16;
         let limit = u64::from(input.byte());
@@ -896,6 +907,7 @@ pub fn hostile(data: &[u8]) {
                 }
             }
         }
+
         world.work = Some(work.min(MAX_WORK));
         let _ = length(&bound, &mut world, this.clone(), &mut checkpoints);
         world.work = Some(work.min(MAX_WORK));
@@ -917,6 +929,7 @@ pub fn built_in_choices() -> Vec<(String, Option<String>)> {
         data: &[],
         position: 0,
     };
+
     let (world, variables) = containers(&mut input);
     let views = ViewSet::built_in();
     variables

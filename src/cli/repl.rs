@@ -21,8 +21,10 @@ use super::{Cli, Renderers};
 enum Input {
     /// A line, and the terminal's width and height when it was entered.
     Line(String, Option<(usize, usize)>),
+
     /// The answer to a question, empty when it was interrupted.
     Answer(String),
+
     /// Asks for the members of the value an expression names, to complete
     /// one.
     Members(String, mpsc::Sender<Vec<String>>),
@@ -35,6 +37,7 @@ enum Reply {
     /// Reads the next line, completing from the context.
     Read(Arc<complete::Context>),
     Quit,
+
     /// Asks a question and sends the answer.
     Ask(String),
 }
@@ -74,10 +77,13 @@ impl rustyline::completion::Completer for LineHelper {
             {
                 return Vec::new();
             }
+
             receive.recv_timeout(MEMBERS_TIMEOUT).unwrap_or_default()
         };
+
         let (start, mut candidates) =
             complete::complete(line, position, &self.context, &mut members);
+
         // A word completed alone is followed by the next, except a file's
         // line or function.
         if let [candidate] = candidates.as_mut_slice()
@@ -85,6 +91,7 @@ impl rustyline::completion::Completer for LineHelper {
         {
             candidate.push(' ');
         }
+
         Ok((start, candidates))
     }
 }
@@ -134,7 +141,9 @@ pub async fn run(cli: &Cli, confirm: bool) -> Result<()> {
                 if let Some((columns, rows)) = dimensions {
                     cli.set_dimensions(columns, rows);
                 }
+
                 let entered = text.trim();
+
                 // An empty line repeats the last repeatable command.
                 let command = if entered.is_empty() {
                     last_repeatable.clone().unwrap_or_default()
@@ -150,6 +159,7 @@ pub async fn run(cli: &Cli, confirm: bool) -> Result<()> {
                     last_repeatable = repeatable.then(|| entered.to_owned());
                     entered.to_owned()
                 };
+
                 if confirm
                     && quits(cli, &command)
                     && let Some(process) = cli.live_process().await
@@ -178,11 +188,13 @@ pub async fn run(cli: &Cli, confirm: bool) -> Result<()> {
                 break;
             }
         };
+
         let reply = match next {
             Next::Read => Reply::Read(Arc::new(cli.completion_context().await)),
             Next::Quit => Reply::Quit,
             Next::Ask(question) => Reply::Ask(question),
         };
+
         let quit = matches!(reply, Reply::Quit);
         if ack_sender.send(reply).is_err() {
             outcome = Err(anyhow!(
@@ -190,6 +202,7 @@ pub async fn run(cli: &Cli, confirm: bool) -> Result<()> {
             ));
             break;
         }
+
         if quit {
             break;
         }
@@ -237,6 +250,7 @@ fn line_editor(
             renderers.stderr.paint(Role::Warning, "warning")
         );
     };
+
     let mut editor = match Editor::<LineHelper, DefaultHistory>::new() {
         Ok(editor) => editor,
         Err(error) => {
@@ -244,6 +258,7 @@ fn line_editor(
             return;
         }
     };
+
     // Rustyline needs a helper to select the styled prompt, and completes
     // through it.
     editor.set_helper(Some(LineHelper {
@@ -261,6 +276,7 @@ fn line_editor(
     if let Err(error) = editor.set_max_history_size(keep) {
         warn(format!("failed to limit command history: {error}"));
     }
+
     if keep != 0
         && history.exists()
         && let Err(error) = editor.load_history(&history)
@@ -270,6 +286,7 @@ fn line_editor(
             history.display()
         ));
     }
+
     let styled_prompt = renderers.stdout.paint(Role::Prompt, prompt).to_string();
     loop {
         match editor.readline(&(prompt, &styled_prompt)) {
@@ -279,12 +296,14 @@ fn line_editor(
                 {
                     warn(format!("failed to record command history: {error}"));
                 }
+
                 let dimensions = editor
                     .dimensions()
                     .map(|(columns, rows)| (usize::from(columns), usize::from(rows)));
                 if input.blocking_send(Input::Line(line, dimensions)).is_err() {
                     break;
                 }
+
                 if !follow_replies(&mut editor, input, acknowledgements) {
                     break;
                 }
@@ -301,6 +320,7 @@ fn line_editor(
             }
         }
     }
+
     if keep != 0
         && let Err(error) = persist_history(&mut editor, &history)
     {
@@ -321,6 +341,7 @@ fn follow_replies(
                 if let Some(helper) = editor.helper_mut() {
                     helper.context = context;
                 }
+
                 return true;
             }
             Ok(Reply::Quit) | Err(_) => return false,
@@ -332,6 +353,7 @@ fn follow_replies(
                 Err(error) => Input::Failed(error.to_string()),
             },
         };
+
         if input.blocking_send(answer).is_err() {
             return false;
         }
@@ -359,6 +381,7 @@ fn persist_history(
             )
         })?;
     }
+
     if path.exists() {
         editor.append_history(path)
     } else {

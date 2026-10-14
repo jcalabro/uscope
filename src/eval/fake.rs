@@ -21,6 +21,7 @@ use super::target::{
     Key, Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TextSpan, TypeLookup,
     TypeQuery,
 };
+
 use super::types::{TypeSource, c_type_key_of_name};
 use crate::{
     AddressValue, ArrayDimension, ArrayOrdering, BaseType, BaseTypeEncoding, ByteOrder,
@@ -77,6 +78,7 @@ pub enum Step {
         offset: u64,
         ty: TypeReference,
     },
+
     /// To the member of one variant of a tagged union whose tag is the byte
     /// at its start, inactive unless the tag is `tag`.
     VariantMember {
@@ -94,13 +96,16 @@ pub enum Step {
         element_size: u64,
         ty: TypeReference,
     },
+
     /// To a variable, from anywhere: a view's `global(NAME)`.
     Global(usize),
+
     /// To the value for a key of a map, `{K *keys; V *values; u64 n}`.
     Entry {
         key: TypeReference,
         value: TypeReference,
     },
+
     /// To what a shared pointer, `{u64 count; V *value}`, points to, as
     /// the view that presents it would.
     Presented(TypeReference),
@@ -111,27 +116,37 @@ pub enum Step {
 pub struct World {
     types: Vec<TypeInfo>,
     objects: Vec<Object>,
+
     /// Mapped regions by their first address.
     memory: BTreeMap<u64, Vec<u8>>,
+
     /// Ranges that reading fails the test: what a short circuit skips.
     poisoned: Vec<(u64, u64)>,
     registers: BTreeMap<&'static str, Option<u128>>,
+
     /// Pointer types that stand for containers.
     containers: Vec<TypeReference>,
     next: u64,
+
     /// Every memory read, in order.
     pub reads: Vec<(u64, usize)>,
+
     /// Units of work left, when limited.
     pub work: Option<u64>,
+
     /// Maps, `{K *keys; V *values; u64 n}`, with their key and value types.
     maps: Vec<(TypeReference, TypeReference, TypeReference)>,
+
     /// Shared pointers, `{u64 count; V *value}`, with their value types.
     shared: Vec<(TypeReference, TypeReference)>,
+
     /// The id of the task the stopped thread runs, when the program has
     /// tasks.
     pub task: Option<u64>,
+
     /// The system call that stopped the thread, when one did.
     pub call: Option<super::target::CallValues>,
+
     /// Generic functions, by the address their code begins at, with their
     /// type arguments by their parameters' names.
     functions: BTreeMap<u64, Vec<(Arc<str>, TypeReference)>>,
@@ -150,6 +165,7 @@ impl World {
             image: IMAGE,
             id: TypeId::new(u32::try_from(self.types.len()).expect("few types")),
         };
+
         self.types.push(TypeInfo {
             reference,
             name: name.into(),
@@ -233,17 +249,20 @@ impl World {
         let TypeKind::Record { bases, .. } = &self.info(from).kind else {
             return Vec::new();
         };
+
         let mut found = Vec::new();
         for base in bases.iter() {
             let RecordMemberLayout::ByteOffset(offset) = base.layout else {
                 panic!("the world lays bases out at byte offsets");
             };
+
             if base.type_ref == target {
                 found.push(at + offset);
             } else {
                 found.extend(self.base_offsets(base.type_ref, target, at + offset));
             }
         }
+
         found
     }
 
@@ -302,6 +321,7 @@ impl World {
             embedded: false,
             declaration: None,
         };
+
         let variants: Vec<crate::Variant> = variants
             .iter()
             .zip(0_u128..)
@@ -461,6 +481,7 @@ impl World {
         let TypeKind::Base(base) = self.info(representation).kind.clone() else {
             panic!("an enumeration's representation is a base type");
         };
+
         let enumerators: Vec<Enumerator> = values
             .iter()
             .map(|(enumerator, value)| Enumerator {
@@ -726,6 +747,7 @@ impl World {
         {
             panic!("read {address:#x}..{end:#x} overlaps poisoned memory {start:#x}..{stop:#x}");
         }
+
         self.reads.push((address, size));
         let region = self
             .memory
@@ -742,6 +764,7 @@ impl World {
                 },
             )));
         };
+
         let offset = usize::try_from(address - start).expect("small offsets");
         Ok(bytes[offset..offset + size].to_vec())
     }
@@ -762,6 +785,7 @@ impl World {
             let shift = 128 - size * 8;
             (raw.cast_signed() << shift) >> shift
         };
+
         match &self.representation(ty).kind {
             TypeKind::Base(base) => VariableValue::Scalar(match base.encoding {
                 BaseTypeEncoding::Boolean => ScalarValue::Boolean(raw != 0),
@@ -797,6 +821,7 @@ impl World {
                 } else {
                     IntegerValue::Unsigned(raw)
                 };
+
                 let matches: Vec<Enumerator> = enumerators
                     .iter()
                     .filter(|enumerator| enumerator.value == value)
@@ -821,6 +846,7 @@ impl World {
                     let at = usize::from(at) * 8;
                     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
                 };
+
                 VariableValue::Slice {
                     length: word(words.length),
                     capacity: words.capacity.map(word),
@@ -889,6 +915,7 @@ impl World {
                 }
             }
         }
+
         TextSummary {
             bytes: bytes.into(),
             completion: TextCompletion::Truncated { length: None },
@@ -928,6 +955,7 @@ impl World {
         let RecordMemberLayout::ByteOffset(offset) = member.layout else {
             panic!("the world lays members out at byte offsets");
         };
+
         Ok(Planned {
             step: Step::VariantMember {
                 tag,
@@ -985,12 +1013,14 @@ impl TypeSource for World {
         if left == right {
             return true;
         }
+
         let (Some(left), Some(right)) = (
             self.info(left).identity.as_deref(),
             self.info(right).identity.as_deref(),
         ) else {
             return false;
         };
+
         left.language == right.language
             && left.path == right.path
             && left.base == right.base
@@ -1036,6 +1066,7 @@ impl Scope for World {
             }
             [] => {}
         }
+
         let mut found = Vec::new();
         for info in &self.types {
             if let TypeKind::Enumeration { enumerators, .. } = &info.kind {
@@ -1047,6 +1078,7 @@ impl Scope for World {
                 }
             }
         }
+
         Ok(match found.as_slice() {
             [] => Lookup::NotFound,
             [(_, value, ty)] => Lookup::Enumerator {
@@ -1092,6 +1124,7 @@ impl Scope for World {
             result: Some(result),
             consumed,
         };
+
         match (step, &info.kind) {
             (
                 StepKind::Deref,
@@ -1109,6 +1142,7 @@ impl Scope for World {
                 let RecordMemberLayout::ByteOffset(offset) = member.layout else {
                     panic!("the world lays members out at byte offsets");
                 };
+
                 Ok(planned(
                     Step::Member {
                         offset,
@@ -1121,6 +1155,7 @@ impl Scope for World {
             (StepKind::Member(name), TypeKind::Variant { variants, .. }) => {
                 Self::plan_variant_member(info, variants, name)
             }
+
             (
                 StepKind::Index { available },
                 TypeKind::Array {
@@ -1136,6 +1171,7 @@ impl Scope for World {
                         dimensions.len()
                     )));
                 }
+
                 Ok(planned(
                     Step::Array {
                         dimensions: Arc::clone(dimensions),
@@ -1199,6 +1235,7 @@ impl Scope for World {
             "fp" => "rbp",
             other => other,
         };
+
         let number = self
             .registers
             .keys()
@@ -1293,6 +1330,7 @@ impl Machine for World {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -1308,6 +1346,7 @@ impl Machine for World {
                 ty,
             },
         };
+
         match step {
             Step::Entry { .. } => Err(Stop::Refused(Refusal::new(
                 ErrorKind::Type,
@@ -1328,6 +1367,7 @@ impl Machine for World {
                     VariableValue::Address(address) => address.address.get(),
                     _ => panic!("the world dereferences pointers only"),
                 };
+
                 if address == 0 {
                     return Err(Stop::missing(VariableState::Unavailable(
                         VariableUnavailableReason::ValueAccess(
@@ -1335,6 +1375,7 @@ impl Machine for World {
                         ),
                     )));
                 }
+
                 Ok(Place::Memory {
                     address,
                     ty: *target,
@@ -1354,8 +1395,10 @@ impl Machine for World {
                         ),
                     )));
                 }
+
                 Ok(offset_place(from, *offset, *ty))
             }
+
             Step::Array {
                 dimensions,
                 element_size,
@@ -1366,6 +1409,7 @@ impl Machine for World {
                     linear = linear * dimension.count
                         + u64::try_from(index - dimension.lower_bound).expect("checked");
                 }
+
                 Ok(offset_place(from, linear * element_size, *ty))
             }
             Step::Slice { element_size, ty } => {
@@ -1382,6 +1426,7 @@ impl Machine for World {
                         },
                     )));
                 }
+
                 Ok(Place::Memory {
                     address: data.wrapping_add(
                         u64::try_from(index)
@@ -1426,6 +1471,7 @@ impl Machine for World {
                 let VariableValue::Address(address) = self.load(at)? else {
                     unreachable!("pointers decode to addresses")
                 };
+
                 Ok(Some(
                     self.c_string(address.address.get(), TextSummary::MAX_BYTES),
                 ))
@@ -1467,12 +1513,15 @@ impl Machine for World {
         else {
             return Ok(None);
         };
+
         if !self.is_char(target) {
             return Ok(None);
         }
+
         let VariableValue::Address(address) = self.load(at)? else {
             unreachable!("pointers decode to addresses")
         };
+
         let address = address.address.get();
         let text = self.c_string(address, TextSummary::MAX_BYTES);
         Ok(Some(TextSpan {
@@ -1489,6 +1538,7 @@ impl Machine for World {
         else {
             panic!("the world finds entries through entry steps");
         };
+
         let bytes = self.bytes(from)?;
         let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("a word"));
         let (keys, values, count) = (word(0), word(8), word(16));
@@ -1500,11 +1550,13 @@ impl Machine for World {
                 address: keys + index * key_size,
                 ty: *key_type,
             };
+
             let mut candidate = self.present(&place)?;
             let read = self.text(&place)?;
             if let VariableState::Available { text, .. } = &mut candidate.state {
                 *text = read.map(Arc::new);
             }
+
             if key.matches(&candidate)? {
                 return Ok(Some(Place::Memory {
                     address: values + index * value_size,
@@ -1512,6 +1564,7 @@ impl Machine for World {
                 }));
             }
         }
+
         Ok(None)
     }
 
@@ -1553,10 +1606,12 @@ impl Machine for World {
             }
             Place::Register { .. } => VariableValueSource::Computed,
         };
+
         let bytes = match &self.representation(at.ty()).kind {
             TypeKind::Record { .. } => Vec::new(),
             _ => self.bytes(at)?,
         };
+
         let state = self.available(at.ty(), source, bytes);
         Ok(self.inspected(at.ty(), state))
     }
@@ -1648,6 +1703,7 @@ pub fn scalars() -> World {
     world.variable("u64v", ulonglong, &u64::MAX.to_le_bytes());
     world.variable("f", float, &1.5_f32.to_le_bytes());
     world.variable("d", double, &10.0_f64.to_le_bytes());
+
     // 1.25 in x87 extended precision, padded to sixteen bytes.
     let mut extended = 0xa000_0000_0000_0000_u64.to_le_bytes().to_vec();
     extended.extend_from_slice(&0x3fff_u16.to_le_bytes());
@@ -1728,17 +1784,20 @@ pub fn memory() -> World {
     // Text that runs into unmapped memory before it ends.
     let cut = world.allocate(b"hel");
     world.variable("partial", char_pointer, &cut.to_le_bytes());
+
     // Two variables of one name, and an enumerator two enumerations share.
     world.variable("twice", int, &1_i32.to_le_bytes());
     world.variable("twice", int, &2_i32.to_le_bytes());
     let light = world.enumeration("Light", uint, &[("RED", 10), ("AMBER", 11)]);
     world.variable("light", light, &11_u32.to_le_bytes());
+
     // Names C reserves, which Go, Rust, and Zig programs may use.
     world.variable("long", int, &3_i32.to_le_bytes());
     let words = world.record("Words", 8, &[("int", int, 0), ("class", int, 4)]);
     let mut words_bytes = 4_i32.to_le_bytes().to_vec();
     words_bytes.extend(6_i32.to_le_bytes());
     world.variable("words", words, &words_bytes);
+
     // C++ classes: a Tile is a Named and a Shape, and a Twice holds two
     // Shapes, its own and its Tile's.
     let shape = world.record("Shape", 4, &[("id", int, 0)]);

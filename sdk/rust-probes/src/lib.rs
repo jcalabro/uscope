@@ -74,11 +74,15 @@ pub mod abi {
     /// reads it waits, up to [`EXIT_WAIT_NANOSECONDS`], for uscope to say it
     /// has read every ring, so that the last records are not lost with it.
     pub const MAGIC: [u8; 8] = *b"USCOPEPR";
+
     pub const ABI: u16 = 1;
+
     /// Record times are nanoseconds of `CLOCK_MONOTONIC`.
     pub const CLOCK_MONOTONIC: u16 = 1;
+
     /// Record times are the time-stamp counter's.
     pub const CLOCK_TSC: u16 = 2;
+
     pub const CONTROL_SIZE: usize = 64;
 
     /// A site, 32 bytes, in `uscope_sites`; its offsets are from the
@@ -94,14 +98,22 @@ pub mod abi {
     /// | 16 | file, `i32` offset, and 20 its length, `u32` |
     /// | 24 | state byte, `i32` offset: zero is off |
     pub const SITE_VERSION: u8 = 1;
+
     pub const SITE_SIZE: usize = 32;
+
     /// The SDK's own site, which keeps the section present.
     pub const SITE_NONE: u8 = 0;
+
     pub const SITE_ZONE: u8 = 1;
+
     pub const SITE_FRAME: u8 = 2;
+
     pub const SITE_PLOT: u8 = 3;
+
     pub const SITE_MESSAGE: u8 = 4;
+
     pub const SITE_LABEL: u8 = 5;
+
     pub const SITE_TRIGGER: u8 = 6;
 
     /// A ring: a 128-byte header, then `2^size` records of 16 bytes:
@@ -117,17 +129,27 @@ pub mod abi {
     /// | 16 | events dropped because a signal handler interrupted a write, `u64` |
     /// | 64 | head, `u64`: the position the next record takes |
     pub const RING_MAGIC: u32 = u32::from_le_bytes(*b"USRG");
+
     pub const RING_VERSION: u8 = 1;
+
     pub const RING_HEADER: usize = 128;
+
     pub const RING_FREE: u32 = 0;
+
     pub const RING_ACTIVE: u32 = 1;
+
     /// Its thread exited: once uscope has read it, uscope frees it.
     pub const RING_RETIRED: u32 = 2;
+
     /// A thread is taking it.
     pub const RING_CLAIMED: u32 = 3;
+
     pub const DEFAULT_RING_SIZE: u32 = 12;
+
     pub const LEAST_RING_SIZE: u32 = 6;
+
     pub const MOST_RING_SIZE: u32 = 20;
+
     pub const MOST_RINGS: usize = 1024;
 
     /// A record, 16 bytes: time `u64`, site `u32` (its state byte's offset
@@ -136,28 +158,40 @@ pub mod abi {
     /// each of kind [`CONTINUED`] and fifteen bytes of the rest: bytes 0 to
     /// 12, then 13 to 16.
     pub const RECORD: usize = 16;
+
     pub const ZONE_BEGIN: u8 = 1;
+
     pub const ZONE_END: u8 = 2;
+
     pub const FRAME: u8 = 3;
+
     /// The next record holds the value, an `f64`.
     pub const PLOT: u8 = 4;
+
     /// The argument is the text's length; its bytes follow.
     pub const MESSAGE: u8 = 5;
+
     /// The argument is the value's length; its bytes follow.
     pub const LABEL_BEGIN: u8 = 6;
+
     pub const LABEL_END: u8 = 7;
+
     pub const TRIGGER: u8 = 8;
+
     /// More of the record before it.
     pub const CONTINUED: u8 = 9;
+
     /// The longest message or label value.
     pub const MOST_TEXT: usize = 256;
 
     /// How long uscope may go without a heartbeat before every site
     /// switches itself off, unless it says otherwise.
     pub const STALE_NANOSECONDS: u64 = 10_000_000_000;
+
     /// How old a heartbeat may be for an exiting program to wait for
     /// uscope, and how long it waits at most.
     pub const FRESH_NANOSECONDS: u64 = 1_000_000_000;
+
     pub const EXIT_WAIT_NANOSECONDS: u64 = 1_000_000_000;
 }
 
@@ -171,6 +205,7 @@ mod probes;
 pub const fn listening() -> bool {
     false
 }
+
 #[cfg(feature = "enabled")]
 #[doc(hidden)]
 pub use probes::*;
@@ -214,13 +249,16 @@ const _: fn() = || {
     trait NotSend<Which> {
         fn check() {}
     }
+
     impl<T: ?Sized> NotSend<()> for T {}
     impl<T: ?Sized + Send> NotSend<u8> for T {}
+
     #[cfg(feature = "enabled")]
     {
         <Zone as NotSend<_>>::check();
         <Label as NotSend<_>>::check();
     }
+
     #[cfg(not(feature = "enabled"))]
     <Off as NotSend<_>>::check();
 };
@@ -392,5 +430,6 @@ pub const fn __bytes<const N: usize>(text: &str) -> [u8; N] {
         bytes[index] = text.as_bytes()[index];
         index += 1;
     }
+
     bytes
 }

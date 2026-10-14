@@ -42,10 +42,12 @@ fn exact_arithmetic_matches_i128_for_every_small_pair() {
                 assert_eq!(a.div(b), Ok(exact(left / right)), "{left} / {right}");
                 assert_eq!(a.rem(b), Ok(exact(left % right)), "{left} % {right}");
             }
+
             assert_eq!(a.bitwise(BitOperator::And, b), Ok(exact(left & right)));
             assert_eq!(a.bitwise(BitOperator::Or, b), Ok(exact(left | right)));
             assert_eq!(a.bitwise(BitOperator::Xor, b), Ok(exact(left ^ right)));
         }
+
         assert_eq!(exact(left).neg(), Ok(exact(-left)));
         assert_eq!(exact(left).not(), Ok(exact(!left)));
         for amount in 0..=130_u32 {
@@ -55,6 +57,7 @@ fn exact_arithmetic_matches_i128_for_every_small_pair() {
             } else {
                 left >> amount
             };
+
             assert_eq!(exact(left).shr(shift), Ok(exact(expected_right)));
             let expected_left = 2_i128
                 .checked_pow(amount)
@@ -63,6 +66,7 @@ fn exact_arithmetic_matches_i128_for_every_small_pair() {
                 assert_eq!(exact(left).shl(shift), Ok(exact(expected)));
             }
         }
+
         assert_eq!(
             exact(left).shl(exact(-1)),
             Err(NumberError::ShiftAmount),
@@ -174,11 +178,13 @@ fn typed_shifts_match_native_shifts_and_refuse_bad_amounts() {
                 exact(i128::from(signed_raw >> amount))
             );
         }
+
         for amount in [-1, 8, 9, 1 << 40] {
             assert_eq!(unsigned.shl(exact(amount)), Err(NumberError::ShiftAmount));
             assert_eq!(signed.shr(exact(amount)), Err(NumberError::ShiftAmount));
         }
     }
+
     let wide = Bits::from_raw(int(128, true), u128::MAX);
     assert_eq!(wide.shr(exact(127)).unwrap().value(), exact(-1));
     assert_eq!(wide.shl(exact(127)).unwrap().value(), exact(i128::MIN));
@@ -197,10 +203,12 @@ fn an_exact_operand_must_fit_the_typed_width_either_way() {
             } else {
                 assert_eq!(result, Err(NumberError::DoesNotFit(typed)));
             }
+
             let flipped = Integer::Exact(exact(value)).bitwise(BitOperator::Or, ones);
             assert_eq!(flipped.is_ok(), (-128..=255).contains(&value));
         }
     }
+
     assert_eq!(
         Integer::Exact(exact(-1)).not(),
         Ok(Integer::Exact(Exact::ZERO))
@@ -233,6 +241,7 @@ fn truncation_to_every_width_matches_modular_arithmetic() {
                         exact(low)
                     }
                 };
+
                 assert_eq!(bits.value(), expected, "{value} as {ty:?}");
                 assert_eq!(
                     Bits::exactly(ty, exact(value)).is_ok(),
@@ -240,6 +249,7 @@ fn truncation_to_every_width_matches_modular_arithmetic() {
                 );
             }
         }
+
         let natives = [
             (int(8, true), i128::from(value as i8)),
             (int(8, false), i128::from(value as u8)),
@@ -307,6 +317,7 @@ fn special_f64s() -> Vec<f64> {
             values.extend([value, value.next_up(), value.next_down()]);
         }
     }
+
     values
 }
 
@@ -322,6 +333,7 @@ fn floats_convert_to_integers_like_saturating_native_casts() {
             assert_eq!($float.to_int(ty).map(Bits::value), Ok(expected), "{} as {}", $value, stringify!($native));
         )*};
     }
+
     for value in special_f64s() {
         let double = Float::from_f64(value);
         check_native!(
@@ -346,6 +358,7 @@ fn floats_convert_to_integers_like_saturating_native_casts() {
         let extended = double.convert(FloatFormat::X87Extended);
         check_native!(extended, value, i8, u8, i32, u64, i128, u128);
     }
+
     for format in [
         FloatFormat::Binary32,
         FloatFormat::Binary64,
@@ -354,6 +367,7 @@ fn floats_convert_to_integers_like_saturating_native_casts() {
         let nan = Float::from_f64(f64::NAN).convert(format);
         assert_eq!(nan.to_int(int(32, true)), Err(NumberError::NotANumber));
     }
+
     let i1 = int(1, true);
     assert_eq!(
         Float::from_f64(-7.0).to_int(i1).map(Bits::value),
@@ -390,6 +404,7 @@ fn floats_compare_with_integers_exactly() {
             if !holds {
                 continue;
             }
+
             assert_eq!(
                 Float::from_f64(value).compare_exact(exact(integer)),
                 value.partial_cmp(&converted),
@@ -397,6 +412,7 @@ fn floats_compare_with_integers_exactly() {
             );
         }
     }
+
     let above = Float::from_f64(9_007_199_254_740_992.0);
     assert_eq!(
         above.compare_exact(exact(9_007_199_254_740_993)),
@@ -426,6 +442,7 @@ fn float_arithmetic_matches_host_ieee_arithmetic() {
     let same = |left: f64, right: f64| {
         (left.is_nan() && right.is_nan()) || left.to_bits() == right.to_bits()
     };
+
     for &left in &values {
         for &right in &values {
             for (operator, expected) in [
@@ -441,11 +458,13 @@ fn float_arithmetic_matches_host_ieee_arithmetic() {
                 else {
                     panic!("binary64 operands compute in binary64");
                 };
+
                 assert!(
                     same(f64::from_bits(bits), expected),
                     "{left} {operator:?} {right}"
                 );
             }
+
             assert_eq!(
                 Float::from_f64(left).compare(Float::from_f64(right)),
                 left.partial_cmp(&right)
@@ -459,6 +478,7 @@ fn float_arithmetic_matches_host_ieee_arithmetic() {
             .to_value() else {
                 panic!("binary32 operands compute in binary32");
             };
+
             let product = narrow_left * narrow_right;
             assert!(
                 (product.is_nan() && f32::from_bits(bits).is_nan()) || bits == product.to_bits()
@@ -487,6 +507,7 @@ fn mixed_float_formats_compute_in_the_widest() {
         "x87 bits round-trip"
     );
     assert_eq!(product.to_string(), "2.5");
+
     // 2^64 + 1 needs 65 significant bits: x87 rounds it, f64 more so.
     let big = Exact::from((1_u128 << 64) + 1);
     let rounded = Float::from_exact(big, FloatFormat::X87Extended);
@@ -514,21 +535,26 @@ proptest! {
         if let Ok(difference) = a.sub(b) {
             prop_assert_eq!(difference.add(b), Ok(a));
         }
+
         if let (Ok(quotient), Ok(remainder)) = (a.div(b), a.rem(b)) {
             prop_assert_eq!(quotient.mul(b).and_then(|product| product.add(remainder)), Ok(a));
             prop_assert!(remainder.is_zero() || remainder.negative == a.negative);
             prop_assert!(Exact::from(remainder.magnitude) < Exact::from(b.magnitude));
         }
+
         // Associativity and distributivity wherever every step is in range.
         if let (Ok(left), Ok(right)) = (a.add(b).and_then(|ab| ab.add(c)), b.add(c).and_then(|bc| a.add(bc))) {
             prop_assert_eq!(left, right);
         }
+
         if let (Ok(left), Ok(ab), Ok(ac)) = (b.add(c).and_then(|bc| a.mul(bc)), a.mul(b), a.mul(c)) {
             prop_assert_eq!(Ok(left), ab.add(ac));
         }
+
         if let Ok(not) = a.not() {
             prop_assert_eq!(not.not(), Ok(a));
         }
+
         prop_assert_eq!(a.bitwise(BitOperator::Xor, a), Ok(Exact::ZERO));
     }
 

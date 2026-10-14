@@ -18,6 +18,7 @@ pub use crate::image::NONE;
 pub enum CaptureTable {
     /// NUL-terminated UTF-8 strings, named by offset.
     Strings = 1,
+
     /// What produced the capture, as key and value.
     Settings = 2,
     Modules = 3,
@@ -26,50 +27,69 @@ pub enum CaptureTable {
     Mappings = 6,
     Frames = 7,
     Stacks = 8,
+
     /// On-CPU samples, thread by thread, each thread's in time order.
     Samples = 9,
+
     /// Where each thread's on-CPU samples are.
     SampleRanges = 10,
+
     /// Each frame's source lines, innermost inline first: empty for a
     /// frame not symbolized.
     FrameSymbols = 11,
     Lines = 12,
     Functions = 13,
+
     /// Counts of what was lost, throttled, or truncated.
     Accounting = 14,
+
     /// Intervals a thread spent off its CPU, thread by thread, each
     /// thread's in time order.
     OffCpu = 15,
+
     /// Where each thread's off-CPU intervals are.
     OffCpuRanges = 16,
+
     /// Instrumentation sites.
     Sites = 17,
+
     /// Instrumented zones and labels, thread by thread, depth by depth, by
     /// start.
     Zones = 18,
+
     /// Where each thread's zones are at each depth: how many zones of the
     /// thread hold each.
     ZoneRanges = 19,
+
     /// Values of plotted series, by series and time.
     Plots = 20,
+
     /// Instants: frames, messages, triggers, stops.
     Markers = 21,
+
     /// Runtime tasks: goroutines and async tasks.
     Tasks = 22,
+
     /// Samples of where tasks waited, thread of none, by time.
     TaskWaits = 23,
+
     /// Spans the recording did not sample, in time order.
     Gaps = 24,
+
     /// System calls, in the order they were seen.
     Syscalls = 25,
+
     /// The bytes calls' and signals' engines copied, which rows name by
     /// offset.
     SyscallBlobs = 26,
+
     /// What a system call trace saw besides calls: signals, processes and
     /// threads made and ended, programs executed, descriptors, losses.
     SyscallNotes = 27,
+
     /// Each process's statistics of each call it made.
     SyscallStats = 28,
+
     /// The errnos each row of statistics counts, row by row.
     SyscallErrnos = 29,
 }
@@ -136,8 +156,10 @@ pub struct Setting {
 pub struct Module {
     /// Its path when it was mapped.
     pub path: U32,
+
     /// Its GNU build id in hex, or [`NONE`] for a file without one.
     pub build_id: U32,
+
     /// XXH3-128 of its bytes, or zero when they could not be read.
     pub digest: [u8; 16],
     pub size: U64,
@@ -180,6 +202,7 @@ pub struct Mapping {
     pub start: U64,
     pub end: U64,
     pub file_offset: U64,
+
     /// What the process adds to the module's image addresses.
     pub bias: U64,
     pub time: I64,
@@ -192,14 +215,18 @@ pub enum FrameKind {
     /// An instruction of a module, by image address; or, with no module, a
     /// virtual address no module covers.
     Native = 0,
+
     /// Where a stack's unwinding ended without reaching its outermost
     /// frame, and why: the address is a [`Truncation`]'s number, and the
     /// module, when there is one, the module at fault.
     Truncated = 1,
+
     /// The task a task segment of a stack belongs to, by its root frame.
     TaskRoot = 2,
+
     /// The runtime's scheduler, standing for every frame below a task.
     Runtime = 3,
+
     /// The future a suspended task awaits, which runs no code: the address
     /// is the string that names it, and its one line says what it waits
     /// for.
@@ -225,27 +252,37 @@ impl FrameKind {
 pub enum Truncation {
     /// No module's call-frame information covers the code.
     NoUnwindInfo = 1,
+
     /// The kernel's frame-pointer chain passes through a function that
     /// does not keep its frame pointer, so its callers are unknown.
     FramePointerNotKept = 2,
+
     /// The copy of the stack ended before a frame the kernel's chain could
     /// continue from.
     StackCopyExhausted = 3,
+
     /// A return address no mapping covers.
     UnmappedAddress = 4,
+
     /// The deepest stack recorded.
     DepthLimit = 5,
+
     /// The kernel's chain ended at a frame that is not a stack's outermost.
     ChainEnded = 6,
+
     /// Unwinding found an impossible caller.
     InvalidCaller = 7,
+
     /// The sample carried no stack at all.
     NoStack = 8,
+
     /// A runtime switched stacks, and neither the kernel's chain nor the
     /// copy reaches the frames it switched from.
     StackSwitch = 9,
+
     /// A suspended task's chain of awaits could not be followed further.
     AwaitChainEnded = 10,
+
     /// Unwinding a task's stack could not read what it needed: a register,
     /// memory, or unwind information it could interpret.
     Unreadable = 11,
@@ -296,8 +333,10 @@ impl Truncation {
 pub struct Frame {
     pub address: U64,
     pub module: U32,
+
     /// A [`FrameKind`].
     pub kind: u8,
+
     /// The function's `CodeRole`, by its number, when known.
     pub role: u8,
     pub reserved: U16,
@@ -322,9 +361,11 @@ pub struct Stack {
 pub struct Sample {
     /// Nanoseconds on the capture's clock.
     pub time: I64,
+
     /// Nanoseconds of CPU time, or executions, the sample stands for.
     pub weight: U64,
     pub stack: U32,
+
     /// The task it ran, or [`NONE`].
     pub task: U32,
 }
@@ -337,8 +378,10 @@ pub struct Sample {
 pub struct OffCpu {
     /// When it left its CPU, in nanoseconds on the capture's clock.
     pub time: I64,
+
     /// Nanoseconds until it ran again, or until the recording ended.
     pub duration: U64,
+
     /// One when it left while it could still run, zero when it blocked.
     pub preempted: u8,
 }
@@ -371,6 +414,7 @@ pub struct Range {
 )]
 pub struct Line {
     pub function: U32,
+
     /// The file's path, or [`NONE`].
     pub file: U32,
     pub number: U32,
@@ -385,9 +429,11 @@ pub struct Line {
 pub struct Function {
     pub name: U32,
     pub module: U32,
+
     /// The file it is declared in, or [`NONE`].
     pub file: U32,
     pub line: U32,
+
     /// Its `CodeRole`, by [`role_number`].
     pub role: u8,
     pub reserved: [u8; 3],
@@ -430,54 +476,75 @@ pub const fn role_of(number: u8) -> Option<CodeRole> {
 pub enum AccountKind {
     /// Samples the kernel dropped because a ring was full.
     LostSamples = 1,
+
     /// Times the kernel throttled a sampling event.
     Throttles = 2,
+
     /// Samples whose stack ended in a truncation, by its number above
     /// 1000: 1001 is [`Truncation::NoUnwindInfo`].
     Truncated = 1000,
+
     /// Records uscope could not decode.
     Malformed = 3,
+
     /// Bytes of stack the kernel copied.
     StackBytes = 7,
+
     /// Records the kernel wrote after later ones had been processed, which
     /// were applied late: a mapping's samples before it end unmapped.
     LateRecords = 11,
+
     /// Breakpoint samples of an instruction that ran again within one
     /// call, as a Go stack check does when it grows the stack.
     Repeats = 12,
+
     /// What the events counted, in the weight's unit: the CPU time the
     /// program's threads ran, sampled or not, or every execution of a
     /// breakpoint's instruction, while the events were on.
     Counted = 13,
+
     /// Nanoseconds of CPU time uscope spent recording.
     RecorderCpu = 14,
+
     /// The part of it spent reading programs' debug information.
     RecorderLoading = 15,
+
     /// Nanoseconds task snapshots held the program stopped.
     SnapshotPause = 16,
+
     /// Task snapshots taken.
     Snapshots = 17,
+
     /// Task snapshots that failed, and tasks a snapshot could not read.
     SnapshotFailures = 18,
+
     /// Samples task snapshots gave the task they ran.
     TaskSamples = 19,
+
     /// Instrumentation events read.
     ProbeEvents = 20,
+
     /// Instrumentation records a thread overwrote before uscope read them.
     ProbeOverwritten = 21,
+
     /// Instrumentation events no ring could take: the program had no ring
     /// left for a thread, or a thread recorded after it began exiting.
     ProbeNoRing = 22,
+
     /// Instrumentation events a signal handler raised while its thread was
     /// writing one, which it dropped.
     ProbeInterrupted = 23,
+
     /// Instrumentation records that broke the ABI, and rings that did.
     ProbeMalformed = 24,
+
     /// Waiting tasks live task snapshots left out because they changed
     /// while read.
     SnapshotChanged = 25,
+
     /// Task snapshots read while the program ran.
     LiveSnapshots = 26,
+
     /// System call records the kernel's ring had no room for.
     SyscallsLost = 27,
 }
@@ -503,6 +570,7 @@ pub struct Site {
     pub file: U32,
     pub line: U32,
     pub module: U32,
+
     /// The site record's kind: an `abi::SITE_` constant of
     /// `uscope-probes`.
     pub kind: u8,
@@ -518,8 +586,10 @@ pub struct Zone {
     pub start: I64,
     pub end: I64,
     pub site: U32,
+
     /// `ZONE_` flags.
     pub flags: U32,
+
     /// A label's value, as a string, or [`NONE`].
     pub value: U32,
     pub reserved: U32,
@@ -528,12 +598,15 @@ pub struct Zone {
 /// Its begin was lost, or came before the capture: it starts where its
 /// thread's records were lost, or where the capture does.
 pub const ZONE_BEGAN_UNSEEN: u32 = 1;
+
 /// Its end was not seen: it ends where its thread's records were lost or
 /// ended, or where a zone around it ended.
 pub const ZONE_ENDED_UNSEEN: u32 = 2;
+
 /// Its begin and end do not nest: a zone around it ended first, or no
 /// begin matched its end.
 pub const ZONE_MISMATCHED: u32 = 4;
+
 pub const ZONE_FLAGS: u32 = ZONE_BEGAN_UNSEEN | ZONE_ENDED_UNSEEN | ZONE_MISMATCHED;
 
 /// Where one thread's zones of one depth are.
@@ -555,6 +628,7 @@ pub struct ZoneRange {
 )]
 pub struct Plot {
     pub time: I64,
+
     /// The value's bits, as an `f64`.
     pub value: U64,
     pub site: U32,
@@ -570,6 +644,7 @@ pub struct Marker {
     pub time: I64,
     pub thread: U32,
     pub site: U32,
+
     /// A string, or [`NONE`].
     pub text: U32,
     pub kind: u8,
@@ -583,15 +658,20 @@ pub enum MarkerKind {
     /// The budget changed how much of each period is sampled; the text
     /// says to what, and why.
     Budget = 1,
+
     /// A task snapshot failed, or could not read some tasks; the text
     /// says why.
     TaskSnapshot = 2,
+
     /// A program's message, on its thread.
     Message = 3,
+
     /// The end of a program's frame.
     Frame = 4,
+
     /// A program asked for the window to be saved.
     Trigger = 5,
+
     /// uscope could not read a module's instrumentation; the text says
     /// why.
     Probes = 6,
@@ -623,6 +703,7 @@ pub struct Gap {
     /// began again, on the capture's clock.
     pub start: I64,
     pub end: I64,
+
     /// A [`GapReason`].
     pub reason: u8,
 }
@@ -633,6 +714,7 @@ pub struct Gap {
 pub enum GapReason {
     /// To hold uscope's own CPU time to its budget.
     Budget = 1,
+
     /// A task snapshot held the program stopped.
     TaskSnapshot = 2,
 }
@@ -657,8 +739,10 @@ pub struct Task {
     /// The runtime's name, as a string: "goroutine", "task".
     pub runtime: U32,
     pub number: U64,
+
     /// The task's root frame, or [`NONE`].
     pub root: U32,
+
     /// Its labels, as a string `key=value` per line, or [`NONE`].
     pub labels: U32,
     pub first_seen: I64,
@@ -672,10 +756,12 @@ pub struct Task {
 )]
 pub struct TaskWait {
     pub time: I64,
+
     /// The time it stands for.
     pub weight: U64,
     pub task: U32,
     pub stack: U32,
+
     /// The runtime's state, as a string.
     pub state: U32,
     pub reserved: U32,
@@ -693,23 +779,30 @@ pub struct Syscall {
     /// When it entered and returned, [`UNSEEN`] when either was not seen.
     pub entered: I64,
     pub exited: I64,
+
     /// What it returned: a negative errno when it failed.
     pub ret: I64,
     pub args: [U64; 6],
+
     /// Its thread's row.
     pub thread: U32,
     pub number: U32,
+
     /// The thread's stack, or [`NONE`].
     pub stack: U32,
+
     /// The bytes behind its arguments, as the engines' captures: each an
     /// argument, when it was read, its state, a pad byte, the bytes wanted
     /// and the bytes kept as `u32`s, then the bytes kept.
     pub captures: U32,
     pub captures_len: U32,
+
     /// A [`crate::syscalls::Abi`] by its index.
     pub abi: u8,
+
     /// A [`CallOutcome`].
     pub outcome: u8,
+
     /// The event's [`crate::syscalls::EventFlags`].
     pub flags: u8,
     pub reserved: u8,
@@ -721,10 +814,13 @@ pub struct Syscall {
 pub enum CallOutcome {
     Returned = 0,
     Failed = 1,
+
     /// Still running when the trace ended.
     Unfinished = 2,
+
     /// Its process ended while it ran.
     ProcessExited = 3,
+
     /// Its result could not be read.
     Unavailable = 4,
 }
@@ -749,28 +845,38 @@ impl CallOutcome {
 )]
 pub struct SyscallNote {
     pub time: I64,
+
     /// A signal's number, a child's pid, an exit's code as `wait(2)`
     /// encodes it, a descriptor, or a count lost.
     pub value: I64,
+
     /// A signal's code above its sender, or a device's numbers: block in
     /// the top bit, its major above its minor.
     pub extra: U64,
+
     /// Its thread's row, or [`NONE`].
     pub thread: U32,
+
     /// Its process's row, or [`NONE`].
     pub process: U32,
+
     /// A program's path, or what a descriptor refers to.
     pub text: U32,
+
     /// A signal's stack.
     pub stack: U32,
+
     /// A signal's `siginfo_t`, in the blobs.
     pub blob: U32,
     pub blob_len: U32,
+
     /// How many calls came before it, which places it among them: an
     /// engine may stamp a note later than the call after it.
     pub calls: U32,
+
     /// A [`NoteKind`].
     pub kind: u8,
+
     /// [`NoteKind`]'s flags.
     pub flags: u8,
     pub reserved: [u8; 10],
@@ -790,6 +896,7 @@ pub fn captures(mut bytes: &[u8]) -> Option<Vec<crate::syscalls::Capture>> {
         if rest.len() < len {
             return None;
         }
+
         let state = match head[2] {
             0 => CaptureState::Complete,
             1 => CaptureState::Truncated { wanted: word(4) },
@@ -797,11 +904,13 @@ pub fn captures(mut bytes: &[u8]) -> Option<Vec<crate::syscalls::Capture>> {
             3 => CaptureState::NotRequested,
             _ => return None,
         };
+
         let when = match head[1] {
             0 => ReadAt::Entry,
             1 => ReadAt::Exit,
             _ => return None,
         };
+
         captures.push(Capture {
             arg: head[0],
             when,
@@ -810,6 +919,7 @@ pub fn captures(mut bytes: &[u8]) -> Option<Vec<crate::syscalls::Capture>> {
         });
         bytes = &rest[len..];
     }
+
     Some(captures)
 }
 
@@ -817,10 +927,15 @@ pub fn captures(mut bytes: &[u8]) -> Option<Vec<crate::syscalls::Capture>> {
 /// thread, and a descriptor's facts.
 pub mod note_flags {
     pub const SIGNAL_CODE: u8 = 1;
+
     pub const SIGNAL_SENDER: u8 = 2;
+
     pub const SPAWN_THREAD: u8 = 1;
+
     pub const FD_CLOEXEC: u8 = 1;
+
     pub const FD_MADE: u8 = 2;
+
     pub const FD_DEVICE: u8 = 4;
 }
 
@@ -830,11 +945,13 @@ pub mod note_flags {
 pub enum NoteKind {
     /// A signal delivered; flags say whether it has a code and a sender.
     Signal = 1,
+
     /// A process or thread made; flag 1 when a thread.
     Spawn = 2,
     Exec = 3,
     Exit = 4,
     ThreadExit = 5,
+
     /// What a descriptor refers to; flags: close-on-exec, made by the next
     /// call, a device.
     Descriptor = 6,
@@ -870,9 +987,11 @@ pub struct SyscallStat {
     pub max_ns: U64,
     pub bytes: U64,
     pub log2_ns: [U64; crate::syscalls::stats::BUCKETS],
+
     /// The process's row, or [`NONE`] for every process.
     pub process: U32,
     pub number: U32,
+
     /// Its rows of errnos.
     pub errnos: U32,
     pub errno_count: U32,

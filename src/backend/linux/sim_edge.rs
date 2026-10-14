@@ -29,6 +29,7 @@ use super::native::{
     InspectionOps, LinuxTraceOps, SignalQueue, maps_executable, siginfo_has_fault_address,
     siginfo_names_sender,
 };
+
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
 use super::tls::TlsModule;
@@ -45,14 +46,17 @@ use crate::{Error, Result, VirtualAddress};
 /// builds as production's is.
 #[cfg(debug_assertions)]
 type Edge = super::recorded::Recorded<SimTrace>;
+
 #[cfg(not(debug_assertions))]
 type Edge = SimTrace;
 
 /// What a simulated launch starts.
 pub struct SimLaunch {
     pub image: Arc<Image>,
+
     /// The path the executable has in the simulation.
     pub path: Arc<str>,
+
     /// The bytes `AT_RANDOM` names.
     pub random: [u8; 16],
 }
@@ -62,6 +66,7 @@ pub struct SimExecutable {
     pub path: Arc<str>,
     pub data: Arc<[u8]>,
     pub inode: u64,
+
     /// The start time of the process a session attaches to, which it
     /// checks, as it checks a held child's.
     pub start_time: Option<u64>,
@@ -81,8 +86,10 @@ pub trait Preemption {
 pub struct SimWaiter {
     /// The tracer whose tracees' statuses it reaps.
     tracer: i32,
+
     /// The controller's queue, once the controller starts its waiter.
     messages: Option<mpsc::Sender<ControllerMessage>>,
+
     /// A status reaped but not yet queued.
     hand: Option<WaitStatus>,
 }
@@ -91,6 +98,7 @@ pub struct SimWaiter {
 pub struct Collected {
     /// The status reaped, if the waiter held none already.
     pub reaped: Option<WaitStatus>,
+
     /// Whether the status is still held, the queue being full.
     pub held: bool,
 }
@@ -128,6 +136,7 @@ impl SimWaiter {
         else {
             return false;
         };
+
         match self.hand {
             Some(_) => messages.capacity() > 0,
             None => kernel.reportable(self.tracer).next().is_some(),
@@ -150,6 +159,7 @@ impl SimWaiter {
             reaped = Some(status);
             self.hand = Some(status);
         }
+
         let status = self.hand.take().expect("the waiter holds a status");
         let queued = self.messages.as_ref().is_some_and(|messages| {
             messages
@@ -159,6 +169,7 @@ impl SimWaiter {
         if !queued {
             self.hand = Some(status);
         }
+
         Collected {
             reaped,
             held: !queued,
@@ -174,6 +185,7 @@ pub struct SimTrace {
     launch: SimLaunch,
     waiter: Rc<RefCell<SimWaiter>>,
     preemption: Rc<dyn Preemption>,
+
     /// Stop identifiers count per session, so that a session's identifiers
     /// do not depend on any other.
     last_stop_id: Cell<u64>,
@@ -248,9 +260,11 @@ impl SimTrace {
             record!("read /proc/{pid}/maps -> not found");
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
         };
+
         if !maps.is_empty() {
             return Ok(maps);
         }
+
         let group = kernel.thread_group(tid(pid)).unwrap_or_else(|| tgid(pid));
         Ok(kernel
             .threads_of(group)
@@ -365,6 +379,7 @@ fn wait_status(event: &WaitEvent) -> String {
             return format!("{event:?} for {pid}");
         }
     };
+
     status.to_string()
 }
 
@@ -420,6 +435,7 @@ impl LinuxTraceOps for SimTrace {
         if executable != Path::new(&*self.launch.path) {
             return self.gap(&format!("launching {}", executable.display()));
         }
+
         if !options.environment.is_empty()
             || options.working_directory.is_some()
             || options.stdin.is_some()
@@ -428,6 +444,7 @@ impl LinuxTraceOps for SimTrace {
         {
             return self.gap("launch options other than arguments");
         }
+
         let Some(arguments) = options
             .arguments
             .iter()
@@ -436,6 +453,7 @@ impl LinuxTraceOps for SimTrace {
         else {
             return self.gap("arguments that are not UTF-8");
         };
+
         let tid = self.kernel_mut().spawn(
             Arc::clone(&self.launch.image),
             &self.launch.path,
@@ -455,6 +473,7 @@ impl LinuxTraceOps for SimTrace {
         if !kernel.processes.contains_key(&tgid(process)) {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
         }
+
         let mut threads = kernel
             .threads_of(tgid(process))
             .map(|thread| Pid::from_raw(thread.tid))
@@ -710,10 +729,13 @@ impl LinuxTraceOps for SimTrace {
 pub struct Site {
     pub original_byte: u8,
     pub installed: bool,
+
     /// How many owners the site has.
     pub owners: usize,
+
     /// The executions whose plans own the site.
     pub plans: Vec<u64>,
+
     /// The user breakpoints that own the site.
     pub users: BTreeSet<u64>,
 }
@@ -732,23 +754,32 @@ pub struct UserBreakpoint {
 pub struct Truth {
     /// Every breakpoint site of the inferior's address space.
     pub sites: BTreeMap<u64, Site>,
+
     /// The sites each execution plan installed, by execution.
     pub plan_sites: BTreeMap<u64, BTreeSet<u64>>,
+
     /// The execution in progress.
     pub active_execution: Option<u64>,
+
     /// The published stop, if the inferior is stopped.
     pub public_stop: Option<u64>,
+
     /// The process the controller debugs.
     pub inferior: Option<Tgid>,
+
     /// Whether the inferior finished launching or attaching, which put its
     /// breakpoints and watchpoints in place.
     pub established: bool,
+
     /// The inferior's threads the controller knows.
     pub threads: BTreeSet<Tid>,
+
     /// The user's breakpoints, by identifier.
     pub breakpoints: BTreeMap<u64, UserBreakpoint>,
+
     /// The hits each watchpoint counted, by identifier.
     pub watchpoints: BTreeMap<u64, u64>,
+
     /// Each stopped thread's own reason, as the controller holds it.
     pub reasons: BTreeMap<Tid, crate::StopReason>,
 }
@@ -767,10 +798,13 @@ pub struct ClientChannels {
 /// A message taken from the controller's queue, to be handled.
 pub struct Delivery {
     message: ControllerMessage,
+
     /// What the message is, for the trace.
     pub description: String,
+
     /// The thread a `SIGTRAP` signal-delivery-stop status is about.
     pub trap: Option<Tid>,
+
     /// Whether the message asks the controller to shut down.
     pub shutdown: bool,
 }
@@ -785,8 +819,10 @@ pub struct SimParts {
     pub launch: SimLaunch,
     pub executable: SimExecutable,
     pub debug_info: DebugInfo,
+
     /// How many messages the controller's queue holds.
     pub queue_capacity: usize,
+
     /// How many events the event channel holds.
     pub event_capacity: usize,
 }
@@ -806,6 +842,7 @@ impl SimController {
             preemption: parts.preemption,
             last_stop_id: Cell::new(0),
         };
+
         #[cfg(debug_assertions)]
         let trace = super::recorded::Recorded(trace);
         let executable = parts.executable;
@@ -860,6 +897,7 @@ impl SimController {
                 },
             ),
         };
+
         let shutdown = matches!(
             message,
             ControllerMessage::Request(Request::Shutdown { .. })
@@ -937,6 +975,7 @@ impl SimController {
                 ..Truth::default()
             };
         };
+
         Truth {
             sites: inferior
                 .breakpoints
@@ -950,12 +989,14 @@ impl SimController {
                             super::BreakpointOwner::User(id) => {
                                 users.insert(id.get());
                             }
+
                             super::BreakpointOwner::Loader
                             | super::BreakpointOwner::Runtime
                             | super::BreakpointOwner::StackMove
                             | super::BreakpointOwner::Resolver => {}
                         }
                     }
+
                     (
                         address.get(),
                         Site {

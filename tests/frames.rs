@@ -70,6 +70,7 @@ fn integer(value: &VariableValue) -> Option<i128> {
         IntegerValue::Unsigned(value) => i128::try_from(value).ok(),
         _ => None,
     };
+
     match value {
         VariableValue::Scalar(ScalarValue::Signed(value)) => Some(*value),
         VariableValue::Scalar(ScalarValue::Unsigned(value)) => i128::try_from(*value).ok(),
@@ -199,6 +200,7 @@ async fn check_frame_truth(scenario: &mut Scenario, variant: &str, argc: i128) {
     for level in (0..=main).rev() {
         let frame = select(scenario, level).await;
         let function = names[level].as_str();
+
         // Unoptimized recursion keeps one frame per call, innermost first.
         let recursion = (function == "frames_recurse" && recursion_frames == 4).then(|| {
             i128::try_from(
@@ -267,6 +269,7 @@ async fn check_frame_truth(scenario: &mut Scenario, variant: &str, argc: i128) {
             assert_eq!(context_lines.lines.len(), 3, "{context}");
         }
     }
+
     assert!(
         required.is_empty(),
         "{variant}: values that must be available were not: {required:?}"
@@ -291,6 +294,7 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
         doubled.state,
         VariableState::Unavailable(VariableUnavailableReason::RegisterNotSaved("rdi".into()))
     );
+
     // The frame's registers say the same, while those the unwinder recovered
     // are the frame's own.
     let registers = scenario
@@ -305,6 +309,7 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
             .bytes
             .clone()
     };
+
     assert_eq!(register("rdi"), None);
     assert_eq!(register("orig_rax"), None);
     assert_eq!(
@@ -318,6 +323,7 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
         )
     );
     assert!(register("rsp").is_some() && register("fs_base").is_some());
+
     // The innermost frame still reads the live register.
     select(scenario, 0).await;
     let registers = scenario
@@ -348,6 +354,7 @@ async fn caller_frames_show_their_own_values_live_across_the_compiler_matrix() {
         if variant == "clang-o2" {
             check_unsaved_register(&mut scenario).await;
         }
+
         scenario.shutdown().await;
     }
 }
@@ -357,10 +364,12 @@ async fn go_caller_frames_refuse_registers_go_callees_overwrite() {
     let mut scenario = Scenario::launch("frames-go-o2");
     scenario.add_breakpoint("main.leaf").await;
     let mut reason = scenario.run_to_stop().await;
+
     // The Go runtime preempts goroutines with SIGURG.
     while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
@@ -369,6 +378,7 @@ async fn go_caller_frames_refuse_registers_go_callees_overwrite() {
 
     let frames = backtrace(&scenario).await;
     select(&mut scenario, level_of(&frames, "main.held", 0)).await;
+
     // held's arguments are described in rax and rbx through its call, which
     // Go callees overwrite without saving: rbx holds leaf's 2000, not 12.
     for (name, register) in [("a", "rax"), ("b", "rbx")] {
@@ -383,6 +393,7 @@ async fn go_caller_frames_refuse_registers_go_callees_overwrite() {
             "{name}"
         );
     }
+
     // A value kept on the stack across the call is still the caller's.
     select(&mut scenario, level_of(&frames, "main.spilled", 0)).await;
     assert_eq!(integer_variable(&scenario, "seed").await, 10);
@@ -401,6 +412,7 @@ async fn caller_frames_show_their_own_values_in_core_dumps_across_the_compiler_m
         if variant == "clang-o2" {
             check_unsaved_register(&mut scenario).await;
         }
+
         scenario.shutdown().await;
     }
 }
@@ -413,6 +425,7 @@ enum OracleValue {
     OptimizedOut,
     Error,
     Other,
+
     /// A structure's members by path, depth first, each judged by its own
     /// bits.
     Struct(Vec<(String, Self)>),
@@ -435,6 +448,7 @@ struct OracleFrame {
     level: usize,
     function: String,
     scope: bool,
+
     /// Innermost block first.
     variables: Vec<(String, OracleValue)>,
 }
@@ -486,11 +500,13 @@ fn parse_oracle(path: &Path) -> BTreeMap<u64, Vec<OracleFrame>> {
                 let Some((_, OracleValue::Struct(members))) = variable else {
                     panic!("member {path} does not follow a structure");
                 };
+
                 members.push(((*path).to_owned(), oracle_value(state, value)));
             }
             other => panic!("malformed oracle line {other:?} in {}", path.display()),
         }
     }
+
     threads
 }
 
@@ -512,6 +528,7 @@ fn oracle_view(value: &VariableValue) -> Option<OracleValue> {
     if let Some(integer) = integer(value) {
         return Some(OracleValue::Integer(integer));
     }
+
     match value {
         VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary32(bits))) => {
             Some(OracleValue::Float(f64::from(f32::from_bits(*bits))))
@@ -535,6 +552,7 @@ fn same_function(ours: &StackFrame, gdb: &str) -> bool {
 struct Agreement {
     /// Values both debuggers read and found equal.
     equal: usize,
+
     /// Values only gdb read, which this debugger reports as unknowable or
     /// unsupported instead.
     declined: usize,
@@ -562,6 +580,7 @@ async fn compare_frame(
         );
         return;
     }
+
     assert!(
         same_function(frame, &oracle.function),
         "{context}: gdb's frame is {:?}, ours is {:?}",
@@ -583,11 +602,13 @@ async fn compare_frame(
         .collect::<Vec<_>>();
     our_names.sort();
     gdb_names.sort();
+
     // gdb shows a Go local before the line declaring it has run; uscope,
     // like Delve, only past it.
     if go {
         gdb_names.retain(|name| our_names.contains(name));
     }
+
     assert_eq!(our_names, gdb_names, "{context}: visible variables differ");
 
     let mut seen = Vec::new();
@@ -596,6 +617,7 @@ async fn compare_frame(
         if seen.contains(name) || !gdb_names.contains(name) {
             continue;
         }
+
         seen.push(name.clone());
         let variable = scenario
             .operation(name, scenario.handle().variable(name.clone()))
@@ -607,11 +629,13 @@ async fn compare_frame(
             compare_value(&variable.state, expected, &context, agreement);
             continue;
         };
+
         for (path, expected) in members {
             // A nested structure's own members follow it.
             if matches!(expected, OracleValue::Struct(_)) {
                 continue;
             }
+
             let member = scenario
                 .operation(
                     path,
@@ -648,6 +672,7 @@ fn compare_value(
                 (_, OracleValue::OptimizedOut | OracleValue::Error) => {
                     panic!("{context}: gdb cannot read {value:?}")
                 }
+
                 // Pointers and aggregates have no numeric view to compare.
                 _ => {}
             }
@@ -715,6 +740,7 @@ async fn every_frame_of_every_dumped_thread_agrees_with_gdb() {
             let ours = backtrace(&scenario).await;
             for frame in frames {
                 let context = format!("{core} thread {tid} frame {}", frame.level);
+
                 // gdb unwinds past code no module describes, where ours
                 // stops, and past the frame a runtime declares its stack's
                 // first, into the code that started the thread.
@@ -729,15 +755,18 @@ async fn every_frame_of_every_dumped_thread_agrees_with_gdb() {
                     );
                     continue;
                 };
+
                 let go = core.contains("-go-");
                 compare_frame(&scenario, our_frame, frame, go, &context, &mut agreement).await;
             }
         }
+
         assert!(agreement.equal > 0, "{core}: nothing compared");
         total.equal += agreement.equal;
         total.declined += agreement.declined;
         scenario.shutdown().await;
     }
+
     assert!(total.equal >= 200, "too few values compared: {total:?}");
 }
 
@@ -800,6 +829,7 @@ async fn frame_selection_lasts_until_the_next_stop() {
         "selection keeps the stop"
     );
     assert_eq!(integer_variable(&scenario, "depth").await, 0);
+
     // The backtrace describes the thread, whatever is selected, while the
     // registers are the selected frame's own.
     assert_eq!(backtrace(&scenario).await, frames);
@@ -1003,6 +1033,7 @@ async fn each_thread_keeps_its_own_selected_frame() {
         .await;
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.selected_frame.map(StackFrameId::get), Some(1));
+
     // Names resolve in main's frame, not the crashing callee's.
     assert!(matches!(
         scenario.handle().variable("depth").await,
@@ -1031,6 +1062,7 @@ async fn value_capabilities_evaluate_in_the_frame_that_produced_them() {
     else {
         panic!("kept_pointer is {:?}", pointer.state);
     };
+
     assert_eq!(integer_variable(&scenario, "kept").await, 16);
 
     select(&mut scenario, 0).await;
@@ -1040,6 +1072,7 @@ async fn value_capabilities_evaluate_in_the_frame_that_produced_them() {
     let VariableState::Available { value, .. } = &target.state else {
         panic!("*kept_pointer is {:?}", target.state);
     };
+
     assert_eq!(integer(value), Some(16));
     scenario.shutdown().await;
 
@@ -1058,6 +1091,7 @@ async fn value_capabilities_evaluate_in_the_frame_that_produced_them() {
     else {
         panic!("pair is {:?}", pair.state);
     };
+
     select(&mut scenario, 0).await;
     let members = scenario
         .operation(
@@ -1109,6 +1143,7 @@ async fn finish_runs_until_the_selected_frame_returns() {
             "{variant}: the selected frame and every frame it called returned"
         );
         assert_eq!(integer_variable(&scenario, "depth").await, 2, "{variant}");
+
         // Optimized code may attribute the return address to another line.
         if variant == "gcc-o0" {
             assert_eq!(
@@ -1118,6 +1153,7 @@ async fn finish_runs_until_the_selected_frame_returns() {
                 )),
             );
         }
+
         assert_eq!(
             scenario.snapshot().await.selected_frame,
             Some(StackFrameId::INNERMOST)
@@ -1236,6 +1272,7 @@ async fn stepping_from_a_selected_outer_frame_is_explicit() {
             Err(Error::FrameStepUnsupported(_))
         ));
     }
+
     assert_eq!(scenario.snapshot().await.stop_id, Some(stop), "nothing ran");
 
     // An inline frame of an outer activation has no return of its own to
@@ -1283,6 +1320,7 @@ async fn stepping_from_a_selected_outer_frame_is_explicit() {
 async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     let mut scenario = stop_in_leaf("gcc-o0").await;
     let frames = backtrace(&scenario).await;
+
     // Not visible in the stopped frame, only in the selected caller.
     assert!(matches!(
         scenario.handle().variable("below").await,
@@ -1300,7 +1338,9 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     let WatchScope::Frame { activation, .. } = *target.scope() else {
         panic!("a local is frame-scoped: {:?}", target.scope());
     };
+
     assert!(target.address() < activation);
+
     // The same name in a deeper activation is other storage, bounded by
     // that activation, on x86-64's downward-growing stack.
     select(&mut scenario, level_of(&frames, "frames_recurse", 0)).await;
@@ -1317,6 +1357,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     else {
         panic!("a local is frame-scoped: {:?}", inner.scope());
     };
+
     assert!(inner.address() < target.address());
     assert!(inner_activation < activation);
     assert!(target.address() > inner_activation);
@@ -1334,6 +1375,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     let StopReason::Watchpoint { hits } = &reason else {
         panic!("expected the store to below, got {reason:?}");
     };
+
     assert_eq!(hits.len(), 1, "{reason:?}");
     assert_eq!(
         hits[0].current.as_deref(),
@@ -1364,6 +1406,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
             .expect("the stop after depth 1 returned invalidated the watchpoint"),
         other => panic!("expected the watchpoint to end, got {other:?}"),
     };
+
     assert_eq!(reason, WatchpointInvalidation::ScopeExited);
     assert!(scenario.snapshot().await.watchpoints.is_empty());
     scenario.shutdown().await;
@@ -1393,6 +1436,7 @@ async fn shared_library_and_c_library_caller_frames_are_selectable() {
         scenario.handle().current_location().await,
         Ok(location) if location.image.source.is_none()
     ));
+
     // Globals stay visible from any frame.
     assert_eq!(integer_variable(&scenario, "frames_sink").await, 0);
     select(&mut scenario, sort).await;
@@ -1406,6 +1450,7 @@ async fn shared_library_and_c_library_caller_frames_are_selectable() {
     else {
         panic!("values is {:?}", values.state);
     };
+
     let page = scenario
         .operation(
             "values elements",

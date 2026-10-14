@@ -27,10 +27,12 @@ impl SourcePathMap {
     /// looked for below `to`.
     pub fn push(&mut self, from: impl Into<PathBuf>, to: impl Into<PathBuf>) -> Result<()> {
         let from = from.into();
+
         // An empty prefix would claim every path.
         if from.components().next().is_none() {
             return Err(Error::EmptySourcePathPrefix);
         }
+
         self.rules.push((from, to.into()));
         Ok(())
     }
@@ -86,6 +88,7 @@ mod tests {
         );
         assert_eq!(candidates("/workspace/a.c"), [Path::new("/workspace/a.c")]);
         assert_eq!(candidates("/a/work/b.c"), [Path::new("/a/work/b.c")]);
+
         // Relative recorded paths match relative prefixes component by
         // component; `..` is not collapsed.
         assert_eq!(
@@ -93,6 +96,7 @@ mod tests {
             [Path::new("/tmp/build/x.c"), Path::new("build/../x.c")]
         );
         assert_eq!(candidates("build/x.c"), [Path::new("build/x.c")]);
+
         // A rule mapping a prefix to itself does not repeat the path, which
         // stays last.
         let mut identity = SourcePathMap::new();

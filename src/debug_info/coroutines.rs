@@ -33,6 +33,7 @@ pub fn coroutine_kind(name: &str) -> Option<CoroutineKind> {
             .and_then(|rest| rest.strip_suffix('}'))
             .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
     };
+
     if numbered("{async_fn_env#") {
         Some(CoroutineKind::AsyncFunction)
     } else if numbered("{async_block_env#") {
@@ -52,6 +53,7 @@ pub fn normalize(types: &[TypeNode]) -> BTreeMap<TypeId, Result<CoroutineInfo, A
         Some(TypeNode::Resolved(info)) => Some(info),
         _ => None,
     };
+
     found(types.iter().map(|node| node.reference().id), &by_id)
 }
 
@@ -66,6 +68,7 @@ pub fn in_table(
             id,
         })
     };
+
     found(
         table
             .view()
@@ -88,6 +91,7 @@ fn found<'a>(
         ) {
             return None;
         }
+
         let kind = coroutine_kind(&info.name)?;
         Some((id, coroutine(info, kind, types)))
     })
@@ -108,15 +112,19 @@ fn coroutine<'a>(
     else {
         return Err("the coroutine has no variant part".into());
     };
+
     let VariantDiscriminant::Stored(state) = discriminant.as_ref() else {
         return Err("the coroutine stores no state number".into());
     };
+
     if state.name.as_deref() != Some("__state") || !state.artificial {
         return Err("the coroutine's discriminant is not its `__state`".into());
     }
+
     let RecordMemberLayout::ByteOffset(offset) = state.layout else {
         return Err("the coroutine's state number has no byte offset".into());
     };
+
     let size = types(state.type_ref.id)
         .and_then(|ty| ty.byte_size)
         .filter(|size| (1..=8).contains(size))
@@ -126,6 +134,7 @@ fn coroutine<'a>(
         .iter()
         .map(|variant| read_state(variant, types))
         .collect::<Result<Vec<_>, Arc<str>>>()?;
+
     // `Unresumed` holds the captures alone; every other state ends with
     // them, by name.
     let unresumed = states
@@ -150,14 +159,17 @@ fn coroutine<'a>(
         {
             return Err(format!("state {value} does not end with the captures").into());
         }
+
         state.saved = state.saved[..tail].into();
     }
+
     let mut numbers = states.iter().map(|state| state.value).collect::<Vec<_>>();
     numbers.sort_unstable();
     numbers.dedup();
     if numbers.len() != states.len() {
         return Err("two states share a number".into());
     }
+
     let mut suspended = states
         .iter()
         .filter_map(|state| match state.kind {
@@ -173,6 +185,7 @@ fn coroutine<'a>(
     {
         return Err("the suspended states are not numbered in order".into());
     }
+
     Ok(CoroutineInfo {
         kind,
         state: StateMember { offset, size },
@@ -188,16 +201,20 @@ pub fn pinned_coroutine(types: &[TypeNode], ty: TypeId) -> Option<TypeId> {
         Some(TypeNode::Resolved(info)) => Some(info),
         _ => None,
     };
+
     let pin = resolved(ty)?;
     if !pin.name.starts_with("Pin<") {
         return None;
     }
+
     let TypeKind::Record { members, .. } = &pin.kind else {
         return None;
     };
+
     let [pointer] = members.as_ref() else {
         return None;
     };
+
     let target = match &resolved(pointer.type_ref.id)?.kind {
         TypeKind::Pointer {
             target: Some(target),
@@ -206,6 +223,7 @@ pub fn pinned_coroutine(types: &[TypeNode], ty: TypeId) -> Option<TypeId> {
         | TypeKind::Reference { target, .. } => *target,
         _ => return None,
     };
+
     coroutine_kind(&resolved(target.id)?.name).map(|_| target.id)
 }
 
@@ -227,18 +245,22 @@ fn read_state<'a>(
         },
         VariantSelection::Default => return Err("a state is the default variant".into()),
     };
+
     let [member] = variant.members.as_ref() else {
         return Err(format!("state {value} does not hold exactly one member").into());
     };
+
     let RecordMemberLayout::ByteOffset(base) = member.layout else {
         return Err(format!("state {value} has no byte offset").into());
     };
+
     let record = types(member.type_ref.id).ok_or("a state's type is unresolved")?;
     let kind = state_kind(&record.name)
         .ok_or_else(|| format!("state {value} is named `{}`", record.name))?;
     let TypeKind::Record { members, .. } = &record.kind else {
         return Err(format!("state {value} is not a record").into());
     };
+
     let members = members
         .iter()
         .map(|inner| {
@@ -247,6 +269,7 @@ fn read_state<'a>(
                     "a member of state {value} has no byte offset"
                 )));
             };
+
             let mut moved = inner.clone();
             moved.layout = RecordMemberLayout::ByteOffset(
                 base.checked_add(at).ok_or("a member's offset overflows")?,
@@ -289,15 +312,18 @@ pub fn body_name(name: &str, namespace: &str) -> Option<Arc<str>> {
     if !name.starts_with("{async_") {
         return None;
     }
+
     let name = without_arguments(name)?;
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix)
             .and_then(|rest| rest.strip_suffix('}'))
             .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
     };
+
     if namespace.is_empty() {
         return None;
     }
+
     let (outer, last) = namespace.rsplit_once("::").unwrap_or(("", namespace));
     let enclosing = body_name(last, outer).unwrap_or_else(|| last.into());
     if numbered("{async_fn#").is_some() {
@@ -317,6 +343,7 @@ pub fn without_arguments(name: &str) -> Option<&str> {
     if !name.ends_with('>') {
         return Some(name);
     }
+
     let mut depth = 0_usize;
     for (at, character) in name.char_indices().rev() {
         match character {
@@ -332,6 +359,7 @@ pub fn without_arguments(name: &str) -> Option<&str> {
             _ => {}
         }
     }
+
     None
 }
 
@@ -362,6 +390,7 @@ mod tests {
             body_name("{async_closure#0}", namespace).as_deref(),
             Some("leaf::{async closure#0}")
         );
+
         // A block in an async function's body, or in another block, is
         // named within the function that wrote it.
         let within = "steps::leaf::{async_fn#0}";

@@ -11,9 +11,11 @@ use super::model::{Pid, ProcessEnd, Tid, TraceEvent};
 pub struct Process {
     pub pid: Pid,
     pub parent: Option<Pid>,
+
     /// Images it ran, in order, with when each exec happened.
     pub images: Vec<(u64, Arc<str>)>,
     pub threads: Vec<Tid>,
+
     /// When the trace first saw it.
     pub started: u64,
     pub ended: Option<(u64, ProcessEnd)>,
@@ -23,6 +25,7 @@ pub struct Process {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessTree {
     processes: BTreeMap<Pid, Process>,
+
     /// Each thread's process.
     threads: BTreeMap<Tid, Pid>,
 }
@@ -40,6 +43,7 @@ impl ProcessTree {
         if let Some(image) = image {
             process.images.push((time, image));
         }
+
         self.threads.insert(pid.leader(), pid);
     }
 
@@ -84,6 +88,7 @@ impl ProcessTree {
                     self.threads.insert(child, pid);
                 }
             }
+
             TraceEvent::Exec {
                 process,
                 time,
@@ -97,6 +102,7 @@ impl ProcessTree {
                     ..Process::default()
                 });
                 entry.images.push((time, path.clone()));
+
                 // Every other thread is gone after an exec.
                 entry.threads.retain(|&thread| thread == process.leader());
             }
@@ -105,6 +111,7 @@ impl ProcessTree {
                     entry.ended = Some((time, end));
                 }
             }
+
             TraceEvent::Call(_)
             | TraceEvent::Signal { .. }
             | TraceEvent::ThreadExit { .. }

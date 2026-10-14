@@ -23,13 +23,17 @@ use crate::sim::kernel::{Tid, WaitStatus};
 pub struct NativeTracee {
     ptrace: super::native::LinuxPtrace,
     pid: Pid,
+
     /// Perf breakpoints holding some of a thread's hardware breakpoints.
     held: Vec<std::os::fd::OwnedFd>,
+
     /// The events sampling the process at a breakpoint, as the profiler
     /// opens them.
     sampling: Option<super::perf::Events>,
+
     /// Children the process forked, killed with it.
     forked: Vec<Pid>,
+
     /// Whether the process was left to its parent rather than killed.
     abandoned: bool,
 }
@@ -49,6 +53,7 @@ impl NativeTracee {
             stdout: Some(std::process::Stdio::null()),
             ..LaunchOptions::default()
         };
+
         let pid = ptrace
             .spawn(executable, options)
             .expect("spawn a traced program");
@@ -60,6 +65,7 @@ impl NativeTracee {
             forked: Vec::new(),
             abandoned: false,
         };
+
         let first = tracee.wait(tracee.pid());
         (tracee, first)
     }
@@ -95,6 +101,7 @@ impl NativeTracee {
             forked: Vec::new(),
             abandoned: false,
         };
+
         let first = tracee.wait(tracee.pid());
         (tracee, first)
     }
@@ -118,6 +125,7 @@ impl NativeTracee {
                         waited < std::time::Duration::from_secs(10),
                         "{thread} reported nothing for ten seconds"
                     );
+
                     // A single step reports within microseconds.
                     if waited < std::time::Duration::from_millis(1) {
                         std::thread::yield_now();
@@ -128,6 +136,7 @@ impl NativeTracee {
                 Err(errno) => panic!("waiting for {thread} failed: {errno}"),
             }
         };
+
         match event {
             WaitEvent::Exited(pid, code) => WaitStatus::Exited(pid.as_raw(), code),
             WaitEvent::Signaled(pid, signal, core) => {
@@ -193,6 +202,7 @@ impl NativeTracee {
             orig_rax: user.orig_rax,
             ..user_registers(registers, crate::sim::kernel::NO_SYSTEM_CALL)
         };
+
         user.eflags = (flags & !SETTABLE_FLAGS) | (registers.rflags & SETTABLE_FLAGS);
         self.ptrace
             .set_registers(Pid::from_raw(thread), user)
@@ -419,6 +429,7 @@ impl NativeTracee {
             ring_pages: 64,
             switches: false,
         };
+
         let pid = self.pid.as_raw().cast_unsigned();
         let events = super::perf::Events::attach(pid, &options, 4096).expect("open perf events");
         self.sampling = Some(events);
@@ -430,6 +441,7 @@ impl NativeTracee {
         if let Some(events) = &mut self.sampling {
             events.drain(&mut records);
         }
+
         records
     }
 
@@ -444,6 +456,7 @@ impl NativeTracee {
             bp_len: 8,
             ..sys::Attr::default()
         };
+
         for _ in 0..count {
             let fd = sys::open(&attributes, thread, -1)
                 .unwrap_or_else(|error| panic!("perf_event_open failed: {error}"));
@@ -505,9 +518,11 @@ impl Drop for NativeTracee {
         if self.abandoned {
             return;
         }
+
         for &child in &self.forked {
             let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
             let started = std::time::Instant::now();
+
             // A child still traced is reaped here; a detached one is its
             // parent's to reap.
             while !matches!(
@@ -522,7 +537,9 @@ impl Drop for NativeTracee {
                 std::thread::yield_now();
             }
         }
+
         let _ = nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::SIGKILL);
+
         // Reap every thread, so nothing outlives the test. A thread in a
         // stop, even one already reported such as its exit event, waits
         // there until it is continued, and the leader's exit is reported
@@ -533,6 +550,7 @@ impl Drop for NativeTracee {
             if !threads.contains(&self.pid()) {
                 threads.push(self.pid());
             }
+
             for thread in threads {
                 let thread = Pid::from_raw(thread);
                 let _ = self.ptrace.continue_execution(thread, None);
@@ -546,6 +564,7 @@ impl Drop for NativeTracee {
                     _ => {}
                 }
             }
+
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(10),
                 "{} outlived its test",

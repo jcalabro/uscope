@@ -34,6 +34,7 @@ pub fn spawn(
             let read = receiver.read(&mut buffer).await.unwrap_or(0);
             pending.extend_from_slice(&buffer[..read]);
             let text = decode(&mut pending, read == 0);
+
             // Replacement characters can make the text longer than the bytes.
             for piece in pieces(&text, CHUNK) {
                 if client
@@ -44,6 +45,7 @@ pub fn spawn(
                     return;
                 }
             }
+
             if read == 0 {
                 return;
             }
@@ -59,10 +61,12 @@ pub fn pieces(text: &str, limit: usize) -> impl Iterator<Item = &str> {
         if rest.is_empty() {
             return None;
         }
+
         let mut end = rest.len().min(limit);
         while !rest.is_char_boundary(end) {
             end -= 1;
         }
+
         let (piece, after) = rest.split_at(end);
         rest = after;
         Some(piece)
@@ -102,6 +106,7 @@ pub fn decode(bytes: &mut Vec<u8>, end: bool) -> String {
             }
         }
     }
+
     let consumed = bytes.len() - rest.len();
     bytes.drain(..consumed);
     text

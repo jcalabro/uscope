@@ -22,8 +22,10 @@ pub const JOBS_VARIABLE: &str = "USCOPE_JOBS";
 pub enum JobsError {
     #[error("{JOBS_VARIABLE} must be a positive number of workers, not {0:?}")]
     Invalid(String),
+
     #[error("the loader already runs {running} workers, so it cannot run {requested}")]
     AlreadyStarted { running: usize, requested: usize },
+
     #[error("cannot start the loader's workers: {0}")]
     Start(String),
 }
@@ -43,15 +45,18 @@ pub fn resolve(
     if let Some(jobs) = option {
         return Ok(jobs);
     }
+
     if let Some(text) = variable {
         return text
             .trim()
             .parse::<NonZeroUsize>()
             .map_err(|_| JobsError::Invalid(text.to_owned()));
     }
+
     if let Some(jobs) = config {
         return Ok(jobs);
     }
+
     let most = if under_test { TEST_JOBS } else { DEFAULT_JOBS };
     Ok(cpus.min(most))
 }
@@ -71,14 +76,17 @@ fn start(jobs: NonZeroUsize) -> Result<&'static rayon::ThreadPool, JobsError> {
     if let Some(pool) = POOL.get() {
         return Ok(pool);
     }
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs.get())
         .thread_name(|index| format!("uscope-load-{index}"))
         .build()
         .map_err(|error| JobsError::Start(error.to_string()))?;
+
     // Wait until every worker runs, so that what starting them allocates
     // never lands in a measurement that follows.
     pool.broadcast(|_| ());
+
     // Another thread may have started one first; either is the pool.
     Ok(POOL.get_or_init(|| pool))
 }
@@ -98,6 +106,7 @@ pub fn configure(
             requested: requested.get(),
         });
     }
+
     Ok(running)
 }
 
@@ -107,10 +116,12 @@ pub(crate) fn install<R: Send>(work: impl FnOnce() -> R + Send) -> Result<R, Job
     if rayon::current_thread_index().is_some() {
         return Ok(work());
     }
+
     let pool = match POOL.get() {
         Some(pool) => pool,
         None => start(resolve_here(None, None)?)?,
     };
+
     Ok(pool.install(work))
 }
 
@@ -125,6 +136,7 @@ mod tests {
         let resolved = |option, variable, config, under_test| {
             resolve(option, variable, config, cpus, under_test).map(NonZeroUsize::get)
         };
+
         assert_eq!(resolved(n(3), Some("5"), n(7), false), Ok(3));
         assert_eq!(resolved(None, Some(" 5\n"), n(7), false), Ok(5));
         assert_eq!(resolved(None, None, n(7), true), Ok(7));

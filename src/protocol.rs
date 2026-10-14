@@ -17,8 +17,10 @@ use crate::{
 pub enum VariableQuery {
     /// Inspect every visible parameter and local declaration.
     All,
+
     /// Inspect the innermost visible data object with this name.
     Name(String),
+
     /// Inspect one exact global catalog entry.
     Global(GlobalVariableReference),
 }
@@ -28,8 +30,10 @@ pub enum VariableQuery {
 pub struct GlobalVariableQuery {
     /// Case-sensitive substring matched against source and linkage names.
     pub filter: Option<String>,
+
     /// Zero-based offset within the deterministic match ordering.
     pub offset: u64,
+
     /// Maximum entries to return; must be between 1 and 256.
     pub limit: u32,
 }
@@ -49,6 +53,7 @@ impl Default for GlobalVariableQuery {
 pub struct ValueChildQuery {
     /// Zero-based offset within the parent's stable child ordering.
     pub offset: u64,
+
     /// Maximum children to return; must be between 1 and 256.
     pub limit: u32,
 }
@@ -75,9 +80,11 @@ pub struct ViewCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeViews {
     pub type_info: crate::TypeInfo,
+
     /// The module image that defines the type.
     pub module: Arc<std::path::Path>,
     pub candidates: Arc<[ViewCandidate]>,
+
     /// The drawings the view that binds and its `extend`s offer.
     pub visualizers: Arc<[VisualizerBinding]>,
 }
@@ -88,14 +95,19 @@ pub struct TypeViews {
 pub struct VisualizerBinding {
     /// The view or `extend` that holds it.
     pub view: Arc<crate::ViewName>,
+
     /// The line it is on.
     pub line: u32,
+
     /// The renderer it names.
     pub name: Arc<str>,
+
     /// Where that renderer was loaded from, when it binds.
     pub origin: Option<Arc<str>>,
+
     /// Its inputs' names, when it binds.
     pub inputs: Arc<[Arc<str>]>,
+
     /// Why it does not bind, when it does not.
     pub rejection: Option<Arc<str>>,
 }
@@ -116,6 +128,7 @@ impl TypeViews {
         if self.presented_by().is_some() {
             return None;
         }
+
         self.candidates
             .iter()
             .find(|candidate| candidate.rejection.is_none())
@@ -130,9 +143,11 @@ impl TypeViews {
 pub struct ViewCheck {
     pub types: Arc<[TypeViews]>,
     pub unused: Arc<[Arc<crate::ViewName>]>,
+
     /// The kernels loaded for the session or carried by a module, which
     /// their views may call.
     pub kernels: Arc<[KernelSource]>,
+
     /// The renderers loaded for the session or carried by a module, which
     /// their views' drawings may call.
     pub renderers: Arc<[Arc<Renderer>]>,
@@ -143,8 +158,10 @@ pub struct ViewCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelSource {
     pub name: Arc<str>,
+
     /// The file or module record it was loaded from.
     pub origin: Arc<str>,
+
     /// Its source, or a link to it.
     pub source: Arc<str>,
 }
@@ -157,10 +174,13 @@ pub struct KernelSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renderer {
     pub name: Arc<str>,
+
     /// The file or module record it was loaded from, or `built-in`.
     pub origin: Arc<str>,
+
     /// Its JavaScript.
     pub source: Arc<str>,
+
     /// A digest of its source, which names this exact text.
     pub digest: Arc<str>,
 }
@@ -192,6 +212,7 @@ pub struct VisualizerInputs {
 pub struct VisualizerInput {
     pub name: Arc<str>,
     pub value: VisualizerValue,
+
     /// The part of the drawn value the input is, when it is one: `""` for
     /// the value itself, else members and indices, as a `select` names.
     pub path: Option<Arc<str>>,
@@ -203,10 +224,13 @@ pub enum VisualizerValue {
     /// A value, presented as views present it; its children and elements
     /// are read as any value's are.
     Value(Box<crate::InspectedValue>),
+
     /// `bytes(PTR, LEN)`: the bytes of memory there.
     Bytes(Arc<[u8]>),
+
     /// A string the `visualize` writes.
     Text(Arc<str>),
+
     /// Why the input could not be read.
     Problem(Arc<str>),
 }
@@ -259,12 +283,16 @@ pub struct Numbers {
 pub struct ViewExplanation {
     /// The value's type.
     pub type_info: Option<crate::TypeInfo>,
+
     /// Whether views present values at all.
     pub enabled: bool,
+
     /// The views whose patterns name the type, until the first that binds.
     pub candidates: Arc<[ViewCandidate]>,
+
     /// The drawings the view that binds and its `extend`s offer.
     pub visualizers: Arc<[VisualizerBinding]>,
+
     /// The value's presentation at this stop, when a view binds.
     pub presentation: Option<Arc<crate::Presentation>>,
 }
@@ -275,14 +303,17 @@ pub enum BreakpointSpec {
     /// Break at every concrete instance of the functions a location names;
     /// see [`crate::ModuleImage::functions_located`].
     Function(String),
+
     /// Break at every statement address of a source line. A line without
     /// statements moves to the next one with statements in the function
     /// containing it, except in Go, where it is refused; see
     /// [`crate::ModuleImage::breakpoint_line`].
     Source { path: PathBuf, line: LineNumber },
+
     /// Break at every concrete instance of the functions a location names
     /// that are declared in one source file.
     FileFunction { path: PathBuf, function: String },
+
     /// Break at an absolute process virtual address.
     Address(VirtualAddress),
 }
@@ -308,8 +339,10 @@ numeric_id!(
 pub struct ResolvedBreakpointLocation {
     /// The address and address space where the trap is installed.
     pub location: BreakpointLocation,
+
     /// Concrete code instances represented by this location.
     pub code_instances: Arc<[CodeInstanceId]>,
+
     /// The shared library the location is in, whose unloading removes it;
     /// `None` for the program itself and for explicit addresses.
     pub library: Option<crate::ModuleId>,
@@ -320,16 +353,22 @@ pub struct ResolvedBreakpointLocation {
 pub enum HitComparison {
     /// The hit numbered `count`.
     Equal,
+
     /// Every hit except the one numbered `count`.
     NotEqual,
+
     /// Hits numbered below `count`.
     Less,
+
     /// Hits numbered up to and including `count`.
     LessOrEqual,
+
     /// Hits numbered above `count`.
     Greater,
+
     /// The hit numbered `count` and every later hit.
     GreaterOrEqual,
+
     /// Every hit whose number is a multiple of `count`.
     Multiple,
 }
@@ -377,6 +416,7 @@ impl HitCondition {
             HitComparison::Greater => count != u64::MAX,
             HitComparison::NotEqual | HitComparison::GreaterOrEqual => true,
         };
+
         if satisfiable {
             Ok(condition)
         } else {
@@ -450,6 +490,7 @@ impl std::str::FromStr for HitCondition {
                 },
             )
         };
+
         // Two-character operators must be tried before their prefixes.
         let (comparison, digits) = [
             HitComparison::Equal,
@@ -470,6 +511,7 @@ impl std::str::FromStr for HitCondition {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(invalid());
         }
+
         let count = digits.parse().map_err(|_| invalid())?;
         Self::new(comparison, count)
     }
@@ -479,18 +521,24 @@ impl std::str::FromStr for HitCondition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
     pub id: BreakpointId,
+
     /// The user intent that created the breakpoint.
     pub spec: BreakpointSpec,
+
     /// Every deduplicated location at which the breakpoint is installed.
     pub locations: Arc<[ResolvedBreakpointLocation]>,
+
     /// Which hits stop execution; `None` stops at every hit.
     pub hit_condition: Option<HitCondition>,
+
     /// A condition the hitting thread's innermost frame must meet for a
     /// hit that its hit condition allows to stop.
     pub condition: Option<crate::Condition>,
+
     /// A message logged, as [`DebuggerEvent::LogMessage`], at each hit
     /// that would stop, which then does not stop.
     pub log_message: Option<crate::LogMessage>,
+
     /// How many times threads of the current process reached the
     /// breakpoint, including hits its condition did not stop at. A new
     /// process starts again from zero.
@@ -500,10 +548,12 @@ pub struct Breakpoint {
     /// [`DebuggerEvent::BreakpointsChanged`]. It is exact at every published
     /// stop and after the inferior exits.
     pub hit_count: u64,
+
     /// Whether the breakpoint is installed. A disabled breakpoint keeps
     /// its definition and count but owns no trap and counts no hits, and
     /// its `locations` are those it last resolved to.
     pub enabled: bool,
+
     /// Whether the stop the breakpoint first causes deletes it.
     pub temporary: bool,
 }
@@ -515,16 +565,21 @@ pub struct Breakpoint {
 pub struct BreakpointOptions {
     /// Which hits may stop; `None` lets every hit stop.
     pub hit_condition: Option<HitCondition>,
+
     /// A condition the hitting thread's innermost frame must meet.
     pub condition: Option<crate::Condition>,
+
     /// A message to log instead of stopping.
     pub log_message: Option<crate::LogMessage>,
+
     /// Whether to keep a function or source breakpoint that no loaded module
     /// has code for yet, with no locations, until a module that has it
     /// loads. Without this, such a breakpoint is refused.
     pub pending: bool,
+
     /// Whether the breakpoint starts enabled; true by default.
     pub enabled: bool,
+
     /// Whether the stop the breakpoint first causes deletes it.
     pub temporary: bool,
 }
@@ -551,19 +606,24 @@ impl Default for BreakpointOptions {
 pub enum LogPart {
     /// Literal text.
     Text(Arc<str>),
+
     /// A value the message shows, as the hitting thread saw it.
     Value {
         /// The value's expression.
         expression: crate::Expression,
+
         /// Its type, when it resolved.
         type_info: Option<crate::TypeInfo>,
+
         /// Its state; its capabilities belong to no stop.
         state: crate::VariableState,
     },
+
     /// A value the message names that could not be read.
     Error {
         /// The value's expression.
         expression: crate::Expression,
+
         /// Why it could not be read.
         error: Arc<str>,
     },
@@ -574,6 +634,7 @@ pub enum LogPart {
 pub struct BreakpointHit {
     /// The breakpoint whose hit condition the hit met.
     pub breakpoint: BreakpointId,
+
     /// The breakpoint's hit count including this hit, which is this hit's
     /// number. Other threads' hits counted before the stop was published
     /// can make [`Breakpoint::hit_count`] larger.
@@ -604,8 +665,10 @@ pub enum ConditionOwner {
 pub enum CatchPhase {
     /// As the call begins, before the kernel runs it.
     Entry,
+
     /// As the call returns, with its result.
     Exit,
+
     /// At both, as gdb's `catch syscall` does.
     #[default]
     Both,
@@ -630,13 +693,16 @@ impl CatchPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catchpoint {
     pub id: CatchpointId,
+
     /// The calls it stops at, in every ABI that names them; every call when
     /// empty.
     pub calls: Arc<[crate::syscalls::SyscallId]>,
     pub phase: CatchPhase,
+
     /// A condition the stopped thread's innermost frame must meet, where
     /// `$arg0` to `$arg5`, `$ret`, and `$path` read the call.
     pub condition: Option<crate::Condition>,
+
     /// How many calls it caught, including those its condition did not
     /// stop at.
     pub hit_count: u64,
@@ -655,17 +721,22 @@ impl Catchpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyscallStop {
     pub call: crate::syscalls::SyscallId,
+
     /// The arguments, as the call's registers held them.
     pub args: [u64; 6],
+
     /// What the call returned, at its exit; none at its entry.
     pub returned: Option<i64>,
+
     /// The path the call names, when it names one uscope could read.
     pub path: Option<Arc<str>>,
+
     /// The memory behind its pointer arguments, read as the syscall
     /// tracer reads it: what it reads at its entry, and at its exit also
     /// what it wrote. A pointer the thread's entry stop went unseen for is
     /// not read.
     pub captured: Arc<[crate::syscalls::Capture]>,
+
     /// Every catchpoint that stopped here, in identifier order.
     pub catchpoints: Arc<[CatchpointId]>,
 }
@@ -681,10 +752,13 @@ pub enum WatchAccess {
     /// event. A change is judged again once every thread is stopped, and a
     /// store another thread undid before then is not reported either.
     Change,
+
     /// Stores to any watched byte, including stores of an identical value.
     Write,
+
     /// Loads from any watched byte, without stores.
     Read,
+
     /// Loads from or stores to any watched byte.
     ReadWrite,
 }
@@ -706,9 +780,11 @@ pub struct WatchpointCapabilities {
     /// Hardware slots per thread, shared by every watchpoint. Other users of
     /// the debug hardware, such as perf breakpoints, can leave fewer.
     pub slots: u32,
+
     /// The widest naturally aligned span one slot covers. Other spans use
     /// several slots.
     pub max_slot_bytes: u64,
+
     /// The access kinds that can be watched, including changes judged from
     /// the stores the hardware reports.
     pub access: Arc<[WatchAccess]>,
@@ -723,29 +799,35 @@ pub enum WatchScope {
     /// An explicit address, or storage reached through a pointer. The
     /// debugger cannot know when it is reused and never invalidates it.
     Location,
+
     /// Static storage owned by a loaded module.
     Static {
         /// The module whose unload invalidates the watchpoint.
         module: crate::ModuleId,
     },
+
     /// One thread's instance of thread-local storage.
     ThreadLocal {
         /// The thread whose exit invalidates the watchpoint.
         thread: ThreadId,
     },
+
     /// A local variable or parameter of one function activation.
     Frame {
         /// The thread executing the activation.
         thread: ThreadId,
+
         /// The activation's canonical frame address.
         activation: VirtualAddress,
     },
+
     /// A local variable or parameter of one activation on a task's stack,
     /// which the task's runtime may move elsewhere to grow or shrink it.
     /// The watch moves with the stack, on whichever thread runs the task.
     Task {
         /// The task whose stack holds the activation.
         task: crate::TaskId,
+
         /// How far below the top of the task's stack the activation's
         /// canonical frame address is, which a move keeps.
         activation: u64,
@@ -811,10 +893,12 @@ impl WatchTarget {
 pub enum WatchpointSpec {
     /// An object resolved at the current stop.
     Target(Box<WatchTarget>),
+
     /// Explicit bytes of the process address space.
     Location {
         /// The first watched byte.
         address: VirtualAddress,
+
         /// The number of watched bytes.
         byte_size: u64,
     },
@@ -824,25 +908,35 @@ pub enum WatchpointSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchpoint {
     pub id: WatchpointId,
+
     /// The accesses it reports.
     pub access: WatchAccess,
+
     /// The expression that named the object, absent for explicit locations.
     pub expression: Option<crate::Expression>,
+
     /// The first watched byte.
     pub address: VirtualAddress,
+
     /// The number of watched bytes.
     pub byte_size: u64,
+
     /// The watched object's type, when it was resolved from an expression.
     pub type_info: Option<crate::TypeInfo>,
+
     /// The lifetime that bounds the watched storage.
     pub scope: WatchScope,
+
     /// The naturally aligned hardware spans that exactly cover the bytes.
     pub coverage: Arc<[crate::AddressRange<VirtualAddress>]>,
+
     /// Which hits stop execution; `None` stops at every hit.
     pub hit_condition: Option<HitCondition>,
+
     /// A condition the accessing thread's innermost frame must meet, after
     /// the access, for a hit that its hit condition allows to stop.
     pub condition: Option<crate::Condition>,
+
     /// How many accesses the watchpoint reported, including those its
     /// conditions did not stop at: every access for [`WatchAccess::Write`]
     /// and [`WatchAccess::ReadWrite`], and every store that changed the
@@ -851,6 +945,7 @@ pub struct Watchpoint {
     /// As with [`Breakpoint::hit_count`], hits that do not stop publish
     /// nothing, so the count is exact at every published stop.
     pub hit_count: u64,
+
     /// Whether the watchpoint holds debug registers. A disabled one counts
     /// nothing, but still ends with its storage.
     pub enabled: bool,
@@ -862,8 +957,10 @@ pub struct Watchpoint {
 pub struct WatchpointOptions {
     /// Which hits may stop; `None` lets every hit stop.
     pub hit_condition: Option<HitCondition>,
+
     /// A condition the accessing thread's innermost frame must meet.
     pub condition: Option<crate::Condition>,
+
     /// Whether the watchpoint starts enabled; true by default.
     pub enabled: bool,
 }
@@ -891,14 +988,18 @@ impl Default for WatchpointOptions {
 pub struct WatchpointHit {
     /// The watchpoint that reported the access.
     pub watchpoint: WatchpointId,
+
     /// The thread whose instruction made the access.
     pub thread: ThreadId,
+
     /// The watchpoint's hit count including this hit, which is this hit's
     /// number. Other threads' hits counted before the stop was published
     /// can make [`Watchpoint::hit_count`] larger.
     pub hit_count: u64,
+
     /// The watched bytes last observed by the debugger, when readable.
     pub previous: Option<Arc<[u8]>>,
+
     /// The watched bytes once every thread stopped, when readable.
     pub current: Option<Arc<[u8]>>,
 }
@@ -916,10 +1017,13 @@ impl WatchpointHit {
 pub enum WatchpointInvalidation {
     /// The function activation or lexical block owning the object ended.
     ScopeExited,
+
     /// The thread owning the object exited.
     OwnerThreadExited,
+
     /// The module owning the object was unloaded.
     ModuleUnloaded,
+
     /// The language runtime moved the stack holding the object somewhere
     /// the debugger could not follow.
     StackMoved,
@@ -930,6 +1034,7 @@ pub enum WatchpointInvalidation {
 pub struct InvalidatedWatchpoint {
     /// The removed watchpoint.
     pub watchpoint: Watchpoint,
+
     /// Why its storage is no longer watched.
     pub reason: WatchpointInvalidation,
 }
@@ -939,8 +1044,10 @@ pub struct InvalidatedWatchpoint {
 pub enum PresentedFrame {
     /// The physical containing frame is selected.
     Physical,
+
     /// One concrete inline instance is selected.
     Inline(CodeInstanceId),
+
     /// The debug metadata does not identify one compatible inline chain.
     Ambiguous(Arc<[CodeInstanceId]>),
 }
@@ -950,8 +1057,10 @@ pub enum PresentedFrame {
 pub struct FramePresentation {
     /// The machine instruction to which this presentation is tied.
     pub instruction: VirtualAddress,
+
     /// The logical frame currently selected at that instruction.
     pub frame: PresentedFrame,
+
     /// Active inline frames intentionally hidden below the selection.
     pub hidden_inline_frames: u32,
 }
@@ -969,17 +1078,23 @@ numeric_id!(
 pub struct LaunchOptions {
     /// Arguments passed after the program name.
     pub arguments: Vec<OsString>,
+
     /// Changes to the inherited environment, applied in order: a value sets
     /// the variable and `None` removes it.
     pub environment: Vec<(OsString, Option<OsString>)>,
+
     /// The inferior's working directory, instead of the debugger's.
     pub working_directory: Option<PathBuf>,
+
     /// The inferior's standard input, instead of the debugger's.
     pub stdin: Option<Stdio>,
+
     /// The inferior's standard output, instead of the debugger's.
     pub stdout: Option<Stdio>,
+
     /// The inferior's standard error, instead of the debugger's.
     pub stderr: Option<Stdio>,
+
     /// End the launch at the new process's first instruction, before the
     /// dynamic loader runs, with [`StopReason::Entry`].
     pub stop_at_entry: bool,
@@ -1002,14 +1117,17 @@ pub struct DebugFileOptions {
     /// Debug directories searched before the system's: those
     /// `NIX_DEBUG_INFO_DIRS` lists, then `/usr/lib/debug`.
     pub directories: Vec<PathBuf>,
+
     /// Whether to download the debug files no directory holds from
     /// debuginfod servers. As with gdb, sessions ask no server unless told
     /// to, since a download sends a module's build-id over the network and
     /// may take long.
     pub debuginfod: bool,
+
     /// The debuginfod servers to ask, in order, or `None` for those
     /// `DEBUGINFOD_URLS` lists.
     pub debuginfod_urls: Option<Vec<String>>,
+
     /// Where downloaded debug files are kept, or `None` for debuginfod's own
     /// cache, which other debuggers share: `DEBUGINFOD_CACHE_PATH`, or else
     /// `debuginfod_client` in the user's cache directory.
@@ -1022,15 +1140,18 @@ pub struct DebugFileOptions {
 pub struct CoreDumpOptions {
     /// The ELF core file to open.
     pub core: PathBuf,
+
     /// The executable that produced the dump. By default it is found like
     /// every other recorded module.
     pub executable: Option<PathBuf>,
+
     /// A directory holding the files of the machine that wrote the dump.
     ///
     /// Recorded paths are looked up inside it instead of on this machine.
     /// Every path, including absolute symbolic links and `..`, resolves as if
     /// the sysroot were `/`, so no file outside it is used.
     pub sysroot: Option<PathBuf>,
+
     /// Directories searched, in order, for module files missing from the
     /// recorded path or not matching the dump: first for a file with the
     /// recorded file name, then for any file with the recorded build-id.
@@ -1038,6 +1159,7 @@ pub struct CoreDumpOptions {
     /// A file found here is used only when proven to match, unless module
     /// mismatches are allowed, so a directory may hold unrelated builds.
     pub module_paths: Vec<PathBuf>,
+
     /// Use module files that the dump cannot prove match its recorded images.
     ///
     /// A proven file is always preferred, then one the dump cannot verify,
@@ -1046,6 +1168,7 @@ pub struct CoreDumpOptions {
     /// save. A file that cannot be placed at its recorded image is still
     /// refused, since relocating it would be a guess.
     pub allow_module_mismatch: bool,
+
     /// Where the modules' separate debug files are found.
     pub debug_files: DebugFileOptions,
 }
@@ -1070,20 +1193,24 @@ impl CoreDumpOptions {
 pub enum ModuleIdentity {
     /// The dumped GNU build-id note equals the file's.
     BuildId,
+
     /// Every saved byte of the file's read-only segments equals the file.
     SavedContent {
         /// The number of saved bytes compared.
         compared_bytes: u64,
     },
+
     /// The file differs from the dumped image; it was loaded only because
     /// module mismatches were explicitly allowed.
     Mismatched {
         /// Why the file is known to differ.
         detail: Arc<str>,
     },
+
     /// The dump saved nothing that could confirm the file; it was loaded only
     /// because module mismatches were explicitly allowed.
     Unverified,
+
     /// No file backs the image, as none backs the vDSO, so the image was read
     /// from the memory the dump saved.
     DumpedMemory,
@@ -1107,9 +1234,11 @@ pub enum CoreModuleState {
     Loaded {
         /// The loaded module and the file providing its metadata.
         module: crate::LoadedModuleRecord,
+
         /// The evidence that the file is the recorded image.
         identity: ModuleIdentity,
     },
+
     /// No file was found for the image; its frames and memory outside the
     /// dump stay unavailable.
     Missing,
@@ -1121,11 +1250,14 @@ pub struct CoreModule {
     /// The image path recorded by the dump, or `[vdso]` for the vDSO, which
     /// no file backs.
     pub recorded_path: Arc<PathBuf>,
+
     /// The image's lowest mapped address at dump time.
     pub start: VirtualAddress,
+
     /// The GNU build-id the dump saved for the image, which identifies the
     /// file to supply when it is missing or mismatched.
     pub build_id: Option<Arc<[u8]>>,
+
     /// Whether and how a file was loaded for the image.
     pub state: CoreModuleState,
 }
@@ -1135,14 +1267,19 @@ pub struct CoreModule {
 pub struct CoreDumpInfo {
     /// The core file.
     pub path: Arc<PathBuf>,
+
     /// The process that produced the dump.
     pub process_id: ProcessId,
+
     /// The process name recorded by the dump.
     pub process_name: Arc<str>,
+
     /// The leading command-line arguments recorded by the dump.
     pub arguments: Arc<str>,
+
     /// The signal that terminated the process, when recorded.
     pub exception: Option<ExceptionInfo>,
+
     /// Recorded images, beginning with the main executable, and the vDSO
     /// when the dump records one.
     pub modules: Arc<[CoreModule]>,
@@ -1163,6 +1300,7 @@ numeric_id!(
 pub enum ResumeScope {
     /// Resume every eligible thread in one process.
     Process(ProcessId),
+
     /// Resume only one thread.
     Thread(ThreadId),
 }
@@ -1172,19 +1310,25 @@ pub enum ResumeScope {
 pub enum StepKind {
     /// Execute one machine instruction.
     Instruction,
+
     /// Execute one machine instruction, running a call it makes until the
     /// call returns.
     OverInstruction,
+
     /// Advance to a different source location, entering calls.
     IntoSource,
+
     /// Advance to a different source location without stopping in callees.
     OverSource,
+
     /// Run until the selected frame returns to its caller.
     Out,
+
     /// Run until the stepping thread reaches a location, or the selected
     /// frame returns first, which ends it as [`StepKind::Out`] does. It is
     /// requested with [`Request::Advance`], never as a plain step.
     Advance,
+
     /// Advance as [`StepKind::OverSource`] does, unless the stepping task
     /// starts another task before the line completes: then stop where the
     /// first such task begins its function, in that task, which the step
@@ -1197,6 +1341,7 @@ pub enum StepKind {
 pub enum ExceptionDisposition {
     /// Deliver a pending signal that its [`SignalPolicy`] passes.
     Pass,
+
     /// Discard the pending exception.
     Suppress,
 }
@@ -1213,9 +1358,11 @@ pub struct SignalPolicy {
     /// Stop every thread and report the signal as
     /// [`StopReason::Exception`].
     pub stop: bool,
+
     /// Report a signal that does not stop with
     /// [`DebuggerEvent::SignalReceived`].
     pub print: bool,
+
     /// Deliver the signal to the inferior; one not passed is discarded.
     pub pass: bool,
 }
@@ -1226,6 +1373,7 @@ pub struct SignalPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeldProcess {
     pub process_id: ProcessId,
+
     /// When the process started, in the platform's units, which tells it
     /// apart from a later process given the same identifier.
     pub start_time: u64,
@@ -1241,6 +1389,7 @@ pub struct HeldProcess {
 pub struct HeldChild {
     parent: ProcessId,
     process: HeldProcess,
+
     /// Lets the child run. A simulated child has none: the simulation
     /// decides what happens to each.
     release: Option<fn(&HeldProcess) -> crate::Result<bool>>,
@@ -1304,13 +1453,17 @@ impl Drop for HeldChild {
 pub struct ExceptionFilter {
     /// The name clients choose the filter by, such as `go-panic`.
     pub id: &'static str,
+
     /// The language whose runtime reports it.
     pub language: &'static str,
     pub kind: LanguageExceptionKind,
+
     /// A few words naming what stops.
     pub label: &'static str,
+
     /// A sentence saying where the program stops.
     pub description: &'static str,
+
     /// Whether it stops unless a client chooses otherwise.
     pub default: bool,
 }
@@ -1400,8 +1553,10 @@ impl ExceptionStops {
 pub enum LanguageExceptionKind {
     /// An exception as it is raised, which the program may yet handle.
     Raised,
+
     /// An exception nothing handled, which ends the program.
     Unhandled,
+
     /// A fatal error, which ends the program.
     Fatal,
 }
@@ -1410,9 +1565,11 @@ pub enum LanguageExceptionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageException {
     pub kind: LanguageExceptionKind,
+
     /// The runtime's own message, as it prints it or would, with any
     /// exceptions before this one that it prints too.
     pub message: Arc<str>,
+
     /// An expression for the exception's value, which a client may
     /// evaluate at the stop, when the runtime keeps one.
     pub value: Option<Arc<str>>,
@@ -1423,6 +1580,7 @@ pub struct LanguageException {
 pub struct ExceptionInfo {
     /// The platform-defined exception code.
     pub code: u64,
+
     /// A human-readable description of the exception.
     pub description: Arc<str>,
 }
@@ -1442,6 +1600,7 @@ impl ExceptionInfo {
 pub enum ExitStatus {
     /// The process returned an exit code.
     Code(i64),
+
     /// The process was terminated by an exception.
     Terminated(ExceptionInfo),
 }
@@ -1452,8 +1611,10 @@ pub enum ExitStatus {
 pub struct StepTarget {
     /// The call instruction, which names the target to a step.
     pub call: VirtualAddress,
+
     /// The address a direct call calls; `None` for an indirect call.
     pub target: Option<VirtualAddress>,
+
     /// The called function's name, from its debug information or else
     /// its symbol, when something names it.
     pub callee: Option<Arc<str>>,
@@ -1464,6 +1625,7 @@ pub struct StepTarget {
 pub enum TaskEnding {
     /// Its future returned its output.
     Finished,
+
     /// Its future was dropped before it finished, as when the task was
     /// aborted or its runtime shut down.
     Cancelled,
@@ -1474,16 +1636,20 @@ pub enum TaskEnding {
 pub enum StopReason {
     /// The debugger established an initial coherent stop after attaching.
     Attach,
+
     /// A launch requested with [`LaunchOptions::stop_at_entry`] stopped at
     /// the new process's first instruction.
     Entry,
+
     /// Execution reached an installed breakpoint.
     Breakpoint {
         address: VirtualAddress,
+
         /// Every logical breakpoint at the address whose hit condition this
         /// hit met, in identifier order.
         hits: Arc<[BreakpointHit]>,
     },
+
     /// A thread accessed watched memory. The thread stops after the
     /// accessing instruction, or within a repeated string instruction that
     /// has more iterations left.
@@ -1491,6 +1657,7 @@ pub enum StopReason {
         /// Every watchpoint this thread's access reported.
         hits: Arc<[WatchpointHit]>,
     },
+
     /// Watched memory was accessed after the watched object's lifetime ended,
     /// so the affected watchpoints were removed instead of reporting
     /// accesses to unrelated data.
@@ -1498,25 +1665,31 @@ pub enum StopReason {
         /// The removed watchpoints.
         invalidated: Arc<[InvalidatedWatchpoint]>,
     },
+
     /// A new thread could not be armed with the process's watchpoints. It
     /// was stopped before running so it never executes unwatched.
     WatchpointArmFailed {
         /// The unarmed thread.
         thread_id: ThreadId,
+
         /// Why arming failed.
         description: Arc<str>,
     },
+
     /// A stepping operation completed.
     Step { kind: StepKind },
+
     /// A stepping operation stopped before it could tell whether it had
     /// completed, because the debugger lost evidence it follows a step by,
     /// such as the stepping frame's caller. The thread stopped after the
     /// last instruction it executed, and may be resumed or stepped again.
     StepIncomplete {
         kind: StepKind,
+
         /// Why the step could not be followed.
         description: Arc<str>,
     },
+
     /// A step followed its task to the task's end, and stopped in the
     /// runtime's code where the task's future returned or was dropped: the
     /// task runs no more of the program's code.
@@ -1525,29 +1698,37 @@ pub enum StopReason {
         task: crate::TaskId,
         ending: TaskEnding,
     },
+
     /// The future a step waited for was dropped, as a `select!` or a
     /// timeout drops a future it no longer awaits, and the step went on in
     /// the code that dropped it to its next line.
     FutureDropped { kind: StepKind },
+
     /// Execution stopped at the user's request.
     Pause,
+
     /// A thread was moved to resume elsewhere, by a jump or by assigning
     /// its program counter, without running.
     Jump,
+
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
+
     /// A language runtime reported an exception: one its program raised, or
     /// a fatal error. The frame the runtime blames is selected.
     LanguageException(LanguageException),
+
     /// The program executed a breakpoint instruction of its own, such as
     /// Go's `runtime.Breakpoint`. It resumes after the instruction.
     ProgramBreakpoint {
         /// The breakpoint instruction.
         address: VirtualAddress,
     },
+
     /// A thread entered or returned from a system call a catchpoint
     /// catches.
     Syscall(Box<SyscallStop>),
+
     /// The process replaced its executable image.
     Exec {
         /// Whether the new image is this debugger's executable, which is
@@ -1555,22 +1736,27 @@ pub enum StopReason {
         /// cannot be inspected or resumed.
         followed: bool,
     },
+
     /// A thread-specific execution operation ended because its thread exited.
     ThreadExited {
         /// The thread that exited.
         thread_id: ThreadId,
+
         /// How that thread exited. For a process's main thread, which exits
         /// before the process does, the code it passed to `exit`; the
         /// process's own status comes when it exits.
         status: ExitStatus,
     },
+
     /// The backend could not safely classify a native stop.
     Unclassifiable {
         /// Diagnostic details retained by the platform edge.
         description: Arc<str>,
     },
+
     /// The inferior exited.
     Exited(ExitStatus),
+
     /// A post-mortem core dump was opened; execution can never resume.
     CoreDump {
         /// The signal that terminated the process, when the dump recorded one.
@@ -1583,6 +1769,7 @@ pub enum StopReason {
 pub enum ThreadState {
     /// The thread is running or starting.
     Running,
+
     /// The thread is stopped and safe to inspect.
     Stopped {
         /// The thread's own stop reason, when it produced an interesting event.
@@ -1595,12 +1782,15 @@ pub enum ThreadState {
 pub struct ThreadSnapshot {
     /// The thread being described.
     pub id: ThreadId,
+
     /// The thread's observable execution state.
     pub state: ThreadState,
+
     /// The name the thread gave itself, such as with
     /// `pthread_setname_np`, as of its start or the last stop. Core dumps
     /// record no thread names.
     pub name: Option<Arc<str>>,
+
     /// What a stopped thread runs for a language runtime, such as Go's
     /// goroutine; `None` for a running thread, or a program with no runtime
     /// a model knows.
@@ -1612,21 +1802,27 @@ pub struct ThreadSnapshot {
 pub enum InferiorState {
     /// No inferior process exists.
     NotRunning,
+
     /// The inferior is starting or running.
     Running {
         /// The running process.
         process_id: ProcessId,
+
         /// The operation currently controlling execution, when known.
         execution_id: Option<ExecutionId>,
     },
+
     /// The inferior is stopped and may be inspected.
     Stopped {
         /// The stopped process.
         process_id: ProcessId,
+
         /// The immutable stopped snapshot identifier.
         stop_id: StopId,
+
         /// The thread selected by the stop.
         thread_id: ThreadId,
+
         /// The reason execution stopped.
         reason: StopReason,
     },
@@ -1637,23 +1833,32 @@ pub enum InferiorState {
 pub struct StateSnapshot {
     /// The debugger revision represented by this snapshot.
     pub revision: u64,
+
     /// The current inferior state.
     pub inferior: InferiorState,
+
     /// The current stopped snapshot, when the inferior is stopped.
     pub stop_id: Option<StopId>,
+
     /// The thread or task selected for implicit inspection commands.
     pub selected: Option<ExecutionContext>,
+
     /// The selected thread's frame that implicit inspection commands use:
     /// the innermost frame at each new stop, until a client selects another.
     pub selected_frame: Option<StackFrameId>,
+
     /// All live threads known at this revision.
     pub threads: Arc<[ThreadSnapshot]>,
+
     /// Logical presentation for the selected thread at this stop.
     pub presentation: Option<FramePresentation>,
+
     /// The logical breakpoints requested by clients.
     pub breakpoints: Arc<[Breakpoint]>,
+
     /// The watchpoints armed in the current process.
     pub watchpoints: Arc<[Watchpoint]>,
+
     /// The system-call catchpoints, which outlive any process.
     pub catchpoints: Arc<[Catchpoint]>,
 }
@@ -1666,17 +1871,20 @@ pub struct StateSnapshot {
 pub enum DebuggerEvent {
     /// Debugger state changed in a way no more specific event describes.
     StateChanged { revision: u64 },
+
     /// A launched inferior began executing under `execution_id`.
     InferiorLaunched {
         revision: u64,
         process_id: ProcessId,
         execution_id: ExecutionId,
     },
+
     /// An existing process was attached and coherently stopped.
     InferiorAttached {
         revision: u64,
         process_id: ProcessId,
     },
+
     /// Stopped threads resumed under `execution_id`.
     InferiorContinued {
         revision: u64,
@@ -1684,23 +1892,28 @@ pub enum DebuggerEvent {
         execution_id: ExecutionId,
         resumed: ResumeScope,
     },
+
     /// Every live thread is stopped and safe to inspect.
     InferiorStopped {
         revision: u64,
         process_id: ProcessId,
+
         /// The execution that ended, or `None` for a stop no client caused.
         execution_id: Option<ExecutionId>,
         stop_id: StopId,
+
         /// The thread whose event caused the stop.
         thread_id: ThreadId,
         reason: StopReason,
     },
+
     /// A new thread appeared in the inferior.
     ThreadStarted {
         revision: u64,
         process_id: ProcessId,
         thread_id: ThreadId,
     },
+
     /// One thread of a still-running inferior exited. A main thread that
     /// exits before the process does is reported when it exits, with the
     /// code it passed to `exit`, though the platform reports its status only
@@ -1711,29 +1924,35 @@ pub enum DebuggerEvent {
         thread_id: ThreadId,
         status: ExitStatus,
     },
+
     /// A shared object was mapped into the inferior.
     ModuleLoaded {
         revision: u64,
         module: crate::LoadedModuleRecord,
     },
+
     /// A shared object was unmapped from the inferior.
     ModuleUnloaded {
         revision: u64,
         module: crate::LoadedModuleRecord,
     },
+
     /// The inferior process exited.
     InferiorExited {
         revision: u64,
         process_id: ProcessId,
+
         /// The execution that ended, when one was active.
         execution_id: Option<ExecutionId>,
         status: ExitStatus,
     },
+
     /// The debugger released an attached process, which keeps running.
     InferiorDetached {
         revision: u64,
         process_id: ProcessId,
     },
+
     /// A thread received a signal whose policy neither stops nor discards
     /// its report: it was delivered or discarded and the thread ran on.
     SignalReceived {
@@ -1742,6 +1961,7 @@ pub enum DebuggerEvent {
         thread_id: ThreadId,
         exception: ExceptionInfo,
     },
+
     /// A thread hit a breakpoint that logs instead of stopping.
     LogMessage {
         revision: u64,
@@ -1750,6 +1970,7 @@ pub enum DebuggerEvent {
         breakpoint: BreakpointId,
         parts: Arc<[LogPart]>,
     },
+
     /// A breakpoint's or watchpoint's condition could not be evaluated at a
     /// hit, which therefore stops as if the condition were met.
     ConditionFailed {
@@ -1759,12 +1980,16 @@ pub enum DebuggerEvent {
         owner: ConditionOwner,
         error: Arc<str>,
     },
+
     /// The set of logical breakpoints changed.
     BreakpointsChanged { revision: u64 },
+
     /// The set of armed watchpoints changed.
     WatchpointsChanged { revision: u64 },
+
     /// The set of catchpoints changed.
     CatchpointsChanged { revision: u64 },
+
     /// Scoped watchpoints were removed because their storage's lifetime
     /// ended. A following `WatchpointsChanged` publishes the new set.
     WatchpointsInvalidated {
@@ -1888,6 +2113,7 @@ pub enum Request {
     },
     Attach {
         process_id: ProcessId,
+
         /// Whether the process is one a session held, whose job-control
         /// stop the attach ends.
         held: bool,
@@ -1910,20 +2136,24 @@ pub enum Request {
         process_id: ProcessId,
         stop_id: StopId,
         context: ExecutionContext,
+
         /// The frame whose return ends [`StepKind::Out`]; every other kind
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
         kind: StepKind,
+
         /// For [`StepKind::IntoSource`], the one call of the line, a
         /// [`StepTarget`], to go into; the line's other calls run to their
         /// returns.
         call: Option<VirtualAddress>,
+
         /// The threads that run while the step does: every thread, or only
         /// the stepping one.
         scope: ResumeScope,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
     },
+
     /// Runs until `thread_id` reaches a location `spec` resolves to, or
     /// `frame` returns first.
     Advance {
@@ -1936,6 +2166,7 @@ pub enum Request {
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
     },
+
     /// Moves `context`'s thread, without running it, to resume at the one
     /// location `spec` resolves to in the function it is stopped in, and
     /// publishes the stop again there.
@@ -1994,15 +2225,18 @@ pub enum Request {
     Snapshot {
         reply: Reply<StateSnapshot>,
     },
+
     /// One page of the tasks of every language runtime at a stop.
     Tasks {
         stop_id: StopId,
         from: Option<crate::TaskCursor>,
         limit: usize,
+
         /// Whether to leave out the tasks runtimes run for their own work.
         program_only: bool,
         reply: Reply<crate::TaskPage>,
     },
+
     /// The stop, thread, and frame that implicit inspection uses, without
     /// copying the rest of a snapshot.
     StoppedSelection {
@@ -2019,6 +2253,7 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
     },
+
     /// The calls a step into could go into from the innermost frame's
     /// line.
     StepTargets {
@@ -2066,6 +2301,7 @@ pub enum Request {
         limits: crate::InspectionLimits,
         reply: Reply<VisualizerInputs>,
     },
+
     /// The elements of a sequence of numbers that lie next to each other,
     /// read at once, or `None` when they do not.
     Numbers {
@@ -2080,16 +2316,19 @@ pub enum Request {
         query: GlobalVariableQuery,
         reply: Reply<GlobalVariablePage>,
     },
+
     /// Presents values with another set of views from now on.
     SetViews {
         views: Arc<crate::view::ViewSet>,
         reply: Reply<()>,
     },
+
     /// Turns presenting values with views on or off.
     EnableViews {
         enabled: bool,
         reply: Reply<()>,
     },
+
     /// Chooses whether steps stop in a language runtime's own code.
     SetStepIntoRuntime {
         enter: bool,
@@ -2102,6 +2341,7 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<ViewExplanation>,
     },
+
     /// Presents an expression's value and its first page of children,
     /// recording every kernel run it takes, each as text that replays it.
     RecordKernels {
@@ -2111,12 +2351,14 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<Vec<String>>,
     },
+
     /// The views whose patterns name the types a name means, in every
     /// loaded module.
     ExplainType {
         name: String,
         reply: Reply<Vec<TypeViews>>,
     },
+
     /// How every loaded module's types are presented.
     CheckViews {
         reply: Reply<ViewCheck>,
@@ -2147,6 +2389,7 @@ pub enum Request {
         policy: SignalPolicy,
         reply: Reply<SignalPolicy>,
     },
+
     /// Holds the processes the inferior forks from now on, sending each to
     /// `children`. Once its receiver is gone, children are released again.
     HoldForks {
@@ -2319,6 +2562,7 @@ mod tests {
                 .filter(|&hit| condition.is_met(hit))
                 .collect::<Vec<_>>()
         };
+
         assert_eq!(selected("==3"), [3]);
         assert_eq!(selected(" != 3 "), [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         assert_eq!(selected("<3"), [1, 2]);
@@ -2335,12 +2579,14 @@ mod tests {
             Err(crate::Error::InvalidHitCondition(message)) => message,
             other => panic!("{text:?} parsed as {other:?}"),
         };
+
         assert!(message("5").contains("write ==5"), "{}", message("5"));
         for text in [
             "", "==", "= 5", "=>5", "<<5", "==-1", "==+1", "==5x", "==1e3", "%%2",
         ] {
             assert!(message(text).contains("not an operator"), "{text:?}");
         }
+
         assert!(message("==18446744073709551616").contains("not an operator"));
         for text in ["==0", "<1", "<0", "<=0", "%0", ">18446744073709551615"] {
             assert!(message(text).contains("no hit can satisfy"), "{text:?}");
@@ -2369,6 +2615,7 @@ mod tests {
                 let Ok(condition) = HitCondition::new(comparison, count) else {
                     continue;
                 };
+
                 for hits in 0..16 {
                     assert_eq!(
                         condition.may_stop_after(hits),

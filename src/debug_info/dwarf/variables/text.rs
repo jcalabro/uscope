@@ -26,6 +26,7 @@ use super::{DwarfVariableInfo, VariableRuntime};
 use crate::debug_info::TextLocation;
 
 const PAGE_SIZE: u64 = 4096;
+
 /// How deep a string type's pointer to its bytes may be nested.
 const MAX_STRING_DEPTH: usize = 6;
 
@@ -33,6 +34,7 @@ const MAX_STRING_DEPTH: usize = 6;
 enum Stopped {
     /// Memory at this address could not be read.
     Unreadable(VirtualAddress),
+
     /// The budget could not afford the next read.
     Limited(InspectionExhaustion),
 }
@@ -50,6 +52,7 @@ impl TextReader<'_> {
         if let Some(exhaustion) = self.budget.memory_shortfall(size as u64) {
             return Err(Stopped::Limited(exhaustion));
         }
+
         self.budget.consume_memory(size).map_err(Stopped::Limited)?;
         self.runtime
             .read_memory(address, size)
@@ -73,6 +76,7 @@ impl TextReader<'_> {
             let Some(next) = address.get().checked_add(bytes.len() as u64) else {
                 return (bytes, false, None);
             };
+
             // The bytes left in this page, which the last page of the
             // address space ends without overflowing.
             let size = usize::try_from(PAGE_SIZE - next % PAGE_SIZE)
@@ -82,10 +86,12 @@ impl TextReader<'_> {
                 Ok(granted) => granted,
                 Err(exhaustion) => return (bytes, false, Some(Stopped::Limited(exhaustion))),
             };
+
             let next = VirtualAddress::new(next);
             let Ok(chunk) = self.runtime.read_memory(next, granted) else {
                 return (bytes, false, Some(Stopped::Unreadable(next)));
             };
+
             // A unit may straddle the chunks, so the search begins at the
             // unit the chunk's first byte belongs to.
             let first = bytes.len() - bytes.len() % width;
@@ -99,6 +105,7 @@ impl TextReader<'_> {
                 return (bytes, true, None);
             }
         }
+
         (bytes, false, None)
     }
 
@@ -116,6 +123,7 @@ impl TextReader<'_> {
             None if terminated => TextCompletion::Complete,
             None => TextCompletion::Truncated { length: None },
         };
+
         text(bytes, width, byte_order, completion)
     }
 
@@ -138,6 +146,7 @@ impl TextReader<'_> {
             },
             None => TextCompletion::Complete,
         };
+
         text(bytes, width, byte_order, completion)
     }
 
@@ -153,6 +162,7 @@ impl TextReader<'_> {
                 let address = VirtualAddress::new(address.get().checked_add(offset)?);
                 Some(self.read_exact(address, size))
             }
+
             ValueStorage::Bytes {
                 raw, start, end, ..
             } => {
@@ -239,6 +249,7 @@ impl DwarfVariableInfo {
             ) if address.address.get() != 0 && self.is_sentinel_text(type_id) => {
                 Some(reader.c_string(address.address, 1, self.target.byte_order))
             }
+
             (
                 ValueShape::Indirection {
                     target: Some(target),
@@ -249,6 +260,7 @@ impl DwarfVariableInfo {
                 let width = self.character_width(*target)?;
                 Some(reader.c_string(address.address, width, self.target.byte_order))
             }
+
             (
                 ValueShape::Array {
                     element,
@@ -264,6 +276,7 @@ impl DwarfVariableInfo {
                     Ok(bytes) => bytes,
                     Err(stopped) => return Some(stopped.summary(None)),
                 };
+
                 let terminated = bytes
                     .chunks_exact(width)
                     .position(|unit| unit.iter().all(|byte| *byte == 0));
@@ -282,6 +295,7 @@ impl DwarfVariableInfo {
             (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => {
                 self.counted_slice_text(&mut reader, storage, *length, shape)
             }
+
             (
                 ValueShape::Record {
                     record, members, ..
@@ -352,8 +366,10 @@ impl DwarfVariableInfo {
                         ValueAccessUnavailableReason::NullPointer,
                     ));
                 }
+
                 Some(Ok((address.address, None)))
             }
+
             // Slices of text count bytes, which wider characters are not.
             (
                 ValueShape::Slice {
@@ -375,6 +391,7 @@ impl DwarfVariableInfo {
                         Ok(address) => address,
                         Err(stopped) => return Some(Err(stopped)),
                     };
+
                     Some(
                         self.read_word(storage, length, &mut reader)?
                             .map(|length| (address, Some(length))),
@@ -382,6 +399,7 @@ impl DwarfVariableInfo {
                 }),
             _ => None,
         };
+
         match found {
             None => Ok(None),
             Some(Ok((address, length))) => Ok(Some(TextLocation { address, length })),
@@ -412,10 +430,12 @@ impl DwarfVariableInfo {
             Ok(address) => address,
             Err(stopped) => return Some(stopped.summary(None)),
         };
+
         let length = match self.read_word(storage, length, reader)? {
             Ok(length) => length,
             Err(stopped) => return Some(stopped.summary(None)),
         };
+
         Some(reader.counted_text(address, length, 1, self.target.byte_order))
     }
 
@@ -425,6 +445,7 @@ impl DwarfVariableInfo {
         let ValueShape::Slice { element, .. } = slice else {
             return 1;
         };
+
         self.value_shape(*element)
             .ok()
             .and_then(|shape| shape.scalar().map(|base| base.byte_size))
@@ -444,10 +465,12 @@ impl DwarfVariableInfo {
         let ValueShape::Slice { words, .. } = slice else {
             return None;
         };
+
         let address = match self.read_pointer(storage, self.word(words.data), reader)? {
             Ok(address) => address,
             Err(stopped) => return Some(stopped.summary(Some(length))),
         };
+
         let text = reader.counted_text(
             address,
             length,
@@ -463,6 +486,7 @@ impl DwarfVariableInfo {
         let ValueShape::Slice { element, .. } = slice else {
             return text;
         };
+
         let c_characters = self.value_shape(*element).is_ok_and(|shape| {
             shape.scalar().is_some_and(|base| {
                 base.byte_size == 1
@@ -478,6 +502,7 @@ impl DwarfVariableInfo {
         {
             text.bytes = text.bytes[..text.bytes.len() - 1].into();
         }
+
         text
     }
 
@@ -499,12 +524,14 @@ impl DwarfVariableInfo {
         ) {
             return matches!(width, 1 | 2 | 4).then_some(width);
         }
+
         if !matches!(
             base.encoding,
             BaseTypeEncoding::Signed | BaseTypeEncoding::Unsigned
         ) {
             return None;
         }
+
         let mut current = id;
         for _ in 0..MAX_STRING_DEPTH {
             let info = self.type_info(current).ok()?;
@@ -518,15 +545,18 @@ impl DwarfVariableInfo {
                         "char16_t" => 2,
                         _ => 0,
                     };
+
                     if named != 0 {
                         return (named == width).then_some(width);
                     }
+
                     current = target.id;
                 }
                 TypeKind::Modified { target, .. } => current = target.id,
                 _ => return None,
             }
         }
+
         None
     }
 
@@ -539,6 +569,7 @@ impl DwarfVariableInfo {
             let Ok(info) = self.type_info(current) else {
                 return false;
             };
+
             match &info.kind {
                 TypeKind::Modified { target, .. }
                 | TypeKind::Named {
@@ -554,6 +585,7 @@ impl DwarfVariableInfo {
                         Some(SourceLanguage::Odin) => info.name.as_ref() == "cstring",
                         _ => false,
                     };
+
                     return named
                         && self.value_shape(target.id).is_ok_and(|shape| {
                             shape.scalar().is_some_and(|base| {
@@ -564,6 +596,7 @@ impl DwarfVariableInfo {
                 _ => return false,
             }
         }
+
         false
     }
 
@@ -576,6 +609,7 @@ impl DwarfVariableInfo {
         if go.kind != GoKind::String {
             return None;
         }
+
         Some((
             member_offset(members, "str")?,
             member_offset(members, "len")?,
@@ -690,6 +724,7 @@ mod tests {
             runtime: &mut Filled,
             budget: &mut budget,
         };
+
         let text = reader.c_string(
             VirtualAddress::new(u64::MAX - 2),
             1,

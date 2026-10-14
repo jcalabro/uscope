@@ -98,6 +98,7 @@ async fn a_catchpoint_stops_at_a_calls_entry_and_exit_with_what_it_passed_and_re
         while caught(&entry).path.as_deref() != Some("/nonexistent/uscope-catch") {
             entry = scenario.resume_to_stop().await;
         }
+
         let before = hit_count(&mut scenario, &openat).await;
         let stop = caught(&entry);
         assert_eq!(
@@ -139,6 +140,7 @@ async fn a_catchpoint_stops_at_a_calls_entry_and_exit_with_what_it_passed_and_re
 #[tokio::test]
 async fn a_condition_reads_the_call_and_one_it_cannot_judge_stops() {
     let mut scenario = Scenario::launch(FIXTURES[0]);
+
     // Only the write to stdout stops; the one to stderr is counted.
     let writes = catch(&scenario, &["write"], CatchPhase::Entry, Some("$arg0 == 1")).await;
     let stop = scenario.run_to_stop().await;
@@ -184,6 +186,7 @@ async fn a_condition_reads_the_call_and_one_it_cannot_judge_stops() {
 #[tokio::test]
 async fn threads_calling_at_once_have_every_call_counted_and_run_to_their_end() {
     let mut scenario = Scenario::launch(FIXTURES[0]);
+
     // A condition that never holds makes every call an internal stop.
     let getppid = catch(
         &scenario,
@@ -196,10 +199,12 @@ async fn threads_calling_at_once_have_every_call_counted_and_run_to_their_end() 
         arguments: vec!["threads".into()],
         ..LaunchOptions::default()
     };
+
     assert_eq!(
         scenario.run_with_to_stop(options).await,
         StopReason::Exited(ExitStatus::Code(0))
     );
+
     // Four threads, a thousand calls each, entry and exit.
     assert_eq!(hit_count(&mut scenario, &getppid).await, 8000);
     scenario.shutdown().await;
@@ -227,6 +232,7 @@ async fn step_until_not_a_step(scenario: &mut Scenario) -> StopReason {
             reason => return reason,
         }
     }
+
     panic!("ten thousand steps stopped for nothing else");
 }
 
@@ -280,6 +286,7 @@ async fn a_call_under_a_breakpoint_stops_at_its_catchpoint() {
             arguments: vec!["raw".into()],
             ..LaunchOptions::default()
         };
+
         let stop = scenario.run_with_to_stop(options).await;
         assert!(matches!(stop, StopReason::Breakpoint { .. }), "{stop:?}");
         let modules = scenario

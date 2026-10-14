@@ -123,6 +123,7 @@ async fn stopped(scenario: &mut Scenario) -> (StoppedCore, uscope::StateSnapshot
     else {
         panic!("a core is always stopped: {snapshot:?}");
     };
+
     assert_eq!(snapshot.stop_id, Some(stop_id));
     (
         StoppedCore {
@@ -153,6 +154,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         else {
             panic!("{variant}: unexpected stop reason {:?}", stop.reason);
         };
+
         assert_eq!(exception.code, 11, "{variant}");
         assert!(
             exception
@@ -180,6 +182,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         let info = core_info(&scenario);
         assert_eq!(info.process_id, stop.process);
         assert_eq!(info.exception.as_ref(), Some(exception));
+
         // pr_fname keeps a bounded prefix of the executable name; gdb fills
         // all 16 bytes while the kernel reserves one for a terminator.
         assert!(
@@ -188,6 +191,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
             "{variant}: {:?}",
             info.process_name
         );
+
         // pr_psargs keeps a bounded prefix of the command line.
         let command_line = format!("{} segv", Scenario::fixture(&fixture).display());
         assert!(
@@ -197,10 +201,12 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         let CoreModuleState::Loaded { module, .. } = &info.modules[0].state else {
             panic!("{variant}: the executable was not loaded: {info:?}");
         };
+
         assert_eq!(
             module.path.as_ref(),
             &Scenario::fixture(&fixture).canonicalize().unwrap()
         );
+
         // Build-ids are only linked into the gcc -O0 variant; the others are
         // proven by their saved read-only bytes. Every library has a build-id.
         let executable_identity = loaded_identity(&info, &fixture);
@@ -212,6 +218,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
                 "{variant}: {executable_identity:?}"
             );
         }
+
         for library in ["libc.so", "libcrash.so", "ld-linux"] {
             assert_eq!(
                 loaded_identity(&info, library),
@@ -256,6 +263,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         assert_eq!(trace.termination, UnwindTermination::Complete, "{variant}");
 
         assert_eq!(signed(&variable(&scenario, "depth").await), 3, "{variant}");
+
         // At -O2 `scale` lives in xmm0, read from the dump's NT_FPREGSET.
         assert!(
             (binary64(&variable(&scenario, "scale").await) - 2.5).abs() < f64::EPSILON,
@@ -342,7 +350,9 @@ async fn abort_cores_unwind_from_libc_into_the_aborting_caller() {
         else {
             panic!("{variant}: unexpected stop reason {:?}", stop.reason);
         };
+
         assert_eq!(exception.code, 6);
+
         // abort() signals its own thread, so the sender is the process itself.
         assert!(
             exception.description.contains(&format!(
@@ -454,6 +464,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
         assert_eq!(names[1].1.as_deref(), Some("worker_main"));
         assert_eq!(trace.termination, UnwindTermination::Complete, "{names:#?}");
     }
+
     workers.sort_unstable();
     assert_eq!(workers, [1, 2, 3]);
     stack_pointers.sort_unstable();
@@ -577,6 +588,7 @@ async fn module_mismatches_are_fatal_unless_explicitly_allowed() {
         "{:?}",
         rebuilt.err()
     );
+
     // Without a build-id, saved read-only bytes expose a different program.
     for (core_name, executable) in [
         ("crash-clang-o2-segv.core", "crash-gcc-o2-nopie"),
@@ -631,6 +643,7 @@ async fn module_mismatches_are_fatal_unless_explicitly_allowed() {
         unbacked.completion,
         MemoryReadCompletion::Incomplete { .. }
     ));
+
     // Libraries that do match remain verified and keep their file contents.
     assert_eq!(loaded_identity(&info, "libc.so"), &ModuleIdentity::BuildId);
     allowed.shutdown().await;
@@ -658,6 +671,7 @@ async fn unverifiable_modules_require_permission_and_expose_only_registers() {
             ..
         }
     )));
+
     // Dumps save the vDSO whatever their filter, and it needs no file.
     assert_eq!(
         loaded_identity(&info, "[vdso]"),
@@ -718,6 +732,7 @@ async fn header_pages_omitted_from_a_dump_are_recovered_from_verified_files() {
             "{module}: {info:#?}"
         );
     }
+
     let (_, names) = named_frames(&scenario).await;
     assert_eq!(names[1].1.as_deref(), Some("main"));
     assert!(names[2].0.starts_with("libc.so"), "{names:#?}");
@@ -755,6 +770,7 @@ async fn missing_files_are_reported_and_leave_their_images_unavailable() {
         scenario.handle().variable("crash_library_value").await,
         Err(Error::VariableNotFound(_))
     ));
+
     // The executable's own state is unaffected.
     assert_eq!(signed(&variable(&scenario, "depth").await), 3);
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
@@ -859,6 +875,7 @@ fn first_prstatus(bytes: &[u8]) -> usize {
         ))
         .unwrap()
     };
+
     let mut note = start;
     while note < start + size {
         let (name, descriptor, kind) = (word(note), word(note + 4), word(note + 8));
@@ -866,8 +883,10 @@ fn first_prstatus(bytes: &[u8]) -> usize {
         if kind == 1 && &bytes[note + 12..note + 16] == b"CORE" {
             return descriptor_start;
         }
+
         note = descriptor_start + descriptor.next_multiple_of(4);
     }
+
     panic!("the core has no NT_PRSTATUS note");
 }
 
@@ -929,6 +948,7 @@ async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
             ),
             "{name}: {depth:?}"
         );
+
         // Memory outside the edited segment is unaffected.
         assert_eq!(
             signed(&variable(&scenario, "crash_counter").await),
@@ -959,6 +979,7 @@ async fn complete_read(
 #[tokio::test]
 async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() {
     let message_bytes = b"post-mortem read-only message\0";
+
     // Each core is a separate randomized run with its own load addresses.
     let addresses = async |scenario: &Scenario| {
         let handle = scenario.handle();
@@ -971,6 +992,7 @@ async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() 
                 .await,
         )
     };
+
     let reference = open_core("crash-gcc-o0-segv.core");
     let (counter, message) = addresses(&reference).await;
     assert_eq!(
@@ -1135,6 +1157,7 @@ async fn invalid_core_files_fail_with_typed_errors() {
     let truncated = directory.join("truncated.core");
     fs::write(&truncated, &source[..64]).unwrap();
     invalid(open(truncated), "program headers are malformed");
+
     // Truncation inside the note segment loses thread state, which must
     // never be reconstructed.
     let (notes_offset, notes_size) = note_segment(&source);
@@ -1166,6 +1189,7 @@ async fn invalid_core_files_fail_with_typed_errors() {
                     let headers = load_headers(bytes);
                     let (_, second_start, _) = headers[1];
                     let (first, _, _) = headers[0];
+
                     // Grow the first segment's memory size over the second.
                     let start = u64::from_le_bytes(
                         bytes[first + PHDR_VADDR..first + PHDR_VADDR + 8]
@@ -1181,6 +1205,7 @@ async fn invalid_core_files_fail_with_typed_errors() {
         ),
         "overlap",
     );
+
     // An explicit executable that does not exist is an error naming it, not
     // a missing module.
     assert!(matches!(
@@ -1233,6 +1258,7 @@ async fn go_rust_and_zig_cores_present_frames_and_locals() {
         for (index, expected) in expected_frames.iter().enumerate() {
             assert_eq!(functions[index], Some(*expected), "{core_name}: {names:#?}");
         }
+
         assert_eq!(
             trace.termination,
             UnwindTermination::Complete,
@@ -1245,6 +1271,7 @@ async fn go_rust_and_zig_cores_present_frames_and_locals() {
                 "{core_name}: {name}"
             );
         }
+
         scenario.shutdown().await;
     }
 }
@@ -1264,6 +1291,7 @@ async fn an_image_mapped_from_offset_zero_more_than_once_is_one_module() {
     let [module] = recorded[..] else {
         panic!("{core_name}: {:#?}", info.modules);
     };
+
     assert!(
         matches!(
             &module.state,
@@ -1324,6 +1352,7 @@ async fn core_reads_keep_backed_bytes_that_end_inside_a_word() {
             scenario.handle().loaded_module_image(library.module.id),
         )
         .await;
+
     // .fini ends the executable segment, whose file contents end with it.
     let fini = image
         .sections()
@@ -1400,6 +1429,7 @@ async fn foreign_modules() -> Vec<(PathBuf, PathBuf)> {
             } else {
                 recorded.clone()
             };
+
             (recorded, original)
         })
         .collect()
@@ -1486,6 +1516,7 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
     {
         place(root.path(), recorded, original);
     }
+
     let options = foreign(|options| options.sysroot = Some(root.path().to_owned()));
 
     // A module the sysroot lacks is missing even though this machine has a
@@ -1520,8 +1551,10 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
                 module.recorded_path.display()
             );
         };
+
         assert_eq!(identity, &ModuleIdentity::BuildId);
         assert!(loaded.path.starts_with(&canonical_root), "{loaded:?}");
+
         // The build-id read from the dump's saved header is the file's own,
         // as an independent ELF reader sees it.
         assert_eq!(
@@ -1535,12 +1568,14 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
     assert_eq!(names[1].1.as_deref(), Some("main"));
     assert_eq!(names[2].0, "libc.so.6", "{names:#?}");
     assert_eq!(signed(&variable(&scenario, "depth").await), 3);
+
     // Saved data is the dump's own; the rebuilt library on this machine
     // would say 123.
     assert_eq!(
         signed(&variable(&scenario, "crash_library_value").await),
         321
     );
+
     // Unsaved read-only data comes from the verified sysroot file.
     let message = scenario
         .operation(
@@ -1553,6 +1588,7 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
         .await;
     assert_eq!(read.completion, MemoryReadCompletion::Complete);
     assert_eq!(&*read.bytes, b"post-mortem read-only message");
+
     // The other machine's C library describes its own structures, which
     // locate its TLS.
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
@@ -1581,6 +1617,7 @@ async fn a_sysroot_copy_of_this_machine_serves_tls_through_its_c_library() {
     let (libc, identity) = loaded_from(&core_info(&scenario), "libc.so.6");
     assert!(libc.starts_with(&canonical_root), "{}", libc.display());
     assert_eq!(identity, ModuleIdentity::BuildId);
+
     // The C library's descriptors are found through the sysroot file, and
     // the TLS blocks in the dump.
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
@@ -1598,6 +1635,7 @@ async fn sysroot_paths_resolve_inside_the_sysroot_and_open_only_regular_files() 
     for (recorded, original) in &modules {
         place(root.path(), recorded, original);
     }
+
     // Each link would reach this machine's different build if it escaped the
     // sysroot; inside it, the link reaches the original.
     let decoy = |name: &str| core(name).strip_prefix("/").expect("absolute").to_owned();
@@ -1684,6 +1722,7 @@ async fn module_paths_supply_files_by_name_then_by_build_id() {
     ] {
         fs::copy(source, by_name.path().join(name)).unwrap();
     }
+
     let scenario = Scenario::open_core(
         "module path names",
         &foreign(|options| options.module_paths = vec![by_name.path().to_owned()]),
@@ -1698,6 +1737,7 @@ async fn module_paths_supply_files_by_name_then_by_build_id() {
             )
         );
     }
+
     // Modules this machine does hold stay at their recorded paths.
     let (pthread, identity) = loaded_from(&info, "libpthread.so.0");
     assert!(!pthread.starts_with(canonical(by_name.path())));
@@ -1721,6 +1761,7 @@ async fn module_paths_supply_files_by_name_then_by_build_id() {
     ] {
         fs::copy(source, renamed.path().join(name)).unwrap();
     }
+
     fs::create_dir(renamed.path().join("crash-gcc-o0")).unwrap();
     let scenario = Scenario::open_core(
         "module path build-ids",
@@ -1742,6 +1783,7 @@ async fn module_paths_supply_files_by_name_then_by_build_id() {
             )
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -1798,6 +1840,7 @@ async fn unproven_module_files_are_errors_only_at_their_recorded_paths() {
             place(root.path(), recorded, original);
         }
     }
+
     let searched = foreign(|options| {
         options.sysroot = Some(root.path().to_owned());
         options.module_paths = vec![decoys.path().to_owned()];
@@ -1836,6 +1879,7 @@ async fn unproven_module_files_are_errors_only_at_their_recorded_paths() {
 async fn executables_found_nowhere_name_the_search_and_the_build_id_to_supply() {
     let modules = foreign_modules().await;
     let (_, executable_file) = named(&modules, "crash-gcc-o0");
+
     // An executable found nowhere names what was searched and what to supply.
     let empty = ScratchDir::new("empty-sysroot");
     let unavailable = Debugger::open_core(&foreign(|options| {
@@ -1850,6 +1894,7 @@ async fn executables_found_nowhere_name_the_search_and_the_build_id_to_supply() 
         "{:?}",
         unavailable.err()
     );
+
     // An explicit executable needs no search.
     let explicit = Scenario::open_core(
         "explicit executable with sysroot",
@@ -1890,8 +1935,10 @@ async fn thread_tls(scenario: &Scenario) -> Vec<[(i128, u64); 2]> {
             };
             *slot = (signed(&variable), address.get());
         }
+
         threads.push(located);
     }
+
     threads.sort_unstable();
     threads
 }
@@ -1925,6 +1972,7 @@ async fn core_tls_is_located_through_the_c_librarys_own_descriptors() {
         VariableState::Unavailable(reason) => reason.to_string(),
         state => panic!("TLS without a thread pointer was available: {state:?}"),
     };
+
     assert!(
         reason.ends_with("the thread has not allocated the module's TLS block"),
         "{reason}"
@@ -1938,6 +1986,7 @@ async fn core_tls_is_located_through_the_c_librarys_own_descriptors() {
     for name in ["crash-gcc-o0", "libcrash.so", "libc.so.6"] {
         fs::copy(named(&modules, name).1, originals.path().join(name)).unwrap();
     }
+
     let foreign_scenario = Scenario::open_core(
         "foreign TLS",
         &foreign(|options| options.module_paths = vec![originals.path().to_owned()]),
@@ -1980,6 +2029,7 @@ async fn vdso_images_the_dump_lost_are_missing_rather_than_guessed() {
             .unwrap_or_else(|| panic!("no vDSO in {info:#?}"))
             .clone()
     };
+
     let reference = open_core(FIXTURE);
     let start = vdso(&core_info(&reference)).start.get();
     let (trace, _) = named_frames(&reference).await;
@@ -2021,6 +2071,7 @@ async fn vdso_images_the_dump_lost_are_missing_rather_than_guessed() {
         let missing = vdso(&info);
         assert_eq!(missing.state, CoreModuleState::Missing, "{name}");
         assert_eq!(missing.start.get(), start, "{name}");
+
         // The modules files back are unaffected.
         assert!(
             loaded_identity(&info, "vdso-gcc-o0").is_verified(),

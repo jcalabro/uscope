@@ -238,6 +238,7 @@ impl fmt::LowerHex for LoadBias {
 pub struct AddressRange<A> {
     /// The first address included in the range.
     pub start: A,
+
     /// The first address after the range.
     pub end: A,
 }
@@ -316,6 +317,7 @@ macro_rules! numeric_id {
         }
     };
 }
+
 pub(crate) use numeric_id;
 
 id_type!(
@@ -408,6 +410,7 @@ impl fmt::Display for RuntimeId {
 pub struct TaskId {
     /// The runtime instance that schedules the task.
     pub runtime: RuntimeId,
+
     /// The runtime's number for the task.
     pub number: u64,
 }
@@ -423,12 +426,16 @@ impl std::fmt::Display for TaskId {
 pub enum TaskState {
     /// On a thread, running or in a system call.
     Running,
+
     /// Ready to run, waiting for a thread.
     Runnable,
+
     /// Waiting for an event, such as a channel or a lock.
     Blocked,
+
     /// Finished, and not yet released by its runtime.
     Exited,
+
     /// The runtime's state for the task could not be read, for this reason.
     Unknown(Arc<str>),
 }
@@ -439,13 +446,16 @@ pub enum TaskState {
 pub struct TaskLocation {
     /// The place's code, unless its runtime recorded it only by its source.
     pub address: Option<VirtualAddress>,
+
     /// The loaded module whose image holds the address, or whose source
     /// the runtime recorded the place in.
     pub module: Option<ModuleId>,
+
     /// The function holding the address, or the call at it for a return
     /// address.
     pub function: Option<Arc<str>>,
     pub source: Option<SourceLocation>,
+
     /// The place as its runtime recorded it, by its source's path, as
     /// Rust's `Location` does; the source file it names may be none of
     /// the module's.
@@ -465,30 +475,40 @@ pub struct RecordedPlace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSnapshot {
     pub id: TaskId,
+
     /// What its runtime calls a task, such as Go's "goroutine".
     pub noun: &'static str,
     pub state: TaskState,
+
     /// The runtime's own words for what the task does or waits for, such
     /// as Go's "chan receive".
     pub detail: Option<Arc<str>>,
+
     /// The thread running the task, or its runtime's code for it, as while
     /// it is being parked.
     pub thread: Option<ThreadId>,
+
     /// Where a task that is not on a thread will resume.
     pub resume: Option<TaskLocation>,
+
     /// The call that created the task.
     pub creation: Option<TaskLocation>,
+
     /// The function the task began in.
     pub entry: Option<TaskLocation>,
+
     /// The task that created this one.
     pub parent: Option<TaskId>,
+
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker, rather than the program's.
     pub internal: bool,
+
     /// The key-value labels the program or its runtime gave the task, such
     /// as Go's profiler labels, or the tokio runtime that holds it in a
     /// process with several.
     pub labels: Arc<[(Arc<str>, Arc<str>)]>,
+
     /// Where the runtime keeps the task at this stop, such as a goroutine's
     /// `g`. A runtime may reuse the memory for another task once this one
     /// exits.
@@ -500,13 +520,17 @@ pub struct TaskSnapshot {
 pub enum StackSegment {
     /// An OS thread's stack, which no runtime knows.
     Thread,
+
     /// A task's own stack.
     Task,
+
     /// A runtime's scheduler stack for a thread, on which it runs its own
     /// code, for a task or for none.
     System,
+
     /// A runtime's signal-handling stack.
     Signal,
+
     /// No stack: the chain of awaits of a future that the frame below
     /// drives, such as the one a runtime's `block_on` polls, which is
     /// suspended between its polls.
@@ -518,13 +542,16 @@ pub enum StackSegment {
 pub enum ThreadActivity {
     /// A task, or the runtime's code on its behalf.
     Task { task: TaskId, stack: StackSegment },
+
     /// The runtime's scheduler with no task, or for Go, code the runtime
     /// does not know, such as a thread C created.
     Idle,
+
     /// The program's own code, on a thread no runtime schedules tasks on,
     /// such as one the program spawned or the one that blocks on a
     /// runtime.
     Outside,
+
     /// The runtime's state for the thread could not be read, for this
     /// reason.
     Unknown(Arc<str>),
@@ -541,12 +568,15 @@ pub struct TaskCursor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPage {
     pub tasks: Arc<[TaskSnapshot]>,
+
     /// Where the next page begins, or `None` after the last.
     pub next: Option<TaskCursor>,
+
     /// Why the page may be missing tasks or describe some wrongly, such
     /// as a task whose memory could not be read. A page with none is
     /// complete.
     pub gaps: Arc<[Arc<str>]>,
+
     /// What reading the page cost: the memory read of the runtimes.
     pub usage: crate::InspectionUsage,
 }
@@ -558,6 +588,7 @@ pub struct TaskPage {
 pub enum ExecutionContext {
     /// An operating-system thread.
     Thread(ThreadId),
+
     /// A language runtime's task.
     Task(TaskId),
 }
@@ -600,8 +631,10 @@ impl std::fmt::Display for ExecutionContext {
 pub enum RegisterRole {
     /// The address of the current instruction.
     ProgramCounter,
+
     /// The address of the top of the current stack.
     StackPointer,
+
     /// The base address conventionally used for the current stack frame.
     FramePointer,
 }
@@ -611,10 +644,13 @@ pub enum RegisterRole {
 pub struct RegisterDescriptor {
     /// The register's identifier within its target architecture.
     pub id: RegisterId,
+
     /// The canonical architecture-defined register name.
     pub name: Arc<str>,
+
     /// The number of meaningful bits in the register.
     pub bits: u16,
+
     /// The register's architecture-independent role, when distinguished.
     pub role: Option<RegisterRole>,
 }
@@ -624,6 +660,7 @@ pub struct RegisterDescriptor {
 pub struct RegisterValue {
     /// The register represented by this value.
     pub register: RegisterDescriptor,
+
     /// The register bytes in the target's byte order, or `None` in a caller's
     /// frame when a callee may have overwritten the register without saving
     /// it, so its value in that frame is unknown.
@@ -636,10 +673,13 @@ pub struct RegisterValue {
 pub struct RegisterSnapshot {
     /// The debugger revision at which these values were read.
     pub revision: u64,
+
     /// The thread or task whose registers were read.
     pub context: ExecutionContext,
+
     /// The architecture and data representation of the register values.
     pub target: TargetDescription,
+
     /// Register values in the architecture's canonical display order.
     pub registers: Arc<[RegisterValue]>,
 }
@@ -654,6 +694,7 @@ pub enum BaseTypeEncoding {
     Unsigned,
     UnsignedCharacter,
     Floating,
+
     /// A complex number: two floats, each half its size, the real part
     /// first.
     ComplexFloating,
@@ -679,6 +720,7 @@ impl BaseType {
         if self.encoding != BaseTypeEncoding::Floating {
             return None;
         }
+
         let name = self.base_name.as_ref();
         Some(match (self.byte_size, name) {
             (2, "_Float16" | "__fp16" | "f16") => FloatLayout::Binary16,
@@ -699,12 +741,16 @@ impl BaseType {
 pub struct BaseType {
     /// The source-facing type name.
     pub name: Arc<str>,
+
     /// The underlying base-type name, before typedef presentation.
     pub base_name: Arc<str>,
+
     /// How values of the type are encoded.
     pub encoding: BaseTypeEncoding,
+
     /// The number of bytes occupied in target storage.
     pub byte_size: u64,
+
     /// The meaningful low-order bits when the representation is narrower than its storage.
     pub bit_size: Option<u64>,
 }
@@ -723,6 +769,7 @@ pub enum IntegerValue {
 pub enum EnumerationOrigin {
     /// A source-language enumeration represented by `DW_TAG_enumeration_type`.
     Language,
+
     /// Constants associated with a named integer type, as emitted by Go.
     NamedConstants,
 }
@@ -732,6 +779,7 @@ pub enum EnumerationOrigin {
 pub struct Enumerator {
     /// The producer/source name.
     pub name: Arc<str>,
+
     /// The exact signed or unsigned value.
     pub value: IntegerValue,
 }
@@ -741,6 +789,7 @@ pub struct Enumerator {
 pub struct TypeReference {
     /// The immutable image that owns the type.
     pub image: ModuleImageId,
+
     /// The type's dense identifier within that image.
     pub id: TypeId,
 }
@@ -751,16 +800,22 @@ pub struct TypeReference {
 pub enum TypeModifier {
     /// C-family `const` qualification.
     Const,
+
     /// C-family `volatile` qualification.
     Volatile,
+
     /// C-family `restrict` qualification.
     Restrict,
+
     /// Atomic qualification.
     Atomic,
+
     /// Producer-defined immutable qualification.
     Immutable,
+
     /// Packed representation.
     Packed,
+
     /// Producer-defined shared qualification.
     Shared,
 }
@@ -771,10 +826,13 @@ pub enum TypeModifier {
 pub enum NamedTypeRelationship {
     /// A source-language synonym, such as a C or C++ typedef.
     Synonym,
+
     /// A source-language type with distinct identity, such as a Go definition.
     Distinct,
+
     /// A producer-created wrapper describing a language encoding.
     Encoding,
+
     /// The producer and language do not establish the relationship safely.
     Unspecified,
 }
@@ -819,13 +877,16 @@ pub enum Accessibility {
 pub enum RecordMemberLayout {
     /// A byte-aligned constant offset from the containing object.
     ByteOffset(u64),
+
     /// An exact bit range from the beginning of the containing object.
     BitRange {
         /// The first bit in the field.
         bit_offset: u64,
+
         /// The field width in bits.
         bit_size: u64,
     },
+
     /// A provider-owned computation requiring a concrete containing-object address.
     Runtime,
 }
@@ -836,14 +897,19 @@ pub struct RecordMember {
     /// The source member name; anonymous members have no name.
     pub name: Option<Arc<str>>,
     pub type_ref: TypeReference,
+
     /// Its location within a containing instance.
     pub layout: RecordMemberLayout,
+
     /// Its normalized source accessibility.
     pub accessibility: Accessibility,
+
     /// Whether the producer marked this member as compiler-generated.
     pub artificial: bool,
+
     /// Whether a producer such as Go marked this as an embedded field.
     pub embedded: bool,
+
     /// Its declaration location, when supplied by debug metadata.
     pub declaration: Option<SourceLocation>,
 }
@@ -861,10 +927,13 @@ pub enum BaseClassVirtuality {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BaseClass {
     pub type_ref: TypeReference,
+
     /// Its location within the derived object.
     pub layout: RecordMemberLayout,
+
     /// Its normalized source accessibility.
     pub accessibility: Accessibility,
+
     /// Whether this is a virtual base.
     pub virtuality: BaseClassVirtuality,
 }
@@ -875,10 +944,12 @@ pub struct BaseClass {
 pub enum VariantSelector {
     /// One exact discriminator value.
     Value(IntegerValue),
+
     /// An inclusive discriminator range.
     Range {
         /// The first selected value.
         low: IntegerValue,
+
         /// The last selected value.
         high: IntegerValue,
     },
@@ -890,6 +961,7 @@ pub enum VariantSelector {
 pub enum VariantSelection {
     /// The fallback when no explicit selector matches.
     Default,
+
     /// One or more exact values or inclusive ranges.
     Selectors(Arc<[VariantSelector]>),
 }
@@ -901,8 +973,10 @@ pub enum VariantSelection {
 pub enum VariantDiscriminant {
     /// A concrete member whose location supplies the runtime discriminator.
     Stored(RecordMember),
+
     /// A tag type is described but no discriminator field exists in storage.
     TagType(TypeReference),
+
     /// Nothing is stored or described, as rustc describes a sum type only
     /// one of whose variants can hold a value, such as `Result<T,
     /// Infallible>`, or none can, such as `Infallible`.
@@ -914,8 +988,10 @@ pub enum VariantDiscriminant {
 pub struct Variant {
     /// The variant DIE name, when supplied independently of its components.
     pub name: Option<Arc<str>>,
+
     /// Its discriminator selection rule.
     pub selection: VariantSelection,
+
     /// Components in producer/source order.
     pub members: Arc<[RecordMember]>,
 }
@@ -926,127 +1002,167 @@ pub struct Variant {
 pub enum TypeKind {
     /// A directly encoded scalar base type.
     Base(BaseType),
+
     /// An integral representation with ordered symbolic names.
     Enumeration {
         /// The normalized integral storage representation.
         representation: BaseType,
+
         /// The producer-supplied underlying type edge, when present.
         underlying: Option<TypeReference>,
+
         /// Symbolic names in producer/source order. Duplicate values are preserved.
         enumerators: Arc<[Enumerator]>,
+
         /// Whether this is a language enum or a named integer with associated constants.
         origin: EnumerationOrigin,
+
         /// Whether the producer marked enumerator names as scoped.
         scoped: bool,
     },
+
     /// A thin pointer. A missing target represents an unspecified pointee such as `void`.
     Pointer {
         /// The pointed-to type, when supplied by the producer.
         target: Option<TypeReference>,
+
         /// The target-specific DWARF address class; zero is the default class.
         address_class: u64,
     },
+
     /// A language reference represented by an address-like value.
     Reference {
         /// Whether this is an lvalue or rvalue reference.
         kind: ReferenceKind,
         target: TypeReference,
+
         /// The target-specific DWARF address class; zero is the default class.
         address_class: u64,
     },
+
     /// A statically bounded array with one or more dimensions.
     Array {
         element: TypeReference,
+
         /// Dimensions in source order.
         dimensions: Arc<[ArrayDimension]>,
+
         /// Which dimension's elements are adjacent in memory.
         ordering: ArrayOrdering,
     },
+
     /// An array whose bounds, or whose elements' place, the program decides
     /// at run time, as a Fortran array's descriptor, an Ada array of an
     /// unconstrained type, and a C variable-length array do. Reading a
     /// value finds them; a C flexible array member's count is never known.
     RuntimeArray {
         element: TypeReference,
+
         /// Dimensions in source order.
         dimensions: Arc<[RuntimeDimension]>,
+
         /// Which dimension's elements are adjacent in memory.
         ordering: ArrayOrdering,
     },
+
     /// A language slice descriptor with a runtime element count.
     Slice {
         element: TypeReference,
+
         /// Which of the descriptor's words hold its parts.
         words: SliceWords,
+
         /// Whether the elements are the language's text, as in Rust's `str`
         /// and Zig's `[]const u8`.
         text: bool,
     },
+
     /// A structure or class with ordered instance members and base subobjects.
     Record {
         /// The source aggregate category.
         kind: RecordKind,
+
         /// Direct instance members in producer/source order.
         members: Arc<[RecordMember]>,
+
         /// Base-class subobjects in producer/source order.
         bases: Arc<[BaseClass]>,
+
         /// Whether this is a declaration without a complete layout.
         incomplete: bool,
     },
+
     /// Overlapping aggregate storage without a producer-described active member.
     Union {
         /// Alternative member interpretations in producer/source order.
         members: Arc<[RecordMember]>,
+
         /// Whether this is a declaration without a complete layout.
         incomplete: bool,
     },
+
     /// Aggregate storage whose active components are selected by a discriminator.
     Variant {
         /// The containing aggregate category.
         storage: VariantStorageKind,
+
         /// Ordinary members outside the variant part.
         common_members: Arc<[RecordMember]>,
+
         /// Base subobjects outside the variant part.
         bases: Arc<[BaseClass]>,
+
         /// Stored discriminator or tag-only metadata.
         discriminant: Box<VariantDiscriminant>,
+
         /// Variants in producer/source order.
         variants: Arc<[Variant]>,
+
         /// Whether the containing aggregate has no complete layout.
         incomplete: bool,
     },
+
     /// An ordered source modifier around another type.
     Modified {
         /// The modifier at this graph node.
         modifier: TypeModifier,
         target: TypeReference,
     },
+
     /// A named type relationship described by a producer wrapper.
     Named {
         /// The representation target, absent for an incomplete declaration.
         target: Option<TypeReference>,
+
         /// The source or producer relationship to that target.
         relationship: NamedTypeRelationship,
     },
+
     /// A deliberately unspecified type such as C `void`.
     Unspecified,
+
     /// A function value, such as Go's `func`: null, or a pointer to a
     /// context whose first word is the code it calls and whose rest holds
     /// what a closure captured.
     Function,
+
     /// The type of a function's code, as C's `int (int)`, which values have
     /// only through pointers to it.
     Signature {
         /// What the function returns, or `None` for nothing.
         returns: Option<TypeReference>,
+
         /// The parameters' types, in order.
         parameters: Arc<[TypeReference]>,
+
         /// Whether more arguments may follow the parameters, as C's `...`.
         variadic: bool,
+
         /// Whether the parameters were declared, which C distinguishes:
         /// `int (void)` takes none, while `int ()` says nothing.
         prototyped: bool,
     },
+
     /// A valid type whose value shape is not implemented yet.
     Opaque {
         /// A stable description of the unsupported DWARF type tag.
@@ -1061,8 +1177,10 @@ pub enum TypeKind {
 pub struct SliceWords {
     /// The pointer to the first element.
     pub data: u8,
+
     /// How many elements there are.
     pub length: u8,
+
     /// How many elements there is room for, when the descriptor says, as
     /// Go's slices do.
     pub capacity: Option<u8>,
@@ -1075,12 +1193,14 @@ impl SliceWords {
         length: 1,
         capacity: None,
     };
+
     /// A length then a pointer, as D's slices are.
     pub const LENGTH_POINTER: Self = Self {
         data: 1,
         length: 0,
         capacity: None,
     };
+
     /// A pointer, a length, then a capacity, as Go's slices are.
     pub const POINTER_LENGTH_CAPACITY: Self = Self {
         data: 0,
@@ -1100,6 +1220,7 @@ impl SliceWords {
 pub enum ArrayOrdering {
     /// Row by row, the last index varying fastest, as C's arrays are.
     RowMajor,
+
     /// Column by column, the first index varying fastest, as Fortran's
     /// arrays are.
     ColumnMajor,
@@ -1110,6 +1231,7 @@ pub enum ArrayOrdering {
 pub struct ArrayDimension {
     /// The source lower bound.
     pub lower_bound: i128,
+
     /// The number of elements in this dimension.
     pub count: u64,
 }
@@ -1119,8 +1241,10 @@ pub struct ArrayDimension {
 pub struct RuntimeDimension {
     /// The first index.
     pub lower_bound: ArrayBound,
+
     /// Where the dimension ends.
     pub extent: ArrayExtent,
+
     /// The distance in bytes from one element of the dimension to the
     /// next, when the producer gives one rather than the elements being
     /// adjacent.
@@ -1132,8 +1256,10 @@ pub struct RuntimeDimension {
 pub enum ArrayExtent {
     /// At its last index.
     Upper(ArrayBound),
+
     /// After its count of elements.
     Count(ArrayBound),
+
     /// Nowhere the producer says, as for a C flexible array member: its
     /// elements are reached only by index.
     Unknown,
@@ -1144,12 +1270,15 @@ pub enum ArrayExtent {
 pub enum ArrayBound {
     /// Known when the program is loaded.
     Constant(i128),
+
     /// The value of an expression of the producer's, from where the array
     /// is and the frame reading it, as an integer of `byte_size` bytes.
     Computed { byte_size: u8, signed: bool },
+
     /// What the program stored where an expression of the producer's says,
     /// an integer of `byte_size` bytes.
     Stored { byte_size: u8, signed: bool },
+
     /// The value of the program's variable whose debugging entry is at
     /// this offset in `.debug_info`.
     Variable { debug_info_offset: u64 },
@@ -1160,12 +1289,16 @@ pub enum ArrayBound {
 pub struct TypeInfo {
     /// Stable identity within the owning module image.
     pub reference: TypeReference,
+
     /// Producer name or a deterministic structural presentation.
     pub name: Arc<str>,
+
     /// Storage size in bytes, when known.
     pub byte_size: Option<u64>,
+
     /// The node's normalized shape.
     pub kind: TypeKind,
+
     /// What the type is, independent of how a producer spells its name:
     /// present for every type the producer names.
     pub identity: Option<Arc<TypeIdentity>>,
@@ -1180,6 +1313,7 @@ impl TypeInfo {
         let Some(identity) = self.identity.as_deref() else {
             return self.name.to_string();
         };
+
         let spells_path = identity.path.first().is_none_or(|first| {
             self.name
                 .strip_prefix(first.as_ref())
@@ -1193,11 +1327,13 @@ impl TypeInfo {
         {
             return self.name.to_string();
         }
+
         let mut name = String::new();
         for segment in identity.path.iter() {
             name.push_str(segment);
             name.push_str("::");
         }
+
         name.push_str(&self.name);
         name
     }
@@ -1209,24 +1345,33 @@ impl TypeInfo {
 pub enum SourceLanguage {
     /// Any version of C.
     C,
+
     /// Any version of C++.
     Cpp,
     Rust,
     Go,
+
     /// Zig, whichever backend produced it.
     Zig,
+
     /// Odin, whose units say they are C99.
     Odin,
+
     /// Fortran, of any standard.
     Fortran,
+
     /// D.
     D,
+
     /// Nim, whose units are the C it compiles each module to.
     Nim,
+
     /// Ada, of any standard.
     Ada,
+
     /// Another language, by its DWARF language code.
     Other(u16),
+
     /// The unit does not say.
     Unknown,
 }
@@ -1242,21 +1387,28 @@ pub enum SourceLanguage {
 pub struct TypeIdentity {
     /// The language of the unit that defines the type.
     pub language: SourceLanguage,
+
     /// The enclosing namespaces, modules, packages, types, and functions,
     /// outermost first, with inline namespaces removed.
     pub path: Arc<[Arc<str>]>,
+
     /// The inline namespaces among the enclosing scopes, such as libc++'s
     /// `__1`, which a name may spell or omit.
     pub inline_namespaces: Arc<[Arc<str>]>,
+
     /// The name without its path or arguments: `vector`, `Vec`, `Aligned`.
     pub base: Arc<str>,
+
     /// Template or generic arguments by position, with packs flattened.
     pub arguments: Arc<[TypeArgument]>,
+
     /// Where a C++ template parameter pack's arguments begin among
     /// `arguments`, when the type has a pack, even an empty one.
     pub pack: Option<usize>,
+
     /// Where the arguments came from.
     pub origin: ArgumentOrigin,
+
     /// What Go's runtime records about the type, for Go types.
     pub go: Option<GoTypeAttributes>,
 }
@@ -1266,8 +1418,10 @@ pub struct TypeIdentity {
 #[non_exhaustive]
 pub enum TypeArgument {
     Type(TypeReference),
+
     /// An integral value, such as an array length.
     Value(IntegerValue),
+
     /// An argument the debugger cannot resolve, as the name spells it. It
     /// matches only a wildcard.
     Unknown(Arc<str>),
@@ -1281,9 +1435,11 @@ pub enum ArgumentOrigin {
     /// Values the entries omit, such as Rust's const generic arguments,
     /// come from the name.
     Dwarf,
+
     /// The producer described no parameters, so the name was parsed and its
     /// arguments resolved through the image's types.
     ParsedName,
+
     /// The type has no arguments.
     None,
 }
@@ -1293,6 +1449,7 @@ pub enum ArgumentOrigin {
 pub struct GoTypeAttributes {
     /// The type's kind, which says what it is whatever it is named.
     pub kind: GoKind,
+
     /// The offset of the type's runtime descriptor from `runtime.types`.
     pub runtime_type: Option<u64>,
 }
@@ -1327,6 +1484,7 @@ pub enum GoKind {
     String,
     Struct,
     UnsafePointer,
+
     /// A number this version does not know, or zero, which Go gives the
     /// types it synthesizes for its own runtime.
     Other(u8),
@@ -1374,10 +1532,12 @@ impl GoKind {
 pub enum TypeNode {
     /// A type whose normalized metadata is available.
     Resolved(TypeInfo),
+
     /// A type DIE whose metadata is defective and cannot be interpreted safely.
     Malformed {
         /// Stable identity within the owning module image.
         reference: TypeReference,
+
         /// A stable description of the defect.
         description: Arc<str>,
     },
@@ -1400,18 +1560,24 @@ impl TypeNode {
 pub enum FloatValue {
     /// IEEE binary16 bits: C's `_Float16`, and Rust's and Zig's `f16`.
     Binary16(u16),
+
     /// bfloat16 bits: binary32's top half, as C's `__bf16`.
     BFloat16(u16),
+
     /// IEEE binary32 bits.
     Binary32(u32),
+
     /// IEEE binary64 bits.
     Binary64(u64),
+
     /// IEEE binary128 bits: C's `__float128`, and Rust's and Zig's `f128`.
     Binary128(u128),
+
     /// The meaningful 80 bits of an x87 extended value.
     X87Extended {
         /// The explicit integer bit and fraction.
         significand: u64,
+
         /// The sign and biased exponent.
         sign_exponent: u16,
     },
@@ -1422,11 +1588,14 @@ pub enum FloatValue {
 #[non_exhaustive]
 pub enum ScalarValue {
     Boolean(bool),
+
     /// A sign-extended integer.
     Signed(i128),
     Unsigned(u128),
+
     /// A binary floating-point value retained as exact target bits.
     Floating(FloatValue),
+
     /// A complex number, its parts retained as exact target bits.
     Complex {
         real: FloatValue,
@@ -1439,6 +1608,7 @@ pub enum ScalarValue {
 pub struct AddressValue {
     /// The target virtual address represented by the value.
     pub address: VirtualAddress,
+
     /// The function a pointer to code enters, by name, when the address is
     /// a function's first instruction in a loaded module.
     pub function: Option<Arc<str>>,
@@ -1450,48 +1620,63 @@ pub struct AddressValue {
 pub enum VariableValue {
     /// A supported scalar value.
     Scalar(ScalarValue),
+
     /// An integral value retaining all exact symbolic matches.
     Enumeration {
         /// The exact target value.
         value: IntegerValue,
+
         /// Exact symbolic matches in producer/source order, or, when none
         /// equals the value, the flag constants whose bitwise OR it is.
         matches: Arc<[Enumerator]>,
     },
+
     /// A concrete thin pointer or reference address.
     Address(AddressValue),
+
     /// A function value. A closure's captured variables are its children.
     Function {
         /// The code it calls, or `None` for a null (Go's nil) function.
         code: Option<VirtualAddress>,
+
         /// The function that code begins, when the debug information
         /// describes one there.
         function: Option<Arc<str>>,
     },
+
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
+
     /// An array whose elements are available through explicit child pages.
     Array { dimensions: Arc<[ArrayDimension]> },
+
     /// A Fortran allocatable array the program has not allocated.
     NotAllocated,
+
     /// A Fortran pointer to an array the program has not associated with
     /// one.
     NotAssociated,
+
     /// A decoded language slice whose elements are available through child pages.
     Slice {
         /// Runtime length from the descriptor.
         length: u64,
+
         /// Runtime capacity when present in the descriptor.
         capacity: Option<u64>,
     },
+
     /// A structure or class whose bases and members are available through child pages.
     Record,
+
     /// Overlapping union storage whose interpretations are available through child pages.
     Union,
+
     /// A discriminated aggregate whose selected components are available through child pages.
     Variant {
         /// The decoded stored discriminator; absent for tagless single variants.
         discriminant: Option<IntegerValue>,
+
         /// The selected variant, or `None` when no selector matched.
         active: Option<Arc<Variant>>,
     },
@@ -1505,36 +1690,45 @@ pub enum ValueChildRelationship {
     ArrayElement {
         /// The zero-based row-major index.
         index: u64,
+
         /// One index per source dimension, including each declared lower bound.
         indices: Arc<[i128]>,
     },
+
     /// One runtime slice element.
     SliceElement {
         /// The zero-based runtime index.
         index: u64,
     },
+
     /// One direct record, union, common-variant, or active-variant member.
     Member(RecordMember),
+
     /// One base-class subobject.
     Base(BaseClass),
+
     /// One element of a value a view presents as a sequence.
     Element {
         /// The zero-based position in the sequence.
         index: u64,
     },
+
     /// One entry of a value a view presents as a map. The child is the
     /// entry's value.
     Entry {
         /// The zero-based position among the entries.
         index: u64,
+
         /// The entry's key.
         key: Arc<MapKey>,
     },
+
     /// One named child a view computes, such as a vector's capacity.
     Field {
         /// The name the view gives it.
         name: Arc<str>,
     },
+
     /// The value as it is stored, without its view.
     Raw,
 }
@@ -1544,6 +1738,7 @@ pub enum ValueChildRelationship {
 pub struct MapKey {
     /// Its source-facing normalized type.
     pub type_info: TypeInfo,
+
     /// Its current availability and decoded summary.
     pub state: VariableState,
 }
@@ -1554,14 +1749,19 @@ pub struct MapKey {
 pub enum InspectionLimit {
     /// Maximum visible variables examined or returned.
     Variables,
+
     /// Maximum requested target bytes read.
     MemoryBytes,
+
     /// Maximum number of logical target-memory reads.
     MemoryReads,
+
     /// Maximum number of value nodes.
     ValueNodes,
+
     /// Maximum aggregate nesting depth.
     AggregateDepth,
+
     /// Maximum debug-expression work.
     ExpressionWork,
 }
@@ -1571,14 +1771,19 @@ pub enum InspectionLimit {
 pub struct InspectionLimits {
     /// Visible variables that may be examined or returned.
     pub variables: u64,
+
     /// Value nodes that may be materialized.
     pub value_nodes: u64,
+
     /// Deepest aggregate path or expansion level.
     pub aggregate_depth: u64,
+
     /// Logical target-memory reads.
     pub memory_reads: u64,
+
     /// Requested target-memory bytes.
     pub memory_bytes: u64,
+
     /// Conservatively reserved debug-expression work units.
     pub expression_work: u64,
 }
@@ -1618,14 +1823,19 @@ impl InspectionLimits {
 pub struct InspectionUsage {
     /// Visible variables examined or returned.
     pub variables: u64,
+
     /// Value nodes materialized.
     pub value_nodes: u64,
+
     /// Deepest aggregate path or expansion level reached.
     pub aggregate_depth: u64,
+
     /// Logical target-memory reads attempted.
     pub memory_reads: u64,
+
     /// Target-memory bytes requested.
     pub memory_bytes: u64,
+
     /// Conservatively reserved debug-expression work units.
     pub expression_work: u64,
 }
@@ -1635,10 +1845,13 @@ pub struct InspectionUsage {
 pub struct InspectionExhaustion {
     /// Resource that could not be reserved.
     pub resource: InspectionLimit,
+
     /// Configured ceiling for the resource.
     pub limit: u64,
+
     /// Amount completed before the failed reservation.
     pub used: u64,
+
     /// Additional amount requested by the failed operation.
     pub requested: u64,
 }
@@ -1649,6 +1862,7 @@ pub struct InspectionExhaustion {
 pub enum InspectionCompletion {
     /// The requested operation completed.
     Complete,
+
     /// Work stopped at a typed resource boundary.
     Truncated(InspectionExhaustion),
 }
@@ -1669,6 +1883,7 @@ impl InspectionCompletion {
 pub enum ValueStorage {
     /// Storage in the inferior's virtual address space.
     Memory(VirtualAddress),
+
     /// Bounded immutable bytes captured while evaluating the parent value.
     Bytes {
         source: VariableValueSource,
@@ -1677,11 +1892,13 @@ pub enum ValueStorage {
         end: usize,
         address: Option<VirtualAddress>,
     },
+
     /// A DWARF implicit pointer that must be resolved at the originating frame.
     ImplicitPointer {
         debug_info_offset: u64,
         byte_offset: i64,
     },
+
     /// Part of a value whose pieces lie in several places.
     Composite(CompositeStorage),
 }
@@ -1692,6 +1909,7 @@ pub enum ValueStorage {
 pub struct CompositeStorage {
     /// Pieces in order, covering the whole value without gaps.
     pub pieces: Arc<[StoragePiece]>,
+
     /// The first selected bit.
     pub start: u64,
 }
@@ -1713,6 +1931,7 @@ pub enum PieceLocation {
         address: VirtualAddress,
         bit_offset: u64,
     },
+
     /// Bytes captured at the stop, from `bit_offset` bits into `raw`: a
     /// register's whole contents, least significant byte first, or a value
     /// the expression computed or holds.
@@ -1721,14 +1940,17 @@ pub enum PieceLocation {
         raw: Arc<[u8]>,
         bit_offset: u64,
     },
+
     /// A pointer to an object with no address, as in
     /// [`ValueStorage::ImplicitPointer`].
     ImplicitPointer {
         debug_info_offset: u64,
         byte_offset: i64,
     },
+
     /// Bits the program did not keep.
     Undefined,
+
     /// Bits this stop cannot provide, such as a register a caller's callee
     /// did not save.
     Unavailable(VariableUnavailableReason),
@@ -1747,8 +1969,10 @@ pub struct ValueChildrenReference {
     pub(crate) storage: ValueStorage,
     pub(crate) total: u64,
     pub(crate) active_variant: Option<usize>,
+
     /// The view whose children these are, rather than the stored value's.
     pub(crate) view: Option<ViewChildren>,
+
     /// Where the elements of an array bounded at run time are, from its
     /// storage, as its value found them.
     pub(crate) placement: Option<Arc<ArrayPlacement>>,
@@ -1758,6 +1982,7 @@ pub struct ValueChildrenReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayPlacement {
     pub(crate) dimensions: Arc<[ArrayDimension]>,
+
     /// Each dimension's distance in bytes between adjacent elements.
     pub(crate) strides: Arc<[i64]>,
 }
@@ -1770,13 +1995,17 @@ pub struct ViewChildren {
     /// for what the debugger presents without a view, such as a sum type's
     /// active variant, which has no fields.
     pub(crate) bound: Option<Arc<dyn std::any::Any + Send + Sync>>,
+
     /// How many elements precede the fields.
     pub(crate) elements: u64,
+
     /// How many fields precede the `[raw]` child.
     pub(crate) fields: u64,
+
     /// For a view presenting the value as another, that value's children,
     /// which are the elements.
     pub(crate) inner: Option<Arc<ValueChildrenReference>>,
+
     /// Which of those children the elements are, by their positions, when
     /// they are only some of them.
     pub(crate) picked: Option<Arc<[u64]>>,
@@ -1799,6 +2028,7 @@ impl PartialEq for ViewChildren {
             (None, None) => true,
             _ => false,
         };
+
         same_view
             && self.elements == other.elements
             && self.fields == other.fields
@@ -1839,8 +2069,10 @@ impl ValueChildrenReference {
 pub enum ValueChildren {
     /// Scalars, enumerations, pointers, and references have no structural children.
     NotApplicable,
+
     /// Children can be requested in arbitrary bounded pages.
     Available(Arc<ValueChildrenReference>),
+
     /// The aggregate header is valid but its children cannot be evaluated.
     Unavailable(VariableUnavailableReason),
 }
@@ -1850,8 +2082,10 @@ pub enum ValueChildren {
 pub struct ValueChild {
     /// Its stable relationship to the page's parent.
     pub relationship: ValueChildRelationship,
+
     /// Its source-facing normalized type.
     pub type_info: TypeInfo,
+
     /// Its current availability and decoded summary.
     pub state: VariableState,
 }
@@ -1861,14 +2095,19 @@ pub struct ValueChild {
 pub struct ValueChildPage {
     /// The stopped snapshot that authorized the reads.
     pub stop_id: crate::StopId,
+
     /// The zero-based child offset represented by this page.
     pub offset: u64,
+
     /// The deterministic number of children exposed by the parent.
     pub total: u64,
+
     /// Children represented in stable parent order.
     pub children: Arc<[ValueChild]>,
+
     /// Whether the requested interval completed.
     pub completion: InspectionCompletion,
+
     /// Resources consumed while producing this page.
     pub usage: InspectionUsage,
 }
@@ -1879,14 +2118,19 @@ pub struct ValueChildPage {
 pub enum VariableValueSource {
     /// Memory in the inferior's virtual address space.
     Memory(VirtualAddress),
+
     /// A target register containing the complete value.
     Register(RegisterDescriptor),
+
     /// Debug metadata supplies the value as a constant.
     Constant,
+
     /// A DWARF expression computes a value that has no storage location.
     Computed,
+
     /// Optimization retained a referent value but eliminated the pointer's address.
     ImplicitPointer,
+
     /// The value is assembled from several places, or from part of a
     /// register above its least significant bit, so no one place holds it.
     Composite,
@@ -1898,14 +2142,19 @@ pub enum VariableValueSource {
 pub enum DereferenceUnavailableReason {
     /// The pointer contains the null address.
     Null,
+
     /// The producer did not supply a concrete pointee type.
     UnspecifiedPointee,
+
     /// The pointee is a valid type whose value shape is not implemented.
     UnsupportedPointee(Arc<str>),
+
     /// The pointer uses a target address class the backend cannot interpret.
     AddressClass(u64),
+
     /// The referent could not be read or reconstructed at this stop.
     Unavailable(VariableUnavailableReason),
+
     /// The type metadata needed to dereference the value is defective.
     Malformed(VariableMalformedReason),
 }
@@ -1962,13 +2211,16 @@ impl DereferenceReference {
 pub enum DereferenceState {
     /// The value is not a pointer or reference.
     NotApplicable,
+
     /// Dereference is valid at the capability's exact stopped state.
     Available(Box<DereferenceReference>),
+
     /// The value is an indirection, but dereference is unavailable for a typed reason.
     Unavailable {
         /// The dereferenced expression's type (the pointee), when it resolves.
         /// `None` when the producer supplied no concrete pointee type.
         pointee: Option<Box<TypeInfo>>,
+
         /// Why the dereference cannot be performed.
         reason: DereferenceUnavailableReason,
     },
@@ -1980,35 +2232,50 @@ pub enum DereferenceState {
 pub enum UnsupportedVariableFeature {
     /// Reconstructing a value as it existed at function entry.
     EntryValue,
+
     /// Recovering a parameter from the caller's call-site metadata.
     ParameterReference,
+
     /// Evaluating a referenced DIE's location expression.
     CrossDieEvaluation,
+
     /// Resolving a thread-local storage address.
     Tls,
+
     /// Reading from a non-default target address space.
     AddressSpace,
+
     /// Combining multiple or partial location pieces.
     CompositeLocation,
+
     /// Resolving a pointer to an object that has no concrete location.
     ImplicitPointer,
+
     /// Reading WebAssembly execution state.
     WasmLocation,
+
     /// Reading a target register class not captured by this backend.
     RegisterClass,
+
     /// Applying a typed DWARF operation outside the supported scalar types.
     TypedValue,
+
     /// Selecting among simultaneous valid locations for one object.
     AlternativeLocations,
+
     /// Materializing a valid source type representation not modeled by uscope.
     TypeRepresentation,
+
     /// Evaluating a valid runtime aggregate layout not modeled by uscope.
     RuntimeAggregateLocation,
+
     /// Decoding a valid scalar representation not modeled by uscope.
     ScalarRepresentation,
+
     /// Evaluating a DWARF expression operation uscope does not implement,
     /// such as `DW_OP_GNU_variable_value`.
     ExpressionOperation,
+
     /// Finding a returned value its calling convention does not say where
     /// to find, as for an aggregate in a language that leaves its own
     /// unspecified.
@@ -2043,6 +2310,7 @@ impl fmt::Display for UnsupportedVariableFeature {
 pub struct ValueBitRange {
     /// Offset from the least-addressed byte of the value, in bits.
     pub offset: u64,
+
     /// Number of unavailable bits.
     pub size: u64,
 }
@@ -2053,8 +2321,10 @@ pub struct ValueBitRange {
 pub enum OptimizedOutReason {
     /// The defining entry supplies neither a location nor a constant.
     NoLocation,
+
     /// The selected location description is empty.
     EmptyLocation,
+
     /// Only the listed portions of a composite value are undefined.
     UndefinedPieces {
         /// Undefined destination ranges in source-value bit coordinates.
@@ -2068,11 +2338,14 @@ pub enum OptimizedOutReason {
 pub enum CallFrameUnavailableReason {
     /// The instruction has no usable module-relative context.
     NoInstructionContext,
+
     /// Unwinding terminated without producing a CFA.
     UnwindTerminated(Arc<str>),
+
     /// The frame's function left by a tail call, which gave its place on
     /// the stack to the function it jumped to.
     TailCall,
+
     /// The frame is a suspended task's: its future holds its state, and it
     /// has no place on any stack.
     Suspended,
@@ -2085,20 +2358,27 @@ pub enum CallFrameUnavailableReason {
 pub enum EntryValueUnavailableReason {
     /// The frame has no caller, or was entered by a signal.
     NoCaller,
+
     /// The caller's debug information describes no call returning to it.
     NoCallSite,
+
     /// The call site calls another function, which jumped to this one.
     TargetMismatch,
+
     /// The call site's target cannot be identified, so another function
     /// may have jumped to this one.
     UnknownTarget,
+
     /// Chains of tail calls may have entered the function again since the
     /// call site called it.
     TailCalls,
+
     /// The call site does not describe the value it passed.
     NoParameter,
+
     /// A tail call passed it, computed from state the jump discarded.
     DiscardedState,
+
     /// The caller cannot provide the value its call site passed.
     Caller(Box<VariableUnavailableReason>),
 }
@@ -2132,10 +2412,13 @@ impl fmt::Display for EntryValueUnavailableReason {
 pub enum TlsUnavailableReason {
     /// The module has no loader identity usable by the TLS provider.
     ModuleIdentityUnavailable,
+
     /// No compatible TLS provider is available.
     ProviderUnavailable,
+
     /// The provider could not resolve this thread's address.
     LookupFailed(Arc<str>),
+
     /// A parked task runs on no thread, so has no thread's storage.
     NoThread,
 }
@@ -2146,33 +2429,45 @@ pub enum TlsUnavailableReason {
 pub enum ValueAccessUnavailableReason {
     /// A pointer type does not name a concrete pointee type.
     UnspecifiedPointee,
+
     /// A dereference was requested from a non-pointer, non-reference value.
     NotPointerOrReference,
+
     /// The pointer uses a target-specific address class.
     AddressClass(u64),
+
     /// Dereferencing a null pointer cannot produce a value.
     NullPointer,
+
     /// Address arithmetic exceeded the target address width.
     AddressOverflow,
+
     /// A runtime member expression requires a concrete containing-object address.
     NoConcreteObjectAddress,
+
     /// The requested bit-field representation is non-integral.
     NonIntegralBitField,
+
     /// The selected member belongs to a different active variant.
     InactiveVariant(Option<Arc<str>>),
+
     /// Debug information does not describe what the closure a function
     /// value calls captured, or describes it malformedly.
     UndescribedClosure,
+
     /// The debug information does not say how many elements an array has,
     /// as for a C flexible array member, so only its elements by index
     /// are values.
     UnknownLength,
+
     /// An implicit-pointer view falls outside its referenced source object.
     ImplicitPointerOutOfBounds {
         /// Signed byte offset into the referenced object.
         offset: i64,
+
         /// Number of bytes requested from that offset.
         size: u64,
+
         /// Size of the referenced object.
         containing_size: u64,
     },
@@ -2184,43 +2479,60 @@ pub enum ValueAccessUnavailableReason {
 pub enum VariableUnavailableReason {
     /// The source value has no complete executable representation.
     OptimizedOut(OptimizedOutReason),
+
     /// No location-list entry applies at the current instruction.
     UnavailableAtInstruction,
+
     /// Selecting the location requires an instruction context that is unavailable.
     NoInstructionContext,
+
     /// The value requires a valid feature outside the current implementation.
     Unsupported(UnsupportedVariableFeature),
+
     /// A required target-memory interval is not completely readable.
     MemoryInaccessible {
         /// First address requested for the typed value.
         address: VirtualAddress,
+
         /// Total requested byte count.
         requested: u64,
+
         /// Contiguous bytes successfully read before the failure.
         completed: u64,
+
         /// First inaccessible address.
         next_address: VirtualAddress,
     },
+
     /// A required target register is unavailable.
     RegisterUnavailable(Arc<str>),
+
     /// A caller frame's value of a register its callees may overwrite was
     /// not saved, so the register's value in that frame is unknown.
     RegisterNotSaved(Arc<str>),
+
     /// The selected frame cannot provide its call-frame address.
     CallFrameUnavailable(CallFrameUnavailableReason),
+
     /// The value a parameter held on entry cannot be recovered.
     EntryValue(EntryValueUnavailableReason),
+
     /// Thread-local storage cannot be resolved for this value.
     TlsUnavailable(TlsUnavailableReason),
+
     /// A structural value operation cannot be completed.
     ValueAccess(ValueAccessUnavailableReason),
+
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
+
     /// The thread runs no task of its runtime, such as a thread idle in the
     /// runtime's scheduler.
     NoTask,
+
     /// A typed live-inspection resource was exhausted.
     InspectionLimit(InspectionExhaustion),
+
     /// A pointer's target is on the reading frame's stack below the
     /// frame's stack pointer, where only the frame's callees' memory is,
     /// live or freed, so the pointer is stale.
@@ -2228,6 +2540,7 @@ pub enum VariableUnavailableReason {
         /// The pointer's target.
         address: VirtualAddress,
     },
+
     /// The variable of a function that can suspend was last written
     /// before the await its current run resumed from, which did not keep
     /// it, so its storage holds whatever has used that memory since.
@@ -2235,12 +2548,15 @@ pub enum VariableUnavailableReason {
         /// The line of the await the function resumed from.
         line: LineNumber,
     },
+
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
         index: i128,
+
         /// First valid source index.
         lower_bound: i128,
+
         /// Number of valid elements.
         count: u64,
     },
@@ -2262,6 +2578,7 @@ impl fmt::Display for VariableUnavailableReason {
                     if index != 0 {
                         formatter.write_str(", ")?;
                     }
+
                     write!(
                         formatter,
                         "bits {}..{}",
@@ -2269,6 +2586,7 @@ impl fmt::Display for VariableUnavailableReason {
                         range.offset.saturating_add(range.size)
                     )?;
                 }
+
                 Ok(())
             }
             Self::UnavailableAtInstruction => {
@@ -2280,6 +2598,7 @@ impl fmt::Display for VariableUnavailableReason {
             Self::Unsupported(feature) => {
                 write!(formatter, "unsupported variable feature: {feature}")
             }
+
             Self::MemoryInaccessible {
                 address,
                 requested,
@@ -2357,6 +2676,7 @@ impl fmt::Display for VariableUnavailableReason {
                     formatter.write_str("the member belongs to an inactive variant")
                 }
             }
+
             Self::ValueAccess(ValueAccessUnavailableReason::ImplicitPointerOutOfBounds {
                 offset,
                 size,
@@ -2406,16 +2726,22 @@ impl From<UnsupportedVariableFeature> for VariableUnavailableReason {
 pub enum VariableMalformedKind {
     /// An attribute has an invalid form or value.
     InvalidAttribute,
+
     /// A metadata reference has no valid target.
     InvalidReference,
+
     /// The normalized type graph is inconsistent.
     InvalidTypeGraph,
+
     /// A location list violates its structural contract.
     InvalidLocationList,
+
     /// A location expression is malformed.
     InvalidExpression,
+
     /// Type or aggregate layout metadata is inconsistent.
     InconsistentLayout,
+
     /// A constant cannot inhabit its declared type.
     InvalidConstant,
 }
@@ -2425,6 +2751,7 @@ pub enum VariableMalformedKind {
 pub struct VariableMalformedReason {
     /// Machine-readable defect category.
     pub kind: VariableMalformedKind,
+
     /// A stable human-readable diagnosis.
     pub description: Arc<str>,
 }
@@ -2455,6 +2782,7 @@ impl fmt::Display for VariableInvalidReason {
 pub struct TextSummary {
     /// The bytes read, at most [`TextSummary::MAX_BYTES`].
     pub bytes: Arc<[u8]>,
+
     /// Whether every byte of the text was read.
     pub completion: TextCompletion,
 }
@@ -2497,6 +2825,7 @@ impl TextSummary {
         } else {
             Box::new(units.map(|unit| char::from_u32(unit).unwrap_or(char::REPLACEMENT_CHARACTER)))
         };
+
         let mut text = String::new();
         let mut cut = false;
         for character in characters {
@@ -2504,8 +2833,10 @@ impl TextSummary {
                 cut = true;
                 break;
             }
+
             text.push(character);
         }
+
         Self {
             bytes: Arc::from(text.into_bytes()),
             completion: match completion {
@@ -2521,11 +2852,14 @@ impl TextSummary {
 pub enum TextCompletion {
     /// Every byte was read.
     Complete,
+
     /// More text follows the bytes read: `length` bytes in all, when the
     /// string records its length.
     Truncated { length: Option<u64> },
+
     /// The text continues into memory that could not be read.
     Unreadable { address: VirtualAddress },
+
     /// The inspection's budget could not afford reading more of the text:
     /// `length` bytes in all, when the string records its length.
     Limited {
@@ -2539,10 +2873,13 @@ pub enum TextCompletion {
 pub struct ViewName {
     /// The view file, or the built-in library it came from.
     pub source: Arc<str>,
+
     /// The line of its `view` keyword.
     pub line: u32,
+
     /// Its language and pattern, as written.
     pub header: Arc<str>,
+
     /// Whether it is an `extend`, which adds to a view.
     pub extend: bool,
 }
@@ -2564,22 +2901,30 @@ impl fmt::Display for ViewName {
 pub enum PresentedShape {
     /// Text, in the state's `text`.
     Text,
+
     /// Another value, standing for this one.
     Value,
+
     /// This value as the type it dynamically is, such as a C++ object of a
     /// derived class, a Rust trait object, or a Go interface's value.
     Dynamic,
+
     /// Nothing, described by the summary, such as `None`.
     Empty,
+
     /// Elements, which are children.
     Sequence,
+
     /// Entries, each a key and a value, which are children.
     Map,
+
     /// Members a view names, which are children, as a C++ `std::tuple`'s
     /// elements are.
     Record,
+
     /// The value as stored, written another way, such as in hexadecimal.
     Formatted,
+
     /// The view failed, for the reason in `problem`, so the value shows as
     /// it is stored.
     Raw,
@@ -2590,6 +2935,7 @@ pub enum PresentedShape {
 #[non_exhaustive]
 pub enum PresentedCount {
     Exact(u64),
+
     /// At least this many: the view leaves the count to its generators, and
     /// the inspection's budget ended the count first.
     AtLeast(u64),
@@ -2613,27 +2959,36 @@ pub enum ViewProblem {
     /// what the view describes.
     CheckFailed {
         check: Arc<str>,
+
         /// The values of the check's sides, when it compares.
         detail: Option<Arc<str>>,
     },
+
     /// The program state could not provide a value the view needed.
     Unavailable(VariableUnavailableReason),
+
     /// The view asked for something the debugger refuses at this stop.
     Refused(Arc<str>),
+
     /// The view declares one count and generates another.
     CountMismatch { declared: u64, generated: u64 },
+
     /// A linked structure leads back to a node already visited, so the
     /// element at this position would repeat an earlier one.
     Cycle { at: u64 },
+
     /// A tree is deeper than a view walks, so it is no tree a library
     /// builds.
     TooDeep { depth: u32 },
+
     /// The generators passed the most elements a view generates without a
     /// count.
     TooMany { limit: u64 },
+
     /// A kernel the view calls failed: it trapped, returned a failure, or
     /// used the host wrongly.
     Kernel { kernel: Arc<str>, reason: Arc<str> },
+
     /// The debugger failed presenting the value; a defect in uscope.
     Internal(Arc<str>),
 }
@@ -2682,22 +3037,29 @@ impl fmt::Display for ViewProblem {
 pub struct Presentation {
     pub view: Arc<ViewName>,
     pub shape: PresentedShape,
+
     /// The elements or entries a sequence or map holds; `None` for other
     /// shapes.
     pub count: Option<PresentedCount>,
+
     /// A bounded one-line rendering, in one style for every language.
     pub summary: Arc<str>,
+
     /// The elements, the view's fields, and a `[raw]` child.
     pub children: ValueChildren,
+
     /// With [`PresentedShape::Raw`], why the view failed; otherwise why the
     /// summary stopped short.
     pub problem: Option<ViewProblem>,
+
     /// For a value presented as an integer, as an atomic is, that integer,
     /// so a client can write it as it writes any, such as in hexadecimal.
     pub number: Option<Arc<InspectedValue>>,
+
     /// For a value a view presents as another, as a `Box` is what it
     /// holds, that value.
     pub presented: Option<Arc<InspectedValue>>,
+
     /// The drawings the view and its `extend`s offer of the value, in
     /// order, which only the web page draws.
     pub visualizers: Arc<[Visualizer]>,
@@ -2730,6 +3092,7 @@ pub struct Visualizer {
 pub struct VisualizerReference {
     /// The presented value's children, which name its view.
     pub(crate) children: Arc<ValueChildrenReference>,
+
     /// Which of the view's and its `extend`s' `visualize`s it is.
     pub(crate) index: usize,
 }
@@ -2749,32 +3112,43 @@ pub enum VariableState {
     Available {
         /// How the bytes were obtained.
         source: VariableValueSource,
+
         /// Exact bytes materialized for this value in target byte order. Aggregate
         /// summaries generally retain storage only in their opaque child capability.
         raw: Option<Arc<[u8]>>,
+
         /// The decoded scalar or aggregate summary.
         value: VariableValue,
+
         /// Explicit lazy dereference state.
         dereference: DereferenceState,
+
         /// Explicit lazy structural-child state.
         children: ValueChildren,
+
         /// The text the value holds, for values that are strings: a pointer
         /// to characters, a character array, or a language's string type.
         text: Option<Arc<TextSummary>>,
+
         /// How a view presents the value, when one applies.
         presentation: Option<Arc<Presentation>>,
     },
+
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),
+
     /// Bytes were read exactly, but do not form a valid value of the declared type.
     Invalid {
         /// How the bytes were obtained.
         source: VariableValueSource,
+
         /// Exact invalid bytes in target byte order.
         raw: Arc<[u8]>,
+
         /// Why the representation is invalid.
         reason: VariableInvalidReason,
     },
+
     /// This entry's metadata is defective.
     Malformed(VariableMalformedReason),
 }
@@ -2784,10 +3158,13 @@ pub enum VariableState {
 pub struct InspectedValue {
     /// The resolved terminal type, when valid and supported.
     pub type_info: Option<TypeInfo>,
+
     /// The terminal value's current availability and decoded representation.
     pub state: VariableState,
+
     /// Whether the requested inspection completed.
     pub completion: InspectionCompletion,
+
     /// Resources consumed while producing this value.
     pub usage: InspectionUsage,
 }
@@ -2798,15 +3175,19 @@ pub struct InspectedValue {
 pub enum VariableKind {
     /// A formal parameter of the selected function or inline instance.
     Parameter,
+
     /// A result of the selected function or inline instance that the
     /// debug information names as a variable, such as Go's named results
     /// and its unnamed `~r0`. It holds the value returned once the
     /// function sets it, at the latest as it returns.
     Result,
+
     /// A local variable declared within the selected function.
     Local,
+
     /// A data object with static storage described by a module image.
     Global,
+
     /// A value the function a step out finished returned, shown in the
     /// frame it returned to at the stop that step made.
     Returned,
@@ -2818,6 +3199,7 @@ pub enum VariableKind {
 pub enum GlobalVariableVisibility {
     /// The producer marks the object as externally visible.
     External,
+
     /// The object is local to one compilation unit.
     CompilationUnit,
 }
@@ -2828,8 +3210,10 @@ pub enum GlobalVariableVisibility {
 pub enum GlobalVariableType {
     /// A normalized type whose top-level node is available.
     Resolved(TypeInfo),
+
     /// A valid type outside the current inspection contract.
     Unsupported(Arc<str>),
+
     /// Defective type metadata isolated to this entry.
     Malformed(VariableMalformedReason),
 }
@@ -2839,16 +3223,22 @@ pub enum GlobalVariableType {
 pub struct GlobalVariableInfo {
     /// The identifier within the containing module image.
     pub id: GlobalVariableId,
+
     /// The unqualified source name.
     pub name: Arc<str>,
+
     /// The producer-normalized source qualification.
     pub qualified_name: Arc<str>,
+
     /// The linker identity, when supplied by debug metadata.
     pub linkage_name: Option<Arc<str>>,
+
     /// The declaration location, when supplied by debug metadata.
     pub declaration: Option<SourceLocation>,
+
     /// The resolved scalar type or an explicit unsupported/malformed state.
     pub type_info: GlobalVariableType,
+
     /// Whether the object is external or compilation-unit local.
     pub visibility: GlobalVariableVisibility,
 }
@@ -2858,10 +3248,13 @@ pub struct GlobalVariableInfo {
 pub struct GlobalVariableCandidate {
     /// The candidate within its module image.
     pub id: GlobalVariableId,
+
     /// The canonical source qualification.
     pub qualified_name: Arc<str>,
+
     /// The resolved declaration path, when known.
     pub declaration_path: Option<Arc<PathBuf>>,
+
     /// The declaration location, when known.
     pub declaration: Option<SourceLocation>,
 }
@@ -2871,8 +3264,10 @@ pub struct GlobalVariableCandidate {
 pub struct GlobalVariableReference {
     /// The runtime module mapping used for evaluation.
     pub module: ModuleId,
+
     /// The immutable image containing the catalog entry.
     pub image: ModuleImageId,
+
     /// The entry within that image.
     pub variable: GlobalVariableId,
 }
@@ -2882,8 +3277,10 @@ pub struct GlobalVariableReference {
 pub struct LoadedGlobalVariableInfo {
     /// The module mapping when the image is currently loaded.
     pub module: Option<LoadedModule>,
+
     /// The immutable module image that owns this entry.
     pub image: ModuleImageId,
+
     /// The image-level global metadata.
     pub variable: GlobalVariableInfo,
 }
@@ -2893,10 +3290,13 @@ pub struct LoadedGlobalVariableInfo {
 pub struct GlobalVariablePage {
     /// The debugger revision at which loaded modules were enumerated.
     pub revision: u64,
+
     /// The zero-based offset represented by this page.
     pub offset: u64,
+
     /// The total number of entries matching the filter.
     pub total: u64,
+
     /// Deterministically ordered entries in this page.
     pub variables: Arc<[LoadedGlobalVariableInfo]>,
 }
@@ -2906,17 +3306,23 @@ pub struct GlobalVariablePage {
 pub struct Variable {
     /// Whether this data object is a parameter or local variable.
     pub kind: VariableKind,
+
     /// Stable module identity for a global; absent for parameters and locals.
     pub global: Option<GlobalVariableReference>,
+
     /// The source-level variable name.
     pub name: Arc<str>,
+
     /// Its declaration location, when supplied by debug metadata.
     pub declaration: Option<SourceLocation>,
+
     /// Its resolved type, when valid and supported.
     pub type_info: Option<TypeInfo>,
+
     /// Why a generic value has the type of the shape its code was compiled
     /// for, such as Go's `go.shape.int`, rather than its own type.
     pub unresolved_shape: Option<ShapeUnresolvedReason>,
+
     /// Its current availability and value.
     pub state: VariableState,
 }
@@ -2928,20 +3334,27 @@ pub struct Variable {
 pub enum ShapeUnresolvedReason {
     /// The function has no dictionary of type arguments here.
     NoDictionary,
+
     /// The dictionary, or its entry for the type, cannot be read.
     DictionaryUnavailable(VariableUnavailableReason),
+
     /// Optimized code describes its dictionary in the slot where the
     /// function may spill it, which holds a stale value until it does.
     UnreliableDictionary,
+
     /// The table of the runtime's type descriptors, Go's
     /// `runtime.firstmoduledata`, is not described or cannot be read.
     ModuleDataUnavailable(VariableUnavailableReason),
+
     /// The dictionary names a type descriptor outside this module's.
     ForeignType,
+
     /// No type in the debug information has the dictionary's descriptor.
     UndescribedType,
+
     /// The type the dictionary names is laid out unlike the shape.
     MismatchedShape,
+
     /// The debug information describing the dictionary or the table is
     /// malformed.
     Malformed(Arc<str>),
@@ -2985,10 +3398,13 @@ impl fmt::Display for ShapeUnresolvedReason {
 pub struct DereferencedValue {
     /// The pointee type.
     pub type_info: TypeInfo,
+
     /// Its current availability and value.
     pub state: VariableState,
+
     /// Whether the dereference completed.
     pub completion: InspectionCompletion,
+
     /// Resources consumed while producing this value.
     pub usage: InspectionUsage,
 }
@@ -2998,23 +3414,32 @@ pub struct DereferencedValue {
 pub struct VariableSnapshot {
     /// The debugger revision at which the values were read.
     pub revision: u64,
+
     /// The stopped snapshot that authorized the reads.
     pub stop_id: crate::StopId,
+
     /// The thread or task whose frame was inspected.
     pub context: ExecutionContext,
+
     /// The backtrace frame that was inspected.
     pub stack_frame: StackFrameId,
+
     /// The logical frame whose source scope selected these variables.
     pub frame: crate::PresentedFrame,
+
     /// The canonical frame address of the inspected activation, which
     /// identifies it while it lives, when its unwind information gives one.
     pub frame_address: Option<VirtualAddress>,
+
     /// Target data representation used for decoding.
     pub target: TargetDescription,
+
     /// Visible parameters followed by local variables in source declaration order.
     pub variables: Arc<[Variable]>,
+
     /// Whether every selected variable was represented.
     pub completion: InspectionCompletion,
+
     /// Resources consumed while producing this snapshot.
     pub usage: InspectionUsage,
 }
@@ -3032,6 +3457,7 @@ pub enum Architecture {
 pub enum ByteOrder {
     /// Least-significant byte first.
     Little,
+
     /// Most-significant byte first.
     Big,
 }
@@ -3078,6 +3504,7 @@ impl TargetDescription {
         if self.architecture != Architecture::X86_64 || self.pointer_width != PointerWidth::Bits64 {
             return None;
         }
+
         // The System V x86-64 data model: LP64, signed `char`, and an x87
         // `long double` padded to sixteen bytes.
         let (encoding, byte_size) = match ty {
@@ -3093,6 +3520,7 @@ impl TargetDescription {
             CBaseType::Double => (E::Floating, 8),
             CBaseType::LongDouble => (E::Floating, 16),
         };
+
         let name: Arc<str> = ty.name().into();
         Some(BaseType {
             name: Arc::clone(&name),
@@ -3192,10 +3620,12 @@ impl fmt::Display for MemoryReadUnavailableReason {
 pub enum MemoryReadCompletion {
     /// Every requested byte was returned.
     Complete,
+
     /// A contiguous prefix was returned before target memory became unavailable.
     Incomplete {
         /// The first requested address not represented in `MemoryRead::bytes`.
         next_address: VirtualAddress,
+
         /// Why reading could not continue.
         reason: MemoryReadUnavailableReason,
     },
@@ -3206,16 +3636,22 @@ pub enum MemoryReadCompletion {
 pub struct MemoryRead {
     /// The debugger revision at which the bytes were read.
     pub revision: u64,
+
     /// The stopped snapshot that authorized the read.
     pub stop_id: crate::StopId,
+
     /// Target properties relevant to address and byte presentation.
     pub target: TargetDescription,
+
     /// The first requested virtual address.
     pub address: VirtualAddress,
+
     /// The number of bytes requested.
     pub requested: u64,
+
     /// The readable contiguous prefix beginning at `address`.
     pub bytes: Arc<[u8]>,
+
     /// Whether every requested byte was returned.
     pub completion: MemoryReadCompletion,
 }
@@ -3278,6 +3714,7 @@ impl fmt::Display for ColumnNumber {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
     pub id: SourceFileId,
+
     /// The source path resolved from the debug metadata.
     pub path: Arc<PathBuf>,
 }
@@ -3287,8 +3724,10 @@ pub struct SourceFile {
 pub struct SourceLocation {
     /// The source file containing the location.
     pub file: SourceFileId,
+
     /// The one-based source line.
     pub line: LineNumber,
+
     /// The one-based column, when present in the debug information.
     pub column: Option<ColumnNumber>,
 }
@@ -3298,6 +3737,7 @@ pub struct SourceLocation {
 pub struct SourceLine {
     /// The one-based line number.
     pub number: LineNumber,
+
     /// The source text without its line terminator.
     pub text: Arc<str>,
 }
@@ -3307,11 +3747,14 @@ pub struct SourceLine {
 pub struct SourceContext {
     /// The source file the debug information names.
     pub file: SourceFile,
+
     /// The file that was read: the recorded path, or where a source path
     /// map found it.
     pub path: Arc<PathBuf>,
+
     /// The execution location within the file.
     pub location: SourceLocation,
+
     /// Contiguous source lines ordered by line number.
     pub lines: Arc<[SourceLine]>,
 }
@@ -3320,30 +3763,39 @@ pub struct SourceContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionInfo {
     pub id: FunctionId,
+
     /// The source-level function name.
     pub name: Arc<str>,
+
     /// The linker-visible function name, when known.
     pub linkage_name: Option<Arc<str>>,
+
     /// The function's declaration location, when known.
     pub declaration: Option<SourceLocation>,
+
     /// The language of the unit that defines the function.
     pub language: SourceLanguage,
+
     /// What the function is to unwinding and stepping.
     pub role: CodeRole,
+
     /// The function whose loop this one is the body of, when a compiler
     /// made a loop's body a function of its own, as Go does for a range
     /// over a function. A step treats the body as its enclosing function's
     /// own code, and the code between them as a call it makes.
     pub enclosing: Option<FunctionId>,
+
     /// For the function that runs a coroutine, such as the body of a Rust
     /// `async fn`, the coroutine's type: the future the body's state lives
     /// in between polls.
     pub coroutine: Option<TypeId>,
+
     /// The type arguments a generic function was instantiated with, each
     /// with its parameter's name, as tokio's `poll::<T, S>` names the
     /// future it polls `T`. Empty for a function that is not generic, or
     /// whose debug information names none.
     pub generics: FunctionGenerics,
+
     /// Whether the function is the program's main subprogram, which a
     /// language's runtime enters from a C `main` of its own, as gfortran's
     /// `MAIN__` is. The name `main` finds it too.
@@ -3361,10 +3813,13 @@ pub type FunctionGenerics = Arc<[(Arc<str>, TypeId)]>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoroutineInfo {
     pub kind: CoroutineKind,
+
     /// Where the state number lies in the coroutine, and its size.
     pub state: StateMember,
+
     /// The states, by number.
     pub states: Arc<[CoroutineState]>,
+
     /// What the coroutine captured, which every state holds: an `async
     /// fn`'s arguments, or the variables an `async` block uses.
     pub captures: Arc<[RecordMember]>,
@@ -3376,8 +3831,10 @@ pub enum CoroutineKind {
     /// The body of an asynchronous function, whose arguments it captures
     /// and moves into its body as it starts.
     AsyncFunction,
+
     /// An asynchronous block, which captures the variables it uses.
     AsyncBlock,
+
     /// An asynchronous closure's body.
     AsyncClosure,
 }
@@ -3387,6 +3844,7 @@ pub enum CoroutineKind {
 pub struct StateMember {
     /// Its byte offset in the coroutine.
     pub offset: u64,
+
     /// Its size in bytes.
     pub size: u64,
 }
@@ -3397,9 +3855,11 @@ pub struct CoroutineState {
     /// The state number that selects it.
     pub value: u64,
     pub kind: CoroutineStateKind,
+
     /// Where the source shows the state: an `await`'s line for a suspended
     /// state, the function's header before it starts, and its end after.
     pub location: Option<SourceLocation>,
+
     /// The members the state holds besides the captures, laid out from the
     /// coroutine's start: the variables live across its `await`, and the
     /// future it awaits.
@@ -3411,10 +3871,13 @@ pub struct CoroutineState {
 pub enum CoroutineStateKind {
     /// Built but never polled.
     Unresumed,
+
     /// Finished, having produced its value.
     Returned,
+
     /// Finished by panicking.
     Panicked,
+
     /// Waiting at an `await`, the `index`th in the source.
     Suspended { index: u32 },
 }
@@ -3425,6 +3888,7 @@ pub enum CoroutineStateKind {
 pub struct ResumePoints {
     /// The dispatch's code, which runs before any state's own.
     pub dispatch: Arc<[AddressRange<ImageAddress>]>,
+
     /// Where each state's code begins.
     pub points: Arc<[ResumePoint]>,
 }
@@ -3434,8 +3898,10 @@ pub struct ResumePoints {
 pub struct ResumePoint {
     /// The state number.
     pub state: u64,
+
     /// Where the dispatch leaves for the state.
     pub address: ImageAddress,
+
     /// The code that runs from there as the coroutine resumes in the state
     /// before it goes on to new work: for a suspended state, the code of
     /// its await's line that resuming reaches, such as polling the awaited
@@ -3477,6 +3943,7 @@ impl CoroutineInfo {
                 .as_deref()
                 .is_some_and(|name| !name.starts_with("__"))
         };
+
         state
             .saved
             .iter()
@@ -3519,25 +3986,33 @@ pub enum CodeRole {
     /// Code the program's author wrote, or a library they call.
     #[default]
     Ordinary,
+
     /// Forwards to another function and never shows to a step:
     /// trampolines, ABI wrappers, and code a compiler generates.
     Wrapper,
+
     /// The language runtime's own machinery: a step passes through it to
     /// user code it calls, and a backtrace marks it.
     RuntimeInternal,
+
     /// The runtime's code that begins a panic, which calls the program's
     /// deferred functions as it unwinds: a step goes through it into them.
     Panic,
+
     /// Continues on another stack; only a runtime model can say where.
     StackSwitch,
+
     /// The outermost frame of any stack: unwinding ends here, complete.
     Outermost,
+
     /// Entered by a trap, not a call: its caller's instruction is the one
     /// that trapped, not a return address.
     TrapEntry,
+
     /// The signal-return trampoline a handler returns to: the interrupted
     /// registers are in the kernel's signal frame above it.
     SignalTrampoline,
+
     /// The runtime's code that gives the thread to a task, which may be
     /// another than the task that switched to the stack it runs on. That
     /// task may have left the thread, so a stack it switched from ends at
@@ -3550,6 +4025,7 @@ pub enum CodeRole {
 pub enum CodeInstanceKind {
     /// A physical, independently callable function body.
     OutOfLine,
+
     /// A function body expanded at a source call site.
     Inline {
         /// The call expression in the containing instance, when described.
@@ -3562,12 +4038,16 @@ pub enum CodeInstanceKind {
 pub enum EntryProvenance {
     /// The debug format supplied an explicit entry address.
     Explicit,
+
     /// A recommended line-program boundary supplied the entry address.
     Statement,
+
     /// Target-specific instruction analysis proved a post-prologue address.
     AnalyzedPrologue,
+
     /// The first concrete address range supplied the entry address.
     RangeStart,
+
     /// The function runs a coroutine, and the entry is where its decoded
     /// dispatch leaves for the state before the first poll: the body's
     /// first statement, past the dispatch.
@@ -3579,6 +4059,7 @@ pub enum EntryProvenance {
 pub struct BreakpointEntry {
     /// The entry address in the module image.
     pub address: ImageAddress,
+
     /// How the address was selected.
     pub provenance: EntryProvenance,
 }
@@ -3587,14 +4068,19 @@ pub struct BreakpointEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeInstanceInfo {
     pub id: CodeInstanceId,
+
     /// The source-level function represented by this instance.
     pub function: FunctionId,
+
     /// The nearest containing function instance, for an inline expansion.
     pub parent: Option<CodeInstanceId>,
+
     /// Whether the instance is physical or inlined.
     pub kind: CodeInstanceKind,
+
     /// Every image-address range occupied by the instance.
     pub ranges: Arc<[AddressRange<ImageAddress>]>,
+
     /// The preferred location for a function breakpoint, when one exists.
     pub breakpoint_entry: Option<BreakpointEntry>,
 }
@@ -3612,11 +4098,14 @@ impl CodeInstanceInfo {
 pub enum SymbolKind {
     /// Machine code entered by calling the symbol's address.
     Function,
+
     /// An indirect function's resolver, which selects the implementation
     /// that calls through the symbol reach.
     IndirectFunction,
+
     /// A data object.
     Data,
+
     /// The object file does not describe what the symbol names.
     Unknown,
 }
@@ -3626,8 +4115,10 @@ pub enum SymbolKind {
 pub enum SymbolBinding {
     /// Visible to other objects and preferred during linking.
     Global,
+
     /// Visible to other objects but overridable by a global definition.
     Weak,
+
     /// Private to the object that defines it.
     Local,
 }
@@ -3637,6 +4128,7 @@ pub enum SymbolBinding {
 pub enum SymbolExtentProvenance {
     /// The symbol table declared the symbol's size.
     Declared,
+
     /// The symbol declared no size, so its extent ends at the first evidence
     /// of other code: the next symbol, the next unwind-table function, or
     /// the end of its section.
@@ -3648,6 +4140,7 @@ pub enum SymbolExtentProvenance {
 pub struct SymbolExtent {
     /// The non-empty image-address range beginning at the symbol's address.
     pub range: AddressRange<ImageAddress>,
+
     /// How the end of the range was determined.
     pub provenance: SymbolExtentProvenance,
 }
@@ -3656,24 +4149,32 @@ pub struct SymbolExtent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
     pub id: SymbolId,
+
     /// The linker-visible symbol name.
     pub name: Arc<str>,
+
     /// The symbol's image address.
     pub address: ImageAddress,
+
     /// What the symbol names.
     pub kind: SymbolKind,
+
     /// The symbol's linkage visibility.
     pub binding: SymbolBinding,
+
     /// Whether the module's dynamic symbol table exports the symbol.
     pub exported: bool,
+
     /// The code the symbol names, for a code symbol whose extent lies within
     /// one executable section.
     pub extent: Option<SymbolExtent>,
+
     /// The storage a data symbol names, for a data symbol defined in an
     /// allocated, non-thread-local section whose declared size fits within
     /// it. The range is empty for an unsized symbol, which names only its own
     /// address.
     pub storage: Option<AddressRange<ImageAddress>>,
+
     /// What the code the symbol names is to unwinding and stepping, for
     /// code no debug information describes.
     pub role: CodeRole,
@@ -3685,6 +4186,7 @@ pub struct SymbolInfo {
 pub enum DebugFile {
     /// The file the module's debug information and symbols came from.
     Used(Arc<PathBuf>),
+
     /// A file that names the module but could not be loaded, which leaves
     /// the module as its own file describes it.
     Unusable {
@@ -3700,14 +4202,17 @@ pub enum DebugInformation {
     /// The module has none, so its symbols alone describe its code.
     #[default]
     Absent,
+
     /// All of it was read.
     Loaded,
+
     /// Some of it was read; the rest is in a form the debugger does not
     /// read, so the code it describes is described by symbols alone.
     Incomplete {
         /// What was left out, and why.
         reason: Arc<str>,
     },
+
     /// None of it could be read, so the module's symbols alone describe its
     /// code.
     Unusable {
@@ -3722,6 +4227,7 @@ pub enum DebugInformation {
 pub struct GotSlot {
     /// Where the slot is in the module.
     pub address: ImageAddress,
+
     /// The function whose address the loader writes there.
     pub target: GotTarget,
 }
@@ -3731,6 +4237,7 @@ pub struct GotSlot {
 pub enum GotTarget {
     /// A function named for the loader to look up in the loaded modules.
     Import(Arc<str>),
+
     /// The implementation chosen by this module's indirect function whose
     /// resolver is at this address.
     Indirect(ImageAddress),
@@ -3741,10 +4248,13 @@ pub enum GotTarget {
 pub struct SymbolTableSources {
     /// Whether the image has a static symbol table.
     pub static_table: bool,
+
     /// Whether the image has a dynamic symbol table.
     pub dynamic_table: bool,
+
     /// The state of the image's embedded compressed symbol table.
     pub embedded_table: EmbeddedSymbolTable,
+
     /// The state of a language runtime's own function table, such as Go's
     /// `.gopclntab`, which names, places, and unwinds functions when no
     /// debug information describes them.
@@ -3769,8 +4279,10 @@ impl Default for SymbolTableSources {
 pub enum EmbeddedSymbolTable {
     /// The image embeds no such table.
     Absent,
+
     /// The embedded table was read.
     Loaded,
+
     /// The embedded table could not be read, so what it holds is absent.
     Unusable {
         /// Why the table could not be read.
@@ -3782,12 +4294,16 @@ pub enum EmbeddedSymbolTable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolLocation {
     pub symbol: SymbolId,
+
     /// The linker-visible symbol name.
     pub name: Arc<str>,
+
     /// What the symbol names.
     pub kind: SymbolKind,
+
     /// The distance from the symbol's address to the described address.
     pub offset: u64,
+
     /// How the end of the symbol's extent or storage was determined. An
     /// unsized data symbol named at its own address is `Inferred`.
     pub provenance: SymbolExtentProvenance,
@@ -3836,12 +4352,16 @@ impl SymbolLocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionInfo {
     pub id: SectionId,
+
     /// The section name recorded by the object file.
     pub name: Arc<str>,
+
     /// The non-empty image-address range the section occupies.
     pub range: AddressRange<ImageAddress>,
+
     /// Whether the section holds machine code.
     pub executable: bool,
+
     /// Whether the section is writable at run time.
     pub writable: bool,
 }
@@ -3850,10 +4370,13 @@ pub struct SectionInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionLocation {
     pub section: SectionId,
+
     /// The section name.
     pub name: Arc<str>,
+
     /// The distance from the section's start to the described address.
     pub offset: u64,
+
     /// Whether the section holds machine code.
     pub executable: bool,
 }
@@ -3863,9 +4386,11 @@ pub struct SectionLocation {
 pub struct ImageAddressDescription {
     /// The address that was described.
     pub address: ImageAddress,
+
     /// The allocated section containing the address, when the image records
     /// section headers.
     pub section: Option<SectionLocation>,
+
     /// The code symbol whose extent contains the address or, failing that,
     /// the data symbol whose declared storage contains it.
     pub symbol: Option<SymbolLocation>,
@@ -3876,8 +4401,10 @@ pub struct ImageAddressDescription {
 pub struct ModuleAddress {
     /// The loaded module containing the address.
     pub module: ModuleId,
+
     /// The path of the module's image.
     pub path: Arc<PathBuf>,
+
     /// The image's description of the corresponding image address.
     pub image: ImageAddressDescription,
 }
@@ -3887,6 +4414,7 @@ pub struct ModuleAddress {
 pub struct AddressDescription {
     /// The described process virtual address.
     pub address: VirtualAddress,
+
     /// The module containing the address, or `None` when no loaded module's
     /// image covers it.
     pub module: Option<ModuleAddress>,
@@ -3897,14 +4425,19 @@ pub struct AddressDescription {
 pub struct ImageLocation {
     /// The address that was resolved.
     pub address: ImageAddress,
+
     /// The containing function, when known.
     pub function: Option<FunctionInfo>,
+
     /// The physical code instance containing the address, when known.
     pub physical_instance: Option<CodeInstanceId>,
+
     /// Active inline frames at this address.
     pub inline_frames: InlineFrameLookup,
+
     /// The corresponding source location, when known.
     pub source: Option<SourceLocation>,
+
     /// The code symbol containing the address, when known.
     pub symbol: Option<SymbolLocation>,
 }
@@ -3921,8 +4454,10 @@ pub struct InlineChain {
 pub enum InlineFrameLookup {
     /// No presentable inline frame is active.
     None,
+
     /// Exactly one logical inline chain is active.
     Unique(InlineChain),
+
     /// The debug metadata describes incompatible active chains.
     Ambiguous(Arc<[InlineChain]>),
 }
@@ -3932,6 +4467,7 @@ pub enum InlineFrameLookup {
 pub enum BreakpointLocation {
     /// A location relative to an immutable module image.
     Image(ImageAddress),
+
     /// An absolute location in a running process.
     Virtual(VirtualAddress),
 }
@@ -3941,9 +4477,11 @@ pub enum BreakpointLocation {
 pub struct ExecutionLocation {
     /// The loaded module containing the address.
     pub module: ModuleId,
+
     /// The frame's instruction: where execution stopped in the innermost
     /// frame, or the return address of an outer frame's call.
     pub address: VirtualAddress,
+
     /// Static metadata resolved from the corresponding module image. An outer
     /// frame's is resolved one byte before its return address, inside the
     /// call it is making.
@@ -3955,19 +4493,24 @@ pub struct ExecutionLocation {
 pub enum FrameKind {
     /// A normal machine-code activation.
     Physical,
+
     /// A source-level inline expansion within a physical activation.
     Inline,
+
     /// A signal trampoline activation.
     Signal,
+
     /// A function that left by a tail call, which replaced its activation
     /// with the frame's below it. Only the debug information's one chain
     /// of tail calls between a call and the frame it entered shows it, and
     /// its state is gone but for what was passed to it.
     TailCall,
+
     /// An async function or block of a suspended task, whose state is the
     /// future at `object`: no thread runs it, so it has no registers, and
     /// its variables are those its state keeps.
     Async { object: VirtualAddress },
+
     /// The future at `object`, of type `ty`, that a suspended task's
     /// innermost async frame awaits, which is no async function's.
     Awaited {
@@ -3990,34 +4533,45 @@ impl FrameKind {
 pub struct StackFrame {
     /// The frame's identifier within the current stop revision.
     pub id: StackFrameId,
+
     /// Zero-based position, beginning with the stopped frame.
     pub level: u32,
+
     /// How the frame was reconstructed.
     pub kind: FrameKind,
+
     /// The loaded module containing the instruction, when known. The
     /// future an [`FrameKind::Awaited`] frame names has no instruction:
     /// its module is the one whose image describes the future's type.
     pub module: Option<ModuleId>,
+
     /// The exact instruction or resume address for the frame. A suspended
     /// task's async frame has the address its function resumes at, where
     /// that is known, and the future it awaits has none.
     pub instruction: Option<VirtualAddress>,
+
     /// Whose stack the frame is on. A backtrace changes segment where a
     /// runtime switched stacks.
     pub segment: StackSegment,
+
     /// The concrete code instance represented by the frame, when known.
     pub code_instance: Option<CodeInstanceId>,
+
     /// The containing function, when known.
     pub function: Option<FunctionInfo>,
+
     /// The corresponding source location, when known.
     pub source: Option<SourceLocation>,
+
     /// The code symbol containing a physical or signal frame's code, with
     /// its offset measured to [`Self::instruction`]. Inline frames carry no
     /// symbol because they are source-level expansions within one.
     pub symbol: Option<SymbolLocation>,
+
     /// What the frame's code is to stepping and unwinding: its function's
     /// role, or its symbol's where no function describes it.
     pub role: CodeRole,
+
     /// What the future an [`FrameKind::Awaited`] frame names waits for, as
     /// the view that presents it summarizes it; `None` for any other frame,
     /// or a future no view presents.
@@ -4083,28 +4637,39 @@ impl StackFrame {
 pub enum UnwindTermination {
     /// The unwind metadata declared that no caller exists.
     Complete,
+
     /// No unwind information covered the supplied instruction.
     NoUnwindInfo { address: VirtualAddress },
+
     /// The instruction could not be associated with a loaded module.
     ModuleNotFound { address: VirtualAddress },
+
     /// Valid metadata used a feature not implemented by this debugger.
     UnsupportedUnwindInfo { feature: Arc<str> },
+
     /// The unwind metadata was malformed.
     CorruptUnwindInfo { description: Arc<str> },
+
     /// A register required to reconstruct the caller was unavailable.
     RegisterUnavailable { register: Arc<str> },
+
     /// Inferior memory required by an unwind rule could not be read.
     MemoryReadFailed { address: VirtualAddress },
+
     /// The reconstructed caller did not make valid progress.
     InvalidCaller { description: Arc<str> },
+
     /// A runtime switched stacks at the frame, and where the stack it
     /// switched from continues could not be found.
     UnresolvedStackSwitch { reason: Arc<str> },
+
     /// A suspended task's chain of awaits could not be followed past its
     /// last frame, for this reason.
     BrokenAwaitChain { reason: Arc<str> },
+
     /// A previously visited frame state was encountered again.
     CycleDetected,
+
     /// The configured maximum frame count was reached.
     DepthLimit,
 }
@@ -4154,10 +4719,13 @@ impl fmt::Display for UnwindTermination {
 pub struct Backtrace {
     /// The thread or task whose stack was inspected.
     pub context: ExecutionContext,
+
     /// Frames ordered from the stopped frame outward.
     pub frames: Arc<[StackFrame]>,
+
     /// The completion or failure reason for the trace.
     pub termination: UnwindTermination,
+
     /// The futures frames of the trace drive whose chains of awaits it
     /// shows in part or not at all.
     pub unfollowed: Arc<[UnfollowedFuture]>,
@@ -4169,6 +4737,7 @@ pub struct Backtrace {
 pub struct UnfollowedFuture {
     /// The frame that drives the future.
     pub driver: StackFrameId,
+
     /// Why the chain is not shown, or where it ends.
     pub reason: Arc<str>,
 }
@@ -4197,6 +4766,7 @@ impl Backtrace {
     #[must_use]
     pub fn loop_iterators(&self) -> Vec<Option<u32>> {
         let mut iterators = vec![None; self.frames.len()];
+
         // The loops whose enclosing frames are still to come, innermost
         // last: each one's function, and where its iterators begin.
         let mut open: Vec<(Option<ModuleId>, FunctionId, usize)> = Vec::new();
@@ -4204,6 +4774,7 @@ impl Backtrace {
             let Some(function) = &frame.function else {
                 continue;
             };
+
             if let Some(&(module, enclosing, start)) = open.last()
                 && module == frame.module
                 && enclosing == function.id
@@ -4213,10 +4784,12 @@ impl Backtrace {
                     *iterator = Some(frame.level);
                 }
             }
+
             if let Some(enclosing) = function.enclosing {
                 open.push((frame.module, enclosing, index + 1));
             }
         }
+
         iterators
     }
 }
@@ -4226,6 +4799,7 @@ impl Backtrace {
 pub struct LineEntry {
     pub range: AddressRange<ImageAddress>,
     pub location: SourceLocation,
+
     /// Whether the row that opened this range is a recommended breakpoint
     /// location (`is_stmt`). Source stepping stops only at statement rows.
     pub statement: bool,
@@ -4236,22 +4810,29 @@ pub struct LineEntry {
 pub struct StatementRow {
     /// The image address associated with this row.
     pub address: ImageAddress,
+
     /// The operation index for architectures with multiple operations per instruction.
     pub operation_index: u64,
+
     /// The corresponding source location, when the producer supplied one that
     /// can be resolved.
     ///
     /// Control-flow markers remain meaningful on rows without source
     /// attribution, including rows whose line is zero.
     pub location: Option<SourceLocation>,
+
     /// The producer-defined discriminator for this source position.
     pub discriminator: u64,
+
     /// Semantic flags associated with the row.
     pub flags: StatementFlags,
+
     /// The instruction-set identifier supplied by the producer.
     pub isa: u64,
+
     /// The containing line-program sequence.
     pub sequence: LineSequenceId,
+
     /// The row's order within its sequence, including equal-address rows.
     pub ordinal: u32,
 }
@@ -4309,8 +4890,10 @@ impl StatementFlags {
 pub struct LoadedModule {
     /// The loaded module's session-scoped identifier.
     pub id: ModuleId,
+
     /// The corresponding immutable module image.
     pub image: ModuleImageId,
+
     /// The load bias applied to image addresses.
     pub load_bias: LoadBias,
 }
@@ -4320,6 +4903,7 @@ pub struct LoadedModule {
 pub struct LoadedModuleRecord {
     /// The checked runtime mapping.
     pub module: LoadedModule,
+
     /// The canonical ELF image path.
     pub path: Arc<PathBuf>,
 }
@@ -4329,6 +4913,7 @@ pub struct LoadedModuleRecord {
 pub struct LoadedModuleSnapshot {
     /// The debugger revision represented by this snapshot.
     pub revision: u64,
+
     /// Loaded modules ordered by module identifier.
     pub modules: Arc<[LoadedModuleRecord]>,
 }

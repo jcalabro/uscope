@@ -30,6 +30,7 @@ extern crate self as uscope;
 mod analysis;
 mod backend;
 pub(crate) mod capture;
+
 mod condition;
 mod debug_info;
 mod demangle;
@@ -45,10 +46,12 @@ pub use image::symbols::Symbol;
 pub mod cache;
 mod inspection;
 pub(crate) mod model;
+
 pub mod pool;
 pub mod profiler;
 mod protocol;
 mod runtime_model;
+
 // The simulator is a test harness, which may panic.
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
@@ -62,11 +65,13 @@ pub mod sim;
 mod source_map;
 mod sync;
 pub mod syscalls;
+
 /// The engines that trace system calls into [`syscalls`]' events.
 pub use backend::syscall_engines;
 #[cfg(test)]
 mod test_memory;
 pub mod timings;
+
 /// What the tests of uscope's unsafe code reach it through. They are a
 /// test target of their own, `tests/miri.rs`, so that Miri checks only
 /// them, not the whole crate, each time it runs them.
@@ -74,6 +79,7 @@ pub mod timings;
 pub mod unsafe_parts {
     pub use crate::backend::perf::sys::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
 }
+
 #[cfg(feature = "tools")]
 #[doc(hidden)]
 pub mod tools;
@@ -103,6 +109,7 @@ pub use disassembly::{
     InstructionToken, InstructionTokenKind, MAX_BACKWARD_DISTANCE, MAX_FUNCTION_INSTRUCTIONS,
     MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE, TargetBoundary,
 };
+
 pub use error::{Error, Result};
 pub use eval::Evaluation;
 pub use eval::bind::Mode as EvaluationMode;
@@ -145,6 +152,7 @@ pub use model::{
     VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress, Visualizer,
     VisualizerReference,
 };
+
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CatchPhase,
     Catchpoint, CatchpointId, ConditionOwner, CoreDumpInfo, CoreDumpOptions, CoreModule,
@@ -160,6 +168,7 @@ pub use protocol::{
     Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation,
     WatchpointOptions, WatchpointSpec,
 };
+
 pub use runtime_model::TASK_NOUNS;
 pub use source_map::SourcePathMap;
 pub use view::summary::{
@@ -167,6 +176,7 @@ pub use view::summary::{
     integer as integer_text, quoted as quoted_text, scalar as scalar_text, symbol as symbol_text,
     value as value_summary,
 };
+
 pub use view::syntax::Error as ViewFileError;
 
 /// The views built into uscope, in the order they are tried.
@@ -183,8 +193,10 @@ pub fn built_in_views() -> Vec<Arc<ViewName>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayedRun {
     pub kernel: String,
+
     /// The reads and items the recording holds.
     pub events: usize,
+
     /// How many of them the kernel reproduced, or the first difference.
     pub outcome: std::result::Result<usize, String>,
 }
@@ -209,12 +221,14 @@ pub fn replay_kernel_runs(
                 .kernel(&recording.kernel)
                 .ok_or_else(|| format!("no built-in kernel is named `{}`", recording.kernel))?,
         };
+
         replayed.push(ReplayedRun {
             kernel: recording.kernel.clone(),
             events: recording.events.len(),
             outcome: view::kernel::replay(&kernel, recording),
         });
     }
+
     Ok(replayed)
 }
 
@@ -516,6 +530,7 @@ impl Debugger {
             Some(executable) => backend::executable_source(executable)?,
             None => backend::process_executable_source(process)?,
         };
+
         executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(process, executable, false).await
     }
@@ -552,6 +567,7 @@ impl Debugger {
     ) -> Result<Self> {
         let mut executable = if let Some(executable) = executable {
             let mut executable = backend::executable_source(executable)?;
+
             // The attach checks this once it has seized the process.
             executable.process_start_time = Some(held.start_time);
             executable
@@ -560,8 +576,10 @@ impl Debugger {
             if executable.process_start_time != Some(held.start_time) {
                 return Err(Error::HeldProcessGone(held.process_id.get()));
             }
+
             executable
         };
+
         executable.debug_files = debug_info::DebugFileSearch::new(debug_files);
         Self::attach_from_source(held.process_id, executable, true).await
     }
@@ -584,6 +602,7 @@ impl Debugger {
             let _ = debugger.shutdown().await;
             return Err(error);
         }
+
         Ok(debugger)
     }
 
@@ -653,6 +672,7 @@ impl Debugger {
             .send(ControllerMessage::Request(Request::Shutdown {
                 reply: send,
             }));
+
         // A controller that ended, as a panic ends it, closes its queue
         // with the request in it unanswered. One that answered closed it
         // after, so the answer is there to take, even when the runtime's
@@ -1245,6 +1265,7 @@ impl DebuggerHandle {
         } else {
             StackFrameId::INNERMOST
         };
+
         let mut events = self.subscribe();
         let execution = self
             .start_step(
@@ -1327,6 +1348,7 @@ impl DebuggerHandle {
         if self.core_dump.is_some() {
             return Err(Error::PostMortemTarget);
         }
+
         let snapshot = self.snapshot().await?;
         let InferiorState::Running { process_id, .. } = snapshot.inferior else {
             return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
@@ -1335,6 +1357,7 @@ impl DebuggerHandle {
                 Error::AlreadyStopped
             });
         };
+
         let mut events = self.subscribe();
         let execution = self
             .request(|reply| Request::Pause { process_id, reply })
@@ -1405,6 +1428,7 @@ impl DebuggerHandle {
                 address.get() + written,
             )));
         }
+
         Ok(())
     }
 
@@ -1454,9 +1478,11 @@ impl DebuggerHandle {
                 modules.push((record.module, image));
             }
         }
+
         let mut found = BTreeSet::new();
         for (module, image) in &modules {
             let symbols = image.symbols_answering(name).collect::<Vec<_>>();
+
             // A versioned name's default version is the one the loader binds.
             if let Some(exported) = symbols
                 .iter()
@@ -1465,10 +1491,12 @@ impl DebuggerHandle {
             {
                 return module.virtual_address(exported.address());
             }
+
             for symbol in symbols {
                 found.insert(module.virtual_address(symbol.address())?);
             }
         }
+
         let mut found = found.into_iter();
         match (found.next(), found.next()) {
             (Some(address), None) => Ok(address),
@@ -1601,6 +1629,7 @@ impl DebuggerHandle {
                 }
             }
         }
+
         Err(Error::SourceFileMissing {
             path: recorded.to_owned(),
             tried: candidates,
@@ -1762,6 +1791,7 @@ impl DebuggerHandle {
                 [(renderer.name.as_str(), renderer.source.as_str())],
             );
         }
+
         for kernel in kernels {
             views.add_kernels(
                 &kernel.path,
@@ -1772,6 +1802,7 @@ impl DebuggerHandle {
                 )],
             );
         }
+
         let views = Arc::new(views);
         let errors: Arc<[ViewFileError]> = views.errors().into();
         self.request(|reply| Request::SetViews { views, reply })
@@ -2042,6 +2073,7 @@ impl DebuggerHandle {
                 event = events.recv() => event,
                 () = self.requests.closed() => return Err(Error::RequestCancelled),
             };
+
             match event {
                 Ok(DebuggerEvent::InferiorStopped {
                     execution_id: Some(event_execution),
@@ -2083,8 +2115,10 @@ impl DebuggerHandle {
 pub struct StopContext {
     /// The stop the frame belongs to.
     pub stop: StopId,
+
     /// The thread or task whose stack holds the frame.
     pub execution: ExecutionContext,
+
     /// The frame, numbered as [`DebuggerHandle::backtrace`] presents it.
     pub frame: StackFrameId,
 }
@@ -2137,6 +2171,7 @@ impl StopView<'_> {
                 "only the innermost frame's line can be stepped into".into(),
             ));
         }
+
         self.handle
             .request(|reply| Request::StepTargets {
                 stop_id: context.stop,
@@ -2180,6 +2215,7 @@ impl StopView<'_> {
             }
             Err(error) => return Err(error),
         };
+
         self.handle.source_context_at(module, source, radius).await
     }
 

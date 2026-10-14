@@ -7,6 +7,7 @@ use proptest::prelude::*;
 use super::super::types::{
     BuiltTypes, DynamicAggregateChild, DynamicAggregateLayoutKey, TypeEntry,
 };
+
 use super::*;
 use crate::{
     Accessibility, ModuleImageId, RecordKind, RecordMember, RecordMemberLayout, SourceLanguage,
@@ -156,8 +157,10 @@ fn copies_of_a_cyclic_type_merge_and_every_reference_follows() {
     assert_eq!(types.complex_parts[&("float".into(), 4)], TypeId::new(1));
     assert_eq!(types.passed_by_value.len(), 1);
     assert!(types.passed_by_value[&TypeId::new(0)]);
+
     // An identifier past the types stays past them.
     assert_eq!(remap.id(TypeId::new(7)), TypeId::new(4));
+
     // Colliding hashes only propose candidates.
     let mut colliding = built(linked_lists());
     let collided = colliding
@@ -175,6 +178,7 @@ fn types_that_keep_their_provenance_never_merge() {
         let TypeEntry::Resolved(mut info) = record(id, "Hidden", &[]) else {
             unreachable!()
         };
+
         info.identity = Some(Arc::new(TypeIdentity {
             language: SourceLanguage::Cpp,
             path: Arc::from([Arc::from(ANONYMOUS_NAMESPACE)]),
@@ -187,6 +191,7 @@ fn types_that_keep_their_provenance_never_merge() {
         }));
         TypeEntry::Resolved(info)
     };
+
     let cases: [Case; 5] = [
         (
             "an anonymous namespace's",
@@ -232,6 +237,7 @@ fn types_that_keep_their_provenance_never_merge() {
         let mut types = built(entries.clone());
         change(&mut types);
         assert!(types.deduplicate().is_none(), "{name} copies merged");
+
         // Signatures zero references in place, so this proves each came
         // back.
         assert_eq!(types.entries, entries, "{name}");
@@ -249,14 +255,17 @@ fn refinement_that_does_not_settle_keeps_every_type() {
             for link in 0..depth {
                 entries.push(pointer(base + link, base + link + 1));
             }
+
             entries.push(TypeEntry::Resolved(info(
                 base + depth,
                 end,
                 TypeKind::Unspecified,
             )));
         }
+
         built(entries)
     };
+
     let mut shallow = chains(8);
     let remap = shallow.deduplicate().expect("the copy merges");
     assert_eq!(shallow.entries.len(), 18);
@@ -298,6 +307,7 @@ fn bisimilar(labels: &[Option<u8>], edges: &[Vec<u32>]) -> Vec<Vec<bool>> {
                 }
             }
         }
+
         if !changed {
             return related;
         }
@@ -328,6 +338,7 @@ fn check_refinement(labels: &[Option<u8>], edges: &[Vec<u32>]) -> Result<(), Tes
         flat.extend(targets);
         offsets.push(flat.len());
     }
+
     let signatures = Signatures {
         fields: infos
             .iter()
@@ -342,6 +353,7 @@ fn check_refinement(labels: &[Option<u8>], edges: &[Vec<u32>]) -> Result<(), Tes
         offsets: &offsets,
         edges: &flat,
     };
+
     let classes = refine(&signatures, &foldhash::fast::FixedState::default()).unwrap();
     let related = bisimilar(labels, edges);
     for left in 0..labels.len() {
@@ -349,6 +361,7 @@ fn check_refinement(labels: &[Option<u8>], edges: &[Vec<u32>]) -> Result<(), Tes
             prop_assert_eq!(classes[left] == classes[right], related[left][right]);
         }
     }
+
     prop_assert_eq!(refine(&signatures, &Colliding).unwrap(), classes);
     Ok(())
 }
@@ -375,6 +388,7 @@ fn a_class_splits_into_more_groups_than_it_compares_one_by_one() {
             edges.push(vec![u32::try_from(labels.len() - 2).unwrap()]);
         }
     }
+
     check_refinement(&labels, &edges).unwrap();
 }
 
@@ -421,6 +435,7 @@ fn named_types(
             let TypeEntry::Resolved(mut info) = record(id, label(*name), &members) else {
                 unreachable!("a record is resolved");
             };
+
             let positions = arguments
                 .iter()
                 .enumerate()
@@ -434,6 +449,7 @@ fn named_types(
                     positions,
                 });
             }
+
             info.identity = Some(Arc::new(TypeIdentity {
                 language: SourceLanguage::Rust,
                 path: Arc::from([]),
@@ -476,6 +492,7 @@ proptest! {
             pending_arguments: pending,
             ..built(entries)
         };
+
         prop_assert_eq!(merging.deduplicate().as_ref().map(ids), expected);
         prop_assert_eq!(format!("{:?}", merging.entries), format!("{:?}", before.entries));
     }

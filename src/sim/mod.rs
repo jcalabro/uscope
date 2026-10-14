@@ -20,26 +20,38 @@
 mod audit;
 mod catches;
 pub(crate) mod choices;
+
 mod client;
 #[cfg(test)]
 mod conformance;
 pub(crate) mod corpus;
+
 pub(crate) mod cpu;
+
 pub(crate) mod facts;
+
 pub mod faults;
 mod hits;
 pub(crate) mod kernel;
+
 pub(crate) mod loader;
+
 mod machine;
 pub(crate) mod markers;
+
 pub(crate) mod marks;
+
 pub(crate) mod memory;
+
 mod oracles;
 pub(crate) mod report;
+
 mod samples;
 pub(crate) mod schedule;
+
 mod semantics;
 pub(crate) mod swarm;
+
 #[cfg(test)]
 mod tests;
 mod tracing;
@@ -70,15 +82,19 @@ pub fn describe_failure(outcome: &Outcome) -> String {
             failure.check, failure.step, failure.message
         );
     }
+
     if let Some(plan) = outcome.unfired {
         let _ = writeln!(text, "fault    {plan} never fired");
     }
+
     if outcome.dropped > 0 {
         let _ = writeln!(text, "  ... {} earlier lines", outcome.dropped);
     }
+
     for line in &outcome.trace {
         let _ = writeln!(text, "  {line}");
     }
+
     let _ = writeln!(
         text,
         "replay   just sim-seed {:#x} --fingerprint {:#x}",

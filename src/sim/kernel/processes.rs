@@ -16,12 +16,15 @@ use super::{
     Ended, ExitStatus, Happening, Kernel, Parent, Pending, Process, SigInfo, State, StopKind, Tgid,
     Thread, Tid, Tracing, Zombie,
 };
+
 use crate::sim::cpu::RAX;
 
 /// `wait4`'s option to return at once when no child has exited.
 const WNOHANG: u64 = 1;
+
 /// The process id `getppid` reports once init has taken a process on.
 pub(super) const INIT: Tid = 1;
+
 /// The process id of whatever started a program untraced.
 const LAUNCHER: Tid = 2;
 
@@ -55,6 +58,7 @@ impl Kernel {
         let caller = &self.threads[&tid];
         let traced = caller.traced() && caller.options.trace_fork;
         let group = caller.tgid;
+
         // The child returns through its parent's calls, on its own copy of
         // the stack.
         let shadow = caller.shadow.clone();
@@ -83,6 +87,7 @@ impl Kernel {
             continued: false,
             start_time,
         };
+
         self.processes.insert(Tgid::led_by(child), process);
         self.threads.insert(child, thread);
         self.happenings
@@ -108,6 +113,7 @@ impl Kernel {
         let Ok(child) = Tid::try_from(pid.cast_signed()) else {
             return failure(Errno::ECHILD);
         };
+
         let process = Tgid::new(child);
         if child <= 0 || options != WNOHANG {
             self.gap(format!(
@@ -116,6 +122,7 @@ impl Kernel {
             ));
             return failure(Errno::EINVAL);
         }
+
         let group = self.threads[&tid].tgid;
         if let Some(zombie) = self
             .zombies
@@ -132,6 +139,7 @@ impl Kernel {
                     return failure(Errno::EFAULT);
                 }
             }
+
             let zombie = self.zombies.remove(&process).expect("the zombie");
             self.ended.insert(
                 process,
@@ -146,6 +154,7 @@ impl Kernel {
                 .push(Happening::ReapedChild { parent: tid, child });
             return u64::try_from(child).expect("process ids are positive");
         }
+
         let lives = self
             .processes
             .get(&process)
@@ -161,6 +170,7 @@ impl Kernel {
             Parent::Process(parent) => parent.id(),
             Parent::Init => INIT,
         };
+
         u64::try_from(parent).expect("process ids are positive")
     }
 
@@ -202,11 +212,13 @@ impl Kernel {
                 process.parent = Parent::Init;
             }
         }
+
         for zombie in self.zombies.values_mut() {
             if zombie.creator == Some(tid) {
                 zombie.creator = heir;
             }
         }
+
         if heir.is_none() {
             let ended = self
                 .zombies
@@ -301,6 +313,7 @@ impl Kernel {
                 self.gap(format!("the tracer exiting while it holds thread {tid}"));
                 return;
             }
+
             // Only a thread that runs on can meet a trap left in its code.
             let planted = matches!(thread.state, State::Running)
                 .then(|| self.planted(group))
@@ -313,6 +326,7 @@ impl Kernel {
             let thread = self.threads.get_mut(&tid).expect("a traced thread");
             thread.tracing = Tracing::Untraced;
             thread.single_step = false;
+
             // K-SYS-6: an untraced thread stops at no call.
             thread.syscall_stops = false;
             thread.options = super::Options::default();
@@ -337,6 +351,7 @@ impl Kernel {
         if tid != group.leader() {
             self.threads.remove(&tid);
         }
+
         self.end_with_untraced_leader(group);
     }
 
@@ -353,6 +368,7 @@ impl Kernel {
             let State::Zombie(own) = leader.state else {
                 unreachable!("the leader is a zombie")
             };
+
             let process = &self.processes[&group];
             let exit = process.group_exit.unwrap_or(own);
             self.end_process(group, exit);

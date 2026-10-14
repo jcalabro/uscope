@@ -30,20 +30,25 @@ enum Command {
         /// How long to sweep.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+
         /// How many worker threads; every core by default.
         #[arg(long)]
         threads: Option<usize>,
+
         /// The first seed; chosen from the clock by default.
         #[arg(long, value_parser = parse_seed)]
         start: Option<u64>,
     },
+
     /// Reruns one seed, printing its whole trace.
     Replay {
         #[arg(value_parser = parse_seed)]
         seed: u64,
+
         /// Stops after this action and prints the state there.
         #[arg(long)]
         at: Option<u64>,
+
         /// The fingerprint the seed's run had, which the replay must match.
         #[arg(long, value_parser = parse_seed)]
         fingerprint: Option<u64>,
@@ -83,6 +88,7 @@ fn main() -> Result<ExitCode> {
 /// shortest run, the easiest to read.
 struct Group {
     count: u64,
+
     /// The shortest run's length in actions, then its seed, which breaks
     /// ties so that a sweep's choice does not depend on its threads.
     shortest: (u64, u64),
@@ -95,6 +101,7 @@ fn record_failure(groups: &Mutex<BTreeMap<String, Group>>, outcome: &Outcome) {
     let Some(failure) = &outcome.failure else {
         return;
     };
+
     let run = (outcome.steps, outcome.seed);
     let mut groups = groups.lock().unwrap_or_else(PoisonError::into_inner);
     let group = groups.entry(failure.signature()).or_insert_with(|| Group {
@@ -107,6 +114,7 @@ fn record_failure(groups: &Mutex<BTreeMap<String, Group>>, outcome: &Outcome) {
         group.shortest = run;
         group.report = describe_failure(outcome);
     }
+
     drop(groups);
 }
 
@@ -134,6 +142,7 @@ fn sweep(
     let done = AtomicBool::new(false);
     let sessions = AtomicU64::new(0);
     let groups = Mutex::new(BTreeMap::<String, Group>::new());
+
     // How many sessions planned each kind of fault, and how many of those
     // fired.
     let faults = Mutex::new(BTreeMap::<&'static str, (u64, u64)>::new());
@@ -153,10 +162,12 @@ fn sweep(
                         counts.1 += u64::from(outcome.unfired.is_none());
                         drop(faults);
                     }
+
                     record_failure(&groups, &outcome);
                 }
             });
         }
+
         while began.elapsed() < duration {
             std::thread::sleep(Duration::from_secs(1).min(duration));
             let count = sessions.load(Ordering::Relaxed);
@@ -166,6 +177,7 @@ fn sweep(
                 rate(count, began.elapsed(), 1)
             );
         }
+
         done.store(true, Ordering::Relaxed);
     });
     let groups = groups.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -178,10 +190,12 @@ fn sweep(
     for (kind, (planned, fired)) in faults.into_inner().unwrap_or_else(PoisonError::into_inner) {
         println!("{kind}: fired in {fired} of {planned} sessions that planned it");
     }
+
     if groups.is_empty() {
         println!("no failures");
         return ExitCode::SUCCESS;
     }
+
     for (signature, group) in &groups {
         let (steps, seed) = group.shortest;
         println!(
@@ -189,6 +203,7 @@ fn sweep(
             group.count, group.report
         );
     }
+
     ExitCode::FAILURE
 }
 
@@ -203,6 +218,7 @@ fn replay(
         stop_at: at,
         ..Settings::default()
     };
+
     let outcome = run(seed, corpus, &settings);
     let text = report(&outcome);
     print!("{text}");
@@ -223,6 +239,7 @@ fn replay(
         );
         return Ok(ExitCode::FAILURE);
     }
+
     Ok(if outcome.failure.is_some() {
         ExitCode::FAILURE
     } else {
@@ -238,8 +255,10 @@ fn report(outcome: &Outcome) -> String {
             outcome.seed, outcome.program, outcome.arguments, outcome.steps, outcome.swarm
         );
     }
+
     if let Some(state) = &outcome.state {
         let _ = writeln!(text, "state after action #{}:{state}", outcome.steps);
     }
+
     text
 }

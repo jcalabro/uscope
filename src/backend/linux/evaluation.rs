@@ -20,6 +20,7 @@ use crate::eval::target::{
     Key, Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TextSpan, TypeLookup,
     TypeQuery,
 };
+
 use crate::eval::types::{TypeSource, type_info};
 use crate::inspection::InspectionBudget;
 use crate::model::{DereferenceTarget, ValueStorage};
@@ -36,6 +37,7 @@ use super::frames::{FrameRegisters, FrameScope, ResolvedFrame, StackRoot};
 use super::inspection::{
     LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
 };
+
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_register_snapshot;
 use super::{Controller, Inferior, RuntimeModule, validate_image_current};
@@ -45,6 +47,7 @@ use super::{Controller, Inferior, RuntimeModule, validate_image_current};
 pub(super) struct StopObject {
     module: ModuleId,
     key: ObjectRef,
+
     /// Whether it is a local or parameter of the frame.
     local: bool,
 }
@@ -54,6 +57,7 @@ pub(super) struct StopObject {
 enum ObjectRef {
     /// One the debug information describes.
     Data(ObjectKey),
+
     /// A variable a suspended async frame keeps in its future, or the
     /// future itself: a value of type `ty` at `address`.
     Saved { ty: TypeId, address: VirtualAddress },
@@ -75,12 +79,16 @@ impl StopObject {
 pub(super) enum StopStep {
     /// A step one module's image planned.
     Provider { module: ModuleId, step: PlannedStep },
+
     /// To an element of a value a view presents as a sequence.
     Element(Arc<ViewBound>),
+
     /// To the value for a key of a value a view presents as a map.
     Entry(Arc<ViewBound>),
+
     /// To the value a view presents a value as, for `*x`.
     Presented(Arc<ViewBound>),
+
     /// To a global, from anywhere: a view's `global(NAME)`.
     Global(StopObject),
 }
@@ -116,13 +124,16 @@ pub(super) struct Frame<'a, P: InspectionOps> {
     root: &'a StackRoot,
     pub(super) stop_id: StopId,
     resolved: &'a ResolvedFrame,
+
     /// The frame's module, address, and inline instance, when it has debug
     /// information.
     code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
     registers: OnceCell<Option<RegisterSnapshot>>,
+
     /// Units of work every machine running at the frame has done; the
     /// views presenting values one inside another each have a machine.
     charges: Cell<u32>,
+
     /// The system call the frame's thread stopped at, which `$arg0` to
     /// `$arg5`, `$ret`, and `$path` read in any of its frames.
     pub(super) call: Option<crate::eval::target::CallValues>,
@@ -133,6 +144,7 @@ pub(super) fn call_values(reason: &crate::StopReason) -> Option<crate::eval::tar
     let crate::StopReason::Syscall(stop) = reason else {
         return None;
     };
+
     Some(crate::eval::target::CallValues {
         args: stop.args,
         returned: stop.returned,
@@ -208,6 +220,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
                             .map(|pid| self.controller.ptrace.registers(pid));
                         (native.transpose().ok()?, Some(registers))
                     }
+
                     // A tail call discarded every register of the frame.
                     FrameRegisters::Discarded => {
                         let native = self
@@ -218,6 +231,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
                     }
                     FrameRegisters::Thread(native) => (Some(*native), None),
                 };
+
                 Some(x86_64_register_snapshot(
                     self.controller.revision,
                     self.root.context,
@@ -244,9 +258,11 @@ impl<P: InspectionOps> Frame<'_, P> {
             },
             _ => return Ok(None),
         };
+
         let Some(module) = self.controller.module_of(ty) else {
             return Ok(None);
         };
+
         let saved = |ty: TypeReference, address| Lookup::Object {
             object: StopObject {
                 module: module.loaded.id,
@@ -255,9 +271,11 @@ impl<P: InspectionOps> Frame<'_, P> {
             },
             ty: Ok(ty),
         };
+
         if name == "$future" {
             return Ok(Some(saved(ty, object)));
         }
+
         let variables = self
             .controller
             .saved_variables(self.resolved)
@@ -299,6 +317,7 @@ impl<P: InspectionOps> Frame<'_, P> {
                 Err(error) => return Err(refusal(&error)),
             }
         }
+
         match (globals.as_slice(), candidates.is_empty()) {
             ([(module, id)], true) => {
                 let key = module
@@ -320,6 +339,7 @@ impl<P: InspectionOps> Frame<'_, P> {
                         candidates.insert(format!("{file}::{}", global.qualified_name));
                     }
                 }
+
                 Ok(Some(Lookup::Ambiguous(candidates.into_iter().collect())))
             }
         }
@@ -352,6 +372,7 @@ impl<P: InspectionOps> Frame<'_, P> {
                 }
             }
         }
+
         None
     }
 }
@@ -405,6 +426,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             .type_info(reference)
             .map_or_else(|| "?".to_owned(), |info| info.name.to_string())
     };
+
     let members = |members: &[crate::RecordMember]| {
         members
             .iter()
@@ -419,6 +441,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
             .collect::<Vec<_>>()
             .join(",")
     };
+
     let shape = match &info.kind {
         TypeKind::Record {
             members: fields, ..
@@ -437,6 +460,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
                 crate::VariantDiscriminant::TagType(tag) => name(*tag),
                 crate::VariantDiscriminant::Absent => String::new(),
             };
+
             let variants = variants
                 .iter()
                 .map(|variant| format!("{:?}={}", variant.selection, members(&variant.members)))
@@ -444,6 +468,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
                 .join(";");
             format!("{}|{tag}|{variants}", members(common_members))
         }
+
         TypeKind::Named {
             target: Some(target),
             ..
@@ -457,6 +482,7 @@ fn definition(image: &crate::ModuleImage, info: &TypeInfo) -> String {
         TypeKind::Base(base) => format!("{:?}{:?}", base.encoding, base.bit_size),
         other => format!("{other:?}"),
     };
+
     format!("{}/{:?}/{shape}", info.name, info.byte_size)
 }
 
@@ -493,6 +519,7 @@ fn refusal(error: &Error) -> Refusal {
         Error::ValueIndexOutOfBounds { .. } => ErrorKind::Bounds,
         _ => ErrorKind::Unsupported,
     };
+
     Refusal::new(kind, error.to_string())
 }
 
@@ -533,6 +560,7 @@ pub(super) fn plan_in<P: InspectionOps>(
                     "a base class is in the same module as the class",
                 ));
             }
+
             base_name = image
                 .type_info(target)
                 .map_or_else(|| Arc::from("?"), |info| Arc::clone(&info.name));
@@ -545,12 +573,14 @@ pub(super) fn plan_in<P: InspectionOps>(
                     target,
                 )
             };
+
             Step::Base(crate::debug_info::BaseTarget {
                 name: &base_name,
                 is_target: &is_target,
             })
         }
     };
+
     let planned = module
         .variables
         .plan_step(from.id, step)
@@ -620,6 +650,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         if !outermost && let Some(found) = self.lookup_saved(name)? {
             return Ok(found);
         }
+
         if !outermost && let Some((module, address, selected)) = self.code {
             match module.variables.visible_object(address, selected, name) {
                 Ok(key) => return Ok(object(module, key, true)),
@@ -630,9 +661,11 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 Err(error) => return Err(refusal(&error)),
             }
         }
+
         if let Some(global) = self.lookup_global(name)? {
             return Ok(global);
         }
+
         Ok(self.lookup_enumerator(name).unwrap_or(Lookup::NotFound))
     }
 
@@ -644,6 +677,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                 found => return found,
             }
         }
+
         TypeLookup::NotFound
     }
 
@@ -667,6 +701,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         step: StepKind<'_>,
     ) -> std::result::Result<Planned<StopStep>, Refusal> {
         let planned = plan_in(self.controller, from, step);
+
         // A value with no indexing of its own is indexed through the view
         // that presents it as a sequence.
         match (&planned, step) {
@@ -694,6 +729,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
             "fp" => "rbp",
             other => other,
         };
+
         let registers = self.registers()?;
         let number = registers
             .registers
@@ -711,12 +747,15 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
 pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
     pub(super) frame: &'b Frame<'a, P>,
     pub(super) budget: &'b mut InspectionBudget,
+
     /// How many views are presenting the values this machine presents, one
     /// inside another.
     pub(super) depth: u8,
+
     /// Whether a run-control request waiting ends the work, which then
     /// runs again after it; false for work run control itself does.
     pub(super) interruptible: bool,
+
     /// Whether values present as the types they dynamically are; false for
     /// a base-class subobject, which is part of an object, not one.
     pub(super) dynamic: bool,
@@ -839,6 +878,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         {
             return Err(Stop::Failed(Error::Interrupted));
         }
+
         Ok(())
     }
 
@@ -857,6 +897,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 });
             }
         };
+
         let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
@@ -892,6 +933,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                         "a view's elements take one index",
                     )));
                 };
+
                 return self.view_element(bound, from, *index);
             }
             StopStep::Global(object) => return self.locate(object),
@@ -903,6 +945,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 )));
             }
         };
+
         let module = self.module(module_id)?;
         let address = self.address(module);
         let mut runtime = self.frame.runtime(module);
@@ -945,6 +988,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 format!("the value is {where_}, which has no address"),
             ))
         };
+
         match &at.located.storage {
             ValueStorage::Memory(address)
             | ValueStorage::Bytes {
@@ -997,6 +1041,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 crate::debug_info::VariableRuntimeError::Unavailable(reason) => {
                     Stop::missing(VariableState::Unavailable(reason))
                 }
+
                 crate::debug_info::VariableRuntimeError::Malformed(description)
                 | crate::debug_info::VariableRuntimeError::Fatal(description) => {
                     Stop::Failed(Error::VariableRuntime(description))
@@ -1054,6 +1099,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         let Some(bound) = self.view_of(at)? else {
             return Ok(None);
         };
+
         self.view_element(&bound, at, index).map(Some)
     }
 
@@ -1073,9 +1119,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 .map_err(Stop::missing)?
                 .map(|location| (location.address.get(), location.length))
         };
+
         let Some((address, length)) = found else {
             return Ok(None);
         };
+
         // Text that ends at a NUL is as long as reading it finds.
         let length = match length {
             Some(length) => length,
@@ -1105,6 +1153,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 None => return Ok(None),
             },
         };
+
         Ok(Some(TextSpan { address, length }))
     }
 
@@ -1120,6 +1169,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 "only a value a view presents as a map is indexed by key",
             )));
         };
+
         self.view_entry_place(bound, from, key)
     }
 
@@ -1149,6 +1199,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 format!("no function the debug information describes has its code at {address:#x}"),
             )));
         };
+
         Ok(generics
             .iter()
             .map(|(name, id)| (Arc::clone(name), TypeReference { image, id: *id }))
@@ -1161,6 +1212,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         if let crate::ExecutionContext::Task(task) = frame.root.context {
             return Ok(task.number);
         }
+
         // A condition at a hit, before the other threads stop, reads the
         // task from the thread's own state alone, which they cannot change.
         if frame.inferior.public_stop.is_none() {
@@ -1176,6 +1228,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 None => Err(refused("the program has no tasks")),
             };
         }
+
         match frame
             .controller
             .thread_activity(frame.inferior, frame.root.reader())
@@ -1206,8 +1259,10 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             } else {
                 VariableUnavailableReason::RegisterNotSaved(Arc::clone(&value.register.name))
             };
+
             return Err(Stop::missing(VariableState::Unavailable(reason)));
         };
+
         let mut wide = [0_u8; 16];
         let length = bytes.len().min(16);
         wide[..length].copy_from_slice(&bytes[..length]);
@@ -1239,6 +1294,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 address: None,
             },
         };
+
         let value = self.materialize(module, &located)?;
         self.presented(value)
     }
@@ -1254,6 +1310,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         if self.byte_order() == ByteOrder::Big {
             raw.reverse();
         }
+
         let dereference = match (pointee, address) {
             (None, _) => DereferenceState::Unavailable {
                 pointee: None,
@@ -1280,6 +1337,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 },
             },
         };
+
         Ok(self.finish(
             Some(type_info),
             VariableState::Available {
@@ -1310,6 +1368,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
 /// What evaluating an expression asks of the controller.
 enum Evaluated {
     Done(Box<Evaluation>),
+
     /// Store `bytes` in `target`, then read it again.
     Write {
         target: StopPlace,
@@ -1317,6 +1376,7 @@ enum Evaluated {
         whole: bool,
         span: Span,
     },
+
     /// Store `bytes` in a register, then read it again.
     WriteRegister {
         register: Register,
@@ -1372,6 +1432,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reason,
             ))
         };
+
         let thread_registers = self.shares_thread_registers(root, frame)?;
         match &target.located.storage {
             ValueStorage::Memory(address)
@@ -1384,6 +1445,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     return Err(Error::MemoryNotWritable(*address));
                 }
             }
+
             ValueStorage::Bytes {
                 source: VariableValueSource::Register(register),
                 ..
@@ -1396,14 +1458,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                         "it is held in a register the task's runtime saved".into(),
                     ));
                 };
+
                 if !thread_registers {
                     return Err(refused(
                         "it is held in a register of a caller's frame".into(),
                     ));
                 }
+
                 if !whole {
                     return Err(refused("it is part of a value held in a register".into()));
                 }
+
                 self.write_register(pid, register.id, &bytes).map_err(|_| {
                     refused(format!("register {} cannot be changed", register.name))
                 })?;
@@ -1417,6 +1482,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ));
             }
         }
+
         self.read_assigned(stop_id, root, frame, expression, limits)
             .map(|evaluation| (evaluation, None))
     }
@@ -1443,6 +1509,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reason,
             ))
         };
+
         let Some(pid) = root.thread() else {
             return Err(refused(
                 "a parked task's registers are what its runtime saved; only a thread's can be \
@@ -1450,6 +1517,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .into(),
             ));
         };
+
         if !self.shares_thread_registers(root, frame)? {
             return Err(refused(
                 "a caller's registers are what unwinding recovered; only the innermost frame's \
@@ -1457,6 +1525,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .into(),
             ));
         }
+
         let snapshot = self.registers(stop_id, root, frame)?;
         let descriptor = snapshot
             .registers
@@ -1469,6 +1538,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if descriptor.role != Some(crate::RegisterRole::ProgramCounter) {
             return Ok((evaluation, None));
         }
+
         let (_, moved) = self.publish_moved_thread(pid)?;
         Ok((evaluation, Some(moved)))
     }
@@ -1542,6 +1612,7 @@ impl<P: InspectionOps> Controller<P> {
         let scope = self.frame_for(inferior, stop_id, root, &resolved);
         let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(limits);
+
         // Reading may wait for run control; an assignment, which changes
         // the stop, may not.
         let mut machine = StopMachine::new(&scope, &mut budget, mode == Mode::Read);
@@ -1590,6 +1661,7 @@ impl<P: InspectionOps> Controller<P> {
         reason: &crate::StopReason,
     ) -> Result<Evaluation> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+
         // The thread is in the ptrace-stop that reported the hit, which its
         // recorded state does not reflect until the hit is resolved.
         validate_image_current(inferior)?;
@@ -1603,6 +1675,7 @@ impl<P: InspectionOps> Controller<P> {
             Some(&presentation),
         )?;
         let mut scope = self.frame_for(inferior, StopId::new(0), &root, &resolved);
+
         // The thread's recorded reason is not yet this hit's.
         scope.call = call_values(reason);
         let program = if condition {
@@ -1611,6 +1684,7 @@ impl<P: InspectionOps> Controller<P> {
             bind(expression, &scope, Mode::Read)
         }
         .map_err(Error::Expression)?;
+
         // Run control is evaluating, so nothing interrupts it.
         let mut machine = StopMachine::new(&scope, &mut budget, false);
         let outcome = run(&program, &mut machine);
@@ -1647,6 +1721,7 @@ impl<P: InspectionOps> Controller<P> {
                 "a range cannot be watched; watch one element".into(),
             ));
         };
+
         let (address, byte_size) = super::watchpoints::watchable_storage(&value)?;
         let (watch_scope, evidence) = match program.root_object() {
             Some(object) => {
@@ -1659,6 +1734,7 @@ impl<P: InspectionOps> Controller<P> {
                         "a suspended task's variables cannot be watched".into(),
                     ));
                 };
+
                 let storage = module.variables.object_storage(key);
                 let local = object
                     .local
@@ -1668,6 +1744,7 @@ impl<P: InspectionOps> Controller<P> {
             }
             None => (crate::WatchScope::Location, None),
         };
+
         Ok(crate::WatchTarget {
             stop_id,
             expression: expression.clone(),

@@ -16,6 +16,7 @@ use super::{
     DwarfRegister, FramePointerRule, MemoryReader, RBP, RETURN_ADDRESS, RSP, RegisterFile,
     UnwindModule, interrupted_registers, unwind_module_for,
 };
+
 use crate::capture::records::Truncation;
 use crate::{CodeRole, ModuleImageId, UnwindTermination, VirtualAddress};
 
@@ -24,8 +25,10 @@ use crate::{CodeRole, ModuleImageId, UnwindTermination, VirtualAddress};
 pub struct SampledState<'a> {
     /// The user registers by DWARF number.
     pub registers: &'a [(DwarfRegister, u64)],
+
     /// The stack's bytes from the stack pointer up.
     pub stack: &'a [u8],
+
     /// The kernel's frame-pointer walk: the instruction pointer, then
     /// return addresses, innermost first.
     pub chain: &'a [u64],
@@ -38,6 +41,7 @@ pub struct SampledFrame {
     /// the innermost frame and of a frame a signal interrupted, and
     /// otherwise the byte before its return address, inside the call.
     pub address: VirtualAddress,
+
     /// The module covering the address, by index in the modules.
     pub module: Option<usize>,
     pub role: CodeRole,
@@ -48,6 +52,7 @@ pub struct SampledFrame {
 pub enum StackEnd {
     /// At its outermost frame.
     Complete,
+
     /// Short of it, for this reason, with the module at fault if any.
     Truncated(Truncation, Option<usize>),
 }
@@ -123,20 +128,24 @@ fn sampled_frames(
     else {
         return (Vec::new(), StackEnd::Truncated(Truncation::NoStack, None));
     };
+
     let mut memory = StackCopy {
         start: registers.get(RSP),
         bytes: sample.stack,
     };
+
     let walked = walk_cfi(modules, instruction, registers, &mut memory, limit);
     if walked.certain {
         return (frames(walked.unwound), walked.end);
     }
+
     let (mut unwound, cfi_end) = (walked.unwound, walked.end);
 
     // The kernel's chain from the deepest frame that keeps the chain.
     let Some((kept, link)) = splice(modules, rules, &unwound, sample, &mut memory) else {
         return (frames(unwound), cfi_end);
     };
+
     unwound.truncate(kept + 1);
     let mut frames = frames(unwound);
     let end = follow_chain(modules, rules, &mut frames, &sample.chain[link..], limit);
@@ -157,6 +166,7 @@ pub fn unwind_memory(
     let Some(instruction) = registers.get(RETURN_ADDRESS) else {
         return (Vec::new(), StackEnd::Truncated(Truncation::NoStack, None));
     };
+
     let walked = walk_cfi(modules, instruction, registers, memory, limit);
     let end = match walked.end {
         StackEnd::Truncated(Truncation::StackCopyExhausted, module) => {
@@ -164,6 +174,7 @@ pub fn unwind_memory(
         }
         end => end,
     };
+
     debug_assert!(
         walked.unwound.len() <= limit,
         "a stack unwound to {} frames, past its limit of {limit}",
@@ -225,18 +236,22 @@ fn walk_cfi(
         if unwound.len() >= limit {
             return Walked::certain(unwound, StackEnd::Truncated(Truncation::DepthLimit, None));
         }
+
         if role == CodeRole::Outermost {
             return Walked::certain(unwound, StackEnd::Complete);
         }
+
         // A switch's frame lies on the stack it switched from, which its
         // stack pointer no longer names: only the kernel's chain, through
         // the frame pointer the switch kept, reaches its caller.
         if role == CodeRole::StackSwitch {
             break StackEnd::Truncated(Truncation::StackSwitch, index);
         }
+
         let Some((module, image_address)) = found else {
             break StackEnd::Truncated(Truncation::UnmappedAddress, None);
         };
+
         let step = match module.unwind.unwind(image_address, &registers, memory) {
             Ok(step) => step,
             Err(UnwindTermination::Complete) => {
@@ -250,15 +265,19 @@ fn walk_cfi(
             }
             Err(_) => break StackEnd::Truncated(Truncation::InvalidCaller, index),
         };
+
         let caller = match step.registers.get(RETURN_ADDRESS) {
             None | Some(0) => return Walked::certain(unwound, StackEnd::Complete),
             Some(caller) => caller,
         };
+
         // A caller in the same frame as its callee would repeat forever.
         if previous_cfa == Some(step.cfa) {
             break StackEnd::Truncated(Truncation::InvalidCaller, index);
         }
+
         previous_cfa = Some(step.cfa);
+
         // A signal handler returns to the trampoline that restores what it
         // interrupted: its frame, at its first instruction, and then the
         // interrupted instruction, with the registers the kernel saved.
@@ -267,6 +286,7 @@ fn walk_cfi(
             if unwound.len() >= limit {
                 return Walked::certain(unwound, StackEnd::Truncated(Truncation::DepthLimit, None));
             }
+
             let interrupted = step
                 .registers
                 .get(RSP)
@@ -277,17 +297,21 @@ fn walk_cfi(
             }) else {
                 break StackEnd::Truncated(Truncation::StackCopyExhausted, None);
             };
+
             address = VirtualAddress::new(instruction);
             registers = interrupted;
             continue;
         }
+
         address = if step.signal_frame {
             VirtualAddress::new(caller)
         } else {
             VirtualAddress::new(caller.wrapping_sub(1))
         };
+
         registers = step.registers;
     };
+
     Walked {
         unwound,
         end,
@@ -343,31 +367,39 @@ fn splice(
         if links.len() >= sample.chain.len() {
             break;
         }
+
         match memory.read_u64(VirtualAddress::new(current.wrapping_add(8))) {
             // A link whose return address is in the copy must agree with
             // the kernel's, or the two walks part.
             Some(return_address) if return_address != sample.chain[links.len()] => break,
             _ => {}
         }
+
         link = memory.read_u64(VirtualAddress::new(current));
     }
+
     for (index, frame) in unwound.iter().enumerate().rev() {
         let Some(frame_pointer) = frame.frame_pointer else {
             continue;
         };
+
         let Some(position) = links.iter().position(|link| *link == frame_pointer) else {
             continue;
         };
+
         let caller = position + 1;
         if caller >= sample.chain.len() {
             continue;
         }
+
         let Some(module) = frame.frame.module.map(|module| &modules[module]) else {
             continue;
         };
+
         if rules.rule(module, frame.frame.address) != FramePointerRule::Kept {
             continue;
         }
+
         // Where call-frame information found the caller too, both must
         // name the same one.
         if let Some(next) = unwound.get(index + 1)
@@ -375,8 +407,10 @@ fn splice(
         {
             continue;
         }
+
         return Some((index, caller));
     }
+
     None
 }
 
@@ -394,6 +428,7 @@ fn follow_chain(
         let Some((module, image_address)) = unwind_module_for(modules, address) else {
             return StackEnd::Truncated(Truncation::UnmappedAddress, None);
         };
+
         let index = modules
             .iter()
             .position(|candidate| candidate.loaded.id == module.loaded.id);
@@ -406,10 +441,13 @@ fn follow_chain(
         if role == CodeRole::Outermost {
             return StackEnd::Complete;
         }
+
         if frames.len() >= limit {
             return StackEnd::Truncated(Truncation::DepthLimit, None);
         }
+
         let kept = rules.rule(&module, address);
+
         // A switch the chain does not carry on through ends the stack at
         // the switch, whatever its frame keeps.
         if role == CodeRole::StackSwitch
@@ -417,6 +455,7 @@ fn follow_chain(
         {
             return StackEnd::Truncated(Truncation::StackSwitch, index);
         }
+
         match kept {
             FramePointerRule::Kept if position + 1 < chain.len() => {}
             FramePointerRule::Kept => return StackEnd::Truncated(Truncation::ChainEnded, index),
@@ -429,6 +468,7 @@ fn follow_chain(
             }
         }
     }
+
     StackEnd::Truncated(Truncation::ChainEnded, None)
 }
 
@@ -445,8 +485,10 @@ mod tests {
     /// `work` in `stores-clang-O2`, which keeps its frame pointer.
     struct Work {
         info: crate::debug_info::DebugInfo,
+
         /// Just past its prologue, where its frame is found by rbp.
         body: u64,
+
         /// In its epilogue, after it pops rbx and before r14, where its
         /// rules still find rbx below the stack pointer.
         epilogue: u64,
@@ -476,6 +518,7 @@ mod tests {
                     .expect("the symbol")
                     .address()
             };
+
             let after = |start: u64, found: &dyn Fn(&iced_x86::Instruction) -> bool| {
                 instructions
                     .iter()
@@ -484,12 +527,14 @@ mod tests {
                     .expect("the instruction")
                     .ip()
             };
+
             let pop = |register| {
                 move |instruction: &iced_x86::Instruction| {
                     instruction.mnemonic() == Mnemonic::Pop
                         && instruction.op0_register() == register
                 }
             };
+
             let body = after(symbol("work"), &|instruction| {
                 instruction.mnemonic() == Mnemonic::Mov
                     && instruction.op0_register() == Register::RBP
@@ -562,6 +607,7 @@ mod tests {
     #[test]
     fn a_register_saved_below_the_copy_still_leaves_its_caller_found() {
         let work = Work::new();
+
         // The copy holds r14, r15, the caller's rbp, and the return address.
         let sp = 0x7000_0000_u64;
         let rip = work.epilogue;

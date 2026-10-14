@@ -10,10 +10,12 @@ use gimli::{Location, Value};
 use crate::debug_info::dwarf::{
     DieKey, DieMap, DwarfError, Reader, Units, die_reference, unit_dwarf,
 };
+
 use crate::debug_info::{
     CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, TailJump, VariableRuntime,
     VariableRuntimeError,
 };
+
 use crate::{
     AddressRange, EntryValueUnavailableReason, ImageAddress, VariableUnavailableReason,
     VirtualAddress,
@@ -26,10 +28,12 @@ use super::location::{
     Expression, LocationListId, LocationSelectionError, LocationsBuilder, copy_expression,
     copy_optional_location, select,
 };
+
 use super::{DwarfVariableInfo, InspectionBudget, Metadata, MetadataAbsence};
 use crate::image::calls::{
     self, CallView, CallingFunction, Calls, Site, SiteId, SiteParameter, SiteTarget,
 };
+
 use crate::image::locations::ExpressionId;
 use crate::unwind::DwarfRegister;
 
@@ -49,14 +53,19 @@ pub(super) struct CallSiteBuilder {
     /// Each site, with the function entry it calls until that is resolved.
     sites: Vec<(calls::CallSite, Option<DieKey>)>,
     functions: Vec<CallingFunction>,
+
     /// The first address of each function entry with code.
     starts: DieMap<ImageAddress>,
+
     /// Each function with code, by its first address.
     code: Vec<(ImageAddress, usize)>,
+
     /// The abstract origin of each function with code.
     origins: Vec<(DieKey, usize, ImageAddress)>,
+
     /// Functions with code that other units may call by linkage name.
     external: HashMap<Arc<str>, Vec<usize>>,
+
     /// The site whose parameters follow, with its entry's depth.
     open: Option<(usize, usize)>,
 }
@@ -93,6 +102,7 @@ impl CallSiteBuilder {
                 unit: unit_index,
                 offset: entry.offset().0,
             };
+
             self.starts.insert(key, start);
             self.code.push((start, index));
             if let Ok(Some(origin)) = die_reference(
@@ -102,6 +112,7 @@ impl CallSiteBuilder {
             ) {
                 self.origins.push((origin, index, start));
             }
+
             name = external_name(dwarf, units, unit_index, entry);
             if let Some(name) = &name {
                 self.external
@@ -110,6 +121,7 @@ impl CallSiteBuilder {
                     .push(index);
             }
         }
+
         self.functions.push(CallingFunction {
             name,
             frame_base,
@@ -143,6 +155,7 @@ impl CallSiteBuilder {
             parameters: Vec::new(),
             malformed: None,
         };
+
         let mut entry_called = None;
         match site_attributes(dwarf, pool, units, unit_index, unit, entry) {
             Ok(SiteAttributes {
@@ -155,6 +168,7 @@ impl CallSiteBuilder {
                     Callee::Entry(key) => entry_called = Some(key),
                     Callee::Target(target) => site.target = target,
                 }
+
                 // A tail call returns nowhere, whatever address follows it.
                 site.return_address = return_address.filter(|_| !tail);
                 if tail {
@@ -166,6 +180,7 @@ impl CallSiteBuilder {
             }
             Err(error) => site.malformed = Some(error.to_string().into()),
         }
+
         self.open = Some((depth, self.sites.len()));
         self.sites.push((site, entry_called));
     }
@@ -183,9 +198,11 @@ impl CallSiteBuilder {
         let Some((site_depth, site)) = self.open else {
             return;
         };
+
         if depth != site_depth + 1 {
             return;
         }
+
         let (site, _) = &mut self.sites[site];
         match site_parameter(dwarf, pool, units, unit_index, entry) {
             Ok(parameter) => site.parameters.push(parameter),
@@ -219,6 +236,7 @@ impl CallSiteBuilder {
                 for site in &mut calling.tail_calls {
                     *site += super::row(sites);
                 }
+
                 calling
             }));
         self.sites
@@ -227,6 +245,7 @@ impl CallSiteBuilder {
                 if let SiteTarget::Computed(Ok(list)) = &mut site.target {
                     *list = pooled.list(*list);
                 }
+
                 for parameter in &mut site.parameters {
                     for expression in [&mut parameter.value, &mut parameter.data_value]
                         .into_iter()
@@ -235,6 +254,7 @@ impl CallSiteBuilder {
                         *expression = pooled.expression(*expression);
                     }
                 }
+
                 (site, entry)
             }));
         self.starts.extend(other.starts);
@@ -269,6 +289,7 @@ impl CallSiteBuilder {
         for (origin, _, start) in &self.origins {
             concrete.entry(*origin).or_default().push(*start);
         }
+
         for (site, entry) in &mut self.sites {
             if let Some(key) = entry {
                 // A function with code is entered there; an abstract one
@@ -279,12 +300,14 @@ impl CallSiteBuilder {
                 };
             }
         }
+
         // What each tail call enters, when it stays in this module.
         let function_at = |address: ImageAddress| {
             code.binary_search_by_key(&address, |(start, _)| *start)
                 .ok()
                 .map(|position| super::row(code[position].1))
         };
+
         for function in &self.functions {
             for &site in &function.tail_calls {
                 let (site, _) = &mut self.sites[site as usize];
@@ -298,6 +321,7 @@ impl CallSiteBuilder {
                 };
             }
         }
+
         Calls {
             functions: self.functions,
             sites: self.sites.into_iter().map(|(site, _)| site).collect(),
@@ -309,6 +333,7 @@ impl CallSiteBuilder {
 struct SiteAttributes {
     /// The instruction after the call.
     return_address: Option<ImageAddress>,
+
     /// The call instruction itself.
     call: Option<ImageAddress>,
     tail: bool,
@@ -324,6 +349,7 @@ fn tail_jump(call: Option<ImageAddress>, after: Option<ImageAddress>) -> Option<
             lookup: call,
         });
     }
+
     let after = after?;
     Some(TailJump {
         instruction: after,
@@ -350,6 +376,7 @@ fn site_attributes<'data>(
             None => Ok(None),
         }
     };
+
     let return_address = address(&[gimli::DW_AT_call_return_pc, gimli::DW_AT_low_pc])?;
     let call = address(&[gimli::DW_AT_call_pc])?;
     let tail = [gimli::DW_AT_call_tail_call, gimli::DW_AT_GNU_tail_call]
@@ -400,6 +427,7 @@ fn site_attributes<'data>(
     } else {
         Callee::Target(SiteTarget::Unknown)
     };
+
     Ok(SiteAttributes {
         return_address,
         call,
@@ -438,6 +466,7 @@ fn site_parameter(
         }
         None => None,
     };
+
     let parameter = die_reference(
         entry
             .attr_value(gimli::DW_AT_call_parameter)
@@ -477,6 +506,7 @@ fn linkage_name<'data>(
             return Ok(Some(name));
         }
     }
+
     Ok(None)
 }
 
@@ -491,6 +521,7 @@ fn external_name<'data>(
     if flag_with_origins(entry, &chain, gimli::DW_AT_external) != Some(true) {
         return None;
     }
+
     linkage_name(dwarf, units, unit_index, entry).ok().flatten()
 }
 
@@ -514,6 +545,7 @@ fn passed(site: Site<'_>, parameter: EntryParameter) -> Result<ExpressionId, Var
             "a call site describes one parameter twice".into(),
         ));
     }
+
     match parameter {
         EntryParameter::Referent(_) => passed.data_value,
         EntryParameter::Register(_) | EntryParameter::Parameter(_) => passed.value,
@@ -543,6 +575,7 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
         if !calling.tail_calls_described() {
             return Err(unavailable(EntryValueUnavailableReason::TailCalls));
         }
+
         for site in calling.tail_calls() {
             let enters = view
                 .site(site)
@@ -552,10 +585,12 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
                 if reached.len() == MAX_TAIL_CALL_FUNCTIONS {
                     return Err(VariableUnavailableReason::EvaluationLimit.into());
                 }
+
                 reached.push(enters);
             }
         }
     }
+
     if !seen.contains(&to) {
         return Err(unavailable(EntryValueUnavailableReason::TargetMismatch));
     }
@@ -570,6 +605,7 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
                 .push(function);
         }
     }
+
     let mut leads = HashSet::from_iter([to]);
     let mut pending = vec![to];
     while let Some(function) = pending.pop() {
@@ -588,6 +624,7 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
     if chains[&from] != 1 {
         return Err(unavailable(EntryValueUnavailableReason::TailCalls));
     }
+
     let mut path = Vec::new();
     let mut function = from;
     while function != to {
@@ -599,14 +636,17 @@ fn tail_path(view: CallView<'_>, from: u32, to: u32) -> Result<Vec<SiteId>, Vari
                 break;
             }
         }
+
         let Some((site, enters)) = next else {
             return Err(VariableRuntimeError::Fatal(
                 "the chain to the target does not continue".into(),
             ));
         };
+
         path.push(site);
         function = enters;
     }
+
     Ok(path)
 }
 
@@ -621,9 +661,11 @@ fn count_chains(
     if let Some(count) = chains.get(&function) {
         return Ok(*count);
     }
+
     if !active.insert(function) {
         return Err(unavailable(EntryValueUnavailableReason::TailCalls));
     }
+
     let mut count = u64::from(function == to);
     for site in view.function(function).tail_calls() {
         let enters = entered(view, site)?;
@@ -631,6 +673,7 @@ fn count_chains(
             count = count.saturating_add(count_chains(view, enters, to, leads, chains, active)?);
         }
     }
+
     active.remove(&function);
     chains.insert(function, count);
     Ok(count)
@@ -653,19 +696,23 @@ impl DwarfVariableInfo {
         let Some(id) = sites.next() else {
             return Ok(None);
         };
+
         if sites.next().is_some() {
             return Err(VariableRuntimeError::Malformed(
                 format!("several call sites return to {return_address}").into(),
             ));
         }
+
         let Some(site) = calls.site(id) else {
             return Err(VariableRuntimeError::Fatal(
                 "a call site index is out of range".into(),
             ));
         };
+
         if let Some(description) = site.malformed() {
             return Err(VariableRuntimeError::Malformed(description));
         }
+
         let target = match site.target() {
             SiteTarget::Code(address) => CallTarget::Code(address),
             SiteTarget::Symbol(name) => CallTarget::Symbol(name),
@@ -687,6 +734,7 @@ impl DwarfVariableInfo {
             }
             SiteTarget::Unknown => CallTarget::Unknown,
         };
+
         Ok(Some(CallSite {
             id: CallSiteId(id.0 as usize),
             target,
@@ -703,6 +751,7 @@ impl DwarfVariableInfo {
                 .map(|function| function.id().0)
                 .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))
         };
+
         let (from, to) = (function(from)?, function(to)?);
         let calls = self.calls();
         let links = tail_path(calls, from, to)?;
@@ -740,6 +789,7 @@ impl DwarfVariableInfo {
         if let Some(description) = site.malformed() {
             return Err(VariableRuntimeError::Malformed(description));
         }
+
         let expression = self.locations().expression(passed(site, parameter)?);
         self.site_word(site, |_| Ok(Some(expression)), runtime, budget)
     }
@@ -795,11 +845,13 @@ impl DwarfVariableInfo {
                 "a call site's value has several pieces".into(),
             ));
         };
+
         if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
             return Err(VariableRuntimeError::Malformed(
                 "a call site's value is a partial piece".into(),
             ));
         }
+
         match &piece.location {
             // Without DW_OP_stack_value, the address an expression computes
             // is its value.
@@ -905,12 +957,14 @@ mod tests {
             parameters,
             malformed: None,
         };
+
         let in_register = |register, value| SiteParameter {
             register: Some(register),
             parameter: None,
             value: Some(value),
             data_value: None,
         };
+
         let twice = site(vec![in_register(5, first), in_register(5, second)]);
         let one = site(vec![in_register(5, first), in_register(4, second)]);
         let functions = vec![CallingFunction {
@@ -938,6 +992,7 @@ mod tests {
                 panic!("refused for another reason")
             }
         };
+
         assert_eq!(
             passed(one, EntryParameter::Register(DwarfRegister::new(4))),
             Ok(vec![2])

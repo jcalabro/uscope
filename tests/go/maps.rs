@@ -45,6 +45,7 @@ async fn check_map(scenario: &Scenario, step: usize) -> Result<bool, String> {
     else {
         panic!("not stopped");
     };
+
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
@@ -70,6 +71,7 @@ async fn check_map(scenario: &Scenario, step: usize) -> Result<bool, String> {
             other => panic!("step {step}: {text}: {other:?}"),
         }
     };
+
     let next = integer(&evaluate("next").await.state).expect("next");
     let entries = evaluate("entries").await;
     let VariableState::Available {
@@ -79,16 +81,20 @@ async fn check_map(scenario: &Scenario, step: usize) -> Result<bool, String> {
     else {
         panic!("step {step}: entries: {entries:?}");
     };
+
     let Some(PresentedCount::Exact(count)) = presentation.count else {
         panic!("step {step}: {presentation:?}");
     };
+
     // The count is the runtime's own, which the split leaves alone.
     if i128::from(count) != next {
         return Err(format!("{count} entries while {next} are in the map"));
     }
+
     let ValueChildren::Available(reference) = &presentation.children else {
         panic!("step {step}: no entries: {presentation:?}");
     };
+
     let mut keys = BTreeSet::new();
     while (keys.len() as u64) < count {
         let page = scenario
@@ -113,22 +119,27 @@ async fn check_map(scenario: &Scenario, step: usize) -> Result<bool, String> {
             }
             Err(error) => panic!("step {step}: {error}"),
         };
+
         let listed = keys.len();
         for child in page.children.iter() {
             let ValueChildRelationship::Entry { key, .. } = &child.relationship else {
                 continue;
             };
+
             let key = integer(&key.state).expect("an integer key");
             let value = integer(&child.state).expect("an integer value");
             if !(0..next).contains(&key) || value != 7 * key {
                 return Err(format!("it shows {key}: {value}"));
             }
+
             if !keys.insert(key) {
                 return Err(format!("it shows {key} twice"));
             }
         }
+
         assert!(keys.len() > listed, "step {step}: an empty page");
     }
+
     Ok(true)
 }
 
@@ -149,6 +160,7 @@ async fn a_map_is_shown_only_as_it_is_while_a_table_splits() {
             Ok(listed) => refused += usize::from(!listed),
             Err(problem) => panic!("after {steps} instructions of the split: {problem}"),
         }
+
         let reason = scenario.step_to_stop(StepKind::OverInstruction).await;
         assert!(matches!(reason, StopReason::Step { .. }), "{reason:?}");
         steps += 1;
@@ -162,8 +174,10 @@ async fn a_map_is_shown_only_as_it_is_while_a_table_splits() {
         if innermost.as_deref() != Some(INSTALL) {
             break;
         }
+
         assert!(steps < MOST_STEPS, "the split never returns");
     }
+
     // Between the stores of the two halves, the directory holds neither
     // table whole, and the map is refused rather than listed short.
     assert!(refused > 0, "{steps} instructions, none refused");

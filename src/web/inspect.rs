@@ -13,6 +13,7 @@ use super::protocol::{
     self, Backtrace, ErrorKind, Frame, FunctionMatch, FunctionQuery, Functions, SourceFiles,
     SourceLine, SourceText,
 };
+
 use super::session::Failure;
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
@@ -46,6 +47,7 @@ pub async fn context(
     if frame == 0 {
         return Ok(context);
     }
+
     let trace = handle.at(context).backtrace().await?;
     context.frame = trace
         .frames
@@ -77,6 +79,7 @@ pub async fn backtrace(
     for frame in trace.frames.iter() {
         frames.push(frame_of(images, &trace, frame).await);
     }
+
     Ok(Backtrace {
         frames,
         incomplete: (trace.termination != UnwindTermination::Complete)
@@ -90,6 +93,7 @@ async fn frame_of(images: &Images, trace: &uscope::Backtrace, frame: &uscope::St
         Some(module) => images.get(module).await,
         None => None,
     };
+
     let source = frame.source.as_ref().and_then(|location| {
         let file = image.as_ref()?.source_file(location.file)?;
         Some(SourceLine {
@@ -131,6 +135,7 @@ pub async fn sources(images: &Images) -> SourceFiles {
             files.insert(file.path.display().to_string());
         }
     }
+
     // The executable's image comes first; Go names its main function
     // main.main.
     let entry = images.first().and_then(|image| {
@@ -162,7 +167,9 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functio
             more: false,
         });
     }
+
     let images = images.with_sources().await;
+
     // A short query matches most of a large program, so candidates are
     // ranked before any of them is described.
     let mut candidates = Vec::new();
@@ -187,12 +194,14 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functio
             }
         }
     }
+
     // Only the best few are sorted: the rest only when repeated declarations
     // of the same functions took all of their places.
     let keep = limit.saturating_mul(8).max(1).min(candidates.len());
     if keep < candidates.len() {
         candidates.select_nth_unstable(keep);
     }
+
     candidates[..keep].sort_unstable();
     let mut found = Vec::new();
     let mut more = false;
@@ -200,6 +209,7 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functio
         if position == keep {
             candidates[keep..].sort_unstable();
         }
+
         let (_, _, _, module, id) = candidates[position];
         let image = &images[module];
         let Some(function) = image.function(id) else {
@@ -208,6 +218,7 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functio
                 "internal: a ranked candidate names no function",
             ));
         };
+
         let declared = function.declaration();
         let described = FunctionMatch {
             name: function.name().to_string(),
@@ -217,16 +228,20 @@ pub async fn functions(images: &Images, query: &FunctionQuery) -> Result<Functio
                 .map(|file| file.path.display().to_string()),
             line: declared.as_ref().map(|declared| declared.line.get()),
         };
+
         // Declarations repeat a function in each unit that names it.
         if found.contains(&described) {
             continue;
         }
+
         if found.len() == limit {
             more = true;
             break;
         }
+
         found.push(described);
     }
+
     Ok(Functions {
         functions: found,
         more,
@@ -268,9 +283,11 @@ pub async fn source(
         else {
             continue;
         };
+
         breakable.extend(image.breakpoint_lines(file.id, every.clone()));
         found.get_or_insert_with(|| file.clone());
     }
+
     let file = found.ok_or_else(|| {
         Failure::new(
             ErrorKind::Invalid,
@@ -315,6 +332,7 @@ pub async fn tasks(
                 }
             }
         }
+
         let plain = Renderer::new(false);
         let frame = match &trace {
             Ok(trace) => match trace.user_frame() {
@@ -323,6 +341,7 @@ pub async fn tasks(
             },
             Err(_) => None,
         };
+
         tasks.push(protocol::Task {
             frame,
             key: protocol::TaskKey {
@@ -345,6 +364,7 @@ pub async fn tasks(
             thread: task.thread.map(uscope::ThreadId::get),
         });
     }
+
     Ok(protocol::TaskList {
         noun: page.tasks.first().map(|task| task.noun.to_owned()),
         tasks,

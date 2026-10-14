@@ -162,17 +162,21 @@ fn k_exit_4_a_group_exit_ends_a_thread_at_its_own_exit_event() {
                 record.wait(worker);
                 workers.push(worker);
             }
+
             record.resume(leader, None);
             for &worker in &workers {
                 record.resume(worker, None);
             }
+
             for &worker in &workers {
                 record.wait(worker);
             }
+
             record.restore(workers[0], share, original);
             for &worker in &workers {
                 record.rewind(worker);
             }
+
             // The first worker finishes first and waits at its exit event.
             record.resume(workers[0], None);
             record.wait(workers[0]);
@@ -184,6 +188,7 @@ fn k_exit_4_a_group_exit_ends_a_thread_at_its_own_exit_event() {
                 // The second exits the group.
                 record.resume(workers[1], None);
             }
+
             record.wait(workers[1]);
             record.event_message(workers[1]);
             let result = record.tracee.registers(workers[0]).map(drop);
@@ -229,6 +234,7 @@ fn k_sig_1_a_tracer_stop_request_stops_a_running_thread() {
         let leader = record.leader();
         record.set_options(leader);
         record.resume(leader, None);
+
         // Worker 0 stays at its first stop, so nothing exits the group.
         let first = record.cloned(leader);
         record.resume(leader, None);
@@ -305,6 +311,7 @@ fn k_clone_1_a_new_thread_starts_stopped() {
             .registers(leader)
             .map(|(registers, _)| registers.general[RAX] == u64::from(child.cast_unsigned()));
         record.note(format!("clone returned thread 1: {returned:?}"));
+
         // The leader stays stopped until the worker is gone, or its group
         // exit would race the worker's own.
         record.resume(child, None);
@@ -340,6 +347,7 @@ fn k_exit_2_exit_group_ends_every_sibling_through_its_exit_event() {
         let second = record.cloned(leader);
         record.resume(leader, None);
         let third = record.cloned(leader);
+
         // The leader stays at its third clone event, and the second worker
         // at its first stop, while the first worker runs to its exit_group
         // beside the third.
@@ -357,9 +365,11 @@ fn k_exit_2_exit_group_ends_every_sibling_through_its_exit_event() {
             record.stop(thread);
             record.event_message(thread);
         }
+
         // Where the running third stopped depends on timing.
         record.wait(third);
         record.event_message(third);
+
         // The leader returned from its clone call on the way out.
         let leader_call = record
             .tracee
@@ -379,6 +389,7 @@ fn k_exit_2_exit_group_ends_every_sibling_through_its_exit_event() {
             record.resume(thread, None);
             record.wait(thread);
         }
+
         record.wait(leader);
     });
 }
@@ -398,18 +409,21 @@ fn k_exit_3_sigkill_ends_every_thread_through_its_exit_event() {
             record.wait(worker);
             workers.push(worker);
         }
+
         let result = record.tracee.kill();
         record.result("kill", result);
         for &thread in std::iter::once(&leader).chain(&workers) {
             record.wait(thread);
             record.event_message(thread);
         }
+
         record.resume(leader, None);
         record.has_report(leader);
         for &worker in &workers {
             record.resume(worker, None);
             record.wait(worker);
         }
+
         record.wait(leader);
     });
 }
@@ -433,6 +447,7 @@ fn k_exit_5_a_leader_exiting_alone_waits_for_its_threads() {
         record.system_call(leader);
         record.event_message(leader);
         record.resume(leader, None);
+
         // The leader's exit completes on its own; wait until its maps are
         // gone, which shows it is a zombie.
         let started = std::time::Instant::now();
@@ -447,6 +462,7 @@ fn k_exit_5_a_leader_exiting_alone_waits_for_its_threads() {
             );
             std::thread::yield_now();
         }
+
         record.note("the leader's maps read empty");
         let result = record.tracee.registers(leader).map(drop);
         record.result("registers of the zombie leader", result);
@@ -483,6 +499,7 @@ fn k_exit_5_a_zombie_cannot_be_seized() {
             );
             record.tracee.pass_time();
         }
+
         record.seize(leader);
         record.seize(worker);
         record.resume(worker, None);
@@ -513,6 +530,7 @@ fn k_exit_6_the_last_thread_to_begin_exiting_decides_the_status() {
                 record.wait(leader);
                 record.event_message(leader);
             }
+
             let rt_exit = record.landmarks.symbol("rt_exit");
             let original = record.plant(rt_exit);
             record.resume(worker, None);
@@ -533,6 +551,7 @@ fn k_exit_6_the_last_thread_to_begin_exiting_decides_the_status() {
                 record.wait(leader);
                 record.event_message(leader);
             }
+
             record.resume(leader, None);
             record.wait(leader);
         });
@@ -555,23 +574,29 @@ fn k_exit_6_a_group_exit_decides_the_status_of_unreaped_threads() {
             record.wait(worker);
             workers.push(worker);
         }
+
         record.resume(leader, None);
+
         // Both workers pass the barrier and stop at their first share.
         for &worker in &workers {
             record.resume(worker, None);
         }
+
         for &worker in &workers {
             record.wait(worker);
         }
+
         record.restore(workers[0], share, original);
         for &worker in &workers {
             record.rewind(worker);
         }
+
         // The first worker finishes first, so it exits alone.
         record.resume(workers[0], None);
         record.wait(workers[0]);
         record.event_message(workers[0]);
         record.resume(workers[0], None);
+
         // The second exits the group while the first is a zombie.
         record.resume(workers[1], None);
         record.wait(workers[1]);
@@ -588,6 +613,7 @@ fn k_exit_6_a_group_exit_decides_the_status_of_unreaped_threads() {
 
 /// DR7 for slot 0 watching eight bytes for stores.
 const WRITE_8: u64 = 1 | 1 << 16 | 2 << 18;
+
 /// DR6 with no condition recorded.
 const DR6_IDLE: u64 = 0xffff_0ff0;
 
@@ -635,6 +661,7 @@ fn k_dr_2_a_step_over_a_watched_store_reports_both() {
         record.resume(leader, None);
         record.wait(leader);
         record.set_debug(leader, 6, DR6_IDLE);
+
         // Step to the next round's store of the counter.
         let mut steps = 0;
         loop {
@@ -650,6 +677,7 @@ fn k_dr_2_a_step_over_a_watched_store_reports_both() {
                 break;
             }
         }
+
         record.stop(leader);
         record.rip(leader);
         let _ = record.debug(leader, 6);
@@ -673,6 +701,7 @@ fn k_dr_3_a_new_thread_starts_unarmed() {
         for index in [0, 6, 7] {
             let _ = record.debug(worker, index);
         }
+
         // The worker adds to the counter and exits, without a trap.
         record.resume(worker, None);
         record.wait(worker);
@@ -871,6 +900,7 @@ fn k_seize_1_a_seized_thread_runs_on_and_its_children_start_in_an_event_stop() {
         let leader = record.leader();
         record.set_options(leader);
         record.resume(leader, None);
+
         // The first child stays at its first stop, so its parent waits for
         // it, running untraced once detached.
         let first = record.forked(leader);
@@ -908,6 +938,7 @@ fn k_int_1_an_interrupt_stops_a_seized_thread() {
         let leader = record.leader();
         record.set_options(leader);
         record.resume(leader, None);
+
         // Worker 0 stays at its first stop, so nothing exits the group.
         let first = record.cloned(leader);
         record.resume(leader, None);
@@ -949,6 +980,7 @@ fn k_int_2_an_interrupt_reaches_an_exiting_thread_until_it_is_reaped() {
         record.wait(second);
         record.detach(second, None);
         record.seize(second);
+
         // Worker 0 exits the group, which stops every thread at its exit.
         record.resume(first, None);
         record.wait(second);
@@ -960,6 +992,7 @@ fn k_int_2_an_interrupt_reaches_an_exiting_thread_until_it_is_reaped() {
         while !record.tracee.has_report(second) {
             std::thread::yield_now();
         }
+
         record.interrupt(second);
         let result = record.tracee.request_stop(second);
         record.result("tgkill SIGSTOP to a zombie", result);
@@ -988,6 +1021,7 @@ fn k_wait_3_a_tracers_exit_releases_a_traced_zombie() {
             );
             record.tracee.pass_time();
         }
+
         record.detach(leader, None);
     });
 }
@@ -1012,6 +1046,7 @@ fn k_exit_5_reaping_the_last_thread_ends_an_untraced_leaders_process() {
             );
             record.tracee.pass_time();
         }
+
         record.resume(worker, None);
         record.wait(worker);
         record.event_message(worker);
@@ -1070,6 +1105,7 @@ fn k_stop_1_a_detached_child_takes_its_sigstop_untraced() {
         record.rip(child);
         record.detach(child, None);
         record.job_stopped(child);
+
         // The next SIGCHLD the parent gets says its child continued.
         record.continue_process(child);
         record.wait(leader);
@@ -1097,6 +1133,7 @@ fn k_stop_3_sigcont_ends_a_stop_and_interrupts_a_seized_thread() {
         record.seize(child);
         record.wait(child);
         record.interrupt(child);
+
         // The parent hears of the stop, then waits for its child.
         record.resume(leader, None);
         record.wait(leader);
@@ -1229,6 +1266,7 @@ fn k_sys_1_a_thread_stops_at_a_system_calls_entry_and_exit() {
             record.event_message(leader);
             record.call(leader);
         }
+
         record.resume(leader, None);
         record.wait(leader);
         record.system_call(leader);
@@ -1266,6 +1304,7 @@ fn k_sys_3_event_stops_fall_between_a_calls_entry_and_exit() {
             .map(|(registers, _)| registers.general[RAX] == u64::from(child.cast_unsigned()));
         record.note(format!("clone returned thread 1: {returned:?}"));
         record.call(leader);
+
         // The leader stays stopped until the worker is gone, or its group
         // exit would race the worker's own.
         record.resume_to_call(child, None);
@@ -1326,6 +1365,7 @@ fn k_sys_5_sigkill_at_a_calls_entry_skips_the_call() {
                 let result = record.tracee.kill();
                 record.result("kill", result);
             }
+
             record.wait(leader);
             record.system_call(leader);
             record.event_message(leader);
@@ -1348,6 +1388,7 @@ fn k_sys_6_a_thread_detached_at_a_call_makes_it() {
                 record.resume_to_call(leader, None);
                 record.wait(leader);
             }
+
             record.detach(leader, None);
         });
     }

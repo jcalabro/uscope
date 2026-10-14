@@ -34,6 +34,7 @@ impl<P: InspectionOps> Controller<P> {
         {
             return Err(Error::InvalidDisassemblyWindow { before, after });
         }
+
         let target = self.module_image.target();
         let mut decoder = decoder_for(target, query.syntax)?;
         let modules = self.unwind_modules(inferior);
@@ -56,6 +57,7 @@ impl<P: InspectionOps> Controller<P> {
                     blocks: blocks.into(),
                 }
             }
+
             DisassemblyRange::Window {
                 address,
                 before,
@@ -71,6 +73,7 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         };
+
         Ok(Disassembly {
             revision: self.revision,
             stop_id,
@@ -162,6 +165,7 @@ fn next_instruction_registers(native: &nix::libc::user_regs_struct) -> RegisterF
     if in_system_call && restarting {
         registers.remove(RAX);
     }
+
     registers
 }
 
@@ -172,6 +176,7 @@ struct TargetCode<'a, P> {
     breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
     modules: &'a [UnwindModule<'a>],
     program_counter: VirtualAddress,
+
     /// The registers the instruction at the program counter executes with.
     registers: RegisterFile,
 }
@@ -195,6 +200,7 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
             }
             crate::MemoryReadCompletion::Incomplete { reason, .. } => Some(reason),
         };
+
         Ok(CodeRead {
             bytes: read.bytes,
             unreadable,
@@ -212,9 +218,11 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
                 .and_modify(|current: &mut BoundaryEvidence| *current = (*current).min(evidence))
                 .or_insert(evidence);
         };
+
         if range.contains(self.program_counter) {
             insert(self.program_counter, BoundaryEvidence::ProgramCounter);
         }
+
         for module in self.modules {
             let bias = module.loaded.load_bias;
             let image_range = AddressRange {
@@ -225,6 +233,7 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
                     .unload(range.end)
                     .unwrap_or(crate::ImageAddress::new(0)),
             };
+
             for (address, evidence) in module.image.instruction_starts(image_range) {
                 if let Ok(address) = module.loaded.virtual_address(address)
                     && range.contains(address)
@@ -233,6 +242,7 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
                 }
             }
         }
+
         starts
     }
 

@@ -124,6 +124,7 @@ impl Code for Image {
                     .flat_map(|call| [call.start, call.end]),
             );
         }
+
         boundaries
     }
 }
@@ -150,12 +151,14 @@ pub(super) fn segments(
             if !visible(start) {
                 continue;
             }
+
             match visible_ranges.last_mut() {
                 Some(last) if last.end == start => last.end = end,
                 _ => visible_ranges.push(AddressRange { start, end }),
             }
         }
     }
+
     visible_ranges
 }
 
@@ -171,6 +174,7 @@ pub(super) fn fused(
             _ => fused.push(range),
         }
     }
+
     fused
 }
 

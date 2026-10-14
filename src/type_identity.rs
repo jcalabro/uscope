@@ -32,12 +32,16 @@ const MAX_ARGUMENT_DEPTH: usize = 16;
 pub enum NameSyntax {
     /// `a::b::Name<T, 3>`: C, C++, and Rust.
     Angle,
+
     /// `path/to/pkg.Name[T,U]`.
     Go,
+
     /// `module.Name(T,null)`.
     Zig,
+
     /// `package::Name(T:$int,N:$$4)`, and `map[K]V`.
     Odin,
+
     /// `Name!T` and `Name!(T, 3)`, scoped by the module it is in.
     D,
 }
@@ -61,8 +65,10 @@ impl NameSyntax {
 pub struct TypeName<'a> {
     /// The qualifying segments the name spells, outermost first.
     pub path: Vec<&'a str>,
+
     /// The name without its path or arguments.
     pub base: &'a str,
+
     /// The argument texts, when the name has an argument list.
     pub arguments: Option<Vec<&'a str>>,
 }
@@ -79,6 +85,7 @@ impl<'a> TypeName<'a> {
             NameSyntax::Odin => parse_odin(name),
             NameSyntax::D => parse_d(name),
         };
+
         parsed.unwrap_or(Self {
             path: Vec::new(),
             base: name,
@@ -124,10 +131,12 @@ fn parse_go(name: &str) -> Option<TypeName<'_>> {
     {
         return None;
     }
+
     let (qualified, arguments) = split_arguments(name, '[', ']', NameSyntax::Go)?;
     if qualified.contains(char::is_whitespace) {
         return None;
     }
+
     // A package path may hold dots before its last slash, never after.
     let after_slash = qualified.rfind('/').map_or(0, |slash| slash + 1);
     let (path, base) = match qualified[after_slash..].find('.') {
@@ -138,6 +147,7 @@ fn parse_go(name: &str) -> Option<TypeName<'_>> {
         None if after_slash == 0 => (Vec::new(), qualified),
         None => return None,
     };
+
     (!base.is_empty()).then_some(TypeName {
         path,
         base,
@@ -149,6 +159,7 @@ fn parse_zig(name: &str) -> Option<TypeName<'_>> {
     if !name.starts_with(is_identifier_start) {
         return None;
     }
+
     let (qualified, arguments) = split_arguments(name, '(', ')', NameSyntax::Zig)?;
     let mut segments = qualified.split('.').collect::<Vec<_>>();
     let base = segments.pop()?;
@@ -172,12 +183,15 @@ fn parse_odin(name: &str) -> Option<TypeName<'_>> {
             arguments: Some(vec![key, value]),
         });
     }
+
     if !name.starts_with(is_identifier_start) || name.starts_with("proc") {
         return None;
     }
+
     let (qualified, arguments) = split_arguments(name, '(', ')', NameSyntax::Odin)?;
     let mut segments = split_top_level(qualified, "::", NameSyntax::Odin)?;
     let base = segments.pop()?;
+
     // An argument names its parameter: `T:$int` is the type `int`, and
     // `N:$$4` the constant 4.
     let arguments = arguments
@@ -211,12 +225,14 @@ fn parse_d(name: &str) -> Option<TypeName<'_>> {
             arguments: None,
         });
     };
+
     let (base, argument) = (&name[..bang], &name[bang + 1..]);
     let arguments = match split_arguments(argument, '(', ')', NameSyntax::D)? {
         ("", Some(arguments)) => arguments,
         (argument, None) if !argument.is_empty() => vec![argument],
         _ => return None,
     };
+
     is_identifier(base).then_some(TypeName {
         path: Vec::new(),
         base,
@@ -256,12 +272,15 @@ fn split_arguments(
     let Some(start) = top_level_position(text, open, syntax) else {
         return Some((text, None));
     };
+
     let inner = text[start + open.len_utf8()..].strip_suffix(close)?;
+
     // The list must close only at the very end, and be balanced, which
     // splitting it checks.
     if top_level_position(inner, close, syntax).is_some() {
         return None;
     }
+
     let arguments = if inner.trim().is_empty() {
         Vec::new()
     } else {
@@ -270,6 +289,7 @@ fn split_arguments(
             .map(str::trim)
             .collect()
     };
+
     Some((&text[..start], Some(arguments)))
 }
 
@@ -285,16 +305,20 @@ fn split_top_level<'a>(text: &'a str, separator: &str, syntax: NameSyntax) -> Op
         if stack.is_empty() && Some(character) == first && text[index..].starts_with(separator) {
             parts.push(&text[start..index]);
             start = index + separator.len();
+
             // Skip the rest of the separator.
             while characters.peek().is_some_and(|(next, _)| *next < start) {
                 characters.next();
             }
+
             previous = None;
             continue;
         }
+
         step(&mut stack, character, previous, syntax)?;
         previous = Some(character);
     }
+
     stack.is_empty().then(|| {
         parts.push(&text[start..]);
         parts
@@ -309,9 +333,11 @@ fn top_level_position(text: &str, target: char, syntax: NameSyntax) -> Option<us
         if stack.is_empty() && character == target && !(target == '>' && previous == Some('-')) {
             return Some(index);
         }
+
         step(&mut stack, character, previous, syntax)?;
         previous = Some(character);
     }
+
     None
 }
 
@@ -334,6 +360,7 @@ fn step(
                 ']' => '[',
                 _ => '{',
             };
+
             if stack.pop() != Some(open) {
                 return None;
             }
@@ -341,18 +368,21 @@ fn step(
         '>' if angles && previous != Some('-') && stack.pop() != Some('<') => return None,
         _ => {}
     }
+
     Some(())
 }
 
 /// The integer an argument spells, with any C or Rust suffix.
 pub fn parse_integer(text: &str) -> Option<IntegerValue> {
     let text = text.trim();
+
     // C++ names spell a truth value argument as a word.
     match text {
         "false" => return Some(IntegerValue::Unsigned(0)),
         "true" => return Some(IntegerValue::Unsigned(1)),
         _ => {}
     }
+
     let (negative, digits) = text
         .strip_prefix('-')
         .map_or((false, text), |rest| (true, rest));
@@ -385,6 +415,7 @@ pub fn parse_integer(text: &str) -> Option<IntegerValue> {
     if number.is_empty() || !suffix_valid {
         return None;
     }
+
     let magnitude = u128::from_str_radix(&number.replace('_', ""), radix).ok()?;
     if negative {
         let magnitude = i128::try_from(magnitude).ok()?;
@@ -430,6 +461,7 @@ impl<'t> Parses<'t> {
         if let Some(parsed) = self.parsed.borrow().get(text) {
             return Rc::clone(parsed);
         }
+
         let parsed = Rc::new(TypeName::parse(text, self.syntax));
         self.parsed.borrow_mut().insert(text, Rc::clone(&parsed));
         parsed
@@ -453,15 +485,18 @@ fn names_type<'t>(
     let Some(identity) = info.identity.as_deref() else {
         return false;
     };
+
     if depth > MAX_ARGUMENT_DEPTH || NameSyntax::of(identity.language) != syntax {
         return false;
     }
+
     let same_base = identity.base.as_ref() == pattern.base
         || c_type_key_of_name(&identity.base)
             .is_some_and(|key| c_type_key_of_name(pattern.base).is_some_and(|other| other == key));
     if !same_base {
         return false;
     }
+
     let path = || {
         pattern.path.iter().filter(|segment| {
             !identity
@@ -470,6 +505,7 @@ fn names_type<'t>(
                 .any(|inline| inline.as_ref() == **segment)
         })
     };
+
     let length = path().count();
     if length > identity.path.len()
         || !identity.path[identity.path.len() - length..]
@@ -479,14 +515,17 @@ fn names_type<'t>(
     {
         return false;
     }
+
     let Some(arguments) = &pattern.arguments else {
         return true;
     };
+
     if arguments.len() > identity.arguments.len()
         || exact && arguments.len() != identity.arguments.len()
     {
         return false;
     }
+
     arguments
         .iter()
         .zip(identity.arguments.iter())
@@ -509,6 +548,7 @@ fn argument_matches<'t>(
             if info.name.as_ref() == text {
                 return true;
             }
+
             // A qualifier may be spelled before or after what it qualifies.
             if let TypeKind::Modified { modifier, target } = &info.kind
                 && let Some(word) = match modifier {
@@ -531,6 +571,7 @@ fn argument_matches<'t>(
                     )
                 });
             }
+
             names_type(&parses.parse(text), parses, info, types, true, depth)
         }),
     }
@@ -540,11 +581,14 @@ fn argument_matches<'t>(
 #[derive(Debug, Default)]
 pub struct TypeIndex {
     image: Option<ModuleImageId>,
+
     /// Types with identities, by base, in identifier order. A C base type
     /// is also under C's own spelling of it.
     by_base: HashMap<Arc<str>, Vec<TypeId>>,
+
     /// Every resolved type, by name.
     by_name: HashMap<Arc<str>, Vec<TypeId>>,
+
     /// Each type's identity as one string, so that one type in several
     /// units compares equal.
     keys: Vec<Arc<str>>,
@@ -604,6 +648,7 @@ impl TypeIndex {
         if self.image != Some(reference.image) {
             return None;
         }
+
         self.keys.get(reference.id.index())
     }
 
@@ -703,11 +748,13 @@ pub trait NameIndex {
             if let Some(key) = key.as_deref() {
                 candidates.extend(self.by_base(key));
             }
+
             crate::count!("type_name_candidates", candidates.len());
             for id in candidates {
                 let Some(reference) = self.reference(id) else {
                     continue;
                 };
+
                 if types
                     .type_info(reference)
                     .is_some_and(|info| names_type(&pattern, &parses, info, types, exact, 0))
@@ -716,6 +763,7 @@ pub trait NameIndex {
                 }
             }
         }
+
         found.sort_unstable();
         found.dedup();
         found
@@ -742,6 +790,7 @@ fn names_by_base<'a>(
         let Some(type_info) = info(index).filter(|_| searchable(index)) else {
             continue;
         };
+
         let id = type_info.reference.id;
         by_name
             .entry(Arc::clone(&type_info.name))
@@ -752,6 +801,7 @@ fn names_by_base<'a>(
                 .entry(Arc::clone(&identity.base))
                 .or_default()
                 .push(id);
+
             // A C base type is also under C's own spelling, whichever
             // words the producer chose: `short int` is `short`.
             if let Some(key) = c_type_key_of_name(&identity.base)
@@ -761,6 +811,7 @@ fn names_by_base<'a>(
             }
         }
     }
+
     (by_base, by_name)
 }
 
@@ -775,6 +826,7 @@ pub fn canonical_keys<'a>(
         visiting: vec![false; count],
         depth: 0,
     };
+
     (0..count)
         .map(|index| canonical_key(index, &info, &mut walk))
         .collect()
@@ -791,16 +843,20 @@ fn canonical_key<'a>(
     if let Some(Some(key)) = walk.memo.get(index) {
         return Arc::clone(key);
     }
+
     let Some(type_info) = info(index) else {
         return Arc::from(format!("<malformed #{index}>"));
     };
+
     if index >= walk.memo.len() {
         walk.memo.resize(index + 1, None);
         walk.visiting.resize(index + 1, false);
     }
+
     if walk.depth > MAX_ARGUMENT_DEPTH * 4 || walk.visiting[index] {
         return Arc::from(format!("<cycle #{index}>"));
     }
+
     walk.visiting[index] = true;
     walk.depth += 1;
     let mut key_of = |reference: TypeReference| canonical_key(reference.id.index(), info, walk);
@@ -813,9 +869,11 @@ fn canonical_key<'a>(
         {
             let _ = write!(key, "#{index}|");
         }
+
         for segment in identity.path.iter() {
             let _ = write!(key, "{segment}::");
         }
+
         key.push_str(&identity.base);
         if !identity.arguments.is_empty() {
             key.push('<');
@@ -823,6 +881,7 @@ fn canonical_key<'a>(
                 if position > 0 {
                     key.push(',');
                 }
+
                 match argument {
                     TypeArgument::Type(reference) => key.push_str(&key_of(*reference)),
                     TypeArgument::Value(IntegerValue::Signed(value)) => {
@@ -836,8 +895,10 @@ fn canonical_key<'a>(
                     }
                 }
             }
+
             key.push('>');
         }
+
         key
     } else {
         match &type_info.kind {
@@ -857,15 +918,18 @@ fn canonical_key<'a>(
                 if *ordering == ArrayOrdering::ColumnMajor {
                     key.push_str("column-major ");
                 }
+
                 for dimension in dimensions.iter() {
                     let _ = write!(key, "[{}]", dimension.count);
                 }
+
                 key.push_str(&key_of(*element));
                 key
             }
             _ => format!("#{}", type_info.name),
         }
     };
+
     walk.visiting[index] = false;
     walk.depth -= 1;
     let key: Arc<str> = key.into();
@@ -909,6 +973,7 @@ mod tests {
                     prop_assert!(name.contains(piece));
                 }
             }
+
             let _ = parse_integer(&name);
         }
     }
@@ -933,6 +998,7 @@ mod tests {
                 Some(vec!["[u8]", "alloc::alloc::Global"])
             )
         );
+
         // `->` and a parenthesized comparison do not close the list.
         assert_eq!(
             parts("Vec<fn(i32) -> i32>", Angle),
@@ -986,6 +1052,7 @@ mod tests {
             parts("Tuple!(int[], Nullable!int, 3)", D),
             (vec![], "Tuple", Some(vec!["int[]", "Nullable!int", "3"]))
         );
+
         // What the syntax does not describe is all base.
         for (name, syntax) in [
             ("&str", Angle),
@@ -1021,6 +1088,7 @@ mod tests {
             image,
             id: TypeId::new(index),
         };
+
         let named = |index, scope: &str, base: &str, argument: Option<u32>| TypeInfo {
             reference: reference(index),
             name: base.into(),
@@ -1040,6 +1108,7 @@ mod tests {
                 go: None,
             })),
         };
+
         let types = [
             named(0, "(anonymous namespace)", "Entry", None),
             named(1, "(anonymous namespace)", "Entry", None),
@@ -1059,6 +1128,7 @@ mod tests {
     #[test]
     fn qualified_arguments_match_in_either_order() {
         struct Lookup<'a>(&'a [TypeInfo]);
+
         impl TypeLookup for Lookup<'_> {
             fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo> {
                 self.0.get(reference.id.index())
@@ -1072,6 +1142,7 @@ mod tests {
             image,
             id: TypeId::new(index),
         };
+
         let identity = |base: &str, path: &[&str], arguments: Vec<TypeArgument>| {
             Some(Arc::new(TypeIdentity {
                 language: SourceLanguage::Cpp,
@@ -1084,6 +1155,7 @@ mod tests {
                 go: None,
             }))
         };
+
         let types = [
             TypeInfo {
                 reference: reference(0),
@@ -1126,6 +1198,7 @@ mod tests {
         ] {
             assert_eq!(index.named(name, false, &lookup), [reference(2)], "{name}");
         }
+
         assert!(
             index
                 .named("std::pair<int, int>", false, &lookup)
@@ -1145,6 +1218,7 @@ mod tests {
         assert_eq!(parse_integer("0x10usize"), Some(IntegerValue::Unsigned(16)));
         assert_eq!(parse_integer("(char)97"), None);
         assert_eq!(parse_integer("3x"), None);
+
         // A truth value argument, as C++ names spell it, is its number, as
         // its template parameter's DWARF holds it.
         assert_eq!(parse_integer("false"), Some(IntegerValue::Unsigned(0)));

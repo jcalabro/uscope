@@ -12,13 +12,16 @@ use crate::support::{Scenario, ScratchDir};
 
 const FIXTURE: &str = "tokio-scale-o0";
 const TASKS: usize = 100_000;
+
 /// The tasks one page asks for.
 const PAGE: usize = 1_024;
+
 /// What listing one parked task may read: its header and its link in the
 /// list, its future's chain of awaits, and what the future it waits on
 /// says of itself. A task here reads under a hundred bytes; reading the
 /// list again on a page would read seven megabytes.
 const BYTES_PER_TASK: u64 = 256;
+
 /// What a page may read besides its tasks: where the runtime is and what
 /// each thread runs.
 const BYTES_PER_PAGE: u64 = 16 * 1_024;
@@ -29,6 +32,7 @@ const BYTES_PER_PAGE: u64 = 16 * 1_024;
 async fn a_hundred_thousand_tasks_are_listed_at_a_bounded_cost_a_page() {
     let scratch = ScratchDir::new("scale");
     let output = scratch.path().join("stdout");
+
     // The invariants read every task at every stop, which is not for this
     // many; the pages here check what they would.
     let mut scenario = Scenario::launch(FIXTURE);
@@ -79,11 +83,13 @@ async fn a_hundred_thousand_tasks_are_listed_at_a_bounded_cost_a_page() {
             assert_eq!(task.state, TaskState::Blocked, "{task:#?}");
             assert!(listed.insert(task.id.number), "listed twice: {task:#?}");
         }
+
         match next {
             Some(next) => from = Some(next),
             None => break,
         }
     }
+
     assert_eq!(listed, expected);
     scenario.shutdown().await;
 }

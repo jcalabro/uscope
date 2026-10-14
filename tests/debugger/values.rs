@@ -30,11 +30,13 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
                 let uscope::VariableValue::Address(value) = value else {
                     panic!("pointer value was not an address: {value:?}");
                 };
+
                 assert_ne!(value.address.get(), 0);
                 reference.clone()
             }
             state => panic!("pointer was not available for dereference: {state:?}"),
         };
+
         let dereferenced = partial
             .operation(
                 "dereference pointer",
@@ -365,6 +367,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 "{fixture}: {invalid:?}"
             );
         }
+
         if source == "variables.cpp" {
             assert_signed(
                 &dereference_named(&scenario, "pointer_parameter", 1)
@@ -410,6 +413,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     "{fixture}: {variable:?}"
                 );
             }
+
             assert_signed(
                 &dereference_named(&scenario, "rvalue_reference", 1)
                     .await
@@ -434,6 +438,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 fixture,
             );
         }
+
         if source == "variables.rs" {
             for name in [
                 "shared_parameter",
@@ -447,9 +452,11 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     fixture,
                 );
             }
+
             let slice = scenario
                 .operation("inspect Rust slice", scenario.handle().variable("slice"))
                 .await;
+
             // Optimized code keeps the slice's pointer and length in two
             // registers.
             assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
@@ -510,6 +517,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
             }
         }
+
         if source == "variables.zig" {
             if fixture != "variables-zig-o2" {
                 assert_signed(
@@ -520,6 +528,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     fixture,
                 );
             }
+
             assert_signed(
                 &dereference_named(&scenario, "const_pointer", 1).await.state,
                 42,
@@ -532,12 +541,14 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     fixture,
                 );
             }
+
             assert_signed(
                 &dereference_named(&scenario, "many_pointer", 1).await.state,
                 42,
                 fixture,
             );
         }
+
         scenario.shutdown().await;
     }
 
@@ -605,10 +616,12 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
                 .await;
             record_page(&scenario, &pair.state, 2, &format!("{fixture} pair")).await;
         }
+
         for name in record_pointers {
             let value = dereference_named(&scenario, name, 1).await;
             record_page(&scenario, &value.state, 2, &format!("{fixture} {name}")).await;
         }
+
         for name in unsupported_pointers {
             let variable = scenario
                 .operation(
@@ -633,6 +646,7 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
                 "{fixture} {name}: {variable:?}"
             );
         }
+
         let array = scenario
             .operation(
                 "dereference bounded array",
@@ -646,6 +660,7 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
         else {
             panic!("{fixture} array pointer did not expose a dereference: {array:?}");
         };
+
         let value = scenario
             .operation(
                 "read bounded array",
@@ -714,6 +729,7 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             let uscope::VariableValue::Array { .. } = available_value(&records.state) else {
                 panic!("{fixture}: pointer-to-array did not decode: {records:?}");
             };
+
             let records_page = child_page(&scenario, &records.state, 0, 2).await;
             assert_eq!(records_page.children.len(), 2, "{fixture}: {records:?}");
             let second_page =
@@ -722,12 +738,14 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             let uscope::VariableValue::Array { .. } = available_value(&values.state) else {
                 panic!("{fixture}: nested array was not decoded: {records:?}");
             };
+
             let values_page = child_page(&scenario, &values.state, 0, 2).await;
             assert_signed(&values_page.children[1].state, 44, fixture);
 
             let flexible = dereference_named(&scenario, "flexible", 1).await;
             let flexible_page = record_page(&scenario, &flexible.state, 2, fixture).await;
             assert_signed(&named_child(&flexible_page, "count").state, 2, fixture);
+
             // A flexible array member's elements are reached by index.
             assert_eq!(
                 named_child(&flexible_page, "values").state,
@@ -763,6 +781,7 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
                 break;
             }
         }
+
         assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
         scenario.shutdown().await;
     }
@@ -858,6 +877,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             "{fixture}: {expression}: {indexed:?}"
         );
     }
+
     let nested_array_member = scenario
         .operation(
             "inspect through an explicitly dereferenced array",
@@ -896,6 +916,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                     && indices.as_ref() == [i128::try_from(3 + relative).expect("small index")]
         )
     }));
+
     // The page is read at once, but each element reports its own address.
     let sources = range_page
         .children
@@ -949,8 +970,10 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             ),
             _ => matches!(&result, Err(Error::InvalidValueRange(_))),
         };
+
         assert!(expected, "{fixture}: {expression}: {result:?}");
     }
+
     let out_of_bounds = scenario
         .handle()
         .inspect(&parsed_value_expression("huge_array[1048577]"))
@@ -963,6 +986,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         ),
         "{fixture}: {out_of_bounds:?}"
     );
+
     // A pointer indexes as C indexes it: `records[0]` is `*records`.
     let pointer_index = scenario
         .handle()
@@ -989,6 +1013,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             .await;
         assert_signed(&value.state, expected, fixture);
     }
+
     let unsigned_bit_field = scenario
         .operation(
             "inspect unsigned bit-field member",
@@ -1036,6 +1061,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         variables: 1,
         ..uscope::InspectionLimits::default()
     };
+
     let variables = scenario
         .operation(
             "truncate visible variables at the exact variable boundary",
@@ -1106,6 +1132,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             ),
         )
         .await;
+
     // The selection and the page share the limit, which the page's
     // elements reach.
     assert_eq!(range.children.len(), 3, "{range:?}");
@@ -1123,6 +1150,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         value_nodes: 2,
         ..uscope::InspectionLimits::default()
     };
+
     let nodes = scenario
         .operation(
             "truncate a child page by value nodes",
@@ -1175,6 +1203,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         memory_bytes: 2,
         ..uscope::InspectionLimits::default()
     };
+
     let bytes = scenario
         .operation(
             "truncate a child page by requested memory bytes",
@@ -1205,6 +1234,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         memory_bytes: 3,
         ..uscope::InspectionLimits::default()
     };
+
     let reads = scenario
         .operation(
             "truncate a child page by logical memory reads",
@@ -1234,6 +1264,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         expression_work: 1,
         ..uscope::InspectionLimits::default()
     };
+
     let work = scenario
         .operation(
             "truncate evaluation by expression work",
@@ -1258,6 +1289,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         memory_reads: 0,
         ..uscope::InspectionLimits::default()
     };
+
     assert!(matches!(
         scenario
             .handle()
@@ -1383,6 +1415,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
         } else {
             scenario.add_breakpoint(function).await;
         }
+
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -1402,6 +1435,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 assert!(!matches!(variable.state, VariableState::Malformed(_)));
                 continue;
             }
+
             let value = dereference_named(&scenario, name, 1).await;
             match available_value(&value.state) {
                 uscope::VariableValue::Record => {
@@ -1418,6 +1452,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 other => panic!("{fixture} {name}: unexpected value {other:?}"),
             }
         }
+
         if inspect_values {
             let slice = scenario
                 .operation("inspect record slice", scenario.handle().variable("slice"))
@@ -1426,6 +1461,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
             else {
                 panic!("{fixture}: slice did not decode: {slice:?}");
             };
+
             let slice_page = child_page(&scenario, &slice.state, 0, 2).await;
             assert_eq!(slice_page.children.len(), 2, "{fixture}: {slice:?}");
             assert!(matches!(
@@ -1447,6 +1483,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 );
             }
         }
+
         let mut reason = scenario.resume_to_stop().await;
         for _ in 0..8 {
             if matches!(reason, StopReason::Breakpoint { .. }) {
@@ -1455,6 +1492,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 break;
             }
         }
+
         assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
         scenario.shutdown().await;
     }
@@ -1500,6 +1538,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 .await;
             record_page(&scenario, &variable.state, 2, fixture).await;
         }
+
         resume_go_to_exit(&mut scenario, fixture).await;
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
@@ -1570,6 +1609,7 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
             else {
                 panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
             };
+
             assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
             assert_eq!(
                 matches
@@ -1585,6 +1625,7 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
         let uscope::VariableValue::Union = available_value(&raw.state) else {
             panic!("{fixture}: raw value was not a union: {raw:?}");
         };
+
         let page = record_page(&scenario, &raw.state, 2, fixture).await;
         assert_eq!(
             page.children
@@ -1709,8 +1750,10 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
                 ("failed", uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
                 _ => false,
             };
+
             assert!(decoded, "{fixture} {name}: {payload:?}");
         }
+
         if fixture == "enums-rust-o0" {
             let uscope::VariableValue::Variant {
                 discriminant,
@@ -1719,6 +1762,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
             else {
                 panic!("payload enum did not decode as an active variant: {value:?}");
             };
+
             assert_eq!(
                 *discriminant,
                 Some(uscope::IntegerValue::Unsigned(1)),
@@ -1775,6 +1819,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
                 "{inactive_payload:?}"
             );
         }
+
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0))
@@ -1808,6 +1853,7 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
             else {
                 panic!("{fixture} {name}: value was not symbolic: {inspected:?}");
             };
+
             assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
             assert_eq!(
                 matches
@@ -1818,6 +1864,7 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
                 "{fixture} {name}: {inspected:?}"
             );
         }
+
         // A value no constant names is a number, not a nameless symbol.
         let unknown = dereference_named(&scenario, "unknown", 1).await;
         assert_eq!(
@@ -1860,6 +1907,7 @@ async fn cpp_scoped_enums_and_unions_preserve_language_semantics() {
             else {
                 panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
             };
+
             assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
             assert_eq!(
                 matches
@@ -1870,6 +1918,7 @@ async fn cpp_scoped_enums_and_unions_preserve_language_semantics() {
                 "{fixture} {name}: {inspected:?}"
             );
         }
+
         let raw = dereference_named(&scenario, "raw", 1).await;
         assert!(
             matches!(available_value(&raw.state), uscope::VariableValue::Union)
@@ -1904,6 +1953,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
         else {
             panic!("{fixture}: state was unavailable: {state:?}");
         };
+
         assert!(
             matches!(
                 state_graph,
@@ -1918,6 +1968,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
         let VariableState::Available { value: graph, .. } = &tagged.state else {
             panic!("{fixture}: tagged union was unavailable: {tagged:?}");
         };
+
         let uscope::VariableValue::Variant {
             active: Some(active),
             ..
@@ -1925,6 +1976,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
         else {
             panic!("{fixture}: tagged union did not select an arm: {tagged:?}");
         };
+
         let integer = active
             .members
             .iter()
@@ -1954,6 +2006,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
             else {
                 panic!("{fixture}: {name} did not select an arm: {inspected:?}");
             };
+
             assert_eq!(active.name.as_deref(), Some(arm), "{inspected:?}");
             assert_eq!(active.members.len(), 1, "{inspected:?}");
             let page = record_page(&scenario, &inspected.state, 1, fixture).await;
@@ -2103,6 +2156,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
     let uscope::VariableValue::Address(boundary) = available_value(&pointer.state) else {
         panic!("{fixture}: boundary array was not an address: {pointer:?}");
     };
+
     let end = VirtualAddress::new(boundary.address.get() + 8);
     let prefix = scenario
         .operation(
@@ -2118,6 +2172,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
         next_address: end,
         reason: uscope::MemoryReadUnavailableReason::Inaccessible,
     };
+
     assert_eq!(prefix.completion, inaccessible);
     let none = scenario
         .operation(
@@ -2157,6 +2212,7 @@ async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
     else {
         panic!("pointer was not dereferenceable: {pointer:?}");
     };
+
     let first = scenario
         .operation("dereference", scenario.handle().dereference(target.clone()))
         .await;
@@ -2251,10 +2307,12 @@ async fn stop_scoped_capabilities_reject_running_state_before_becoming_stale() {
     else {
         panic!("spin pointer was not dereferenceable: {pointer:?}");
     };
+
     let page = uscope::ValueChildQuery {
         offset: 0,
         limit: 1,
     };
+
     scenario.remove_all_breakpoints().await;
     let running = scenario.start_resuming().await;
     assert!(matches!(
@@ -2412,6 +2470,7 @@ async fn go_slices_decode_subranges_empty_and_nil_descriptors() {
             _ => panic!("{fixture} stopped unexpectedly while exiting: {reason:?}"),
         }
     }
+
     assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
@@ -2484,6 +2543,7 @@ async fn assert_strings(
         let file = source.rsplit('/').next().expect("a file name");
         scenario.add_source_breakpoint(file, line).await;
     }
+
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -2498,6 +2558,7 @@ async fn assert_strings(
             "{fixture} {name}"
         );
     }
+
     scenario.shutdown().await;
 }
 
@@ -2508,6 +2569,7 @@ async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
     let unreadable = Unreadable {
         address: VirtualAddress::new(1),
     };
+
     assert_strings(
         "strings-c-gcc-o0",
         "c/strings.c",
@@ -2597,6 +2659,7 @@ async fn text_running_into_an_unmapped_page_stops_at_the_page() {
     let uscope::TextCompletion::Unreadable { address } = edge.completion else {
         panic!("the text continues into an unmapped page: {edge:?}");
     };
+
     assert_eq!(address.get() % 4096, 0);
     scenario.shutdown().await;
 }
@@ -2618,10 +2681,12 @@ async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
         })
         .await;
     assert_eq!(entry, StopReason::Entry);
+
     // The entry point clears rbp, aligns the stack, and calls rt_start.
     for _ in 0..4 {
         scenario.step_to_stop(StepKind::Instruction).await;
     }
+
     let location = scenario
         .operation("location", scenario.handle().current_location())
         .await;
@@ -2657,6 +2722,7 @@ async fn assert_array_values(
     let uscope::VariableValue::Array { .. } = available_value(&value.state) else {
         panic!("{fixture}: expected decoded array, got {value:?}");
     };
+
     let page = child_page(scenario, &value.state, 0, 2).await;
     let values: Vec<i128> = page
         .children

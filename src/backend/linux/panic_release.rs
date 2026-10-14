@@ -16,6 +16,7 @@ use super::native::LinuxTraceOps;
 use super::{
     BREAKPOINT_OPCODE, Controller, ControllerMessage, Inferior, InferiorOrigin, Signal, WaitEvent,
 };
+
 use crate::VirtualAddress;
 
 /// How long the release waits for the threads it interrupted to stop.
@@ -26,10 +27,13 @@ const STOP_WAIT: Duration = Duration::from_secs(1);
 struct Seen {
     /// Threads now in a ptrace-stop.
     stopped: BTreeSet<Pid>,
+
     /// Threads that exited.
     gone: BTreeSet<Pid>,
+
     /// The signal each thread stopped to take, which it keeps once released.
     signals: BTreeMap<Pid, Signal>,
+
     /// Threads that stopped for a trap: an `int3`, a step, or a watchpoint.
     trapped: BTreeSet<Pid>,
 }
@@ -71,10 +75,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(mut inferior) = self.inferior.take() else {
             return;
         };
+
         if inferior.origin != InferiorOrigin::Attached {
             return;
         }
+
         record!("releasing {} after a panic", inferior.tgid);
+
         // A stop no event announced yet is a new thread's or a fork child's.
         // Only a child is scrubbed, and killed if it cannot be: SIGKILL sent
         // to a thread would end the whole process.
@@ -98,6 +105,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if let Some(&memory) = stopped.first() {
             self.restore_every_trap(memory, &sites);
         }
+
         let traps: BTreeSet<VirtualAddress> = sites
             .iter()
             .filter(|&&(_, original)| original != BREAKPOINT_OPCODE)
@@ -107,6 +115,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if seen.trapped.contains(&pid) {
                 self.rewind_over_trap(pid, &traps);
             }
+
             let _ = self.ptrace.write_debug_register(pid, CONTROL_REGISTER, 0);
             let thread = inferior.threads.get(&pid);
             let signal = seen
@@ -125,11 +134,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .filter(|&signal| self.signals.get(signal).pass);
             let _ = self.ptrace.detach(pid, signal);
         }
+
         // A child keeps the traps its parent held when it forked.
         for child in children.into_iter().filter(live) {
             let child_sites = inferior.fork_children.get(&child).unwrap_or(&sites);
             self.scrub_and_settle(tgid, child, child_sites);
         }
+
         record!(
             "released {} after a panic: {} of {} threads stopped",
             inferior.tgid,
@@ -142,6 +153,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// which stopped, which exited, and what each stopped to take.
     fn stop_for_release(&self, inferior: &mut Inferior, threads: &[Pid], children: &[Pid]) -> Seen {
         let mut seen = Seen::default();
+
         // Statuses already taken from the waiter and not yet handled come
         // first: their threads are stopped, and some carry a signal.
         for message in self.pending.borrow_mut().drain(..) {
@@ -149,6 +161,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 seen.note(&status);
             }
         }
+
         // Only a thread in a ptrace-stop answers a register read.
         let mut awaited = BTreeSet::new();
         for &pid in threads.iter().chain(children) {
@@ -161,6 +174,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             {
                 continue;
             }
+
             if self.ptrace.registers(pid).is_ok() {
                 seen.stopped.insert(pid);
             } else if !seen.gone.contains(&pid) {
@@ -168,6 +182,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 awaited.insert(pid);
             }
         }
+
         let deadline = Instant::now() + STOP_WAIT;
         while awaited
             .iter()
@@ -182,6 +197,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 Err(TryRecvError::Disconnected) => break,
             }
         }
+
         // A waiter blocked on a full queue ends once its status is taken.
         let take_queued = |seen: &mut Seen| {
             while let Ok(message) = self.messages.borrow_mut().try_recv() {
@@ -190,10 +206,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
         };
+
         if let Some(waiter) = inferior.waiter.take() {
             let _ = waiter.stop_and_join(|| take_queued(&mut seen));
         }
+
         take_queued(&mut seen);
+
         // With the waiter gone, the statuses the kernel still holds are the
         // controller's to take: a stop at a trap or for a signal, unreported.
         for &pid in threads.iter().chain(children) {
@@ -201,6 +220,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 seen.note(&status);
             }
         }
+
         seen
     }
 
@@ -212,6 +232,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Ok(word) = self.ptrace.read_memory_word(pid, address.get()) else {
                 continue;
             };
+
             let mut bytes = word.to_ne_bytes();
             if bytes[0] == BREAKPOINT_OPCODE {
                 bytes[0] = original;
@@ -229,15 +250,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(metadata) = self.ptrace.signal_metadata(pid) else {
             return;
         };
+
         if metadata.code != libc::SI_KERNEL {
             return;
         }
+
         let Ok(mut registers) = self.ptrace.registers(pid) else {
             return;
         };
+
         let Some(address) = registers.rip.checked_sub(1) else {
             return;
         };
+
         if traps.contains(&VirtualAddress::new(address)) {
             registers.rip = address;
             let _ = self.ptrace.set_registers(pid, registers);

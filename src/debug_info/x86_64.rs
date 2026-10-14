@@ -28,6 +28,7 @@ pub(super) fn prove_prologue_prefix(
     if bytes.is_empty() {
         return Err(PrologueAnalysisError::Empty);
     }
+
     if bytes.len() > MAX_PROLOGUE_BYTES {
         return Err(PrologueAnalysisError::TooLong);
     }
@@ -39,9 +40,11 @@ pub(super) fn prove_prologue_prefix(
     } else {
         (first, 1)
     };
+
     if !is_push_register(&save, Register::RBP) {
         return Err(PrologueAnalysisError::MissingFramePointerSave);
     }
+
     let setup = decode(&mut decoder)?;
     if !is_register_move(&setup, Register::RBP, Register::RSP) {
         return Err(PrologueAnalysisError::MissingFramePointerSetup);
@@ -55,11 +58,13 @@ pub(super) fn prove_prologue_prefix(
         if count > MAX_PROLOGUE_INSTRUCTIONS {
             return Err(PrologueAnalysisError::TooManyInstructions);
         }
+
         let instruction = decode(&mut decoder)?;
 
         if is_callee_save_push(&instruction) || is_stack_allocation(&instruction) {
             continue;
         }
+
         if !is_argument_copy(&instruction, &mut tainted) {
             return Err(PrologueAnalysisError::UnsupportedInstruction);
         }
@@ -72,10 +77,12 @@ fn decode(decoder: &mut Decoder<'_>) -> Result<Instruction, PrologueAnalysisErro
     if !decoder.can_decode() {
         return Err(PrologueAnalysisError::InvalidInstruction);
     }
+
     let instruction = decoder.decode();
     if instruction.code() == Code::INVALID {
         return Err(PrologueAnalysisError::InvalidInstruction);
     }
+
     Ok(instruction)
 }
 
@@ -127,15 +134,18 @@ fn is_argument_copy(instruction: &Instruction, tainted: &mut TaintedRegisters) -
         (OpKind::Register, OpKind::Register) => {
             let source = full_register(instruction.op1_register());
             let destination = full_register(instruction.op0_register());
+
             // Redefining the stack or frame pointer is never argument homing;
             // accepting it would prove away real work that destroys the frame
             // this analysis just validated.
             if matches!(destination, Register::RSP | Register::RBP) {
                 return false;
             }
+
             if !tainted.contains(source) {
                 return false;
             }
+
             tainted.insert(destination);
             true
         }
@@ -150,6 +160,7 @@ fn is_argument_copy(instruction: &Instruction, tainted: &mut TaintedRegisters) -
             {
                 return false;
             }
+
             tainted.insert(destination);
             true
         }
@@ -238,6 +249,7 @@ impl TaintedRegisters {
             registers: [Register::None; MAX_PROLOGUE_INSTRUCTIONS + 16],
             len: 0,
         };
+
         for register in [
             Register::RDI,
             Register::RSI,
@@ -256,6 +268,7 @@ impl TaintedRegisters {
         ] {
             registers.insert(register);
         }
+
         registers
     }
 

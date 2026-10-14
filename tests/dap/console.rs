@@ -49,6 +49,7 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
         )),
         "{source}"
     );
+
     // Lines that are no command are expressions.
     assert_eq!(dap.request("evaluate", json!({"expression": "*pointer_parameter", "frameId": frames[0]["id"], "context": "repl"}))["result"], "42");
     for command in [
@@ -72,6 +73,7 @@ fn console_commands_see_the_focused_frame_and_cannot_run_the_program() {
             )
         );
     }
+
     assert!(
         dap.request_error(
             "evaluate",
@@ -115,6 +117,7 @@ fn breakpoints_made_in_the_console_are_announced_and_reported() {
     dap.success(resumed);
     let stop = dap.stopped(resumed.mark);
     assert_eq!(stop.body["hitBreakpointIds"], json!([id]));
+
     // A disabled breakpoint stays listed, unverified, saying why.
     let mark = dap.mark();
     dap.request(
@@ -266,6 +269,7 @@ fn variables_named_like_commands_evaluate_in_the_console() {
     let mut dap = Dap::start("console names");
     let (_, frame) = stopped_in_names(&mut dap, Profile::VsCode);
     let id = &frame["id"];
+
     // A name the frame knows is the variable, even where a command or its
     // alias has the same name.
     for (line, value) in [
@@ -280,11 +284,13 @@ fn variables_named_like_commands_evaluate_in_the_console() {
     ] {
         assert_eq!(repl(&mut dap, id, line), value, "{line}");
     }
+
     let pointer = dap.request(
         "evaluate",
         json!({"expression": "where", "frameId": id, "context": "repl"}),
     );
     assert_ne!(pointer["variablesReference"], 0, "{pointer}");
+
     // A command the frame has no variable for is still the command, and a
     // line that is no expression is always one.
     assert!(repl(&mut dap, id, "bt").starts_with("#0 "));
@@ -292,6 +298,7 @@ fn variables_named_like_commands_evaluate_in_the_console() {
     assert_eq!(repl(&mut dap, id, "p/x list"), "(int) list = 0x5");
     assert_eq!(repl(&mut dap, id, "print/x x"), "(int) x = 0x14");
     assert_eq!(repl(&mut dap, id, "print x"), "(int) x = 20");
+
     // An expression's mistake points at the text it is about.
     let message = dap.request_error(
         "evaluate",
@@ -328,6 +335,7 @@ fn assignments_in_the_console_change_what_the_variables_view_shows() {
             })
             .collect::<std::collections::BTreeMap<_, _>>()
     };
+
     assert_eq!(locals(&mut dap)["x"], "20");
 
     let mark = dap.mark();

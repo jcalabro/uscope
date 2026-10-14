@@ -8,6 +8,7 @@ use core::ptr;
 use core::sync::atomic::{
     AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering, compiler_fence,
 };
+
 use std::sync::{Once, OnceLock};
 
 use crate::abi;
@@ -42,6 +43,7 @@ static CONTROL: Control = Control {
     rings: AtomicU32::new(0),
     heartbeat: AtomicU64::new(0),
     dropped: AtomicU64::new(0),
+
     #[expect(clippy::cast_possible_truncation, reason = "the registry is small")]
     capacity: abi::MOST_RINGS as u32,
     exiting: AtomicU32::new(0),
@@ -64,11 +66,13 @@ pub struct Header {
     thread: AtomicU32,
     state: AtomicU32,
     signal_drops: AtomicU64,
+
     /// The forks the process had made when the ring was made, which the
     /// ABI leaves out: a forked child takes none of its parent's rings.
     generation: AtomicU32,
     line_0: [u8; 36],
     head: AtomicU64,
+
     /// Whether the thread is writing a record, which a signal handler that
     /// interrupts it must not.
     writing: AtomicU8,
@@ -97,6 +101,7 @@ struct Ring {
 enum Slot {
     /// None yet: the thread's first event takes one.
     Unset,
+
     /// None: the thread is exiting, or none was left.
     Nothing,
     Ring(&'static Ring),
@@ -226,6 +231,7 @@ fn text(state: &'static AtomicU8, kind: u8, text: fmt::Arguments<'_>) -> bool {
         bytes: [0; abi::MOST_TEXT],
         length: 0,
     };
+
     // A cut text is the bytes that fit, as a full one would be.
     let _ = fmt::write(&mut cut, text);
     let text = &cut.bytes[..cut.length];
@@ -246,6 +252,7 @@ impl fmt::Write for Cut {
         while !text.is_char_boundary(take) {
             take -= 1;
         }
+
         self.bytes[self.length..self.length + take].copy_from_slice(&text.as_bytes()[..take]);
         self.length += take;
         if take < text.len() {
@@ -265,15 +272,18 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
     if let Slot::Unset = slot {
         slot = acquire();
     }
+
     let Slot::Ring(ring) = slot else {
         CONTROL.dropped.fetch_add(1, Ordering::Relaxed);
         return false;
     };
+
     let header = &ring.header;
     if header.writing.load(Ordering::Relaxed) != 0 {
         header.signal_drops.fetch_add(1, Ordering::Relaxed);
         return false;
     }
+
     header.writing.store(1, Ordering::Relaxed);
     compiler_fence(Ordering::SeqCst);
     let time = now(header.clock.load(Ordering::Relaxed));
@@ -294,13 +304,16 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
         ring.put(position, &record);
         position += 1;
     }
+
     header.head.store(position, Ordering::Release);
     compiler_fence(Ordering::SeqCst);
     header.writing.store(0, Ordering::Relaxed);
+
     // Every so often, the thread asks whether uscope is still there.
     if (head ^ position) >> 10 != 0 {
         check_heartbeat();
     }
+
     true
 }
 
@@ -338,6 +351,7 @@ fn now(clock: u8) -> u64 {
         // SAFETY: every x86-64 processor reads its time-stamp counter.
         return unsafe { core::arch::x86_64::_rdtsc() };
     }
+
     let _ = clock;
     monotonic()
 }
@@ -369,6 +383,7 @@ unsafe extern "C" {
 fn atexit(_: extern "C" fn()) -> i32 {
     0
 }
+
 #[cfg(miri)]
 fn pthread_atfork(
     _: Option<extern "C" fn()>,
@@ -385,6 +400,7 @@ fn monotonic() -> u64 {
         seconds: 0,
         nanoseconds: 0,
     };
+
     clock_gettime(CLOCK_MONOTONIC, &mut time);
     (time.seconds.cast_unsigned())
         .wrapping_mul(1_000_000_000)
@@ -399,6 +415,7 @@ fn check_heartbeat() {
         0 => abi::STALE_NANOSECONDS,
         milliseconds => u64::from(milliseconds) * 1_000_000,
     };
+
     if CONTROL.enable.load(Ordering::Relaxed) != 0
         && monotonic().saturating_sub(heartbeat) > timeout
     {
@@ -454,6 +471,7 @@ extern "C" fn forked() {
     for ring in &CONTROL.registry {
         ring.store(ptr::null_mut(), Ordering::Relaxed);
     }
+
     CONTROL.rings.store(0, Ordering::Relaxed);
     let _ = RING.try_with(|slot| slot.set(Slot::Unset));
 }
@@ -464,10 +482,12 @@ extern "C" fn exiting() {
     let fresh = |now: u64| {
         now.saturating_sub(CONTROL.heartbeat.load(Ordering::Relaxed)) < abi::FRESH_NANOSECONDS
     };
+
     let start = monotonic();
     if CONTROL.enable.load(Ordering::Relaxed) == 0 || !fresh(start) {
         return;
     }
+
     CONTROL.exiting.store(1, Ordering::Release);
     while CONTROL.flushed.load(Ordering::Acquire) == 0
         && monotonic().saturating_sub(start) < abi::EXIT_WAIT_NANOSECONDS
@@ -484,16 +504,19 @@ fn acquire() -> Slot {
     if CONTROL.enable.load(Ordering::Acquire) == 0 {
         return Slot::Nothing;
     }
+
     ATFORK.call_once(|| {
         // The handlers touch only atomics, the thread's own slot, and the
         // clock.
         pthread_atfork(None, None, Some(forked));
         atexit(exiting);
     });
+
     // A thread that is exiting keeps no ring.
     if RETIRE.try_with(|_| ()).is_err() {
         return Slot::Nothing;
     }
+
     let slot = match reuse().or_else(allocate) {
         Some(ring) => {
             let header = &ring.header;
@@ -510,6 +533,7 @@ fn acquire() -> Slot {
         }
         None => Slot::Nothing,
     };
+
     RING.with(|cell| cell.set(slot));
     slot
 }
@@ -545,6 +569,7 @@ fn allocate() -> Option<&'static Ring> {
         if index as usize >= abi::MOST_RINGS {
             return None;
         }
+
         match CONTROL.rings.compare_exchange_weak(
             index,
             index + 1,
@@ -555,6 +580,7 @@ fn allocate() -> Option<&'static Ring> {
             Err(now) => index = now,
         }
     }
+
     let size = CONTROL
         .ring_size
         .load(Ordering::Relaxed)
@@ -564,6 +590,7 @@ fn allocate() -> Option<&'static Ring> {
     if let Some(slot) = MADE.get(made) {
         let _ = slot.set(ring);
     }
+
     CONTROL.registry[index as usize]
         .store(ptr::from_ref(&ring.header).cast_mut(), Ordering::Release);
     Some(ring)
@@ -577,14 +604,17 @@ fn make_ring(size: u32) -> Option<&'static Ring> {
         abi::RING_HEADER,
     )
     .ok()?;
+
     // SAFETY: the layout has a size.
     let block = unsafe { std::alloc::alloc_zeroed(layout) };
     if block.is_null() {
         return None;
     }
+
     // A ring's records are its slice, so a pointer to one carries their
     // count as its metadata.
     let ring = ptr::slice_from_raw_parts_mut(block, records) as *mut Ring;
+
     // SAFETY: the block is the layout of a ring of `records` records,
     // zeroed, which is a valid ring, and no other thread sees it before
     // the registries hold it. Its header's plain fields are written before

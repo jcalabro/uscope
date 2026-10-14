@@ -15,8 +15,10 @@ pub struct LoadLimits {
     /// Bytes the loader may build for each byte of uncompressed debug
     /// information.
     pub per_input_byte: u64,
+
     /// What any module may build, however little debug information it has.
     pub floor: u64,
+
     /// How many units past those added to the image each worker may walk
     /// to: what is walked waits in memory until the units before it are
     /// added.
@@ -61,6 +63,7 @@ impl LoadLimits {
 pub struct Meter {
     limit: u64,
     spent: u64,
+
     /// The first charge the budget refused.
     exceeded: Option<(&'static str, u64)>,
 }
@@ -78,6 +81,7 @@ impl Meter {
             self.exceeded.get_or_insert((what, bytes));
             return self.check();
         };
+
         self.spent = spent;
         Ok(())
     }
@@ -133,6 +137,7 @@ impl Meter {
         else {
             return false;
         };
+
         self.spent = spent;
         true
     }
@@ -151,6 +156,7 @@ mod tests {
             floor: 10,
             ..LoadLimits::default()
         };
+
         assert_eq!(limits.budget(3).limit, 10, "the floor");
         let mut meter = limits.budget(8);
         assert_eq!(meter.limit, 16);
@@ -165,6 +171,7 @@ mod tests {
             }) => (what, limit, requested),
             other => panic!("{other:?}"),
         };
+
         assert!(meter.charge("data objects", 1).is_err());
         assert!(meter.charge("types", usize::MAX).is_err());
         meter.check().unwrap_err();

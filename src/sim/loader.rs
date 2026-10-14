@@ -16,8 +16,10 @@ use super::memory::{AddressSpace, Backing, PAGE_BYTES, PAGE_SIZE, Page, Protecti
 
 /// The top of the stack of a process run without address randomization.
 pub const STACK_TOP: u64 = 0x7fff_ffff_f000;
+
 /// The size of the stack mapping a new process starts with.
 const STACK_SIZE: u64 = 132 * 1024;
+
 /// Where the mmap area begins, growing down, with randomization off and a
 /// stack limit under 127 MiB: the top of the address space less the
 /// smallest gap Linux leaves for the stack.
@@ -40,6 +42,7 @@ pub const INITIAL_RFLAGS: u64 = 0x202;
 pub enum LoadError {
     #[error("not a loadable ELF executable: {0}")]
     Object(#[from] object::Error),
+
     #[error("{0}")]
     Unsupported(String),
 }
@@ -47,11 +50,13 @@ pub enum LoadError {
 struct Segment {
     start: u64,
     end: u64,
+
     /// Where the pages that hold some of the file's bytes end. The kernel
     /// maps the rest of the segment anonymously.
     file_end: u64,
     protection: Protection,
     offset: u64,
+
     /// Page contents from `start`, one per page.
     pages: Vec<Arc<Page>>,
 }
@@ -60,6 +65,7 @@ struct Segment {
 pub struct Image {
     path: Arc<str>,
     inode: u64,
+
     /// What the image's addresses must be increased by to name where it
     /// loads: zero for a position-dependent executable.
     bias: u64,
@@ -81,6 +87,7 @@ impl Image {
         let object::File::Elf64(elf) = &file else {
             return Err(LoadError::Unsupported("not a 64-bit ELF file".into()));
         };
+
         let header = elf.elf_header();
         let endian = elf.endian();
         let program_header_offset = header.e_phoff.get(endian);
@@ -105,6 +112,7 @@ impl Image {
                 "executables with an interpreter do not load".into(),
             ));
         }
+
         let loads = program_header_table
             .iter()
             .filter(|&&(kind, ..)| kind == object::elf::PT_LOAD);
@@ -116,11 +124,13 @@ impl Image {
                         "segments aligned beyond a page do not load".into(),
                     ));
                 }
+
                 let start = loads.clone().map(|&(_, _, address, _)| address).min();
                 let end = loads.map(|&(_, _, address, size)| address + size).max();
                 let (Some(start), Some(end)) = (start, end) else {
                     return Err(LoadError::Unsupported("nothing to load".into()));
                 };
+
                 let span = end.next_multiple_of(PAGE_SIZE) - (start & !(PAGE_SIZE - 1));
                 MMAP_BASE - span - (start & !(PAGE_SIZE - 1))
             }
@@ -137,14 +147,17 @@ impl Image {
             let SegmentFlags::Elf { p_flags } = segment.flags() else {
                 return Err(LoadError::Unsupported("segment without ELF flags".into()));
             };
+
             let (file_offset, file_size) = segment.file_range();
             let address = segment.address() + bias;
             if address % PAGE_SIZE != file_offset % PAGE_SIZE {
                 return Err(LoadError::Unsupported("misaligned segment".into()));
             }
+
             if (file_offset..file_offset + file_size).contains(&program_header_offset) {
                 program_headers = Some(address + program_header_offset - file_offset);
             }
+
             segments.push(prepare_segment(
                 data,
                 address,
@@ -154,6 +167,7 @@ impl Image {
                 p_flags,
             )?);
         }
+
         Ok(Self {
             path: Arc::from(path),
             inode,
@@ -215,8 +229,10 @@ impl Image {
                     inode: self.inode,
                     offset: segment.offset,
                 };
+
                 space.map(segment.start, segment.file_end, segment.protection, backing);
             }
+
             if segment.end > segment.file_end {
                 space.map(
                     segment.file_end,
@@ -225,10 +241,12 @@ impl Image {
                     Backing::Anonymous,
                 );
             }
+
             for (index, page) in segment.pages.iter().enumerate() {
                 space.share_page(segment.start + index as u64 * PAGE_SIZE, Arc::clone(page));
             }
         }
+
         space.map(
             STACK_TOP - STACK_SIZE,
             STACK_TOP,
@@ -241,6 +259,7 @@ impl Image {
             rflags: INITIAL_RFLAGS,
             ..Registers::default()
         };
+
         registers.general[RSP] = stack_pointer;
         (space, registers)
     }
@@ -256,17 +275,20 @@ impl Image {
             assert!(space.write(top, bytes).is_ok(), "the stack is writable");
             top
         };
+
         let terminated = |text: &str| {
             let mut bytes = text.as_bytes().to_vec();
             bytes.push(0);
             bytes
         };
+
         let name = terminated(&self.path);
         let executable_name = push_bytes(space, &name);
         let mut argv = vec![push_bytes(space, &name)];
         for argument in arguments {
             argv.push(push_bytes(space, &terminated(argument)));
         }
+
         let random_address = push_bytes(space, &random);
 
         let mut words = vec![argv.len() as u64];
@@ -320,6 +342,7 @@ fn prepare_segment(
         write: flags & object::elf::PF_W != 0,
         execute: flags & object::elf::PF_X != 0,
     };
+
     let start = address & !(PAGE_SIZE - 1);
     let end = (address + memory_size).next_multiple_of(PAGE_SIZE);
     let offset = file_offset & !(PAGE_SIZE - 1);
@@ -337,8 +360,10 @@ fn prepare_segment(
                 page[keep..].fill(0);
             }
         }
+
         pages.push(Arc::new(page));
     }
+
     Ok(Segment {
         start,
         end,

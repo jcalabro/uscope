@@ -14,8 +14,10 @@ use crate::{CodeRole, ImageAddress, ModuleImage};
 pub struct CallSites {
     /// Calls whose frame keeps the chain while the callee runs.
     pub kept: u32,
+
     /// Calls whose frame does not, by their rules.
     pub not_kept: u32,
+
     /// The first call that does not keep it, by image address.
     pub first_not_kept: Option<u64>,
 }
@@ -44,6 +46,7 @@ pub fn call_sites(data: &[u8], image: &ModuleImage, unwind: &dyn UnwindInfo) -> 
     let Ok(file) = object::File::parse(data) else {
         return sites;
     };
+
     for section in file.sections() {
         let executable = matches!(
             section.flags(),
@@ -53,6 +56,7 @@ pub fn call_sites(data: &[u8], image: &ModuleImage, unwind: &dyn UnwindInfo) -> 
         if !executable || code.is_empty() {
             continue;
         }
+
         let mut decoder = Decoder::with_ip(64, code, section.address(), DecoderOptions::NONE);
         for instruction in &mut decoder {
             // A system call returns to the instruction after it, with
@@ -60,6 +64,7 @@ pub fn call_sites(data: &[u8], image: &ModuleImage, unwind: &dyn UnwindInfo) -> 
             if instruction.mnemonic() != Mnemonic::Call {
                 continue;
             }
+
             let address = ImageAddress::new(instruction.ip());
             if matches!(
                 image.code_role(address),
@@ -67,12 +72,14 @@ pub fn call_sites(data: &[u8], image: &ModuleImage, unwind: &dyn UnwindInfo) -> 
             ) {
                 continue;
             }
+
             if instruction.flow_control() == FlowControl::Call
                 && image.code_role(ImageAddress::new(instruction.near_branch_target()))
                     != CodeRole::Ordinary
             {
                 continue;
             }
+
             match unwind.frame_pointer_rule(address) {
                 FramePointerRule::Kept | FramePointerRule::Outermost => sites.kept += 1,
                 FramePointerRule::NotKept => {
@@ -83,5 +90,6 @@ pub fn call_sites(data: &[u8], image: &ModuleImage, unwind: &dyn UnwindInfo) -> 
             }
         }
     }
+
     sites
 }

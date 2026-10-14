@@ -42,13 +42,16 @@ pub enum CorpusError {
         path: PathBuf,
         error: std::io::Error,
     },
+
     #[error("{path}: {error}")]
     Manifest {
         path: PathBuf,
         error: serde_json::Error,
     },
+
     #[error("{path}: {error}")]
     Load { path: PathBuf, error: String },
+
     #[error("{path} is missing; build the golden programs with `just build-test-programs`")]
     NotBuilt { path: PathBuf },
 }
@@ -86,18 +89,24 @@ pub struct Run {
 pub struct Variant {
     /// The binary's file name, such as `straight-gcc-O0`.
     pub name: String,
+
     /// The binary as built, which tests also run natively.
     pub file: PathBuf,
+
     /// The binary's path inside the simulation.
     pub path: Arc<str>,
+
     /// The inode simulated mappings of the binary report.
     pub inode: u64,
     pub data: Arc<[u8]>,
     pub image: Arc<Image>,
+
     /// The functions the binary defines, by name.
     pub functions: Vec<String>,
+
     /// What binutils say about the binary.
     pub facts: Facts,
+
     /// The data objects the symbol table defines, up to a page: name,
     /// image address, size.
     pub globals: Vec<(String, u64, u64)>,
@@ -121,15 +130,20 @@ pub struct Program {
     pub name: String,
     pub variants: Vec<Variant>,
     pub runs: Vec<Run>,
+
     /// The functions any variant defines, by name. Another variant may
     /// have inlined some of them away.
     pub functions: Vec<String>,
+
     /// The program's source file, as its debug information names it.
     pub source: PathBuf,
+
     /// How many lines the source file has.
     pub source_lines: u64,
+
     /// The conditions the source states at its lines.
     pub markers: Vec<Marker>,
+
     /// The views its types are presented with, from `NAME.views` beside
     /// its source, which the client loads.
     pub views: Option<Arc<str>>,
@@ -148,6 +162,7 @@ impl Corpus {
             let path = path.to_owned();
             move |error| CorpusError::Io { path, error }
         };
+
         let read_built = |path: &Path| match std::fs::read(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err(CorpusError::NotBuilt {
@@ -156,6 +171,7 @@ impl Corpus {
             }
             result => result.map_err(io(path)),
         };
+
         let mut manifests = std::fs::read_dir(&root)
             .map_err(io(&root))?
             .filter_map(|entry| Some(entry.ok()?.path().join("manifest.json")))
@@ -191,6 +207,7 @@ impl Corpus {
                     path: file.clone(),
                     error,
                 };
+
                 let image = Image::new(&simulated, next_inode, &data)
                     .map_err(|error| load(error.to_string()))?;
                 let debug_info = debug_info::load_bytes(Path::new(&simulated), &data)
@@ -219,6 +236,7 @@ impl Corpus {
                 });
                 next_inode += 1;
             }
+
             let functions = variants
                 .iter()
                 .flat_map(|variant| variant.functions.iter().cloned())
@@ -241,6 +259,7 @@ impl Corpus {
                 runs: manifest.runs,
             });
         }
+
         Ok(Self { programs })
     }
 }

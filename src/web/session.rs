@@ -39,6 +39,7 @@ use super::protocol::{
     Person, Presence, Processes, Request, Role, ServerMessage, ShareLink, State, StepKind, Stream,
     TargetKind,
 };
+
 use super::{draw, inspect, lowlevel, picker, values};
 use crate::cli::format;
 use crate::cli::terminal::Renderer;
@@ -120,6 +121,7 @@ impl From<uscope::Error> for Failure {
             | Error::NoFunctionContainsAddress(_) => ErrorKind::Invalid,
             _ => ErrorKind::Failed,
         };
+
         Self::new(kind, error.to_string())
     }
 }
@@ -136,31 +138,40 @@ enum Chosen {
 pub struct Session {
     cwd: PathBuf,
     home: Option<PathBuf>,
+
     /// The view files given for every program the session debugs, before
     /// the project's and the user's.
     views: Vec<PathBuf>,
+
     /// Where every program's separate debug files are found.
     debug_files: uscope::DebugFileOptions,
+
     /// What links begin with, such as `http://127.0.0.1:7341/`, or the
     /// public URL a proxy serves the page at.
     link_base: String,
     tokens: Tokens,
     default_name: String,
+
     /// The current debugger; locked across a change of what is debugged, so
     /// changes happen one at a time.
     target: tokio::sync::Mutex<Option<Target>>,
     state: Arc<watch::Sender<Arc<State>>>,
+
     /// Output, presence, and notices, already serialized.
     messages: broadcast::Sender<Arc<str>>,
+
     /// Recent output; its lock also orders publishing output, so a joining
     /// tab sees each piece exactly once.
     history: Arc<Mutex<History>>,
     people: Mutex<BTreeMap<u32, Person>>,
     next_connection: AtomicU32,
+
     /// Who last ran the program, for the stop the run ends at.
     cause: Arc<Mutex<Option<Cause>>>,
+
     /// Each connection's handles to values it was shown.
     handles: values::Handles,
+
     /// Whether a process attached to runs on at once rather than staying
     /// stopped at the attach.
     resume_attached: AtomicBool,
@@ -173,16 +184,20 @@ struct Target {
     handle: DebuggerHandle,
     images: Arc<Images>,
     launch: Option<LaunchSpec>,
+
     /// The launched program's standard input, until closed.
     input: Arc<tokio::sync::Mutex<Option<pipe::Sender>>>,
     pump: JoinHandle<()>,
     readers: Vec<JoinHandle<()>>,
     name: String,
+
     /// Runs the console's commands, one at a time: each selects the tab's
     /// frame first, so the selection never changes under another's.
     console: Arc<tokio::sync::Mutex<Cli>>,
+
     /// Counts the changes tabs make to the program's values.
     writes: Arc<AtomicU64>,
+
     /// Counts changes to settings no event announces, such as signal
     /// policies.
     settings: Arc<AtomicU64>,
@@ -258,6 +273,7 @@ impl Session {
         } else {
             format!("?to={}", escape_query(to))
         };
+
         format!("{}join{to}#{}", self.link_base, self.tokens.token(role))
     }
 
@@ -268,6 +284,7 @@ impl Session {
             Role::Control => self.default_name.clone(),
             Role::View => format!("guest-{connection}"),
         };
+
         let (history, messages) = {
             let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
             (
@@ -275,6 +292,7 @@ impl Session {
                 self.messages.subscribe(),
             )
         };
+
         let state = self.state.subscribe();
         self.people
             .lock()
@@ -427,9 +445,11 @@ impl Session {
                 "this link can only view the session; ask for a control link",
             ));
         }
+
         if reads {
             return self.read(connection, role, request).await;
         }
+
         let notice = match request {
             Request::CompletePath(_)
             | Request::Processes
@@ -445,6 +465,7 @@ impl Session {
             | Request::RemoveBreakpoint(_) => {
                 return self.breakpoints(connection, request).await;
             }
+
             Request::WriteMemory(_)
             | Request::AddWatchpoint(_)
             | Request::EditWatchpoint(_)
@@ -469,9 +490,11 @@ impl Session {
             }
             request => self.control(connection, request).await?,
         };
+
         if let Some(text) = notice {
             self.notice(connection, text);
         }
+
         Ok(Value::Null)
     }
 
@@ -601,6 +624,7 @@ impl Session {
                     .await?;
                 format!("attached to process {pid}")
             }
+
             Request::OpenCore(protocol::OpenCore {
                 core,
                 executable,
@@ -642,6 +666,7 @@ impl Session {
                         format!("ended the {name} session, but {}", failure.0.message),
                     );
                 }
+
                 failure
             })
     }
@@ -712,6 +737,7 @@ impl Session {
                 ));
             }
         }
+
         Ok(Value::Null)
     }
 
@@ -756,6 +782,7 @@ impl Session {
                 ));
             }
         };
+
         self.notice(connection, notice);
         Ok(Value::Null)
     }
@@ -776,6 +803,7 @@ impl Session {
                 "the program is not stopped",
             ));
         };
+
         let (kind, action) = match step.kind {
             StepKind::Over => (uscope::StepKind::OverSource, "stepped over"),
             StepKind::Into => (uscope::StepKind::IntoSource, "stepped into"),
@@ -786,11 +814,13 @@ impl Session {
                 "stepped over an instruction",
             ),
         };
+
         let frame = if step.kind == StepKind::Out {
             step.frame
         } else {
             0
         };
+
         let context = inspect::context(
             &handle,
             step.stop,
@@ -814,6 +844,7 @@ impl Session {
                 .await?;
             return Ok(action);
         }
+
         self.caused(connection, action);
         handle
             .start_step(
@@ -869,6 +900,7 @@ impl Session {
                 "the program's input is closed; it reads input only while it runs",
             ));
         };
+
         let written = tokio::time::timeout(INPUT_WAIT, pipe.write_all(input.text.as_bytes()))
             .await
             .map_err(|_| Failure::new(ErrorKind::Failed, "the program is not reading its input"))?;
@@ -879,9 +911,11 @@ impl Session {
                 format!("the program's input closed: {error}"),
             ));
         }
+
         if input.eof {
             *open = None;
         }
+
         drop(open);
         Ok(())
     }
@@ -894,6 +928,7 @@ impl Session {
                 "a name has 1 to 40 characters",
             ));
         }
+
         if let Some(person) = self
             .people
             .lock()
@@ -902,6 +937,7 @@ impl Session {
         {
             name.clone_into(&mut person.name);
         }
+
         self.announce_presence();
         Ok(())
     }
@@ -915,6 +951,7 @@ impl Session {
                 "a focus is a page path and a short label",
             ));
         }
+
         let changed = self
             .people
             .lock()
@@ -928,6 +965,7 @@ impl Session {
         if changed {
             self.announce_presence();
         }
+
         Ok(())
     }
 
@@ -938,9 +976,11 @@ impl Session {
                 "only control access can share control",
             ));
         }
+
         if !is_page_path(to) {
             return Err(Failure::new(ErrorKind::Invalid, "a link opens a page path"));
         }
+
         Ok(to_value(&ShareLink {
             url: self.join_link(wanted, to),
         }))
@@ -972,6 +1012,7 @@ impl Session {
                 "nothing is being debugged",
             ));
         };
+
         let name = current.name.clone();
         let ended = self.end(current).await;
         self.state.send_replace(Arc::new(State::idle(None)));
@@ -991,6 +1032,7 @@ impl Session {
                     "the program is not stopped",
                 ));
             };
+
             self.caused(connection, "continued");
             handle
                 .continue_execution(
@@ -1001,18 +1043,21 @@ impl Session {
                 .await?;
             return Ok("continued".to_owned());
         }
+
         let Some(spec) = launch else {
             return Err(Failure::new(
                 ErrorKind::Invalid,
                 "name the stop to continue",
             ));
         };
+
         if started {
             return Err(Failure::new(
                 ErrorKind::NotStopped,
                 "the program has already started; name the stop to continue",
             ));
         }
+
         self.caused(connection, "started the program");
         self.run(&handle, &spec).await?;
         Ok("started the program".to_owned())
@@ -1026,10 +1071,12 @@ impl Session {
                 "only a launched program can restart",
             ));
         };
+
         match handle.kill().await {
             Ok(()) | Err(uscope::Error::NotRunning) => {}
             Err(error) => return Err(error.into()),
         }
+
         self.caused(connection, "restarted the program");
         self.run(&handle, &spec).await
     }
@@ -1096,9 +1143,11 @@ impl Session {
         else {
             return;
         };
+
         counter.fetch_add(1, Ordering::Relaxed);
         self.state.send_modify(|state| {
             let mut next = State::clone(state);
+
             // Read under the state's lock, so that a count bumped after
             // this one and published first is not published back down.
             set(&mut next, counter.load(Ordering::Relaxed));
@@ -1128,15 +1177,18 @@ impl Session {
                 ));
             }
         };
+
         let Some(at) = at else {
             if command.is_some() {
                 return self.command(role, text, at).await;
             }
+
             return Err(Failure::new(
                 ErrorKind::NotStopped,
                 "expressions need a stopped program",
             ));
         };
+
         let assigns = expression.assignment_target().is_some();
         if assigns && role != Role::Control {
             return Err(Failure::new(
@@ -1144,6 +1196,7 @@ impl Session {
                 "this link can only view the session; it cannot change values",
             ));
         }
+
         let reader = self.reader(connection).await?;
         let context = inspect::context(&reader.handle, at.stop, at.execution(), at.frame).await?;
         let mode = if role == Role::Control {
@@ -1151,6 +1204,7 @@ impl Session {
         } else {
             EvaluationMode::Read
         };
+
         let evaluation = match reader
             .handle
             .at(context)
@@ -1173,11 +1227,13 @@ impl Session {
             }
             Err(other) => return Err(other.into()),
         };
+
         let row = reader.present(context, text, expression, evaluation)?;
         if assigns {
             self.wrote().await;
             self.notice(connection, format!("ran {text}"));
         }
+
         Ok(ConsoleResult {
             output: None,
             row: Some(row),
@@ -1197,6 +1253,7 @@ impl Session {
                 "this link can only view the session; it evaluates, but runs no commands",
             ));
         }
+
         let (handle, console) = self
             .target
             .lock()
@@ -1210,6 +1267,7 @@ impl Session {
             handle.select_context(context.execution).await?;
             handle.select_frame(context.frame).await?;
         }
+
         let output = console
             .console(text)
             .await
@@ -1218,12 +1276,14 @@ impl Session {
                 Failure::new(ErrorKind::Invalid, format!("'{text}' is not a command"))
             })?;
         drop(console);
+
         // `set` changes values the tabs show.
         if crate::cli::commands::line_command(text)
             .is_some_and(|(spec, _)| spec.command == crate::cli::commands::Command::Set)
         {
             self.wrote().await;
         }
+
         Ok(ConsoleResult {
             output: Some(output),
             row: None,
@@ -1257,6 +1317,7 @@ impl Session {
             Start::Attach(process) => format!("Attaching to process {process}"),
             Start::Core(options) => format!("Opening {}", options.core.display()),
         };
+
         self.state.send_replace(Arc::new(State::idle(Some(busy))));
     }
 
@@ -1281,6 +1342,7 @@ impl Session {
                 None,
             ));
         }
+
         let ended = match target.take() {
             Some(current) => {
                 let name = current.name.clone();
@@ -1289,6 +1351,7 @@ impl Session {
             }
             None => None,
         };
+
         let opened = self.open_target(&mut target, start).await;
         drop(target);
         opened.map_err(|failure| (failure, ended))
@@ -1308,6 +1371,7 @@ impl Session {
                 return Err(Failure::new(ErrorKind::Failed, message));
             }
         };
+
         let handle = debugger.handle();
         let attached = matches!(start, Start::Attach(_));
         let (info, launch, run) = describe_target(start, &handle);
@@ -1317,6 +1381,7 @@ impl Session {
             || info.program.clone(),
             |name| name.to_string_lossy().into_owned(),
         );
+
         // The new session's state goes out before the request is answered,
         // so a page can open it; the pump takes every later change.
         let events = handle.subscribe();
@@ -1335,6 +1400,7 @@ impl Session {
             history: Arc::clone(&self.history),
             messages: self.messages.clone(),
         };
+
         // The console's commands read no settings files, as the debug
         // adapter's do not.
         let root = crate::cli::config::project_root(&self.cwd);
@@ -1347,11 +1413,13 @@ impl Session {
         for warning in console.debug_information_warnings().await {
             outlet.publish(Stream::Log, &format!("warning: {warning}\n"));
         }
+
         // The session's, the project's, and the user's views apply, as in
         // the terminal.
         for warning in console.load_view_sources(&self.cwd, &self.views).await {
             outlet.publish(Stream::Log, &format!("views: {warning}\n"));
         }
+
         let session = describer.id.clone();
         let pump = tokio::spawn(pump(Arc::clone(&self.state), describer, events, outlet));
         *target = Some(Target {
@@ -1384,6 +1452,7 @@ impl Session {
                 )
                 .await?;
         }
+
         if run && let Some(spec) = launch {
             let (readers, input) = self.launch(&handle, &spec).await?;
             if let Some(target) = target.as_mut() {
@@ -1391,6 +1460,7 @@ impl Session {
                 *target.input.lock().await = Some(input);
             }
         }
+
         Ok(())
     }
 
@@ -1401,6 +1471,7 @@ impl Session {
             target.readers.extend(readers);
             *target.input.lock().await = Some(input);
         }
+
         Ok(())
     }
 
@@ -1427,6 +1498,7 @@ impl Session {
             stderr: Some(stderr_write.into()),
             stop_at_entry: spec.stop_at_entry,
         };
+
         handle.launch_with(options).await.map_err(|error| {
             Failure::new(
                 ErrorKind::Failed,
@@ -1447,6 +1519,7 @@ impl Session {
             history: Arc::clone(&self.history),
             messages: self.messages.clone(),
         };
+
         Ok(tokio::spawn(async move {
             let mut pending = Vec::with_capacity(OUTPUT_CHUNK);
             let mut buffer = vec![0; OUTPUT_CHUNK];
@@ -1470,11 +1543,13 @@ impl Session {
             Some(debugger) => debugger.shutdown().await,
             None => Ok(()),
         };
+
         // The program's end closes its streams; a reader still waiting is
         // on a stream a forked child kept open.
         for reader in &target.readers {
             reader.abort();
         }
+
         shutdown.map_err(Failure::from)
     }
 
@@ -1528,16 +1603,19 @@ async fn edit_breakpoint(
             .set_breakpoint_log_message(id, wanted.log_message)
             .await?;
     }
+
     if current.hit_condition != wanted.hit_condition {
         handle
             .set_breakpoint_hit_condition(id, wanted.hit_condition)
             .await?;
     }
+
     if current.condition != wanted.condition {
         handle
             .set_breakpoint_condition(id, wanted.condition)
             .await?;
     }
+
     Ok(())
 }
 
@@ -1642,6 +1720,7 @@ async fn open(start: &Start, debug_files: &uscope::DebugFileOptions) -> Result<D
                 debug_files: debug_files.clone(),
                 ..options.clone()
             };
+
             let core = options.core.display().to_string();
             tokio::task::spawn_blocking(move || Debugger::open_core(&options))
                 .await
@@ -1667,6 +1746,7 @@ impl Outlet {
                 text: piece.to_owned(),
             });
             let text: Arc<str> = encode(&message).into();
+
             // Publishing under the lock keeps joining tabs from missing or
             // repeating a piece.
             let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1689,6 +1769,7 @@ async fn pump(
         let Ok(snapshot) = describer.handle.snapshot().await else {
             return;
         };
+
         let next = describer.describe(&snapshot).await;
         publish(&state, next, &describer.writes, &describer.settings);
         match events.recv().await {
@@ -1696,6 +1777,7 @@ async fn pump(
             Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
+
         // Take every event already queued, so the burst publishes once.
         loop {
             match events.try_recv() {
@@ -1723,6 +1805,7 @@ fn publish(
         if changed {
             *current = Arc::new(next);
         }
+
         changed
     });
 }
@@ -1742,11 +1825,13 @@ fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
                 uscope::ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
                 uscope::ConditionOwner::Catchpoint(id) => format!("catchpoint {id}"),
             };
+
             outlet.publish(
                 Stream::Log,
                 &format!("the condition of {owner} failed, so it stopped: {error}\n"),
             );
         }
+
         DebuggerEvent::SignalReceived {
             thread_id,
             exception,
@@ -1780,6 +1865,7 @@ fn escape_query(text: &str) -> String {
             let _ = write!(escaped, "%{byte:02X}");
         }
     }
+
     escaped
 }
 
@@ -1814,6 +1900,7 @@ mod tests {
             revision: 1,
             ..State::idle(None)
         };
+
         let (state, receiver) = watch::channel(Arc::new(built.clone()));
         writes.fetch_add(1, Ordering::Relaxed);
         settings.fetch_add(1, Ordering::Relaxed);

@@ -18,6 +18,7 @@ use super::auth::random_hex;
 
 /// The frame's script, which keeps a worker per card.
 const FRAME: &str = include_str!("../../web/src/visualize/frame.js");
+
 /// The worker's script, which locks itself down and runs a renderer.
 const WORKER: &str = include_str!("../../web/src/visualize/worker.js");
 
@@ -25,9 +26,11 @@ pub async fn frame(State(app): State<Arc<App>>, headers: HeaderMap) -> Response 
     if !app.known_host(&headers) {
         return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
     }
+
     let Ok(nonce) = random_hex(16) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+
     let csp = format!(
         "sandbox allow-scripts; default-src 'none'; script-src 'nonce-{nonce}' 'unsafe-eval'; \
          worker-src blob:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"

@@ -15,12 +15,16 @@ use crate::{ConditionOwner, DebuggerEvent};
 
 pub struct Auditor {
     events: broadcast::Receiver<DebuggerEvent>,
+
     /// The hit events counted for the client's checks.
     published: Rc<RefCell<Published>>,
+
     /// The newest revision of any event.
     revision: u64,
+
     /// The newest revision a `StateChanged` announced.
     change: u64,
+
     /// The newest stop published.
     stop: u64,
 }
@@ -60,6 +64,7 @@ impl Auditor {
                 }
                 Err(_) => return Ok(()),
             };
+
             let revision = event.revision();
             if revision < self.revision {
                 return Err(failure(format!(
@@ -67,6 +72,7 @@ impl Auditor {
                     self.revision
                 )));
             }
+
             self.revision = revision;
             match &event {
                 DebuggerEvent::StateChanged { revision } => {
@@ -76,6 +82,7 @@ impl Auditor {
                             self.change
                         )));
                     }
+
                     self.change = *revision;
                 }
                 DebuggerEvent::InferiorStopped { stop_id, .. } => {
@@ -85,14 +92,17 @@ impl Auditor {
                             self.stop
                         )));
                     }
+
                     self.stop = stop_id.get();
                     self.published.borrow_mut().stops.insert(stop_id.get());
                 }
+
                 DebuggerEvent::ThreadExited {
                     thread_id, status, ..
                 } => {
                     marks.hit(Mark::ThreadExited);
                     let tid = Tid::try_from(thread_id.get()).expect("a simulated tid fits");
+
                     // A leader that exits while the debugger knows other
                     // threads live is reported at its exit event, with the
                     // code it passed to `exit`: Linux reports its exit only
@@ -105,20 +115,24 @@ impl Auditor {
                                  {status:?}"
                             )));
                         }
+
                         marks.hit(Mark::LeaderExitReported);
                         continue;
                     }
+
                     let Some(&reaped) = kernel.reaped.get(&tid) else {
                         return Err(failure(format!(
                             "thread {tid} reported {status:?} before it was reaped"
                         )));
                     };
+
                     if !same_status(reaped, status) {
                         return Err(failure(format!(
                             "thread {tid} reported {reaped}, but the client heard {status:?}"
                         )));
                     }
                 }
+
                 DebuggerEvent::InferiorExited {
                     process_id, status, ..
                 } => {
@@ -129,9 +143,11 @@ impl Auditor {
                             "process {tgid} reported {status:?} before it ended"
                         )));
                     };
+
                     if matches!(truth, ExitStatus::Code(_)) {
                         marks.hit(Mark::ProgramExited);
                     }
+
                     if !same_exit(*truth, status) {
                         return Err(failure(format!(
                             "process {tgid} ended {truth:?}, but the client heard {status:?}"
@@ -153,6 +169,7 @@ impl Auditor {
             DebuggerEvent::LogMessage { breakpoint, .. } => {
                 *published.logged.entry(breakpoint.get()).or_default() += 1;
             }
+
             DebuggerEvent::ConditionFailed {
                 owner: ConditionOwner::Breakpoint(breakpoint),
                 ..
@@ -162,6 +179,7 @@ impl Auditor {
                     .entry(breakpoint.get())
                     .or_default() += 1;
             }
+
             // The client's watch conditions are constants.
             DebuggerEvent::ConditionFailed {
                 owner: ConditionOwner::Watchpoint(watchpoint),
@@ -174,6 +192,7 @@ impl Auditor {
             }
             _ => {}
         }
+
         Ok(())
     }
 }
@@ -196,6 +215,7 @@ fn same_status(kernel: WaitStatus, reported: &crate::ExitStatus) -> bool {
         WaitStatus::Signaled(_, signal, core) => {
             same_exit(ExitStatus::Signal(signal, core), reported)
         }
+
         WaitStatus::Stopped(..)
         | WaitStatus::Event(..)
         | WaitStatus::GroupStop(..)

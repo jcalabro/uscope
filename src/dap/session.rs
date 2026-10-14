@@ -28,6 +28,7 @@ use super::protocol::{
     self, ErrorBody, GotoArguments, Outgoing, SetBreakpointsArguments,
     SetExceptionBreakpointsArguments, SetFunctionBreakpointsArguments, ThreadArguments,
 };
+
 use super::signals::Selection;
 use super::sources::source_json;
 use super::threads::ThreadHandles;
@@ -51,8 +52,10 @@ pub type Response = Result<Value, String>;
 #[derive(Default)]
 pub struct Responses {
     next_ticket: u64,
+
     /// Callers by ticket, until the writer numbers their request.
     unsent: HashMap<u64, oneshot::Sender<Response>>,
+
     /// Callers by the `seq` of their request.
     sent: HashMap<u64, oneshot::Sender<Response>>,
 }
@@ -116,6 +119,7 @@ impl Client {
             responses.unsent.insert(ticket, caller);
             ticket
         };
+
         self.outgoing
             .send(Outgoing::Request {
                 command,
@@ -183,6 +187,7 @@ pub enum Inbound {
         command: String,
         arguments: Value,
     },
+
     /// A request that could not be parsed but whose `seq` was recovered.
     Malformed {
         seq: Value,
@@ -202,8 +207,10 @@ struct Header {
 enum After {
     /// Tell the client it may configure the session.
     Initialized,
+
     /// Start the target, as launch and configuration both arrived.
     Start,
+
     /// End the session.
     End,
 }
@@ -252,20 +259,24 @@ struct Target {
     stop_on_entry: bool,
     source_paths: uscope::SourcePathMap,
     signals: Vec<(u64, Vec<String>)>,
+
     /// The policy each signal had before the session changed it.
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
     applied_exceptions: uscope::ExceptionStops,
+
     /// The catchpoint the system-call filter made, and the calls it
     /// catches.
     applied_syscalls: Option<(Arc<[uscope::syscalls::SyscallId]>, uscope::CatchpointId)>,
     console: Cli,
     syntax: uscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
+
     /// Recorded source paths by the canonical local path they map to.
     recorded_paths: Option<HashMap<PathBuf, PathBuf>>,
     process: Option<ProcessId>,
     pumps: Vec<JoinHandle<()>>,
+
     /// The settings child sessions carry over.
     inherited: serde_json::Map<String, Value>,
     threads: config::ThreadListing,
@@ -276,10 +287,12 @@ struct Target {
 pub(super) struct Stop {
     pub id: StopId,
     pub thread: ThreadId,
+
     /// What the client knows as the thread that stopped: the task the
     /// thread runs, when the client's threads are tasks, or the thread.
     pub context: ExecutionContext,
     pub reason: StopReason,
+
     /// The frame of the stopped context the debugger selected, as at an
     /// exception the frame that raised it; the innermost otherwise.
     pub selected: StackFrameId,
@@ -301,12 +314,15 @@ pub struct Session {
     support: Option<ClientSupport>,
     after: Option<After>,
     configured: bool,
+
     /// The deferred `launch` or `attach` response.
     starting: Option<Header>,
     target: Option<Target>,
     events: Option<broadcast::Receiver<DebuggerEvent>>,
+
     /// The processes the program forked, held for child sessions.
     held: Option<uscope::HeldChildren>,
+
     /// The requests for child sessions still waiting for the client.
     follows: Vec<JoinHandle<()>>,
     pub(super) breakpoints: Breakpoints,
@@ -316,26 +332,36 @@ pub struct Session {
     pub(super) stop: Option<Stop>,
     backtraces: HashMap<ExecutionContext, Arc<Backtrace>>,
     variables: HashMap<(ExecutionContext, StackFrameId), Arc<VariableSnapshot>>,
+
     /// The client's ids for threads and tasks.
     pub(super) thread_ids: ThreadHandles,
+
     /// The threads the client was told about, with their client ids.
     threads: BTreeMap<ThreadId, i64>,
+
     /// The tasks the client was told about, with their client ids.
     pub(super) tasks: BTreeMap<uscope::TaskId, i64>,
+
     /// The modules the client was told are loaded.
     pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
+
     /// The execution the client last started, whose resume it already knows.
     resumed: Option<uscope::ExecutionId>,
+
     /// Whether the program is being restarted, so its end does not end the
     /// session.
     restarting: bool,
+
     /// How values show when a request does not say.
     pub(super) display: super::values::Display,
+
     /// The source files the client was told are loaded, and the modules
     /// that have each, once it asked.
     pub(super) loaded_sources: Option<BTreeMap<PathBuf, BTreeSet<ModuleId>>>,
+
     /// Requests read ahead of the one being handled.
     queue: VecDeque<Inbound>,
+
     /// The `seq` of each request the client cancelled, as text.
     cancelled: Cancelled,
     ended: bool,
@@ -387,6 +413,7 @@ impl Session {
             while let Ok(message) = inbox.try_recv() {
                 self.queue.push_back(message);
             }
+
             let input = if let Some(message) = self.queue.pop_front() {
                 Some(Input::Message(message))
             } else {
@@ -398,6 +425,7 @@ impl Session {
                     event = next_event(&mut self.events) => Some(Input::Event(event)),
                 }
             };
+
             let result = match input {
                 None => break,
                 Some(Input::Message(message)) => self.message(message).await,
@@ -415,13 +443,16 @@ impl Session {
                     Ok(())
                 }
             };
+
             if result.is_err() || self.ended {
                 break;
             }
         }
+
         if !self.ended {
             let _ = self.end(None).await;
         }
+
         self.release().await;
     }
 
@@ -433,6 +464,7 @@ impl Session {
                     .respond(&Header { seq, command }, Err(ErrorBody::cancelled()))
                     .await;
             }
+
             Inbound::Request {
                 seq,
                 command,
@@ -444,6 +476,7 @@ impl Session {
                     .respond(&Header { seq, command }, Err(ErrorBody::cancelled()))
                     .await;
             }
+
             Inbound::Malformed {
                 seq,
                 command,
@@ -455,11 +488,13 @@ impl Session {
                     .await;
             }
         };
+
         match self.dispatch(&header, arguments).await {
             Ok(Some(body)) => self.client.respond(&header, Ok(body)).await?,
             Ok(None) => {}
             Err(error) => self.client.respond(&header, Err(error)).await?,
         }
+
         match self.after.take() {
             Some(After::Initialized) => self.client.event("initialized", Value::Null).await,
             Some(After::Start) => self.start().await,
@@ -483,6 +518,7 @@ impl Session {
                 "the client must send initialize before {command}"
             )));
         }
+
         let body = match command {
             "initialize" => self.initialize(arguments)?,
             "launch" => return self.launch(header, arguments).await,
@@ -540,6 +576,7 @@ impl Session {
                 )));
             }
         };
+
         Ok(Some(body))
     }
 
@@ -547,6 +584,7 @@ impl Session {
         if self.support.is_some() {
             return Err(ErrorBody::new("the session is already initialized"));
         }
+
         let arguments = parse::<protocol::InitializeArguments>(arguments, "initialize arguments")?;
         self.support = Some(ClientSupport {
             lines_start_at1: arguments.lines_start_at1.unwrap_or(true),
@@ -585,6 +623,7 @@ impl Session {
                 "internal: a launch configuration does not launch",
             ));
         };
+
         let program = launch.program.clone();
         let title = format!("Loading {}", launch.program.display());
         let debug_files = configuration.debug_files.clone();
@@ -634,6 +673,7 @@ impl Session {
                         }
                     }
                 };
+
                 let attached = self
                     .with_progress(format!("Attaching to process {process}"), attached)
                     .await;
@@ -667,6 +707,7 @@ impl Session {
                 ));
             }
         };
+
         self.adopt(debugger, configuration, header).await
     }
 
@@ -680,6 +721,7 @@ impl Session {
         if !self.support().progress {
             return work.await;
         }
+
         let _ = self
             .client
             .event(
@@ -701,6 +743,7 @@ impl Session {
                 "the session already has a program; start a new session for another",
             ));
         }
+
         Ok(())
     }
 
@@ -730,6 +773,7 @@ impl Session {
         let core = matches!(start, Start::Core(_));
         let handle = debugger.handle().with_source_paths(source_paths.clone());
         self.events = Some(handle.subscribe());
+
         // The console's commands read no settings files: an editor's
         // sessions take their settings from its launch arguments.
         let root = crate::cli::config::project_root(
@@ -751,9 +795,11 @@ impl Session {
         for code in uscope::signal_codes() {
             default_policies.insert(code, handle.signal_policy(code).await.map_err(error)?);
         }
+
         if step_into_runtime {
             handle.set_step_into_runtime(true).await.map_err(error)?;
         }
+
         self.target = Some(Target {
             debugger: Some(debugger),
             handle,
@@ -777,6 +823,7 @@ impl Session {
         if follow_forks && !core {
             self.hold_forks().await?;
         }
+
         self.warn_debug_information().await?;
         self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
@@ -791,14 +838,17 @@ impl Session {
                 )
                 .await?;
         }
+
         if core {
             self.warn_core_modules().await?;
         }
+
         self.resolve_unresolved().await?;
         self.starting = Some(header.clone());
         if self.configured {
             self.after = Some(After::Start);
         }
+
         Ok(None)
     }
 
@@ -814,6 +864,7 @@ impl Session {
                 .await?;
             return Ok(());
         }
+
         let handle = self.target_handle()?;
         self.held = Some(handle.hold_forks().await.map_err(error)?);
         Ok(())
@@ -824,6 +875,7 @@ impl Session {
         let Some(target) = self.target.as_ref() else {
             return Ok(());
         };
+
         let program = target.handle.executable().file_name().map_or_else(
             || target.handle.executable().display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -856,6 +908,7 @@ impl Session {
         let Some(target) = self.target.as_ref() else {
             return Ok(());
         };
+
         let working_directory = working_directory
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
@@ -869,6 +922,7 @@ impl Session {
         for warning in warnings {
             self.client.important(format!("views: {warning}")).await?;
         }
+
         Ok(())
     }
 
@@ -878,9 +932,11 @@ impl Session {
         let Some(handle) = self.handle() else {
             return Ok(());
         };
+
         for warning in crate::present::debug_information::warnings(handle.module_image(), true) {
             self.client.important(warning).await?;
         }
+
         Ok(())
     }
 
@@ -888,9 +944,11 @@ impl Session {
         let Some(core) = self.handle().and_then(DebuggerHandle::core_dump) else {
             return Ok(());
         };
+
         for warning in crate::cli::format::core_module_warnings(core) {
             self.client.important(format!("warning: {warning}")).await?;
         }
+
         Ok(())
     }
 
@@ -898,10 +956,12 @@ impl Session {
         if self.configured {
             return Err(ErrorBody::new("configuration is already done"));
         }
+
         self.configured = true;
         if self.starting.is_some() {
             self.after = Some(After::Start);
         }
+
         Ok(json!({}))
     }
 
@@ -912,6 +972,7 @@ impl Session {
         let Some(header) = self.starting.take() else {
             return Ok(());
         };
+
         let (method, pipes) = match self.begin().await {
             Ok(begun) => begun,
             Err(error) => {
@@ -920,10 +981,12 @@ impl Session {
                 return Ok(());
             }
         };
+
         self.client.respond(&header, Ok(json!({}))).await?;
         let Some(snapshot) = self.announce_process(method, pipes).await? else {
             return Ok(());
         };
+
         let InferiorState::Stopped {
             stop_id,
             thread_id,
@@ -933,12 +996,14 @@ impl Session {
         else {
             return Ok(());
         };
+
         let Some(target) = self.target.as_ref() else {
             self.client
                 .important("internal: the started target is gone")
                 .await?;
             return Ok(());
         };
+
         match &target.start {
             Start::Core(_) => self.stopped(stop_id, thread_id, reason).await?,
             Start::Attach { .. } if target.stop_on_entry => {
@@ -952,6 +1017,7 @@ impl Session {
                     self.stopped(stop_id, thread_id, StopReason::Attach).await?;
                     return Ok(());
                 };
+
                 let resumed = target
                     .handle
                     .continue_execution(
@@ -972,6 +1038,7 @@ impl Session {
             }
             Start::Launch(_) => {}
         }
+
         Ok(())
     }
 
@@ -988,6 +1055,7 @@ impl Session {
                 .await?;
             return Ok(None);
         };
+
         let snapshot = target.handle.snapshot().await.ok();
         let process = snapshot
             .as_ref()
@@ -1004,10 +1072,12 @@ impl Session {
             "startMethod": method,
             "pointerSize": 64,
         });
+
         // A core dump's process is not one on this machine.
         if let Some(process) = process.filter(|_| target.handle.core_dump().is_none()) {
             body["systemProcessId"] = process.get().into();
         }
+
         self.client.event("process", body).await?;
         for (read, category) in pipes {
             match output::spawn(read, category, self.client.clone()) {
@@ -1019,10 +1089,12 @@ impl Session {
                 }
             }
         }
+
         self.announce_modules().await?;
         if let Some(snapshot) = &snapshot {
             self.announce_threads(snapshot).await?;
         }
+
         Ok(snapshot)
     }
 
@@ -1039,6 +1111,7 @@ impl Session {
                 "only a launched program can be restarted; start a new session instead",
             ));
         };
+
         if let Some(configuration) = arguments.get("arguments").filter(|value| value.is_object()) {
             let configuration = config::launch(configuration.clone()).map_err(ErrorBody::shown)?;
             let Start::Launch(new) = configuration.start else {
@@ -1046,6 +1119,7 @@ impl Session {
                     "internal: a launch configuration does not launch",
                 ));
             };
+
             if new.program != launch.program {
                 return Err(ErrorBody::shown(
                     "a restart cannot change the program; start a new session for another",
@@ -1055,12 +1129,14 @@ impl Session {
             target.stop_on_entry = configuration.stop_on_entry;
             target.threads = configuration.threads;
         }
+
         let handle = target.handle.clone();
         self.restarting = true;
         let killed = match handle.kill().await {
             Ok(()) | Err(Error::NotRunning) => Ok(()),
             Err(error) => Err(self::error(error)),
         };
+
         // Report the old process's end, without ending the session.
         let _ = self.drain_events().await;
         self.restarting = false;
@@ -1077,9 +1153,11 @@ impl Session {
         let Some(target) = self.target.as_mut() else {
             return Err(ErrorBody::new("internal: no target is ready to start"));
         };
+
         let Start::Launch(launch) = &target.start else {
             return Ok(("attach", Vec::new()));
         };
+
         if launch.console != config::Console::Internal {
             // The program's streams belong to the terminal.
             let execution = super::terminal::launch(
@@ -1093,6 +1171,7 @@ impl Session {
             self.resumed = Some(execution);
             return Ok(("launch", Vec::new()));
         }
+
         let (stdout_read, stdout_write) =
             output::pipe().map_err(|error| ErrorBody::shown(error.to_string()))?;
         let (stderr_read, stderr_write) =
@@ -1106,6 +1185,7 @@ impl Session {
             stderr: Some(stderr_write.into()),
             stop_at_entry: target.stop_on_entry,
         };
+
         let execution = target.handle.launch_with(options).await.map_err(|error| {
             ErrorBody::shown(format!(
                 "failed to launch {}: {error}",
@@ -1121,6 +1201,7 @@ impl Session {
 
     async fn disconnect(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<protocol::DisconnectArguments>(arguments, "disconnect arguments")?;
+
         // A restart attaches to the process again, so it must survive the
         // disconnect that begins the restart, whatever else that asks.
         let attached = matches!(
@@ -1132,6 +1213,7 @@ impl Session {
         } else {
             arguments.terminate_debuggee
         };
+
         self.end(terminate).await?;
         self.after = Some(After::End);
         Ok(json!({}))
@@ -1144,6 +1226,7 @@ impl Session {
         let Some(target) = self.target.as_mut() else {
             return Ok(());
         };
+
         let launched = matches!(target.start, Start::Launch(_));
         if terminate.unwrap_or(launched)
             && target.process.is_some()
@@ -1155,15 +1238,18 @@ impl Session {
                 .important(format!("cannot kill the program: {error}"))
                 .await?;
         }
+
         let shutdown = match target.debugger.take() {
             Some(debugger) => debugger.shutdown().await,
             None => Ok(()),
         };
+
         if let Err(error) = shutdown {
             self.client
                 .important(format!("the debugger did not shut down cleanly: {error}"))
                 .await?;
         }
+
         // Report the exit the kill caused, then the session's end.
         self.drain_events().await?;
         if self
@@ -1173,6 +1259,7 @@ impl Session {
         {
             self.ended_target().await?;
         }
+
         Ok(())
     }
 
@@ -1185,6 +1272,7 @@ impl Session {
         {
             self.event(event).await?;
         }
+
         Ok(())
     }
 
@@ -1192,6 +1280,7 @@ impl Session {
         let Some(handle) = self.handle() else {
             return Ok(json!({}));
         };
+
         match handle.terminate().await {
             Ok(()) | Err(Error::NotRunning) => Ok(json!({})),
             Err(error) => Err(self::error(error)),
@@ -1206,10 +1295,12 @@ impl Session {
             if let Some(debugger) = target.debugger.take() {
                 let _ = debugger.shutdown().await;
             }
+
             for pump in target.pumps.drain(..) {
                 pump.abort();
             }
         }
+
         self.held = None;
         for follow in self.follows.drain(..) {
             let _ = follow.await;
@@ -1306,6 +1397,7 @@ impl Session {
                 .map(ResumeScope::Thread)
                 .ok_or_else(|| ErrorBody::new(format!("{context} cannot run alone")));
         }
+
         self.target
             .as_ref()
             .and_then(|target| target.process)
@@ -1329,7 +1421,9 @@ impl Session {
         } else {
             source
         };
+
         let handle = self.target_handle()?;
+
         // A step in may go into one target of `stepInTargets`.
         let call = match arguments.target_id {
             Some(target) if kind == StepKind::IntoSource => {
@@ -1339,6 +1433,7 @@ impl Session {
             }
             _ => None,
         };
+
         let execution = match call {
             Some(call) => {
                 handle
@@ -1362,6 +1457,7 @@ impl Session {
         self.resumed = Some(execution);
         self.leave_stop();
         self.cancel_inspections();
+
         // Without this, clients assume only the stepping thread runs.
         self.client
             .event(
@@ -1384,6 +1480,7 @@ impl Session {
         if context.frame != StackFrameId::INNERMOST {
             return Ok(json!({"targets": []}));
         }
+
         let handle = self.target_handle()?;
         let listed = handle.at(context).step_targets().await.map_err(error)?;
         let mut targets = Vec::with_capacity(listed.len());
@@ -1394,8 +1491,10 @@ impl Session {
                 (None, Some(address)) => format!("call to {address}"),
                 (None, None) => format!("indirect call at {}", target.call),
             };
+
             targets.push(json!({"id": id, "label": label}));
         }
+
         Ok(json!({"targets": targets}))
     }
 
@@ -1441,6 +1540,7 @@ impl Session {
                 if let Some(target) = self.target.as_mut() {
                     target.process = Some(process_id);
                 }
+
                 // The first thread's id is the process id.
                 self.announce_thread(ThreadId::new(process_id.get()))
                     .await?;
@@ -1455,6 +1555,7 @@ impl Session {
                     self.resumed_elsewhere().await?;
                 }
             }
+
             DebuggerEvent::InferiorStopped {
                 stop_id,
                 thread_id,
@@ -1483,9 +1584,11 @@ impl Session {
                 if let Some(target) = self.target.as_mut() {
                     target.process = None;
                 }
+
                 self.leave_stop();
                 self.client.event("terminated", json!({})).await?;
             }
+
             DebuggerEvent::SignalReceived {
                 thread_id,
                 exception,
@@ -1514,6 +1617,7 @@ impl Session {
             DebuggerEvent::WatchpointsChanged { .. } => self.sync_data().await?,
             DebuggerEvent::CatchpointsChanged { .. } | DebuggerEvent::StateChanged { .. } => {}
         }
+
         Ok(())
     }
 
@@ -1523,10 +1627,12 @@ impl Session {
         let Some(stop) = self.stop.take() else {
             return Ok(());
         };
+
         self.leave_stop();
         let Some(id) = self.client_id(stop.context) else {
             return Ok(());
         };
+
         self.client
             .event(
                 "continued",
@@ -1564,6 +1670,7 @@ impl Session {
                 format!("system-call catchpoint {catchpoint}")
             }
         };
+
         self.client
             .important(format!(
                 "{subject} stopped because its condition could not be evaluated: {error}"
@@ -1583,6 +1690,7 @@ impl Session {
             Ok(handle) => handle.snapshot().await.ok(),
             Err(_) => None,
         };
+
         let context = self.stopped_context(snapshot.as_ref(), thread);
         let selected = snapshot
             .as_ref()
@@ -1597,6 +1705,7 @@ impl Session {
         if let Some(id) = self.client_id(context) {
             body["threadId"] = id.into();
         }
+
         let (kind, description, text) = match &reason {
             StopReason::Breakpoint { hits, .. } => {
                 let (ids, kind) = self.breakpoints.hit(hits);
@@ -1634,13 +1743,16 @@ impl Session {
             StopReason::Exited(_) => return Ok(()),
             other => describe_stop(other),
         };
+
         body["reason"] = kind.into();
         if let Some(description) = description {
             body["description"] = description.into();
         }
+
         if let Some(text) = text {
             body["text"] = text.into();
         }
+
         self.stop = Some(Stop {
             id: stop,
             thread,
@@ -1660,6 +1772,7 @@ impl Session {
                 }
             }
         }
+
         self.leave_stop();
         if let ExitStatus::Terminated(info) = status {
             self.client
@@ -1670,6 +1783,7 @@ impl Session {
                 ))
                 .await?;
         }
+
         self.client
             .event("exited", json!({"exitCode": exit_code(status)}))
             .await?;
@@ -1681,15 +1795,18 @@ impl Session {
         if let Some(target) = self.target.as_mut() {
             target.process = None;
         }
+
         // The program's threads end with it, also for a client that keeps
         // the session for a restart.
         let tasks = std::mem::take(&mut self.tasks).into_values();
         for id in std::mem::take(&mut self.threads).into_values().chain(tasks) {
             self.client.thread("exited", id).await?;
         }
+
         if self.restarting {
             return Ok(());
         }
+
         self.client.event("terminated", json!({})).await
     }
 
@@ -1710,6 +1827,7 @@ impl Session {
                 self.client.thread("exited", id).await?;
             }
         }
+
         Ok(())
     }
 
@@ -1760,9 +1878,11 @@ impl Session {
             ExecutionContext::Thread(thread) => return self.announce_thread(thread).await,
             ExecutionContext::Task(task) => task,
         };
+
         if self.tasks.contains_key(&task) {
             return Ok(());
         }
+
         match self.thread_ids.id(context) {
             Ok(id) => {
                 self.tasks.insert(task, id);
@@ -1776,6 +1896,7 @@ impl Session {
         if self.threads.contains_key(&thread) {
             return Ok(());
         }
+
         match self.thread_ids.id(ExecutionContext::Thread(thread)) {
             Ok(id) => {
                 self.threads.insert(thread, id);
@@ -1804,9 +1925,11 @@ impl Session {
                 self.client.thread("exited", id).await?;
             }
         }
+
         for thread in live {
             self.announce_thread(thread).await?;
         }
+
         Ok(())
     }
 
@@ -1815,9 +1938,11 @@ impl Session {
         if let Some(target) = self.target.as_mut() {
             target.images.remove(&id);
         }
+
         let Some(record) = self.modules.remove(&id) else {
             return Ok(());
         };
+
         self.client
             .event(
                 "module",
@@ -1834,9 +1959,11 @@ impl Session {
         let Some(handle) = self.handle().cloned() else {
             return Ok(());
         };
+
         let Ok(snapshot) = handle.snapshot().await else {
             return Ok(());
         };
+
         self.announce_threads(&snapshot).await?;
         self.announce_modules().await?;
         match snapshot.inferior {
@@ -1865,6 +1992,7 @@ impl Session {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -1884,11 +2012,13 @@ impl Session {
             } else {
                 line.saturating_add(1)
             };
+
             match u64::try_from(from_one) {
                 Ok(from_one) if from_one > 0 => Key::Line(from_one),
                 _ => Key::Invalid(format!("line {line} does not exist")),
             }
         };
+
         let wants = match (arguments.breakpoints, arguments.lines) {
             (Some(breakpoints), _) => breakpoints
                 .into_iter()
@@ -1907,6 +2037,7 @@ impl Session {
                 .collect(),
             (None, None) => Vec::new(),
         };
+
         self.replace_group(Group::Source(PathBuf::from(path)), wants)
             .await
     }
@@ -1970,6 +2101,7 @@ impl Session {
                 return Err(error);
             }
         }
+
         let mut entries = Vec::with_capacity(plan.slots.len());
         for slot in plan.slots {
             entries.push(match slot {
@@ -1980,6 +2112,7 @@ impl Session {
                 }
             });
         }
+
         let body = entries
             .iter()
             .map(|entry| self.breakpoint_json(&group, entry))
@@ -1992,6 +2125,7 @@ impl Session {
         let Some(breakpoint) = entry.breakpoint() else {
             return Ok(());
         };
+
         if self.breakpoints.release(breakpoint)
             && let Some(handle) = self.handle()
         {
@@ -2004,6 +2138,7 @@ impl Session {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -2013,24 +2148,29 @@ impl Session {
             message,
             pending: false,
         };
+
         let Some(handle) = self.handle().cloned() else {
             return State::Unresolved {
                 message: "the program is not loaded yet".to_owned(),
                 pending: true,
             };
         };
+
         if let Key::Invalid(message) = &want.key {
             return failed(message.clone());
         }
+
         let options = match breakpoint_options(want) {
             Ok(options) => options,
             Err(error) => return failed(error.to_string()),
         };
+
         let spec = match (group, &want.key) {
             (Group::Source(path), Key::Line(line)) => {
                 let Some(line) = LineNumber::new(*line) else {
                     return failed("line 0 does not exist".to_owned());
                 };
+
                 BreakpointSpec::Source {
                     path: self.recorded_path(path),
                     line,
@@ -2051,6 +2191,7 @@ impl Session {
             }
             _ => return failed("this breakpoint cannot be placed".to_owned()),
         };
+
         let added = handle.add_breakpoint_with(spec, options).await;
         match added {
             Ok(breakpoint) => {
@@ -2075,6 +2216,7 @@ impl Session {
                 )
                 .await?;
         }
+
         Ok(())
     }
 
@@ -2083,14 +2225,17 @@ impl Session {
         let Some(handle) = self.handle().cloned() else {
             return Ok(());
         };
+
         let Ok(snapshot) = handle.snapshot().await else {
             return Ok(());
         };
+
         for change in self.breakpoints.sync(&snapshot.breakpoints) {
             let (reason, mut entry) = match change {
                 Change::New(entry) => ("new", entry),
                 Change::Removed(entry) => ("removed", entry),
             };
+
             if reason == "new"
                 && let Some(core) = snapshot
                     .breakpoints
@@ -2100,6 +2245,7 @@ impl Session {
                 entry.state = self.state_of(core).await;
                 self.breakpoints.replace(&Group::Console, entry.clone());
             }
+
             self.client
                 .event(
                     "breakpoint",
@@ -2107,6 +2253,7 @@ impl Session {
                 )
                 .await?;
         }
+
         // Libraries loading and unloading move breakpoints in and out of
         // pending.
         for (group, entry) in self.breakpoints.owned_entries() {
@@ -2117,10 +2264,12 @@ impl Session {
             else {
                 continue;
             };
+
             let state = self.state_of(core).await;
             if state == entry.state {
                 continue;
             }
+
             let entry = Entry { state, ..entry };
             self.breakpoints.replace(&group, entry.clone());
             self.client
@@ -2130,6 +2279,7 @@ impl Session {
                 )
                 .await?;
         }
+
         Ok(())
     }
 
@@ -2141,6 +2291,7 @@ impl Session {
                 breakpoint: breakpoint.id,
             };
         }
+
         if breakpoint.locations.is_empty() {
             return State::Pending {
                 breakpoint: breakpoint.id,
@@ -2150,6 +2301,7 @@ impl Session {
                 ),
             };
         }
+
         State::Resolved {
             breakpoint: breakpoint.id,
             placement: self.placement(breakpoint).await,
@@ -2162,9 +2314,11 @@ impl Session {
         let Some(handle) = self.handle().cloned() else {
             return Placement::default();
         };
+
         let Some(first) = breakpoint.locations.first() else {
             return Placement::default();
         };
+
         // A location's image, and its address there.
         let (image, address, virtual_address) = match (first.location, first.library) {
             (uscope::BreakpointLocation::Image(address), _) => {
@@ -2197,6 +2351,7 @@ impl Session {
                 };
             }
         };
+
         let source = image.source_location(address).and_then(|location| {
             let file = image.source_file(location.file)?;
             let line = match &breakpoint.spec {
@@ -2208,6 +2363,7 @@ impl Session {
                     .unwrap_or(location.line),
                 _ => location.line,
             };
+
             Some((self.local_path(&file.path), line.get()))
         });
         Placement {
@@ -2228,9 +2384,11 @@ impl Session {
                         _ => source_json(path),
                     };
                 }
+
                 if let Some(address) = placement.address {
                     body["instructionReference"] = format!("{address:#x}").into();
                 }
+
                 return body;
             }
             State::Pending { message, .. } => (message.clone(), Some("pending")),
@@ -2243,15 +2401,18 @@ impl Session {
                 Some(if *pending { "pending" } else { "failed" }),
             ),
         };
+
         body["verified"] = false.into();
         body["message"] = message.into();
         if let Some(reason) = reason {
             body["reason"] = reason.into();
         }
+
         if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
             body["line"] = self.line_to_client(*line).into();
             body["source"] = source_json(client);
         }
+
         body
     }
 
@@ -2273,6 +2434,7 @@ impl Session {
         let Some(target) = self.target.as_mut() else {
             return Ok(());
         };
+
         let exceptions = self.exceptions.exceptions();
         if target.applied_exceptions != exceptions {
             target
@@ -2282,11 +2444,13 @@ impl Session {
                 .map_err(error)?;
             target.applied_exceptions = exceptions;
         }
+
         let syscalls = self.exceptions.syscalls();
         if target.applied_syscalls.as_ref().map(|(calls, _)| calls) != syscalls {
             if let Some((_, id)) = target.applied_syscalls.take() {
                 target.handle.remove_catchpoint(id).await.map_err(error)?;
             }
+
             if let Some(calls) = syscalls {
                 let catchpoint = target
                     .handle
@@ -2296,6 +2460,7 @@ impl Session {
                 target.applied_syscalls = Some((Arc::clone(calls), catchpoint.id));
             }
         }
+
         for code in uscope::signal_codes() {
             let mut policy = target.default_policies[&code];
             policy.stop = self.exceptions.stops(code);
@@ -2306,6 +2471,7 @@ impl Session {
                         .map_err(|error| ErrorBody::new(error.to_string()))?;
                 }
             }
+
             if target.applied_policies.get(&code) != Some(&policy) {
                 target
                     .handle
@@ -2315,6 +2481,7 @@ impl Session {
                 target.applied_policies.insert(code, policy);
             }
         }
+
         Ok(())
     }
 
@@ -2326,6 +2493,7 @@ impl Session {
         let Some(target) = &self.target else {
             return recorded.to_owned();
         };
+
         target
             .source_paths
             .candidates(recorded)
@@ -2341,6 +2509,7 @@ impl Session {
         let Some(target) = self.target.as_mut() else {
             return client.to_owned();
         };
+
         let image = Arc::clone(target.handle.module_image());
         let index = target.recorded_paths.get_or_insert_with(|| {
             let mut index = HashMap::new();
@@ -2353,12 +2522,14 @@ impl Session {
                     }
                 }
             }
+
             index
         });
         let canonical = std::fs::canonicalize(client).unwrap_or_else(|_| client.to_owned());
         if let Some(recorded) = index.get(&canonical) {
             return recorded.clone();
         }
+
         let components = client.components().collect::<Vec<_>>();
         for kept in (1..=components.len()).rev() {
             let suffix = components[components.len() - kept..]
@@ -2372,6 +2543,7 @@ impl Session {
                 return only.path.as_ref().clone();
             }
         }
+
         client.to_owned()
     }
 
@@ -2380,6 +2552,7 @@ impl Session {
         if let Some(image) = target.images.get(&module) {
             return Some(Arc::clone(image));
         }
+
         let image = target.handle.loaded_module_image(module).await.ok()?;
         target.images.insert(module, Arc::clone(&image));
         Some(image)
@@ -2393,6 +2566,7 @@ impl Session {
         if let Some(trace) = self.backtraces.get(&context) {
             return Ok(Arc::clone(trace));
         }
+
         let handle = self.target_handle()?;
         let trace = Arc::new(
             handle
@@ -2422,6 +2596,7 @@ impl Session {
                 self.invalidate_values().await;
             }
         }
+
         Ok(json!({}))
     }
 
@@ -2450,6 +2625,7 @@ impl Session {
         if let Some(snapshot) = self.variables.get(&(context.execution, context.frame)) {
             return Ok(Arc::clone(snapshot));
         }
+
         let handle = self.target_handle()?;
         let snapshot = Arc::new(handle.at(context).variables().await.map_err(error)?);
         self.variables
@@ -2467,6 +2643,7 @@ impl Session {
         let Some(target) = &self.target else {
             return crate::present::Code::default();
         };
+
         crate::present::Code::new(
             self.modules
                 .values()
@@ -2565,6 +2742,7 @@ fn capabilities() -> Value {
 enum Input {
     Message(Inbound),
     Event(Result<DebuggerEvent, broadcast::error::RecvError>),
+
     /// A child the program forked, or none once the debugger is gone.
     Held(Option<uscope::HeldChild>),
 }
@@ -2656,6 +2834,7 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
                 uscope::TaskEnding::Finished => "finished",
                 uscope::TaskEnding::Cancelled => "was cancelled",
             };
+
             (
                 "step",
                 Some(format!("the step's task {task} {ending}")),
@@ -2809,6 +2988,7 @@ mod tests {
                 "cancel 6 variables",
             ]
         );
+
         // A cancellation is honored once, by the request's own seq.
         session
             .cancelled

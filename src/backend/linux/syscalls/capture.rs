@@ -6,6 +6,7 @@ use crate::capture::records::{
     AccountKind, CallOutcome, NONE, NoteKind, Syscall, SyscallErrno, SyscallNote, SyscallStat,
     UNSEEN, note_flags as flags,
 };
+
 use zerocopy::little_endian::{I64, U32, U64};
 
 use crate::profiler::Profile;
@@ -141,6 +142,7 @@ impl SyscallCapture {
                 note.extra = (code | sender << 32).into();
                 bytes = info.as_deref().unwrap_or_default();
             }
+
             TraceEvent::Descriptor {
                 process,
                 fd,
@@ -163,6 +165,7 @@ impl SyscallCapture {
                         note.flags |= flag;
                     }
                 }
+
                 if let Some(device) = device {
                     note.extra = (u64::from(device.block) << 63
                         | u64::from(device.major) << 32
@@ -172,6 +175,7 @@ impl SyscallCapture {
             }
             _ => self.life(event, &mut note, at),
         }
+
         self.builder.syscall_note(note, bytes);
     }
 
@@ -202,6 +206,7 @@ impl SyscallCapture {
                     }
                 }
             }
+
             TraceEvent::Exec {
                 thread,
                 process,
@@ -221,6 +226,7 @@ impl SyscallCapture {
                 note.value = status(*end).into();
                 self.builder.process_exit(*process, at);
             }
+
             TraceEvent::ThreadExit {
                 thread,
                 process,
@@ -254,6 +260,7 @@ impl SyscallCapture {
             Outcome::ProcessExited => (CallOutcome::ProcessExited, 0),
             Outcome::Unavailable => (CallOutcome::Unavailable, 0),
         };
+
         self.blob.clear();
         for capture in &call.captured {
             let (state, wanted) = match capture.state {
@@ -262,16 +269,19 @@ impl SyscallCapture {
                 CaptureState::Unreadable => (2, 0),
                 CaptureState::NotRequested => (3, 0),
             };
+
             let when = match capture.when {
                 ReadAt::Entry => 0,
                 ReadAt::Exit => 1,
             };
+
             let len = u32::try_from(capture.bytes.len()).unwrap_or(u32::MAX);
             self.blob.extend_from_slice(&[capture.arg, when, state, 0]);
             self.blob.extend_from_slice(&wanted.to_le_bytes());
             self.blob.extend_from_slice(&len.to_le_bytes());
             self.blob.extend_from_slice(&capture.bytes[..len as usize]);
         }
+
         let time = |time: Option<u64>| time.map_or(UNSEEN, signed);
         let row = Syscall {
             entered: time(call.entered).into(),
@@ -288,9 +298,11 @@ impl SyscallCapture {
             flags: call.flags.0,
             reserved: 0,
         };
+
         if let Some(entered) = call.entered {
             self.saw(entered);
         }
+
         let blob = std::mem::take(&mut self.blob);
         self.builder.syscall(row, &blob);
         self.blob = blob;
@@ -314,6 +326,7 @@ impl SyscallCapture {
             for (bucket, &count) in log2_ns.iter_mut().zip(&stats.log2_ns) {
                 *bucket = count.into();
             }
+
             let row = SyscallStat {
                 calls: stats.calls.into(),
                 errors: stats.errors.into(),
@@ -330,6 +343,7 @@ impl SyscallCapture {
                 abi: call.abi as u8,
                 reserved: [0; 7],
             };
+
             self.builder.syscall_stat(row, &errnos);
         }
     }

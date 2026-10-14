@@ -25,8 +25,10 @@ use std::fmt;
 pub struct Marker {
     pub line: u64,
     pub condition: Condition,
+
     /// The condition as written.
     pub text: String,
+
     /// An expression in the debugger's language that is true there too.
     pub expect: Option<String>,
 }
@@ -62,8 +64,10 @@ enum Expression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Holds,
+
     /// A comparison failed, shown with the values it compared.
     Fails(String),
+
     /// A variable it needs has no value.
     Unknown(String),
 }
@@ -77,6 +81,7 @@ impl Condition {
             comparison.left.variables(&mut names);
             comparison.right.variables(&mut names);
         }
+
         names.sort_unstable();
         names.dedup();
         names
@@ -93,6 +98,7 @@ impl Condition {
                 (Ok(left), Ok(right)) => (left, right),
                 (Err(missing), _) | (_, Err(missing)) => return Verdict::Unknown(missing),
             };
+
             let holds = match comparison.operator {
                 Operator::Equal => left == right,
                 Operator::NotEqual => left != right,
@@ -101,6 +107,7 @@ impl Condition {
                 Operator::Greater => left > right,
                 Operator::GreaterOrEqual => left >= right,
             };
+
             if !holds {
                 return Verdict::Fails(format!(
                     "{} is {left} and {} is {right}",
@@ -108,6 +115,7 @@ impl Condition {
                 ));
             }
         }
+
         Verdict::Holds
     }
 }
@@ -165,6 +173,7 @@ pub fn parse(source: &str) -> Result<Vec<Marker>, String> {
                 Some((text, expect)) => (text.trim(), Some(expect.trim().to_owned())),
                 None => (text.trim(), None),
             };
+
             Ok(Marker {
                 line,
                 condition: Parser::new(text)
@@ -206,10 +215,12 @@ impl<'a> Parser<'a> {
         while self.eat("&&") {
             comparisons.push(self.comparison()?);
         }
+
         self.skip_space();
         if !self.rest.is_empty() {
             return Err(format!("unexpected {:?}", self.rest));
         }
+
         Ok(Condition(comparisons))
     }
 
@@ -243,6 +254,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Ok(left);
             };
+
             left = Expression::Binary(Box::new(left), operator, Box::new(self.product()?));
         }
     }
@@ -259,6 +271,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Ok(left);
             };
+
             left = Expression::Binary(Box::new(left), operator, Box::new(self.atom()?));
         }
     }
@@ -269,8 +282,10 @@ impl<'a> Parser<'a> {
             if !self.eat(")") {
                 return Err("a parenthesis is not closed".into());
             }
+
             return Ok(inner);
         }
+
         self.skip_space();
         let length = self
             .rest
@@ -281,12 +296,14 @@ impl<'a> Parser<'a> {
         if token.is_empty() {
             return Err("an operand is missing".into());
         }
+
         if token.starts_with(|character: char| character.is_ascii_digit()) {
             return token
                 .parse()
                 .map(Expression::Number)
                 .map_err(|_| format!("{token} is not a number"));
         }
+
         Ok(Expression::Variable(token.to_owned()))
     }
 }

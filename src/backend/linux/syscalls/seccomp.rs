@@ -22,9 +22,11 @@ const JUMP_SET: u16 = 0x45; // BPF_JMP | BPF_JSET | BPF_K
 const RETURN: u16 = 0x06; // BPF_RET | BPF_K
 
 pub const RET_ALLOW: u32 = 0x7fff_0000;
+
 pub const RET_TRACE: u32 = 0x7ff0_0000;
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 const AUDIT_ARCH_I386: u32 = 0x4000_0003;
+
 /// `seccomp_data`'s fields.
 const NUMBER: u32 = 0;
 const ARCH: u32 = 4;
@@ -50,6 +52,7 @@ fn traced(program: &mut Vec<Instruction>, numbers: impl Iterator<Item = u32>) {
         });
         program.push(op(RETURN, RET_TRACE));
     }
+
     program.push(op(RETURN, RET_ALLOW));
 }
 
@@ -59,6 +62,7 @@ pub fn filter(calls: &CallSet) -> Vec<Instruction> {
     if calls.is_all() {
         return vec![op(RETURN, RET_TRACE)];
     }
+
     let mut x86_64 = vec![op(LOAD_WORD, NUMBER)];
     let mut x32 = Vec::new();
     traced(
@@ -67,6 +71,7 @@ pub fn filter(calls: &CallSet) -> Vec<Instruction> {
             .numbers(Abi::X32)
             .map(|number| number | X32_SYSCALL_BIT),
     );
+
     // An x32 call sets a bit of its number; the jump past the 64-bit calls
     // lands on the x32 ones.
     x86_64.push(Instruction {
@@ -139,6 +144,7 @@ pub fn run(program: &[Instruction], arch: u32, number: u32) -> Option<u32> {
                 } else {
                     accumulator & instruction.k != 0
                 };
+
                 at += usize::from(if taken {
                     instruction.jt
                 } else {
@@ -176,11 +182,13 @@ mod tests {
                     Abi::X32 => (AUDIT_ARCH_X86_64, number | X32_SYSCALL_BIT),
                     Abi::X86_32 => (AUDIT_ARCH_I386, number),
                 };
+
                 let expected = if chosen.contains(id) {
                     RET_TRACE
                 } else {
                     RET_ALLOW
                 };
+
                 assert_eq!(
                     run(&program, arch, raw),
                     Some(expected),
@@ -189,6 +197,7 @@ mod tests {
                 );
             }
         }
+
         // Another architecture's calls run.
         assert_eq!(run(&program, 0xdead, 257), Some(RET_ALLOW));
         assert_eq!(filter(&calls(&["trace=all"])), [op(RETURN, RET_TRACE)]);

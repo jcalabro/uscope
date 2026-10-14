@@ -48,6 +48,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         bytes: &[u8],
     ) -> Result<u64> {
         let length = bytes.len() as u64;
+
         // Scans resumed after a write could follow links it changed, and
         // a task may no longer be where its runtime kept it.
         self.views.forget_scans();
@@ -59,12 +60,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             stop.task_locators.borrow_mut().clear();
             stop.task_sets.borrow_mut().take();
         }
+
         if length > MAX_PUBLIC_MEMORY_WRITE {
             return Err(Error::MemoryWriteTooLarge {
                 requested: length,
                 maximum: MAX_PUBLIC_MEMORY_WRITE,
             });
         }
+
         let end = address
             .get()
             .checked_add(length)
@@ -76,6 +79,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let Ok(current) = self.ptrace.read_word(pid, word) else {
                 break;
             };
+
             let mut physical = current.to_ne_bytes();
             let mut hidden = Vec::new();
             let mut count = 0;
@@ -84,6 +88,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if !(address.get()..end).contains(&target) {
                     continue;
                 }
+
                 let user = usize::try_from(target - address.get())
                     .ok()
                     .and_then(|offset| bytes.get(offset))
@@ -95,6 +100,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     _ => *byte = user,
                 }
             }
+
             if self
                 .ptrace
                 .write_word(pid, word, u64::from_ne_bytes(physical))
@@ -102,17 +108,21 @@ impl<P: LinuxTraceOps> Controller<P> {
             {
                 break;
             }
+
             for (target, byte) in hidden {
                 if let Some(site) = inferior.breakpoints.get_mut(&VirtualAddress::new(target)) {
                     site.original_byte = byte;
                 }
             }
+
             written += count;
             word += WORD;
         }
+
         if written == 0 && length != 0 {
             return Err(Error::MemoryNotWritable(address));
         }
+
         Ok(written)
     }
 
@@ -136,6 +146,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if super::registers::is_program_counter(register) {
             registers.orig_rax = u64::MAX;
         }
+
         self.ptrace.set_registers(pid, registers)
     }
 

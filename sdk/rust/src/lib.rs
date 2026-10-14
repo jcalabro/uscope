@@ -132,6 +132,7 @@ pub mod kernel {
     unsafe extern "C" {
         #[link_name = "read"]
         fn host_read(address: u64, buffer: *mut u8, length: i32) -> i32;
+
         #[link_name = "yield"]
         fn host_yield(words: *const u64, count: i32) -> i32;
     }
@@ -144,6 +145,7 @@ pub mod kernel {
     #[must_use]
     pub unsafe fn arguments<'a>(arguments: *const u64, count: i32) -> &'a [u64] {
         let count = usize::try_from(count).unwrap_or(0);
+
         // SAFETY: uscope passes `count` words at `arguments`.
         unsafe { core::slice::from_raw_parts(arguments, count) }
     }
@@ -152,6 +154,7 @@ pub mod kernel {
     /// cannot make ends the run, so a kernel never sees one fail.
     pub fn read(address: u64, buffer: &mut [u8]) {
         let length = i32::try_from(buffer.len()).unwrap_or(i32::MAX);
+
         // SAFETY: the host writes at most `length` bytes into `buffer`.
         unsafe { host_read(address, buffer.as_mut_ptr(), length) };
     }
@@ -189,6 +192,7 @@ pub mod kernel {
     #[must_use]
     pub fn emit(words: &[u64]) -> bool {
         let count = i32::try_from(words.len()).unwrap_or(i32::MAX);
+
         // SAFETY: the host reads `count` words at `words`.
         unsafe { host_yield(words.as_ptr(), count) != 0 }
     }

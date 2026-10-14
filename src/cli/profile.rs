@@ -21,8 +21,10 @@ pub enum PresetArg {
     /// 49 samples a second, copying as little stack as unwinds the program:
     /// safe in production.
     Prod,
+
     /// 999 samples a second with a deep stack copy.
     Dev,
+
     /// 9999 samples a second.
     Max,
 }
@@ -31,6 +33,7 @@ pub enum PresetArg {
 pub enum SymbolsArg {
     /// From the debug information on this host, as the recording ends.
     Now,
+
     /// Wherever the profile is opened, from the modules' build ids: this
     /// host keeps only build ids and addresses.
     Later,
@@ -47,55 +50,68 @@ pub struct RecordArgs {
     /// Write the profile to FILE.
     #[arg(short, long, value_name = "FILE", default_value = "uscope.usprof")]
     output: PathBuf,
+
     /// How much to record, and what it may cost the program.
     #[arg(long, value_enum, default_value = "dev")]
     preset: PresetArg,
+
     /// Samples a second of each thread's CPU time, over the preset's.
     #[arg(long, value_name = "HZ")]
     rate: Option<u32>,
+
     /// Bytes of stack each sample copies, over the preset's.
     #[arg(long, value_name = "BYTES")]
     stack_bytes: Option<u32>,
+
     /// Record each interval a thread spends off its CPU, blocked or
     /// preempted, over the preset's choice: on except in production.
     #[arg(long, value_enum)]
     off_cpu: Option<OnOff>,
+
     /// Hold uscope's own CPU time to PERCENT of one CPU by sampling less of
     /// each second, over the preset's: 1 in production, and otherwise
     /// none. 0 lifts it.
     #[arg(long, value_name = "PERCENT")]
     budget: Option<f64>,
+
     /// Sample each call of the function SYMBOL names, instead of CPU time.
     #[arg(long, value_name = "SYMBOL", conflicts_with = "rate")]
     function: Option<String>,
+
     /// Record the running process PID, without stopping it, until it exits
     /// or Ctrl-C.
     #[arg(long, value_name = "PID", conflicts_with = "command")]
     pid: Option<u32>,
+
     /// Stop recording after SECONDS; a started program is then killed.
     #[arg(long, value_name = "SECONDS")]
     duration: Option<f64>,
+
     /// Stop the program every SECONDS to read where its tasks, such as
     /// goroutines and tokio tasks, wait. Each stop pauses the program, and
     /// the report says for how long.
     #[arg(long, value_name = "SECONDS")]
     task_snapshots: Option<f64>,
+
     /// Read task snapshots from the program's memory as it runs, without
     /// stopping it. A task that changes while read is left out, and the
     /// report counts those.
     #[arg(long, requires = "task_snapshots")]
     live_snapshots: bool,
+
     /// Keep only the last SECONDS of the recording. SIGUSR2 saves the
     /// window as it is to FILE-1.usprof, FILE-2.usprof, and so on, as the
     /// recording goes on; FILE gets the last window.
     #[arg(long, value_name = "SECONDS")]
     window: Option<f64>,
+
     /// Record without end into DIR, as a segment file every --segment,
     /// each a complete profile of its span, deleting segments older than
     /// --keep. SIGUSR2 ends a segment early. `uscope report DIR` and
     /// `uscope web DIR` read them as one profile.
     #[arg(long, value_name = "DIR", conflicts_with_all = ["window", "output"])]
     continuous: Option<PathBuf>,
+
     /// How long each segment of --continuous lasts, in seconds.
     #[arg(
         long,
@@ -104,6 +120,7 @@ pub struct RecordArgs {
         requires = "continuous"
     )]
     segment: f64,
+
     /// How long --continuous keeps segments: seconds, or a number of
     /// minutes, hours, or days, such as 30m, 24h, or 7d.
     #[arg(
@@ -113,24 +130,29 @@ pub struct RecordArgs {
         requires = "continuous"
     )]
     keep: String,
+
     /// The instrumentation sites to switch on in a program built with
     /// uscope's probes SDK: all, off, or names separated by commas, where a
     /// name that ends in `*` is a prefix.
     #[arg(long, value_name = "SITES", default_value = "all")]
     probes: String,
+
     /// How long the program goes on writing its instrumentation once uscope
     /// stops reading it, as when uscope is killed, before it switches it
     /// off.
     #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
     probe_timeout: f64,
+
     /// When frames get their source lines.
     #[arg(long, value_enum, default_value = "now")]
     symbols: SymbolsArg,
+
     /// Trace these system calls too, with their stacks, as `uscope syscalls
     /// -e trace=SET` names them: `all`, or names and classes such as
     /// `%file,%net,connect`. Needs the BPF engine's privileges.
     #[arg(long, value_name = "SET", conflicts_with = "pid")]
     syscalls: Option<String>,
+
     /// The program to record and its arguments.
     #[arg(last = true, required_unless_present = "pid", value_name = "PROGRAM")]
     command: Vec<OsString>,
@@ -140,15 +162,19 @@ pub struct RecordArgs {
 pub struct ReportArgs {
     /// The profile to report, or a directory of --continuous segments.
     file: PathBuf,
+
     /// Show the call tree instead of the most expensive functions.
     #[arg(long)]
     tree: bool,
+
     /// Show this many functions.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+
     /// Show the frames threads ran, not each async task's own stack.
     #[arg(long)]
     native: bool,
+
     /// Hide call-tree nodes below this percentage of the total.
     #[arg(long, value_name = "PERCENT", default_value_t = 1.0)]
     min_percent: f64,
@@ -158,13 +184,16 @@ pub struct ReportArgs {
 pub struct SymbolizeArgs {
     /// The profile to give source lines.
     file: PathBuf,
+
     /// Write the profile to FILE rather than over the one read.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+
     /// A directory of separate debug files, searched by build id before
     /// the system's.
     #[arg(long = "debug-dir", value_name = "DIR")]
     debug_dirs: Vec<PathBuf>,
+
     /// Ask the debuginfod servers `DEBUGINFOD_URLS` lists for the debug
     /// files no directory holds, sending them the modules' build ids.
     #[arg(long)]
@@ -176,13 +205,16 @@ pub struct ConvertArgs {
     /// The profile to read: uscope's own, pprof's, gzipped or not, or
     /// folded stacks.
     input: PathBuf,
+
     /// Where to write it, in the format its name says: `.usprof`,
     /// `.pb.gz` or `.pprof`, `.folded`, or `.json` for a Chrome trace.
     output: PathBuf,
+
     /// The format to write, whatever the output's name: usprof, pprof,
     /// folded, or chrome.
     #[arg(long, value_name = "FORMAT")]
     to: Option<Format>,
+
     /// Write the frames threads ran, not each async task's own stack.
     #[arg(long)]
     native: bool,
@@ -217,11 +249,13 @@ fn convert(args: &ConvertArgs) -> Result<()> {
             args.input.display()
         );
     }
+
     let view = if args.native {
         StackView::Native
     } else {
         StackView::Logical
     };
+
     let bytes = read
         .profile
         .export(format, view)
@@ -234,6 +268,7 @@ fn convert(args: &ConvertArgs) -> Result<()> {
         Format::Folded => "stacks and their weights only",
         Format::Chrome => "instrumentation and threads, without samples",
     };
+
     eprintln!("note: {} holds {kept}", args.output.display());
     Ok(())
 }
@@ -267,6 +302,7 @@ fn symbolize(args: &SymbolizeArgs) -> Result<()> {
     if found.is_empty() {
         eprintln!("note: every frame of {} has its lines", args.file.display());
     }
+
     for module in &found {
         match &module.source {
             Ok(source) => eprintln!(
@@ -278,6 +314,7 @@ fn symbolize(args: &SymbolizeArgs) -> Result<()> {
             Err(why) => eprintln!("{}: keeps its addresses: {why}", module.module),
         }
     }
+
     profile
         .write(output)
         .with_context(|| format!("writing {}", output.display()))
@@ -292,6 +329,7 @@ pub fn symbolize_here(profile: &mut Profile, out: &mut impl std::io::Write) -> R
             writeln!(out, "note: {} keeps its addresses: {why}", module.module)?;
         }
     }
+
     Ok(())
 }
 
@@ -328,17 +366,21 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     if let Some(rate) = args.rate {
         options.source = SampleSource::Clock { rate };
     }
+
     if let Some(symbol) = &args.function {
         options.source = SampleSource::Function {
             symbol: symbol.clone(),
         };
     }
+
     if let Some(bytes) = args.stack_bytes {
         options.stack = StackCopy::Bytes(bytes);
     }
+
     if let Some(off_cpu) = args.off_cpu {
         options.off_cpu = matches!(off_cpu, OnOff::On);
     }
+
     if let Some(percent) = args.budget {
         anyhow::ensure!(
             percent.is_finite() && percent >= 0.0,
@@ -349,15 +391,18 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
             ..Budget::PRODUCTION
         });
     }
+
     if let Some(seconds) = args.task_snapshots {
         let every = Duration::try_from_secs_f64(seconds).context("--task-snapshots")?;
         anyhow::ensure!(!every.is_zero(), "--task-snapshots is a number of seconds");
         options.task_snapshots = Some(every);
         options.live_snapshots = args.live_snapshots;
     }
+
     if let Some(seconds) = args.window {
         options.window = Some(Duration::try_from_secs_f64(seconds).context("--window")?);
     }
+
     if let Some(set) = &args.syscalls {
         let filter = uscope::syscalls::Filter::parse(
             &[format!("trace={set}")],
@@ -366,16 +411,19 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
         .map_err(|error| anyhow::anyhow!("--syscalls: {error}"))?;
         options.syscalls = Some(filter.calls);
     }
+
     if args.continuous.is_some() {
         let every = Duration::try_from_secs_f64(args.segment).context("--segment")?;
         anyhow::ensure!(!every.is_zero(), "--segment is a number of seconds");
         options.segment = Some(every);
     }
+
     options.probes = match args.probes.as_str() {
         "all" => ProbeSelection::All,
         "off" => ProbeSelection::Off,
         names => ProbeSelection::Named(names.split(',').map(str::to_owned).collect()),
     };
+
     options.probe_timeout =
         Duration::try_from_secs_f64(args.probe_timeout).context("--probe-timeout")?;
     options.symbols_later = matches!(args.symbols, SymbolsArg::Later);
@@ -386,6 +434,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
     let options = options(args)?;
     let stop = Arc::new(AtomicBool::new(false));
     let trigger = Arc::new(AtomicBool::new(false));
+
     // Ctrl-C reaches a started program too, which ends as it chooses; an
     // attached one goes on, and the recording stops.
     handle_signals(
@@ -400,6 +449,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
             stop.store(true, Ordering::Relaxed);
         });
     }
+
     let continuous = match &args.continuous {
         Some(directory) => {
             std::fs::create_dir_all(directory)
@@ -415,6 +465,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
         }
         None => None,
     };
+
     let mut saves = 0;
     let mut save = |profile: Profile| {
         if let Some((directory, keep)) = continuous {
@@ -424,8 +475,10 @@ fn record(args: &RecordArgs) -> Result<i32> {
                     directory.display()
                 );
             }
+
             return;
         }
+
         saves += 1;
         let path = numbered(&args.output, saves);
         match profile.write(&path) {
@@ -437,6 +490,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
             Err(error) => eprintln!("uscope: writing {} failed: {error}", path.display()),
         }
     };
+
     if let Some(window) = options.window {
         eprintln!(
             "uscope: keeping the last {:.3} s; `kill -USR2 {}` saves it",
@@ -444,6 +498,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
             std::process::id()
         );
     }
+
     let mut watch = Watch {
         every: Duration::MAX,
         publish: &mut |_| {},
@@ -453,6 +508,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
             to: &mut save,
         }),
     };
+
     let (profile, code) = if let Some(pid) = args.pid {
         let attachment = uscope::profiler::record_attached(pid, &options, &mut watch)?;
         (attachment.profile, 0)
@@ -462,6 +518,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
         let recording = uscope::profiler::record_watched(command, &options, &mut watch)?;
         (recording.profile, recording.status.code().unwrap_or(1))
     };
+
     if let Some((directory, keep)) = continuous {
         let path = profile
             .write_segment(directory, keep)
@@ -477,10 +534,12 @@ fn record(args: &RecordArgs) -> Result<i32> {
             args.output.display()
         );
     }
+
     let lost = profile.lost_samples();
     if lost > 0 {
         eprintln!("uscope: the kernel dropped {lost} samples");
     }
+
     Ok(code)
 }
 
@@ -490,12 +549,14 @@ pub(super) fn duration(text: &str) -> Result<Duration> {
         Some((at, unit @ ('s' | 'm' | 'h' | 'd'))) => (&text[..at], unit),
         _ => (text, 's'),
     };
+
     let scale = match unit {
         'm' => 60.0,
         'h' => 3600.0,
         'd' => 86400.0,
         _ => 1.0,
     };
+
     let number: f64 = number
         .parse()
         .with_context(|| format!("{text} is not a duration, such as 90, 30m, 24h, or 7d"))?;
@@ -540,6 +601,7 @@ pub(super) fn handle_signals(
                 return;
             }
         };
+
         let _ = installed.send(Ok(()));
         runtime.block_on(async {
             loop {
@@ -555,6 +617,7 @@ pub(super) fn handle_signals(
             }
         });
     });
+
     // The handler is installed before the recording begins.
     ready
         .recv()
@@ -575,22 +638,27 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     } else {
         StackView::Logical
     };
+
     if read.truncated {
         writeln!(
             out,
             "The file was cut short; this is the part that was complete."
         )?;
     }
+
     symbolize_here(&mut profile, out)?;
+
     // A trace alone, which no recording sampled.
     if profile.has_syscalls() && profile.setting("weight").is_none() {
         return syscall_summary(&profile, out);
     }
+
     summary(&profile, out)?;
     if profile.has_syscalls() {
         writeln!(out)?;
         syscall_summary(&profile, out)?;
     }
+
     let total = profile.total_weight();
     let percent = |value: u64| {
         if total == 0 {
@@ -599,10 +667,12 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             value as f64 * 100.0 / total as f64
         }
     };
+
     writeln!(out)?;
     if args.tree {
         let tree = profile.call_tree(view);
         let mut depth = vec![0_usize; tree.len()];
+
         // Each node with its children after it, depth first.
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); tree.len()];
         let mut roots = Vec::new();
@@ -612,12 +682,15 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
                 None => roots.push(index),
             }
         }
+
         let by_total = |nodes: &mut Vec<usize>| {
             nodes.sort_by(|a, b| tree[*b].total.cmp(&tree[*a].total).then(a.cmp(b)));
         };
+
         for list in &mut children {
             by_total(list);
         }
+
         by_total(&mut roots);
         let mut pending: Vec<usize> = roots.into_iter().rev().collect();
         while let Some(index) = pending.pop() {
@@ -625,6 +698,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             if percent(node.total) < args.min_percent {
                 continue;
             }
+
             writeln!(
                 out,
                 "{:6.2}% {:6.2}%  {}{}",
@@ -650,6 +724,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             )?;
         }
     }
+
     let truncations = profile.truncations();
     if !truncations.is_empty() {
         writeln!(out)?;
@@ -658,6 +733,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
             writeln!(out, "  {count:>8}  {reason}")?;
         }
     }
+
     Ok(())
 }
 
@@ -681,6 +757,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             seconds(loading)
         )?;
     }
+
     let gaps = profile.paused(GapReason::Budget);
     if !gaps.is_empty() {
         let paused: u64 = gaps
@@ -705,6 +782,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             "That is more than --preset prod allows, which holds uscope to 1% of a CPU."
         )?;
     }
+
     let (snapshots, held, _) = profile.task_snapshots();
     let (live, changed) = profile.live_snapshots();
     if live > 0 {
@@ -715,6 +793,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             plural(changed, "task"),
         )?;
     }
+
     let stopped = snapshots - live;
     if stopped > 0 {
         let why = if live > 0 {
@@ -722,6 +801,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         } else {
             "to read where its tasks wait"
         };
+
         writeln!(
             out,
             "{} held the program stopped for {:.3} s, {:.1} ms each, {why}.",
@@ -730,6 +810,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             held as f64 / 1e6 / stopped as f64,
         )?;
     }
+
     if snapshots > 0 {
         writeln!(
             out,
@@ -738,6 +819,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             profile.samples()
         )?;
     }
+
     let problems = profile.task_snapshot_problems();
     if let Some((_, first)) = problems.first() {
         writeln!(
@@ -749,6 +831,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             }
         )?;
     }
+
     Ok(())
 }
 
@@ -777,12 +860,14 @@ fn syscall_summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
             syscalls.lost
         )?;
     }
+
     writeln!(out)?;
     let errno = |number: u16| errno(uscope::syscalls::Errno(number)).0;
     let sort = summary::sort_key("time").map_err(anyhow::Error::msg)?;
     for line in summary::table(&calls, &summary::Column::DEFAULT, sort, &errno) {
         writeln!(out, "{line}")?;
     }
+
     Ok(())
 }
 
@@ -799,6 +884,7 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         "nanoseconds" => format!("{:.3} s", value as f64 / 1e9),
         unit => format!("{value} {unit}"),
     };
+
     writeln!(
         out,
         "{program}: {} samples, {}",
@@ -809,13 +895,16 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
         let source = profile.setting("source").unwrap_or("its file");
         writeln!(out, "Read from {source}, which keeps no times or threads.")?;
     }
+
     let lost = profile.lost_samples();
     if lost > 0 {
         writeln!(out, "The kernel dropped {lost} samples.")?;
     }
+
     if let Some(window) = profile.setting("window").filter(|window| *window != "all") {
         writeln!(out, "The recording kept {window} it reached.")?;
     }
+
     let counted = profile.counted();
     let paused = !profile.gaps().is_empty();
     if unit == "nanoseconds" && counted > total {
@@ -827,6 +916,7 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             if paused { " while sampling was on" } else { "" }
         )?;
     }
+
     cost(profile, out)?;
     if profile.setting("off-CPU") == Some("on") {
         let threads = profile.threads();
@@ -841,6 +931,7 @@ fn summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             seconds(preempted)
         )?;
     }
+
     instrumentation(profile, out)
 }
 
@@ -854,11 +945,14 @@ fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
     for (_, problem) in profile.probe_problems() {
         writeln!(out, "{problem}.")?;
     }
+
     let counts = profile.probe_counts();
     if counts.events == 0 && !counts.lost() {
         return Ok(());
     }
+
     let zones = profile.zones();
+
     // Each site's zones: how many, their total and longest time, and how
     // many are flagged.
     let mut sites: std::collections::BTreeMap<&str, (u64, u64, u64, u64)> =
@@ -871,6 +965,7 @@ fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
         site.2 = site.2.max(length);
         site.3 += u64::from(zone.flags != 0);
     }
+
     writeln!(
         out,
         "Instrumentation: {}, in {} from {}.",
@@ -893,8 +988,10 @@ fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
         } else {
             format!("{count} {what}")
         };
+
         writeln!(out, "  {what}; zones they cut short are flagged.")?;
     }
+
     let mut by_total: Vec<_> = sites.into_iter().collect();
     by_total.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(b.0)));
     writeln!(
@@ -911,6 +1008,7 @@ fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
             *longest as f64 / 1e3,
         )?;
     }
+
     Ok(())
 }
 
@@ -940,6 +1038,7 @@ impl SessionRecording {
                 return Some(profile);
             }
         }
+
         None
     }
 }
@@ -954,6 +1053,7 @@ impl Profiling {
         {
             self.end()?;
         }
+
         Ok(())
     }
 
@@ -968,6 +1068,7 @@ impl Profiling {
                 .map_err(|error| anyhow::anyhow!("profiling failed: {error}"))?;
             self.recorded = Some(profile);
         }
+
         Ok(())
     }
 }
@@ -981,6 +1082,7 @@ impl super::Cli {
         } else {
             None
         };
+
         self.profiling
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1001,6 +1103,7 @@ impl Profiling {
                 let Some(pid) = live else {
                     anyhow::bail!("no program is running to profile");
                 };
+
                 let pid = u32::try_from(pid.get()).context("the program's process id")?;
                 let mut options = RecordOptions::default();
                 if let [seconds] = window {
@@ -1008,6 +1111,7 @@ impl Profiling {
                     options.window =
                         Some(Duration::try_from_secs_f64(seconds).context("a window in seconds")?);
                 }
+
                 self.recording = Some(start_recording(pid, options));
                 self.recorded = None;
                 Ok(format!(
@@ -1033,6 +1137,7 @@ impl Profiling {
                 let Some(profile) = profile.or_else(|| self.recorded.clone()) else {
                     anyhow::bail!("nothing has been profiled; `profile start` begins");
                 };
+
                 profile
                     .write(std::path::Path::new(file))
                     .with_context(|| format!("writing {file}"))?;
@@ -1054,6 +1159,7 @@ fn start_recording(pid: u32, options: RecordOptions) -> SessionRecording {
             let mut save = |profile| {
                 let _ = send.send(profile);
             };
+
             uscope::profiler::record_attached(
                 pid,
                 &options,

@@ -14,6 +14,7 @@ use uscope::{
 /// matrix, for what the compiler decides: where variables live and how
 /// steps cross its code. Each phase function performs one kind of access.
 const MATRIX: [&str; 3] = ["watch-gcc-o0", "watch-clang-o2", "watch-gcc-o2-nopie"];
+
 /// One build, for phases written in assembly or made of system calls, and
 /// for the debugger's own bookkeeping.
 const FIXTURE: &str = MATRIX[0];
@@ -54,6 +55,7 @@ async fn run_to(scenario: &mut Scenario, function: &str) {
             other => panic!("expected to reach {function}, got {other:?}"),
         }
     }
+
     panic!("{function} was not reached");
 }
 
@@ -79,6 +81,7 @@ fn assert_single_hit(reason: &StopReason, watchpoint: WatchpointId, previous: u6
     let [hit] = hits(reason) else {
         panic!("expected exactly one hit, got {reason:?}");
     };
+
     assert_eq!(hit.watchpoint, watchpoint, "{reason:?}");
     assert_eq!(value(hit.previous.as_ref()), previous, "{reason:?}");
     assert_eq!(value(hit.current.as_ref()), current, "{reason:?}");
@@ -120,6 +123,7 @@ async fn resume_to_exit(scenario: &mut Scenario) {
             other => panic!("expected a clean exit, got {other:?}"),
         }
     }
+
     panic!("the inferior did not exit");
 }
 
@@ -221,8 +225,10 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
             hit_count: 4,
             ..watchpoint
         };
+
         assert_eq!(removed, counted);
         assert!(scenario.snapshot().await.watchpoints.is_empty());
+
         // One watchpoint stays armed through the process's exit.
         let armed = watch(&scenario, "watch_wide.words[3]", WatchAccess::Write).await;
         let mut events = scenario.handle().subscribe();
@@ -273,6 +279,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
             "{text}: {oversized:?}"
         );
     }
+
     let words = watch(&scenario, "watch_wide.words", WatchAccess::Write).await;
     assert_eq!((words.byte_size, words.coverage.len()), (32, 4));
     scenario
@@ -303,6 +310,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
             .operation("free slots", scenario.handle().remove_watchpoint(id))
             .await;
     }
+
     let packed = watch(&scenario, "watch_packed.field", WatchAccess::Write).await;
     assert_eq!(packed.byte_size, 4);
     assert_eq!(packed.address.get() % 8, 1, "the field is misaligned");
@@ -361,9 +369,11 @@ async fn one_store_reports_every_watchpoint_it_touches() {
 
     let first = watch(&scenario, "watch_pair.first", WatchAccess::Write).await;
     let second = watch(&scenario, "watch_pair.second", WatchAccess::Write).await;
+
     // The whole record shares both members' slots.
     let pair = watch(&scenario, "watch_pair", WatchAccess::Write).await;
     assert_eq!(pair.byte_size, 16);
+
     // Two slots remain, so a further 16 bytes fit and then nothing does.
     let wide = watch(&scenario, "watch_wide.words[2]", WatchAccess::Write).await;
     let spare = watch(&scenario, "watch_wide.words[3]", WatchAccess::Write).await;
@@ -413,6 +423,7 @@ async fn accesses_that_do_not_change_the_value_are_still_reported() {
     run_to(&mut scenario, "failed_exchange").await;
     let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
     let reason = scenario.resume_to_stop().await;
+
     // A failing locked compare-exchange still writes its destination.
     assert_single_hit(
         &reason,
@@ -451,6 +462,7 @@ async fn repeated_string_stores_report_each_iteration_at_the_string_instruction(
         previous = current;
         program_counters.insert(program_counter(&scenario).await);
     }
+
     assert_eq!(
         program_counters.len(),
         1,
@@ -497,6 +509,7 @@ async fn access_watchpoints_report_loads_and_read_only_watches_are_refused() {
             "{result:?}"
         );
     }
+
     assert!(scenario.snapshot().await.watchpoints.is_empty());
 
     let watchpoint = watch(&scenario, "watch_i32", WatchAccess::ReadWrite).await;
@@ -673,6 +686,7 @@ async fn a_handler_run_before_a_breakpoint_repair_reports_its_write() {
             scenario.handle().remove_watchpoint(watchpoint.id),
         )
         .await;
+
     // The breakpoint the handler interrupted is repaired without being
     // reported again.
     resume_to_exit(&mut scenario).await;
@@ -687,6 +701,7 @@ async fn a_handler_storing_the_same_value_before_a_breakpoint_repair_is_transpar
     let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
         panic!("inferior is stopped");
     };
+
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
         nix::sys::signal::Signal::SIGUSR1,
@@ -704,6 +719,7 @@ async fn a_handler_storing_the_same_value_before_a_breakpoint_repair_is_transpar
     while matches!(&reason, StopReason::Exception(exception) if exception.code == 17) {
         reason = scenario.resume_to_stop().await;
     }
+
     assert_single_hit(&reason, watchpoint.id, 99, 4321);
     assert_eq!(
         stopped_function(&scenario).await.as_deref(),
@@ -756,12 +772,14 @@ async fn vdso_writes_are_reported_in_user_mode() {
     let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
         panic!("inferior is stopped");
     };
+
     let pc = program_counter(&scenario).await;
     let vdso = support::vdso_mapping(process_id);
     assert!(
         vdso.contains(&pc),
         "the store happened in the vDSO, pc {pc:#x} outside {vdso:x?}"
     );
+
     // The vDSO's own call-frame information leads back to the watching code.
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
@@ -806,6 +824,7 @@ async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
         } else {
             scenario.resume_to_stop().await
         };
+
         assert_eq!(
             support::breakpoint_address(&next),
             after,
@@ -819,6 +838,7 @@ async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
 async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
     for kind in [None, Some(StepKind::Instruction)] {
         let mut scenario = Scenario::launch(FIXTURE);
+
         // The function entry is the store itself, so the address
         // breakpoint is installed from the preceding phase.
         run_to(&mut scenario, "store_then_breakpoint").await;
@@ -838,6 +858,7 @@ async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
             Some(kind) => scenario.step_to_stop(kind).await,
             None => scenario.resume_to_stop().await,
         };
+
         assert_single_hit(&reason, watchpoint.id, 4321, 5);
         assert!(program_counter(&scenario).await > site.get());
         let site_bytes = scenario
@@ -876,6 +897,7 @@ async fn source_steps_end_at_a_watched_store_and_leave_no_plan_behind() {
                 scenario.handle().remove_watchpoint(watchpoint.id),
             )
             .await;
+
         // A leftover step-plan breakpoint would stop here.
         resume_to_exit(&mut scenario).await;
         scenario.shutdown().await;
@@ -1003,6 +1025,7 @@ async fn every_write_from_every_thread_is_reported_exactly_once() {
     let mut scenario = Scenario::new("watch threads", Scenario::fixture("watch-threads"));
     run_to(&mut scenario, "before_threads").await;
     let main = selected_thread(&mut scenario).await;
+
     // Every thread that writes these is created after they were armed.
     let locked = watch(&scenario, "locked_counter", WatchAccess::Write).await;
     let racing = watch(&scenario, "racing_counter", WatchAccess::Write).await;
@@ -1021,11 +1044,13 @@ async fn every_write_from_every_thread_is_reported_exactly_once() {
                 started.insert(thread_id);
             }
         }
+
         match reason {
             StopReason::Watchpoint { .. } => {}
             StopReason::Breakpoint { .. } => break,
             other => panic!("unexpected stop while counting: {other:?}"),
         }
+
         let snapshot = scenario.snapshot().await;
         assert!(matches!(snapshot.inferior, InferiorState::Stopped { .. }));
         for hit in thread_hits(&mut scenario).await {
@@ -1052,6 +1077,7 @@ async fn every_write_from_every_thread_is_reported_exactly_once() {
         locked_values, expected,
         "every locked store is reported in order"
     );
+
     // Main's own reset in before_threads is the first racing store.
     assert_eq!(
         racing_hits,
@@ -1114,6 +1140,7 @@ async fn thread_local_watchpoints_watch_one_threads_instance_until_it_exits() {
             StopReason::Breakpoint { .. } => break,
             other => panic!("unexpected stop: {other:?}"),
         }
+
         for hit in thread_hits(&mut scenario).await {
             assert_eq!(hit.watchpoint, watchpoint.id);
             writes
@@ -1122,6 +1149,7 @@ async fn thread_local_watchpoints_watch_one_threads_instance_until_it_exits() {
                 .push(value(hit.current.as_ref()));
         }
     }
+
     // Main's store and the owner's second store may coincide; both are
     // reported, each with the value once every thread stopped.
     assert_eq!(writes.len(), 2, "{writes:?}");
@@ -1210,6 +1238,7 @@ async fn hits_until_invalidated(
                 let [hit] = hits.as_ref() else {
                     panic!("one hit per stop: {hits:?}");
                 };
+
                 assert_eq!(hit.watchpoint, watchpoint);
                 values.push(value(hit.current.as_ref()));
             }
@@ -1217,6 +1246,7 @@ async fn hits_until_invalidated(
                 let [entry] = invalidated.as_ref() else {
                     panic!("one invalidation: {invalidated:?}");
                 };
+
                 assert_eq!(entry.watchpoint.id, watchpoint);
                 assert!(scenario.snapshot().await.watchpoints.is_empty());
                 return (values, entry.reason, true);
@@ -1267,6 +1297,7 @@ async fn frame_watchpoints_end_when_their_activation_returns() {
             values_of(&scenario.resume_to_stop().await, watchpoint.id),
             [11]
         );
+
         // A stop while the activation is live and inside the object's scope
         // keeps the watchpoint.
         assert!(matches!(
@@ -1302,6 +1333,7 @@ async fn recursive_activations_keep_their_own_frame_watchpoint() {
                 scenario.handle().remove_all_breakpoints(),
             )
             .await;
+
         // The outermost activation's value survives its callees returning.
         let watchpoint = watch_local(&mut scenario, "frame_value", WatchAccess::Write).await;
         scenario.add_breakpoint("after_return").await;
@@ -1325,6 +1357,7 @@ async fn block_watchpoints_end_when_execution_leaves_the_block() {
             StopReason::Breakpoint { .. }
         ));
         let watchpoint = watch_local(&mut scenario, "inner", WatchAccess::Write).await;
+
         // The same activation is still live in the next block.
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("reused += 1;"))
@@ -1343,6 +1376,7 @@ async fn a_tail_call_replacing_the_activation_ends_its_watchpoints() {
         let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "tail_caller").await;
         let watchpoint = watch_local(&mut scenario, "mine", WatchAccess::Write).await;
+
         // The callee runs at the replaced activation's frame address.
         scenario.add_breakpoint("tail_callee").await;
 
@@ -1390,6 +1424,7 @@ async fn a_frame_watchpoint_ends_with_its_owner_thread() {
 
         let (values, reason, at_hit) = hits_until_invalidated(&mut scenario, watchpoint.id).await;
         assert_eq!(values, [4], "{fixture}");
+
         // Thread teardown may reuse the dead frame's storage while the thread
         // still exists; otherwise the thread's exit ends the watchpoint.
         assert_eq!(
@@ -1473,6 +1508,7 @@ async fn arming_rolls_back_every_thread_when_a_later_thread_has_no_capacity() {
         "the worker holding every slot refuses arming: {refused:?}"
     );
     assert!(scenario.snapshot().await.watchpoints.is_empty());
+
     // The main thread was armed first and must have been rolled back: its
     // write to the target does not stop.
     resume_to_exit(&mut scenario).await;
@@ -1587,6 +1623,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
         else {
             panic!("attached target is stopped");
         };
+
         handle
             .continue_execution(
                 stop_id,
@@ -1626,6 +1663,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
             watchpoint.scope
         );
         assert_eq!(watchpoint.byte_size, 8, "{fixture}");
+
         // A change watchpoint on the same bytes shares the hardware slot.
         let changes = watch(&scenario, global, WatchAccess::Change).await;
         let mut values = BTreeMap::<_, Vec<_>>::new();
@@ -1643,6 +1681,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
                 other => panic!("{fixture}: unexpected stop {other:?}"),
             }
         }
+
         assert_eq!(values[&watchpoint.id], [1, 2, 3, 3], "{fixture}");
         assert_eq!(values[&changes.id], [1, 2, 3], "{fixture}");
         scenario.shutdown().await;
@@ -1657,11 +1696,13 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads() {
     while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
         reason = scenario.resume_to_stop().await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"
     );
     let watchpoint = watch(&scenario, "main.watchedCounter", WatchAccess::Write).await;
+
     // A Go local exists only past the line declaring it.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go/watch/main.go"),
@@ -1694,6 +1735,7 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads() {
             other => panic!("unexpected stop {other:?}"),
         }
     }
+
     // watchReady's reset plus 4 goroutines x 5 increments.
     assert_eq!(hit_count, 21);
     assert!(writers.len() >= 2, "goroutines ran on several threads");
@@ -1714,6 +1756,7 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads() {
             other => panic!("unexpected stop {other:?}"),
         }
     }
+
     scenario.shutdown().await;
 }
 
@@ -1767,6 +1810,7 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
             "{address:#x}+{byte_size}: {result:?}"
         );
     }
+
     assert!(matches!(
         scenario
             .handle()
@@ -1857,6 +1901,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
                 _ => panic!("{fixture} {name}: expected {expected}, got {result:?}"),
             }
         }
+
         assert!(scenario.snapshot().await.watchpoints.is_empty());
         scenario.shutdown().await;
     }
@@ -1872,6 +1917,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
         matches!(&result, Err(Error::WatchTargetNotInMemory(reason)) if reason.contains("bit-field")),
         "{result:?}"
     );
+
     // The pointer parameter is frame storage; the record it points to has
     // no lifetime the debugger can know.
     let pointer = scenario
@@ -1945,6 +1991,7 @@ async fn post_mortem_targets_refuse_watchpoints() {
     ] {
         assert!(matches!(result, Err(Error::PostMortemTarget)), "{result:?}");
     }
+
     scenario.shutdown().await;
 }
 
@@ -1961,6 +2008,7 @@ async fn repeated_sessions_with_armed_watchpoints_leave_no_processes_behind() {
             let running = scenario.start_resuming().await;
             drop(running);
         }
+
         scenario.shutdown().await;
     }
 }
@@ -1981,6 +2029,7 @@ async fn unloading_a_module_ends_watchpoints_on_its_static_storage() {
         .id;
     let owned = watch(&scenario, "dso_external", WatchAccess::Write).await;
     assert_eq!(owned.scope, WatchScope::Static { module: library });
+
     // The same bytes reached through a pointer have no known owner.
     let pointed = watch(&scenario, "*cross_module_pointer", WatchAccess::Write).await;
     assert_eq!(pointed.address, owned.address);
@@ -2048,6 +2097,7 @@ async fn attached_processes_arm_threads_they_create_later() {
                 let [hit] = hits.as_ref() else {
                     panic!("one writer at a time: {hits:?}");
                 };
+
                 assert_eq!(hit.watchpoint, watchpoint.id);
                 values.push(value(hit.current.as_ref()));
                 writers.insert(hit.thread);
@@ -2056,6 +2106,7 @@ async fn attached_processes_arm_threads_they_create_later() {
             other => panic!("unexpected stop: {other:?}"),
         }
     }
+
     assert_eq!(values, (1..=200).collect::<Vec<_>>());
     assert_eq!(
         writers.len(),
@@ -2089,13 +2140,16 @@ fn gdb_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
     ] {
         command.args(["-ex", setup]);
     }
+
     for (expression, condition) in expressions {
         let condition = condition.map_or_else(String::new, |condition| format!(" if {condition}"));
         command.args(["-ex", &format!("watch {expression}{condition}")]);
     }
+
     for _ in 0..48 {
         command.args(["-ex", "continue"]);
     }
+
     let output = command
         .arg(Scenario::fixture(fixture))
         .output()
@@ -2110,6 +2164,7 @@ fn gdb_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
             .and_then(|rest| rest.split_whitespace().next())
             .and_then(|value| value.parse::<u64>().ok())
     };
+
     let lines = text
         .lines()
         .filter(|line| !line.is_empty())
@@ -2141,6 +2196,7 @@ async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Chang
             condition: condition.map(|text| uscope::Condition::parse(text).expect("condition")),
             ..WatchpointOptions::default()
         };
+
         let watchpoint = scenario
             .operation(
                 &format!("watch {expression}"),
@@ -2154,6 +2210,7 @@ async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Chang
         assert_eq!(watchpoint.access, WatchAccess::Change);
         watched.insert(watchpoint.id, *expression);
     }
+
     let mut changes = Vec::new();
     loop {
         match scenario.resume_to_stop().await {
@@ -2172,6 +2229,7 @@ async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Chang
             other => panic!("{fixture}: unexpected stop {other:?}"),
         }
     }
+
     scenario.shutdown().await;
     changes
 }
@@ -2220,6 +2278,7 @@ async fn conditional_change_watchpoints_report_the_changes_gdb_reports() {
         ];
         let expected = gdb_changes(fixture, &expressions);
         assert!(expected.len() >= 10, "{fixture}: {expected:?}");
+
         // Each reported call follows a declined one, the old value.
         assert!(
             expected
@@ -2268,6 +2327,7 @@ async fn steady_step_script_with(
             )
             .await;
     }
+
     let mut stops = Vec::new();
     for kind in [
         OverSource,
@@ -2295,9 +2355,11 @@ async fn steady_step_script_with(
             Some("steady_store" | "steady_stores") => kind,
             _ => break,
         };
+
         let reason = scenario.step_to_stop(kind).await;
         stops.push((reason, program_counter(&scenario).await));
     }
+
     if access == Some(WatchAccess::Change) {
         // The watchpoint stayed armed throughout and still reports the
         // first store that changes the value, but not the one repeating it.
@@ -2310,6 +2372,7 @@ async fn steady_step_script_with(
         );
         resume_to_exit(&mut scenario).await;
     }
+
     scenario.shutdown().await;
     stops
 }
@@ -2324,6 +2387,7 @@ async fn steps_cross_stores_that_change_nothing_or_are_declined_as_if_unwatched(
             plain,
             "{fixture}"
         );
+
         // The script does cross stores: a write watchpoint ends steps there.
         let written = steady_step_script(fixture, Some(WatchAccess::Write)).await;
         assert!(
@@ -2332,6 +2396,7 @@ async fn steps_cross_stores_that_change_nothing_or_are_declined_as_if_unwatched(
                 .any(|(reason, _)| matches!(reason, StopReason::Watchpoint { .. })),
             "{fixture}: {written:?}"
         );
+
         // Unless its condition or hit condition declines every store.
         for options in [
             WatchpointOptions {
@@ -2426,15 +2491,18 @@ async fn racing_threads_report_changes_from_the_value_each_stop_observed() {
             StopReason::Exited(ExitStatus::Code(0)) => break,
             other => panic!("unexpected stop: {other:?}"),
         }
+
         let stop_hits = thread_hits(&mut scenario).await;
         assert!(!stop_hits.is_empty());
         for hit in &stop_hits {
             assert!(hit.changed(), "{hit:?}");
             assert_eq!(value(hit.previous.as_ref()), observed[&hit.watchpoint]);
         }
+
         if let Some(hit) = stop_hits.iter().find(|hit| hit.watchpoint == locked.id) {
             locked_values.push(value(hit.current.as_ref()));
         }
+
         racing_stops += u64::from(stop_hits.iter().any(|hit| hit.watchpoint == racing.id));
         observed = BTreeMap::from([
             (locked.id, global(&scenario, "locked_counter").await),
@@ -2447,6 +2515,7 @@ async fn racing_threads_report_changes_from_the_value_each_stop_observed() {
         locked_values,
         (1..=WORKERS * ITERATIONS + CHURN).collect::<Vec<_>>()
     );
+
     // The reset to zero in `before_threads` stores what is already there.
     assert!(
         (1..=WORKERS * ITERATIONS).contains(&racing_stops),
@@ -2477,6 +2546,7 @@ async fn stores_that_change_nothing_never_stop_threads_receiving_signals() {
             .resume_with_exception(uscope::ExceptionDisposition::Pass)
             .await;
     }
+
     assert!(
         matches!(reason, StopReason::Breakpoint { .. }),
         "{reason:?}"

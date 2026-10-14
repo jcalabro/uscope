@@ -29,24 +29,31 @@ pub struct FactsRecord {
     /// could not be read, when [`TABLE_UNUSABLE`].
     pub embedded_reason: U32,
     pub runtime_reason: U32,
+
     /// [`TABLE_ABSENT`], [`TABLE_LOADED`], or [`TABLE_UNUSABLE`].
     pub embedded_table: u8,
     pub runtime_table: u8,
     pub flags: u8,
+
     /// Why the separate debug file could not be used, or [`NONE`]. Its
     /// path is where it was found, which binding the image supplies.
     pub debug_reason: U32,
+
     /// [`DEBUG_FILE_NONE`], [`DEBUG_FILE_USED`], or
     /// [`DEBUG_FILE_UNUSABLE`].
     pub debug_file: u8,
+
     /// The addresses the image's segments span.
     pub address_start: U64,
     pub address_end: U64,
+
     /// Why the DWARF is incomplete or unusable, or [`NONE`].
     pub dwarf_reason: U32,
+
     /// [`DWARF_ABSENT`], [`DWARF_LOADED`], [`DWARF_INCOMPLETE`], or
     /// [`DWARF_UNUSABLE`].
     pub dwarf: u8,
+
     /// Why the DWARF's locals were left out, when
     /// [`fact_flags::LOCALS_LEFT_OUT`]; otherwise [`NONE`].
     pub locals_reason: U32,
@@ -57,24 +64,35 @@ impl Record for FactsRecord {
 }
 
 pub const TABLE_ABSENT: u8 = 0;
+
 pub const TABLE_LOADED: u8 = 1;
+
 pub const TABLE_UNUSABLE: u8 = 2;
 
 pub const DEBUG_FILE_NONE: u8 = 0;
+
 pub const DEBUG_FILE_USED: u8 = 1;
+
 pub const DEBUG_FILE_UNUSABLE: u8 = 2;
 
 pub const DWARF_ABSENT: u8 = 0;
+
 pub const DWARF_LOADED: u8 = 1;
+
 pub const DWARF_INCOMPLETE: u8 = 2;
+
 pub const DWARF_UNUSABLE: u8 = 3;
 
 /// [`FactsRecord::flags`].
 pub mod fact_flags {
     pub const STATIC_TABLE: u8 = 1 << 0;
+
     pub const DYNAMIC_TABLE: u8 = 1 << 1;
+
     pub const THREAD_LOCAL_STORAGE: u8 = 1 << 2;
+
     pub const LOCALS_LEFT_OUT: u8 = 1 << 3;
+
     pub const ALL: u8 = STATIC_TABLE | DYNAMIC_TABLE | THREAD_LOCAL_STORAGE | LOCALS_LEFT_OUT;
 }
 
@@ -85,10 +103,13 @@ pub mod fact_flags {
 )]
 pub struct ThreadLocalRecord {
     pub name: U32,
+
     /// The offset's two's-complement bits, or the slot's address.
     pub value: U64,
+
     /// Why the place is unknown, when [`PLACE_UNKNOWN`].
     pub reason: U32,
+
     /// [`PLACE_OFFSET`], [`PLACE_SLOT`], or [`PLACE_UNKNOWN`].
     pub place: u8,
 }
@@ -98,7 +119,9 @@ impl Record for ThreadLocalRecord {
 }
 
 pub const PLACE_OFFSET: u8 = 0;
+
 pub const PLACE_SLOT: u8 = 1;
+
 pub const PLACE_UNKNOWN: u8 = 2;
 
 /// Why facts could not be encoded.
@@ -119,6 +142,7 @@ pub struct Facts<'a> {
     pub symbol_sources: &'a SymbolTableSources,
     pub thread_local_storage: bool,
     pub thread_locals: &'a BTreeMap<Arc<str>, Result<ThreadLocal, Arc<str>>>,
+
     /// The separate debug file found for the image, whose path is left to
     /// binding.
     pub debug_file: Option<&'a DebugFile>,
@@ -139,6 +163,7 @@ pub fn add_to(
             (DEBUG_FILE_UNUSABLE, strings.push(reason).ok_or(TooLarge)?.0)
         }
     };
+
     let mut push = |text: &str| strings.push(text).map(|id| id.0).ok_or(TooLarge);
     let (dwarf, dwarf_reason) = match facts.debug_information {
         DebugInformation::Absent => (DWARF_ABSENT, NONE),
@@ -146,6 +171,7 @@ pub fn add_to(
         DebugInformation::Incomplete { reason } => (DWARF_INCOMPLETE, push(reason)?),
         DebugInformation::Unusable { reason } => (DWARF_UNUSABLE, push(reason)?),
     };
+
     let locals_reason = facts.locals_left_out.map(&mut push).transpose()?;
     let mut table = |table: &EmbeddedSymbolTable| -> Result<(u8, u32), TooLarge> {
         Ok(match table {
@@ -154,6 +180,7 @@ pub fn add_to(
             EmbeddedSymbolTable::Unusable { reason } => (TABLE_UNUSABLE, push(reason)?),
         })
     };
+
     let sources = facts.symbol_sources;
     let (embedded_table, embedded_reason) = table(&sources.embedded_table)?;
     let (runtime_table, runtime_reason) = table(&sources.runtime_function_table)?;
@@ -168,6 +195,7 @@ pub fn add_to(
             flags |= flag;
         }
     }
+
     let record = FactsRecord {
         embedded_reason: embedded_reason.into(),
         runtime_reason: runtime_reason.into(),
@@ -182,6 +210,7 @@ pub fn add_to(
         dwarf,
         locals_reason: locals_reason.unwrap_or(NONE).into(),
     };
+
     // A map's order is its names' byte order, which lookups search.
     let thread_locals = facts
         .thread_locals
@@ -192,6 +221,7 @@ pub fn add_to(
                 Ok(ThreadLocal::Slot(address)) => (PLACE_SLOT, address.get(), NONE),
                 Err(reason) => (PLACE_UNKNOWN, 0, push(reason)?),
             };
+
             Ok(ThreadLocalRecord {
                 name: push(name)?.into(),
                 value: value.into(),
@@ -240,6 +270,7 @@ impl<'a> FactsView<'a> {
         let Some(record) = self.record else {
             return SymbolTableSources::default();
         };
+
         let table = |state, reason: U32| match state {
             TABLE_LOADED => EmbeddedSymbolTable::Loaded,
             TABLE_UNUSABLE => EmbeddedSymbolTable::Unusable {
@@ -247,6 +278,7 @@ impl<'a> FactsView<'a> {
             },
             _ => EmbeddedSymbolTable::Absent,
         };
+
         SymbolTableSources {
             static_table: self.flag(fact_flags::STATIC_TABLE),
             dynamic_table: self.flag(fact_flags::DYNAMIC_TABLE),
@@ -281,6 +313,7 @@ impl<'a> FactsView<'a> {
         let Some(record) = self.record else {
             return DebugInformation::Absent;
         };
+
         let reason = || self.strings.get(StrId(record.dwarf_reason.get())).into();
         match record.dwarf {
             DWARF_LOADED => DebugInformation::Loaded,
@@ -344,11 +377,13 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
         DEBUG_FILE_UNUSABLE => strings.contains(StrId(record.debug_reason.get())),
         _ => false,
     };
+
     let dwarf = |record: &FactsRecord| match record.dwarf {
         DWARF_ABSENT | DWARF_LOADED => record.dwarf_reason.get() == NONE,
         DWARF_INCOMPLETE | DWARF_UNUSABLE => strings.contains(StrId(record.dwarf_reason.get())),
         _ => false,
     };
+
     let locals = |record: &FactsRecord| {
         if record.flags & fact_flags::LOCALS_LEFT_OUT == 0 {
             record.locals_reason.get() == NONE
@@ -356,11 +391,13 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
             strings.contains(StrId(record.locals_reason.get()))
         }
     };
+
     let reason = |state: u8, reason: U32| match state {
         TABLE_ABSENT | TABLE_LOADED => reason.get() == NONE,
         TABLE_UNUSABLE => strings.contains(StrId(reason.get())),
         _ => false,
     };
+
     if records.len() > 1
         || records.iter().any(|record| {
             record.flags & !fact_flags::ALL != 0
@@ -374,6 +411,7 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     {
         return Err("the image's facts are malformed".into());
     }
+
     let thread_locals = image.table::<ThreadLocalRecord>();
     if !thread_locals.iter().all(|record| {
         strings.contains(StrId(record.name.get()))
@@ -389,5 +427,6 @@ pub(super) fn validate(image: &Image) -> Result<(), String> {
     }) {
         return Err("a thread-local variable is malformed or out of order".into());
     }
+
     Ok(())
 }

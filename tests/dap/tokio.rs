@@ -41,6 +41,7 @@ fn stopped_at_checkpoint(name: &str, program: &str) -> (Dap, i64, Vec<(i64, Stri
 #[test]
 fn tokio_tasks_are_threads_beside_the_programs_own() {
     let (dap, stopped, listed) = at_checkpoint("tokio tasks");
+
     // The thread that stopped runs no task, and comes first.
     let (first, name) = &listed[0];
     assert_eq!(*first, stopped, "{listed:?}");
@@ -51,6 +52,7 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
             .filter(|(_, name)| name.contains(text))
             .count()
     };
+
     // Each suspended task says what it waits for.
     assert_eq!(named("] leaf — "), 8, "{listed:?}");
     assert_eq!(
@@ -65,6 +67,7 @@ fn tokio_tasks_are_threads_beside_the_programs_own() {
         1,
         "{listed:?}"
     );
+
     // The process's first thread, which waits for the one that stopped, is
     // the program's own; the runtime's idle workers are left out.
     assert_eq!(listed.len(), 12, "{listed:?}");
@@ -121,6 +124,7 @@ fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
         "evaluate",
         json!({"expression": "leaf_local", "frameId": leaf["id"], "context": "watch"}),
     );
+
     // Each task records its own number, `me`, in its locals.
     assert_eq!(local["result"], (task * 100 + 3).to_string(), "{local}");
     dap.finish();
@@ -132,6 +136,7 @@ fn a_suspended_tasks_stack_is_its_chain_of_awaits() {
 #[test]
 fn a_blocked_threads_stack_holds_the_future_it_drives() {
     let (mut dap, stopped, listed) = stopped_at_checkpoint("tokio driven", "tokio-drivers-o0");
+
     // The main thread, whose id is the process's, drives `#[tokio::main]`'s
     // future while another reaches the checkpoint. Tasks may be listed
     // before it.

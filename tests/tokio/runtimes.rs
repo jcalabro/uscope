@@ -30,6 +30,7 @@ const BUILDS: [&str; 4] = [
 struct Truth {
     /// Each task's id and the runtime or set the program says holds it.
     tasks: BTreeMap<u64, String>,
+
     /// Each of the program's named threads.
     threads: BTreeMap<String, ThreadId>,
 }
@@ -53,6 +54,7 @@ impl Truth {
                 _ => {}
             }
         }
+
         truth
     }
 
@@ -87,6 +89,7 @@ impl Truth {
             }
             _ => panic!("{context}: {gaps:?}"),
         };
+
         let listed = tasks
             .iter()
             .map(|task| task.id.number)
@@ -115,6 +118,7 @@ impl Truth {
                 );
             labels.insert(number, label);
         }
+
         let runtimes = |by: &dyn Fn(u64) -> String| {
             listed
                 .iter()
@@ -129,6 +133,7 @@ impl Truth {
                 .into_values()
                 .collect::<BTreeSet<_>>()
         };
+
         assert_eq!(
             runtimes(&|id| labels[&id].clone()),
             runtimes(&|id| self.tasks[&id].clone()),
@@ -173,6 +178,7 @@ fn check_parked_threads(
             "{context}: thread {name}"
         );
     }
+
     assert!(
         activities
             .values()
@@ -221,6 +227,7 @@ async fn a_running_sets_task_runs_on_its_thread() {
         let (mut scenario, truth, _scratch) = stopped_at(fixture, "task_reached").await;
         let shared = truth.threads["shared"];
         let (tasks, gaps) = tasks(&scenario, 4096).await;
+
         // The set runs, so its thread names it, whatever its frames lose.
         assert!(gaps.is_empty(), "{fixture}: {gaps:?}");
         let running = tasks

@@ -72,6 +72,7 @@ pub async fn stopped_task(scenario: &mut Scenario) -> u64 {
     let InferiorState::Stopped { thread_id, .. } = snapshot.inferior else {
         panic!("not stopped: {:?}", snapshot.inferior);
     };
+
     let thread = snapshot
         .threads
         .iter()
@@ -117,6 +118,7 @@ async fn next_over_a_pending_await_ends_on_the_next_line_of_its_task() {
                     "{context}"
                 );
                 assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+
                 // The await keeps no copy of the argument, whose slot on
                 // the stack another poll may have written.
                 assert_eq!(integer(&scenario, "me").await, None, "{context}");
@@ -143,11 +145,14 @@ async fn next_goes_round_a_loop_of_awaits() {
                 if at == line(SOURCE, "// STEP: round") {
                     rounds.push(integer(&scenario, "round").await);
                 }
+
                 if at == line(SOURCE, "// STEP: rounds-after") {
                     break;
                 }
+
                 assert!(rounds.len() < 3, "{context}: {rounds:?}");
             }
+
             assert_eq!(rounds, [Some(1), Some(2)], "{context}");
             scenario.shutdown().await;
         }
@@ -175,6 +180,7 @@ async fn finish_returns_to_the_awaiter_in_the_same_task() {
                 } else {
                     after
                 };
+
                 let context = format!("{fixture} {mode:?} {from}");
                 let mut scenario = stopped_once(fixture, mode, from).await;
                 let task = stopped_task(&mut scenario).await;
@@ -221,11 +227,13 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
                     .map(|(got, more)| got + more);
                 assert!(output.is_some() || optimized(fixture), "{context}");
                 let mut reason = scenario.step_to_stop(kind).await;
+
                 // `next` stops at the closing brace first.
                 if reason == (StopReason::Step { kind }) {
                     assert_eq!(place(&scenario).await.0, "task", "{context}");
                     reason = scenario.step_to_stop(kind).await;
                 }
+
                 let StopReason::TaskEnded {
                     kind: ended,
                     task: finished,
@@ -234,6 +242,7 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
                 else {
                     panic!("{context}: {reason:?}");
                 };
+
                 assert_eq!((ended, finished.number), (kind, task), "{context}");
                 if kind == StepKind::Out {
                     let returned = scenario
@@ -253,6 +262,7 @@ async fn a_step_past_a_tasks_end_says_it_finished() {
                         "{context}: {output:?}: {returned:#?}"
                     );
                 }
+
                 scenario.shutdown().await;
             }
         }
@@ -290,6 +300,7 @@ async fn a_task_condition_stops_only_in_its_task() {
                 assert!(rounds.len() <= 3, "{context}: {rounds:?}");
                 reason = scenario.resume_to_stop().await;
             }
+
             assert!(
                 matches!(reason, StopReason::Exited(_)),
                 "{context}: {reason:?}"
@@ -327,6 +338,7 @@ async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
                 (StepKind::Out, "outer", "task", "// STEP: task"),
             ] {
                 let context = format!("{fixture} {mode:?} {kind:?}");
+
                 // No task passes the gate before the first stops past it,
                 // so the tasks no thread runs wait at the gate.
                 let mut scenario = stopped_once(fixture, mode, "// STEP: inner-after").await;
@@ -363,6 +375,7 @@ async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
                     "{context}"
                 );
                 assert_eq!(stopped_task(&mut scenario).await, task.number, "{context}");
+
                 // Optimized, the await keeps nothing the step can name.
                 if kind == StepKind::OverSource && !optimized(fixture) {
                     // What the await keeps of the task's own number.
@@ -372,6 +385,7 @@ async fn a_step_of_a_suspended_task_waits_for_it_to_resume() {
                         "{context}"
                     );
                 }
+
                 scenario.shutdown().await;
             }
         }
@@ -402,6 +416,7 @@ async fn another_tasks_breakpoint_ends_a_waiting_step() {
         );
         let other = stopped_task(&mut scenario).await;
         assert_ne!(other, task, "{fixture}");
+
         // The third task stops there too, and then the program ends.
         let reason = scenario.resume_to_stop().await;
         assert!(
@@ -441,6 +456,7 @@ async fn instruction_steps_and_advance_in_an_async_function() {
                 assert_eq!(place(&scenario).await.0, "rounds", "{context} {kind:?}");
                 assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
             }
+
             let after = line(SOURCE, "// STEP: rounds-after");
             assert_eq!(
                 scenario
@@ -460,11 +476,13 @@ async fn instruction_steps_and_advance_in_an_async_function() {
                 "{context}"
             );
             assert_eq!(stopped_task(&mut scenario).await, task, "{context}");
+
             // Both rounds ran, each after a `Pending` poll; optimized, the
             // sum is kept nowhere the debugger can name.
             if !optimized(fixture) {
                 assert_eq!(integer(&scenario, "total").await, Some(3), "{context}");
             }
+
             scenario.shutdown().await;
         }
     }
@@ -484,6 +502,7 @@ async fn step_task_on_a_spawn_line_stops_at_the_new_tasks_first_line() {
             } else {
                 "// SPAWN: runtime"
             };
+
             // An optimized build keeps no breakpoint on the spawn's own
             // line, which a step from the line before still reaches.
             let mut scenario = stopped_once(fixture, mode, "let handle = match").await;
@@ -536,6 +555,7 @@ async fn step_task_on_a_line_that_spawns_none_ends_as_next_does() {
                 ends.push(step(&mut scenario, kind).await);
                 scenario.shutdown().await;
             }
+
             assert_eq!(ends[0], ends[1], "{mode:?} {marker}");
             assert_ne!(ends[0].1, line(SOURCE, marker), "{mode:?} {marker}");
         }
@@ -551,12 +571,14 @@ async fn step_task_from_a_task_follows_the_task_it_spawns() {
         let context = fixture;
         let mut scenario = stopped_once(fixture, Some("nested"), "// BEFORE: nested").await;
         let parent = stopped_task(&mut scenario).await;
+
         // The step from the line before ends on the spawn's line, which an
         // optimized build runs as part of the line before.
         let mut place = step(&mut scenario, StepKind::IntoNewTask).await;
         if place == ("parent".to_owned(), line(SOURCE, "// SPAWN: nested")) {
             place = step(&mut scenario, StepKind::IntoNewTask).await;
         }
+
         assert_eq!(
             place,
             ("child".to_owned(), line(SOURCE, "// FIRST: child")),

@@ -164,6 +164,7 @@ impl InspectionBudget {
         {
             return Err(exhaustion);
         }
+
         self.usage.memory_reads += 1;
         self.usage.memory_bytes += granted as u64;
         Ok(granted)
@@ -178,15 +179,18 @@ impl InspectionBudget {
         if let Some(exhaustion) = self.exhaustion {
             return Err(exhaustion);
         }
+
         for &(resource, requested) in requests {
             let (limit, used) = self.resource(resource);
             if used.checked_add(requested).is_none_or(|next| next > limit) {
                 return Err(self.exhaust(resource, requested));
             }
         }
+
         for &(resource, requested) in requests {
             *self.used_mut(resource) += requested;
         }
+
         Ok(())
     }
 
@@ -198,6 +202,7 @@ impl InspectionBudget {
             used,
             requested,
         };
+
         self.exhaustion = Some(exhaustion);
         exhaustion
     }

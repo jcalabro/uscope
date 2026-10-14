@@ -27,8 +27,10 @@ pub struct Intent {
     pub address: u64,
     pub size: u64,
     pub access: WatchAccess,
+
     /// The hardware spans covering it, as start and end.
     pub spans: Vec<(u64, u64)>,
+
     /// What it was asked to do at its hits since the last stop, oldest
     /// first: a change while the program runs applies from a hit the
     /// client cannot know.
@@ -61,13 +63,17 @@ pub fn bytes(kernel: &Kernel, tgid: Tgid, intent: &Intent) -> Option<Vec<u8>> {
 pub struct Stop<'a> {
     pub kernel: &'a Kernel,
     pub tgid: Tgid,
+
     /// Each stopped thread's own reason.
     pub reasons: &'a BTreeMap<Tid, StopReason>,
     pub intents: &'a [Intent],
+
     /// The watched bytes at the last stop.
     pub baselines: &'a BTreeMap<u64, Vec<u8>>,
+
     /// The hits each watchpoint had counted at the last stop.
     pub last_counts: &'a BTreeMap<u64, u64>,
+
     /// The hits each watchpoint has counted.
     pub counts: &'a BTreeMap<u64, u64>,
 }
@@ -81,6 +87,7 @@ pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
             marks.push(mark);
         }
     };
+
     let mut stopped = BTreeMap::<u64, BTreeSet<u64>>::new();
     let accessors = |watch: u64| {
         kernel
@@ -91,6 +98,7 @@ pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
             .map(|(&tid, _)| tid)
             .collect::<BTreeSet<_>>()
     };
+
     for &tid in &kernel.watching.ran {
         if kernel
             .threads
@@ -99,35 +107,42 @@ pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
         {
             continue;
         }
+
         let accessed = kernel.watching.log.get(&tid).cloned().unwrap_or_default();
         let reported = match stop.reasons.get(&tid) {
             Some(StopReason::Watchpoint { hits }) => hits.to_vec(),
             _ => Vec::new(),
         };
+
         for hit in &reported {
             let id = hit.watchpoint.get();
             let Some(intent) = stop.intents.iter().find(|intent| intent.id == id) else {
                 continue;
             };
+
             if !accessed.contains(&id) {
                 return Err(format!(
                     "thread {tid} reported a hit on watchpoint {id}, but made no access to it \
                      since the last stop"
                 ));
             }
+
             if judge_hit(stop, tid, hit, intent)? {
                 reach(Mark::WatchConditionHeld);
             }
+
             stopped.entry(id).or_default().insert(hit.hit_count);
             reach(Mark::WatchHit);
             if tid != stop.tgid.leader() {
                 reach(Mark::WatchHitOnAnotherThread);
             }
         }
+
         for &id in &accessed {
             let Some(intent) = stop.intents.iter().find(|intent| intent.id == id) else {
                 continue;
             };
+
             let hit = reported.iter().any(|hit| hit.watchpoint.get() == id);
             let changed = bytes(kernel, stop.tgid, intent) != stop.baselines.get(&id).cloned();
             let required = intent.unconditional()
@@ -145,14 +160,17 @@ pub fn judge(stop: &Stop<'_>) -> Result<Vec<Mark>, String> {
                     stop.reasons.get(&tid)
                 ));
             }
+
             if kernel.watching.unchanged.contains(&id) {
                 reach(Mark::UnchangedStore);
             }
         }
     }
+
     if judge_counts(stop, &stopped)? {
         reach(Mark::WatchHitDeclined);
     }
+
     Ok(marks)
 }
 
@@ -168,6 +186,7 @@ fn judge_hit(
     let id = intent.id;
     let now = bytes(stop.kernel, stop.tgid, intent);
     let before = stop.baselines.get(&id).cloned();
+
     // A declined hit's bytes are what the next hit reports from, so those
     // of a watch with conditions are any it held since.
     let held =
@@ -185,12 +204,14 @@ fn judge_hit(
             hit.previous, hit.current
         ));
     }
+
     if intent.access == WatchAccess::Change && hit.previous == hit.current {
         return Err(format!(
             "thread {tid} reported a change of watchpoint {id}, whose bytes are as they were, \
              {now:02x?}"
         ));
     }
+
     let (counted_before, counted) = (count_of(stop.last_counts, id), count_of(stop.counts, id));
     if !(counted_before + 1..=counted).contains(&hit.hit_count) {
         return Err(format!(
@@ -200,6 +221,7 @@ fn judge_hit(
             counted_before + 1
         ));
     }
+
     if !intent
         .policies
         .iter()
@@ -210,6 +232,7 @@ fn judge_hit(
             hit.hit_count, intent.policies
         ));
     }
+
     Ok(!intent.unconditional()
         && intent
             .policies
@@ -237,8 +260,10 @@ fn judge_counts(stop: &Stop<'_>, stopped: &BTreeMap<u64, BTreeSet<u64>>) -> Resu
                 intent.access
             ));
         }
+
         declined |= hits > stopped.get(&id).map_or(0, |hits| hits.len() as u64);
     }
+
     Ok(declined)
 }
 
@@ -257,6 +282,7 @@ pub fn judge_disabled(
         let Some(&counted) = disabled.get(&watchpoint.id.get()) else {
             continue;
         };
+
         if watchpoint.enabled || watchpoint.hit_count != counted {
             return Err(format!(
                 "watchpoint {} was disabled with {counted} hits, but is {watchpoint:?}",
@@ -264,6 +290,7 @@ pub fn judge_disabled(
             ));
         }
     }
+
     for thread in snapshot.threads.iter() {
         let ThreadState::Stopped {
             reason: Some(StopReason::Watchpoint { hits }),
@@ -271,6 +298,7 @@ pub fn judge_disabled(
         else {
             continue;
         };
+
         if let Some(hit) = hits.iter().find(|hit| {
             disabled
                 .get(&hit.watchpoint.get())
@@ -282,6 +310,7 @@ pub fn judge_disabled(
             ));
         }
     }
+
     Ok(())
 }
 

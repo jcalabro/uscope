@@ -21,8 +21,10 @@ struct Case {
     group_of: &'static [usize],
     ahead: usize,
     workers: usize,
+
     /// The unit whose adding stops the walk holding.
     fails_at: Option<usize>,
+
     /// The group whose walk panics.
     panics_at: Option<usize>,
 }
@@ -48,6 +50,7 @@ impl Case {
         for (unit, &group) in self.group_of.iter().enumerate() {
             members[group].push(unit);
         }
+
         let order = (0..self.units())
             .filter(|&group| !members[group].is_empty())
             .collect();
@@ -59,6 +62,7 @@ impl Case {
 struct Log {
     added: Vec<Option<usize>>,
     fails_at: Option<usize>,
+
     /// How many units are added, for walks to check their window against.
     count: Arc<AtomicUsize>,
 }
@@ -92,6 +96,7 @@ impl Run {
         if self.case.panics_at == Some(group) {
             std::panic::panic_any(WalkPanicked);
         }
+
         units.iter().map(|&unit| (unit, Some(unit))).collect()
     }
 
@@ -132,6 +137,7 @@ fn model(case: Case, bound: usize) {
             fails_at: case.fails_at,
             count: Arc::clone(&count),
         };
+
         let run = Arc::new(Run {
             case,
             in_order: InOrder::new(order, members, log, case.ahead),
@@ -147,9 +153,11 @@ fn model(case: Case, bound: usize) {
         for other in others {
             other.join().expect("a worker finishes");
         }
+
         let Ok(run) = Arc::try_unwrap(run) else {
             panic!("every worker is done with it");
         };
+
         let (added, log) = run.in_order.into_parts();
         check(case, added, &log.added);
     });
@@ -164,6 +172,7 @@ fn check(case: Case, added: usize, log: &[Option<usize>]) {
             "{case:?}: unit {unit} was added another's walk: {log:?}"
         );
     }
+
     match (case.fails_at, case.panics_at) {
         (None, None) => assert_eq!(
             log,
@@ -176,6 +185,7 @@ fn check(case: Case, added: usize, log: &[Option<usize>]) {
                 log[..=failed].iter().all(Option::is_some),
                 "{case:?}: {log:?}"
             );
+
             // A group that can begin only once the failed unit is added
             // finds the walk abandoned.
             for (unit, &group) in case.group_of.iter().enumerate() {
@@ -225,6 +235,7 @@ fn groupings(units: usize) -> Vec<&'static [usize]> {
             })
             .collect();
     }
+
     all.into_iter()
         .map(|grouping| &*Vec::leak(grouping))
         .collect()

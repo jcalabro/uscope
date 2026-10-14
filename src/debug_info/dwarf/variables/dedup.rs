@@ -89,6 +89,7 @@ impl BuiltTypes {
             );
             classes = self.classes(hasher);
         }
+
         let classes = classes?;
         let mut new_of_class = vec![u32::MAX; classes.len()];
         let mut retained = 0_u32;
@@ -103,6 +104,7 @@ impl BuiltTypes {
                     retained += 1;
                     *kept = true;
                 }
+
                 TypeId::new(*slot)
             })
             .collect::<Vec<_>>();
@@ -111,10 +113,12 @@ impl BuiltTypes {
         if merged == 0 {
             return None;
         }
+
         let remap = Remap {
             ids,
             retained: retained as usize,
         };
+
         let _phase = crate::span!("types.deduplicate.apply");
         self.apply(&remap, &kept);
         Some(remap)
@@ -181,6 +185,7 @@ impl BuiltTypes {
             .keys()
             .map(|key| key.aggregate)
             .collect::<HashSet<_>>();
+
         // Only a type's references, usually few, are gathered, and copied
         // into one list after.
         let (mergeable, edges): (Vec<bool>, Vec<Vec<u32>>) = self
@@ -192,14 +197,17 @@ impl BuiltTypes {
                 let TypeEntry::Resolved(info) = entry else {
                     return (false, Vec::new());
                 };
+
                 if layouts.contains(&id) || local(info) {
                     return (false, Vec::new());
                 }
+
                 scratch.clear();
                 map_references(info, &mut |reference| {
                     scratch.push(reference);
                     zero(reference)
                 });
+
                 // A type that refers outside the graph keeps its own
                 // identifier, so it never merges, and refers to nothing
                 // refinement must follow.
@@ -214,6 +222,7 @@ impl BuiltTypes {
                     });
                     return (false, Vec::new());
                 }
+
                 debug_assert_eq!(info.reference.id, id, "a type's own reference names it");
                 info.reference = zero(info.reference);
                 (
@@ -229,6 +238,7 @@ impl BuiltTypes {
             flat.extend_from_slice(&own);
             offsets.push(flat.len());
         }
+
         (mergeable, offsets, flat)
     }
 
@@ -242,9 +252,11 @@ impl BuiltTypes {
                 let TypeEntry::Resolved(info) = entry else {
                     return;
                 };
+
                 if !mergeable[index] {
                     return;
                 }
+
                 info.reference.id = TypeId::new(super::row(index));
                 let image = info.reference.image;
                 let mut original = edges[offsets[index]..offsets[index + 1]].iter();
@@ -277,12 +289,14 @@ impl BuiltTypes {
                         map_references(info, &mut |reference| remap.reference(reference));
                         info.reference.id = remap.ids[index];
                     }
+
                     entry
                 })
             })
             .collect::<Vec<_>>();
         self.entries = Vec::with_capacity(remap.retained);
         self.entries.extend(entries.into_iter().flatten());
+
         // Identifiers past the types begin at the retained count.
         debug_assert_eq!(
             self.entries.len(),
@@ -300,6 +314,7 @@ impl BuiltTypes {
         for id in self.complex_parts.values_mut() {
             *id = remap.id(*id);
         }
+
         // Merged types agree on these, which their signatures include.
         self.go_dict_indices = std::mem::take(&mut self.go_dict_indices)
             .into_iter()
@@ -324,6 +339,7 @@ struct Fields<'a> {
 struct Signatures<'a> {
     /// Each type's fields, or `None` for one that never merges.
     fields: Vec<Option<Fields<'a>>>,
+
     /// Where each type's references start in `edges`.
     offsets: &'a [usize],
     edges: &'a [u32],
@@ -364,6 +380,7 @@ fn refine<H: std::hash::BuildHasher + Clone + Sync>(
     let mut classes = classify(fields, hasher);
     let mut members = Members::new(&classes);
     let referrers = Referrers::new(count, offsets, edges);
+
     // Each round splits a class by what its members' references were as
     // the round began, so a class can split only once a type it refers
     // to has moved. Only those classes are looked at again: a large
@@ -388,10 +405,12 @@ fn refine<H: std::hash::BuildHasher + Clone + Sync>(
             crate::count!("types_dedup_rounds", round);
             return Some(numbered_by_first_appearance(&classes));
         }
+
         let mut moved = Vec::new();
         for (class, groups) in splits {
             members.split(class, &groups, &mut classes, &mut moved);
         }
+
         flagged.resize(members.ranges.len(), false);
         dirty.clear();
         for referrer in moved.iter().flat_map(|moved| referrers.of(*moved)) {
@@ -400,10 +419,12 @@ fn refine<H: std::hash::BuildHasher + Clone + Sync>(
                 dirty.push(class);
             }
         }
+
         for class in &dirty {
             flagged[*class] = false;
         }
     }
+
     crate::count!("types_dedup_abandoned", 1);
     None
 }
@@ -413,9 +434,11 @@ fn refine<H: std::hash::BuildHasher + Clone + Sync>(
 struct Scratch {
     /// The classes each member refers to, one member after another.
     keys: Vec<u32>,
+
     /// Where each member's run of `keys` ends.
     ends: Vec<usize>,
     groups: Vec<u32>,
+
     /// The first member of each group so far.
     firsts: Vec<usize>,
 }
@@ -440,6 +463,7 @@ fn split<H: std::hash::BuildHasher + Clone>(
     if group.len() < 2 {
         return None;
     }
+
     let Scratch {
         keys,
         ends,
@@ -457,6 +481,7 @@ fn split<H: std::hash::BuildHasher + Clone>(
         );
         ends.push(keys.len());
     }
+
     let key =
         |member: usize| &keys[member.checked_sub(1).map_or(0, |last| ends[last])..ends[member]];
     groups.clear();
@@ -483,12 +508,15 @@ fn split<H: std::hash::BuildHasher + Clone>(
                 for (first, number) in firsts.iter().zip(0..) {
                     map.insert(key(*first), number);
                 }
+
                 seen = Some(map);
             }
+
             next
         });
         groups.push(found);
     }
+
     (firsts.len() > 1).then(|| (class, groups.clone()))
 }
 
@@ -509,18 +537,21 @@ impl Members {
         for class in classes {
             sizes[*class as usize] += 1;
         }
+
         let mut ranges = Vec::with_capacity(distinct);
         let mut start = 0;
         for size in sizes {
             ranges.push(start..start);
             start += size;
         }
+
         let mut order = vec![0_u32; classes.len()];
         for (index, class) in classes.iter().enumerate() {
             let range = &mut ranges[*class as usize];
             order[range.end] = super::row(index);
             range.end += 1;
         }
+
         Self { order, ranges }
     }
 
@@ -533,6 +564,7 @@ impl Members {
     /// Records the members that moved.
     fn split(&mut self, class: usize, groups: &[u32], classes: &mut [u32], moved: &mut Vec<u32>) {
         let range = self.ranges[class].clone();
+
         // The members are zipped with their groups below.
         debug_assert_eq!(
             groups.len(),
@@ -548,12 +580,14 @@ impl Members {
         for group in groups {
             starts[*group as usize] += 1;
         }
+
         let mut start = range.start;
         for size in &mut starts {
             let own = *size;
             *size = start;
             start += own;
         }
+
         let first_new = self.ranges.len();
         for (group, group_start) in starts.iter().enumerate() {
             let end = starts.get(group + 1).copied().unwrap_or(range.end);
@@ -563,6 +597,7 @@ impl Members {
                 self.ranges.push(*group_start..end);
             }
         }
+
         let segment = self.order[range].to_vec();
         for (member, group) in segment.into_iter().zip(groups) {
             let group = *group as usize;
@@ -588,9 +623,11 @@ impl Referrers {
         for edge in edges {
             starts[*edge as usize + 1] += 1;
         }
+
         for index in 0..count {
             starts[index + 1] += starts[index];
         }
+
         let mut cursor = starts.clone();
         let mut referrers = vec![0_u32; edges.len()];
         for referrer in 0..count {
@@ -599,6 +636,7 @@ impl Referrers {
                 cursor[*edge as usize] += 1;
             }
         }
+
         Self {
             offsets: starts,
             referrers,
@@ -651,6 +689,7 @@ fn classify<H: std::hash::BuildHasher + Sync>(
         .enumerate()
         .map(|(index, candidate)| *candidate == index || fields[*candidate] == fields[index])
         .collect::<Vec<_>>();
+
     // A type unequal to the first of its hash equals only types that are
     // unequal to it too, so those are compared among themselves.
     let mut collided = HashMap::with_hasher(foldhash::fast::FixedState::default());
@@ -660,6 +699,7 @@ fn classify<H: std::hash::BuildHasher + Sync>(
         next += 1;
         next - 1
     };
+
     for (index, candidate) in candidates.iter().enumerate() {
         let class = match &fields[index] {
             None => fresh(),
@@ -667,8 +707,10 @@ fn classify<H: std::hash::BuildHasher + Sync>(
             Some(_) if equal[index] => classes[*candidate],
             Some(own) => *collided.entry(own).or_insert_with(&mut fresh),
         };
+
         classes.push(class);
     }
+
     classes
 }
 
@@ -687,6 +729,7 @@ pub(super) fn map_references(
         TypeKind::Reference { target, .. } | TypeKind::Modified { target, .. } => {
             *target = map(*target);
         }
+
         TypeKind::Array { element, .. }
         | TypeKind::RuntimeArray { element, .. }
         | TypeKind::Slice { element, .. } => {
@@ -711,12 +754,14 @@ pub(super) fn map_references(
                 VariantDiscriminant::TagType(target) => *target = map(*target),
                 VariantDiscriminant::Absent => {}
             }
+
             if !variants.is_empty() {
                 for variant in Arc::make_mut(variants) {
                     map_members(&mut variant.members, map);
                 }
             }
         }
+
         TypeKind::Signature {
             returns,
             parameters,
@@ -729,11 +774,13 @@ pub(super) fn map_references(
                 }
             }
         }
+
         TypeKind::Base(_)
         | TypeKind::Unspecified
         | TypeKind::Function
         | TypeKind::Opaque { .. } => {}
     }
+
     if let Some(identity) = &mut info.identity
         && identity
             .arguments

@@ -57,6 +57,7 @@ async fn malformed_dwarf_leaves_a_program_described_by_its_symbols() {
         let StopReason::Breakpoint { hits, .. } = &reason else {
             panic!("{section}: stopped for {reason:?}");
         };
+
         assert_eq!(hits[0].breakpoint, breakpoint.id);
         let trace = scenario
             .operation("backtrace", scenario.handle().backtrace())
@@ -89,6 +90,7 @@ async fn a_library_with_malformed_dwarf_is_described_by_its_symbols() {
     let scratch = ScratchDir::new("malformed-library");
     let program = scratch.path().join("module-frames");
     fs::copy(Scenario::fixture("module-frames-gcc-o0"), &program).expect("copy the program");
+
     // The program finds its library beside it.
     corrupt_section(
         &Scenario::fixture("libmodule-frames.so"),
@@ -101,6 +103,7 @@ async fn a_library_with_malformed_dwarf_is_described_by_its_symbols() {
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
     };
+
     assert_eq!(hits[0].breakpoint, breakpoint.id);
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
@@ -124,6 +127,7 @@ async fn a_library_with_malformed_dwarf_is_described_by_its_symbols() {
         "{:?}",
         image.debug_information()
     );
+
     // The program's own DWARF is whole.
     assert_eq!(
         scenario.handle().module_image().debug_information(),
@@ -141,6 +145,7 @@ async fn split_dwarf_is_reported_as_incomplete() {
     let uscope::DebugInformation::Incomplete { reason } = image.debug_information() else {
         panic!("{:?}", image.debug_information());
     };
+
     assert_eq!(
         &*reason,
         "its compile unit is described in a split DWARF file, \

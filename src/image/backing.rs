@@ -85,16 +85,20 @@ impl std::ops::Deref for AlignedBytes {
 pub enum ReadError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
     #[error("{path} is a directory")]
     NotAFile { path: String },
+
     #[error("{path} is {length} bytes, more than the {limit} bytes uscope reads")]
     TooLarge {
         path: String,
         length: u64,
         limit: u64,
     },
+
     #[error("{path} changed while it was read, {attempts} times")]
     Changed { path: String, attempts: u32 },
+
     #[error("cannot allocate {length} bytes to read {path}")]
     Allocation { path: String, length: u64 },
 }
@@ -175,6 +179,7 @@ pub fn read_snapshot<B: AsMut<[u8]>>(
         if before.is_dir() {
             return Err(ReadError::NotAFile { path: name() });
         }
+
         if !before.is_file() {
             return read_stream(file, &before, limit, &allocate).map_err(|error| match error {
                 StreamError::Io(error) => ReadError::Io(error),
@@ -189,6 +194,7 @@ pub fn read_snapshot<B: AsMut<[u8]>>(
                 },
             });
         }
+
         let stamp = FileStamp::of(&before);
         if stamp.length > limit {
             return Err(ReadError::TooLarge {
@@ -197,6 +203,7 @@ pub fn read_snapshot<B: AsMut<[u8]>>(
                 limit,
             });
         }
+
         between(attempt);
         let length = usize::try_from(stamp.length).map_err(|_| ReadError::TooLarge {
             path: name(),
@@ -208,6 +215,7 @@ pub fn read_snapshot<B: AsMut<[u8]>>(
             length: stamp.length,
         })?;
         let read = read_fully(&mut file, bytes.as_mut())?;
+
         // A file that grew has more to read; one that shrank ended early.
         let mut probe = [0_u8; 1];
         let grew = file.read(&mut probe)? != 0;
@@ -216,6 +224,7 @@ pub fn read_snapshot<B: AsMut<[u8]>>(
             return Ok((bytes, stamp));
         }
     }
+
     Err(ReadError::Changed {
         path: name(),
         attempts: READ_ATTEMPTS,
@@ -244,6 +253,7 @@ fn read_stream<B: AsMut<[u8]>>(
     if length > limit {
         return Err(StreamError::TooLarge(length));
     }
+
     let mut bytes = allocate(data.len()).ok_or(StreamError::Allocation(length))?;
     bytes.as_mut().copy_from_slice(&data);
     Ok((
@@ -267,5 +277,6 @@ fn read_fully(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<us
             Err(error) => return Err(error),
         }
     }
+
     Ok(filled)
 }

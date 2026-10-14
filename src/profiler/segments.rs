@@ -28,6 +28,7 @@ fn segments(directory: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
             segments.push((ended, path));
         }
     }
+
     segments.sort_unstable();
     Ok(segments)
 }
@@ -46,6 +47,7 @@ impl Profile {
     pub fn write_segment(&self, directory: &Path, keep: Duration) -> std::io::Result<PathBuf> {
         let now = SystemTime::now();
         let ended = milliseconds(now);
+
         // Two segments within a millisecond take the next free name.
         let mut name = ended;
         let path = loop {
@@ -53,8 +55,10 @@ impl Profile {
             if !path.try_exists()? {
                 break path;
             }
+
             name += 1;
         };
+
         let partial = directory.join(format!(".{name:016}.{EXTENSION}.partial"));
         self.write(&partial)?;
         std::fs::rename(&partial, &path)?;
@@ -64,6 +68,7 @@ impl Profile {
                 std::fs::remove_file(old)?;
             }
         }
+
         Ok(path)
     }
 
@@ -77,6 +82,7 @@ impl Profile {
                 directory.display()
             )));
         }
+
         let mut builder = CaptureBuilder::new();
         let mut truncated = false;
         let mut chunks = 0;
@@ -88,6 +94,7 @@ impl Profile {
             truncated |= read.truncated;
             chunks += read.chunks;
         }
+
         Ok(ReadProfile {
             profile: Self {
                 capture: builder.finish(),

@@ -49,6 +49,7 @@ struct Collected {
     epoch: Instant,
     events: Vec<Event>,
     marks: Vec<(&'static str, u64)>,
+
     /// Counts made outside any span.
     loose: Vec<(&'static str, u64)>,
     dropped: u64,
@@ -61,6 +62,7 @@ pub(crate) struct Event {
     pub name: &'static str,
     pub label: Option<Box<str>>,
     pub id: u64,
+
     /// The span that started this one's work, when it ran on another thread.
     pub parent: Option<u64>,
     pub thread: u32,
@@ -88,6 +90,7 @@ struct Open {
 struct ThreadState {
     number: u32,
     generation: u64,
+
     /// The running recording's start, and whether it counts instructions.
     epoch: Instant,
     instructions_wanted: bool,
@@ -125,6 +128,7 @@ impl Instructions {
                 if read.time_running < read.time_enabled {
                     MULTIPLEXED.store(true, Ordering::Relaxed);
                 }
+
                 Some(read.count)
             }
             Err(error) => {
@@ -177,6 +181,7 @@ impl Recording {
             drop(collected);
             return Err(AlreadyRecording);
         }
+
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
         MULTIPLEXED.store(false, Ordering::Relaxed);
         *INSTRUCTIONS_UNAVAILABLE
@@ -210,6 +215,7 @@ impl Recording {
         let cpu_ns = process_cpu_ns().saturating_sub(self.cpu);
         let allocations = alloc::totals().since(&self.allocations);
         alloc::stop_totals();
+
         // This thread's spans may still be buffered.
         flush_thread();
         let collected = COLLECTED
@@ -231,6 +237,7 @@ impl Recording {
         } else {
             report::CounterStatus::Counted
         };
+
         Ok(Report::new(report::Raw {
             wall_ns,
             cpu_ns,
@@ -271,6 +278,7 @@ pub fn mark(name: &'static str) {
     if !enabled() {
         return;
     }
+
     let mut collected = COLLECTED.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(collected) = collected.as_mut() {
         let at = elapsed_ns(collected.epoch);
@@ -292,6 +300,7 @@ impl Span {
         if !self.open {
             return None;
         }
+
         THREAD.with(|thread| {
             thread
                 .borrow()
@@ -321,8 +330,10 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
+
             text.truncate(end);
         }
+
         text.into_boxed_str()
     });
     THREAD.with(|thread| {
@@ -346,6 +357,7 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
                 else {
                     return false;
                 };
+
                 let number = thread.as_ref().map_or_else(
                     || NEXT_THREAD.fetch_add(1, Ordering::Relaxed),
                     |state| state.number,
@@ -362,14 +374,17 @@ fn open_span(name: &'static str, parent: Option<u64>, label: Option<&dyn Fn() ->
                 })
             }
         };
+
         if state.instructions_wanted && state.instructions.is_none() {
             state.instructions = Some(Instructions::open());
         }
+
         let instructions = if state.instructions_wanted {
             state.instructions.as_mut().and_then(Instructions::read)
         } else {
             None
         };
+
         state.open.push(Open {
             name,
             label,
@@ -402,18 +417,22 @@ fn close_span() {
         let Some(state) = thread.as_mut() else {
             return false;
         };
+
         let Some(open) = state.open.pop() else {
             return false;
         };
+
         if state.generation != generation || !enabled() {
             return state.open.is_empty();
         }
+
         let wall_ns = elapsed_ns(open.started);
         let cpu_ns = thread_cpu_ns().saturating_sub(open.cpu);
         let instructions = match (open.instructions, state.instructions.as_mut()) {
             (Some(before), Some(counter)) => counter.read().map(|now| now.saturating_sub(before)),
             _ => None,
         };
+
         let allocations = alloc::thread_allocated().since(&open.allocations);
         let epoch_offset = u64::try_from(
             open.started
@@ -453,9 +472,11 @@ fn flush_thread() {
     }) else {
         return;
     };
+
     if finished.is_empty() {
         return;
     }
+
     if let Some(collected) = COLLECTED
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -488,6 +509,7 @@ fn add_count(name: &'static str, amount: u64) {
         let Some(open) = thread.as_mut().and_then(|state| state.open.last_mut()) else {
             return false;
         };
+
         add_to(&mut open.counters, name, amount);
         true
     });

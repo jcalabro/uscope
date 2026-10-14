@@ -7,6 +7,7 @@ use super::{Profile, StackEnding};
 use crate::capture::records::{
     self, AccountKind, CallOutcome, NONE, NoteKind, UNSEEN, note_flags as flags,
 };
+
 use crate::syscalls::stats::{Folded, SyscallStats};
 use crate::syscalls::{
     Abi, Device, Errno, EventFlags, Outcome, Pid, ProcessEnd, SyscallEvent, SyscallId, Tid,
@@ -19,6 +20,7 @@ pub struct RecordedEvent {
     /// The event, without its stack's addresses: the stack is named by
     /// [`Profile::syscall_stack`] instead.
     pub event: TraceEvent,
+
     /// The stack's row, if it had one.
     pub stack: Option<u32>,
 }
@@ -28,8 +30,10 @@ pub struct RecordedEvent {
 pub struct RecordedSyscalls {
     /// Every event, in the order the engine reported it.
     pub events: Vec<RecordedEvent>,
+
     /// Statistics the kernel counted, for a trace that kept no calls.
     pub counted: Folded,
+
     /// Records the engine lost: every count is a lower bound once this is
     /// above zero.
     pub lost: u64,
@@ -45,6 +49,7 @@ impl RecordedSyscalls {
                 folded.add(call);
             }
         }
+
         folded
     }
 }
@@ -117,12 +122,14 @@ impl Profile {
                     (Tid::new(row.tid.get()), Pid::new(pid))
                 })
         };
+
         let pid = |process: u32| {
             capture
                 .processes
                 .get(process as usize)
                 .map_or(Pid::new(0), |row| Pid::new(row.pid.get()))
         };
+
         let blob = |start: u32, len: u32| -> &[u8] {
             if start == NONE {
                 &[]
@@ -130,6 +137,7 @@ impl Profile {
                 &capture.syscall_blobs[start as usize..(start + len) as usize]
             }
         };
+
         let stack = |row: u32| (row != NONE).then_some(row);
         let mut events = Vec::with_capacity(capture.syscalls.len() + capture.syscall_notes.len());
         let mut notes = capture.syscall_notes.iter().peekable();
@@ -137,6 +145,7 @@ impl Profile {
             while let Some(note) = notes.next_if(|note| note.calls.get() as usize <= index) {
                 events.push(self.note(note, &ids, &pid, &blob));
             }
+
             let (thread, process) = ids(call.thread.get());
             let outcome = match CallOutcome::from_number(call.outcome) {
                 Some(CallOutcome::Returned) => Outcome::Returned(call.ret.get()),
@@ -147,6 +156,7 @@ impl Profile {
                 Some(CallOutcome::ProcessExited) => Outcome::ProcessExited,
                 Some(CallOutcome::Unavailable) | None => Outcome::Unavailable,
             };
+
             let time = |time: i64| (time != UNSEEN).then(|| time.cast_unsigned());
             events.push(RecordedEvent {
                 event: TraceEvent::Call(SyscallEvent {
@@ -168,9 +178,11 @@ impl Profile {
                 stack: stack(call.stack.get()),
             });
         }
+
         for note in notes {
             events.push(self.note(note, &ids, &pid, &blob));
         }
+
         RecordedSyscalls {
             events,
             counted: self.kernel_counted(&pid),
@@ -204,16 +216,19 @@ impl Profile {
                 },
                 bytes: row.bytes.get(),
             };
+
             let call = SyscallId {
                 abi: abi(row.abi),
                 number: row.number.get(),
             };
+
             counted
                 .by_call
                 .entry((pid(row.process.get()), call))
                 .or_default()
                 .merge(&stats);
         }
+
         counted
     }
 
@@ -236,6 +251,7 @@ impl Profile {
                 Arc::from(capture.string(note.text.get()))
             }
         };
+
         let small = |value: i64| i32::try_from(value).unwrap_or(0);
         let extra = note.extra.get();
         let event = match NoteKind::from_number(note.kind) {
@@ -246,6 +262,7 @@ impl Profile {
                     process,
                     time,
                     signal: small(value),
+
                     #[expect(clippy::cast_possible_truncation, reason = "the low half")]
                     code: (note.flags & flags::SIGNAL_CODE != 0)
                         .then_some((extra as u32).cast_signed()),
@@ -285,6 +302,7 @@ impl Profile {
                 time,
                 text: text(),
                 cloexec: note.flags & flags::FD_CLOEXEC != 0,
+
                 #[expect(clippy::cast_possible_truncation, reason = "each part's bits")]
                 device: (note.flags & flags::FD_DEVICE != 0).then_some(Device {
                     block: extra >> 63 != 0,
@@ -298,6 +316,7 @@ impl Profile {
                 count: value.cast_unsigned(),
             },
         };
+
         RecordedEvent {
             event,
             stack: (note.stack.get() != NONE).then_some(note.stack.get()),
@@ -466,12 +485,14 @@ mod tests {
         for event in trace() {
             recorder.event(&event);
         }
+
         let mut counted = Folded::default();
         for event in trace() {
             if let TraceEvent::Call(call) = event {
                 counted.add(&call);
             }
         }
+
         recorder.counted(&counted);
         let bytes = recorder.finish().to_bytes().unwrap();
         let read = Profile::from_bytes(&bytes).expect("the file reads").profile;
@@ -490,6 +511,7 @@ mod tests {
             .filter(|event| event.time() >= 215)
             .collect();
         assert_eq!(events(&windowed), kept);
+
         // Three calls' two captures, a 12-byte head each and 8 bytes of
         // path, and the signal's information.
         assert_eq!(windowed.capture.syscall_blobs.len(), 3 * (24 + 8) + 128);
@@ -502,11 +524,13 @@ mod tests {
             let thread = samples.thread(Pid::new(10), Tid::new(tid), start);
             samples.sample(thread, start + 1, 1, NONE, NONE);
         }
+
         samples.process_exit(Pid::new(10), 400);
         let mut recorder = SyscallCapture::new(None);
         for event in trace() {
             recorder.event(&event);
         }
+
         let mut builder = crate::capture::builder::CaptureBuilder::new();
         builder.absorb(&samples.finish());
         builder.absorb(&recorder.finish().capture);

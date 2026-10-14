@@ -21,6 +21,7 @@ use crate::{TaskId, VirtualAddress};
 pub(super) enum StackOwner {
     /// An operating-system thread's own stack, which never moves.
     Thread(Pid),
+
     /// A task's stack, which its runtime may move.
     Task(TaskId),
 }
@@ -31,6 +32,7 @@ enum Depth {
     /// An address on a stack that never moves. x86-64 stacks grow down, so
     /// a lower address is deeper.
     Address(u64),
+
     /// Bytes below the top of a stack that may move, so a larger offset is
     /// deeper.
     BelowTop(u64),
@@ -115,8 +117,10 @@ impl StackPosition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TaskStack {
     pub(super) task: TaskId,
+
     /// The stack's lowest address.
     pub(super) low: u64,
+
     /// The address just above the stack, its top.
     pub(super) high: u64,
 }
@@ -126,6 +130,7 @@ pub(super) struct TaskStack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StackView {
     thread: Pid,
+
     /// The task the thread runs, whose own stack holds the addresses within
     /// its bounds; the thread's stacks hold every other.
     task: Option<TaskStack>,
@@ -178,6 +183,7 @@ impl StackView {
             (StackOwner::Thread(pid), Depth::Address(address), _) if pid == self.thread => {
                 Some(VirtualAddress::new(address))
             }
+
             (StackOwner::Task(task), Depth::BelowTop(offset), Some(stack))
                 if task == stack.task =>
             {
@@ -225,6 +231,7 @@ mod tests {
             runtime: crate::RuntimeId::new(1),
             number: 7,
         };
+
         let thread = Pid::from_raw(1);
         let before = StackView::task(
             thread,
@@ -234,6 +241,7 @@ mod tests {
                 high: 0x1_2000,
             },
         );
+
         // The runtime copied the stack to a larger one, on another thread.
         let after = StackView::task(
             Pid::from_raw(2),

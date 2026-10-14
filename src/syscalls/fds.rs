@@ -19,8 +19,10 @@ pub struct Description {
     /// The text `-y` prints between `<` and `>`: a path, `pipe:[88213]`,
     /// or `TCP:[10.0.3.4:51022->10.0.3.9:5432]`.
     pub text: Arc<str>,
+
     /// What kind it is, for the files and network views.
     pub kind: Kind,
+
     /// Closed by a successful `execve`.
     pub cloexec: bool,
 }
@@ -30,6 +32,7 @@ pub enum Kind {
     File,
     Socket(Socket),
     Pipe,
+
     /// A character or block device, which `-yy` numbers.
     Device(super::model::Device),
     Other,
@@ -39,6 +42,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Socket {
     pub family: u16,
+
     /// `SOCK_STREAM` or the like, without its flags.
     pub kind: u32,
     pub local: Option<String>,
@@ -78,12 +82,15 @@ impl Socket {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Process {
     fds: BTreeMap<i64, Description>,
+
     /// Descriptors the engine read just before the call that made them,
     /// whose reading the call's own arguments must not replace, with what
     /// each replaced.
     fresh: BTreeMap<i64, (Description, Option<Description>)>,
+
     /// A gap may have hidden calls that changed the table.
     stale: bool,
+
     /// Whether every descriptor was read from the system, or inherited
     /// from a process whose were.
     read: bool,
@@ -175,6 +182,7 @@ fn resolve(process: &Process, dirfd: i64, path: &str) -> String {
     if path.starts_with('/') {
         return path.to_owned();
     }
+
     let Some(base) = process
         .fds
         .get(&dirfd)
@@ -183,6 +191,7 @@ fn resolve(process: &Process, dirfd: i64, path: &str) -> String {
     else {
         return path.to_owned();
     };
+
     let mut joined = base.trim_end_matches('/').to_owned();
     for part in path
         .split('/')
@@ -191,9 +200,11 @@ fn resolve(process: &Process, dirfd: i64, path: &str) -> String {
         joined.push('/');
         joined.push_str(part);
     }
+
     if joined.is_empty() {
         joined.push('/');
     }
+
     joined
 }
 
@@ -290,11 +301,13 @@ impl FdTable {
                 let Some(made) = process.fds.get_mut(&fd) else {
                     continue;
                 };
+
                 // A socket's call knows its family and endpoints,
                 // which its link does not.
                 if matches!(made.kind, Kind::Socket(_)) {
                     continue;
                 }
+
                 if read.text.is_empty() {
                     // The engine read what it is, not its path.
                     made.cloexec = read.cloexec;
@@ -333,6 +346,7 @@ impl FdTable {
                     process.stale = true;
                 }
             }
+
             TraceEvent::Descriptor {
                 process,
                 fd,
@@ -359,6 +373,7 @@ impl FdTable {
         made: bool,
     ) {
         let table = self.processes.entry(process).or_default();
+
         // A socket's link names only its inode; what the trace saw
         // of its endpoints says more.
         let known_socket = matches!(
@@ -372,8 +387,10 @@ impl FdTable {
             if let Some(description) = table.fds.get_mut(&fd) {
                 description.cloexec = cloexec;
             }
+
             return;
         }
+
         let kind = device.map_or_else(
             || {
                 if text.starts_with("pipe:") {
@@ -393,6 +410,7 @@ impl FdTable {
             kind,
             cloexec,
         };
+
         let replaced = table.fds.insert(fd, description.clone());
         if made {
             table.fresh.insert(fd, (description, replaced));
@@ -410,6 +428,7 @@ impl FdTable {
         let Some(name) = event.call.name() else {
             return;
         };
+
         // A non-blocking connect that is still in progress has its peer.
         let in_progress =
             name == "connect" && event.outcome == Outcome::Failed(super::model::Errno(EINPROGRESS));
@@ -418,6 +437,7 @@ impl FdTable {
             _ if in_progress => 0,
             _ => return,
         };
+
         let process = self.processes.entry(event.process).or_default();
         let a = event.args;
         let fd = |word: u64| super::filter::fd_value(word);
@@ -427,6 +447,7 @@ impl FdTable {
                     .into_owned()
             })
         };
+
         let file =
             |process: &Process, dirfd: i64, path: Option<String>, cloexec: bool| Description {
                 text: path
@@ -440,6 +461,7 @@ impl FdTable {
             kind: Kind::Other,
             cloexec,
         };
+
         match name {
             "open" | "creat" => {
                 let cloexec = name == "open" && a[1] & O_CLOEXEC != 0;
@@ -456,6 +478,7 @@ impl FdTable {
                 } else {
                     None
                 };
+
                 let made = file(process, fd(a[0]), path, false);
                 process.fds.insert(result, made);
             }
@@ -534,6 +557,7 @@ impl FdTable {
                     kind: (a[1] & 0xf) as u32,
                     ..Socket::default()
                 };
+
                 process.fds.insert(
                     result,
                     Description {
@@ -553,6 +577,7 @@ impl FdTable {
                     },
                     _ => Socket::default(),
                 };
+
                 socket.remote = event
                     .capture(1)
                     .and_then(|capture| SocketAddress::parse(&capture.bytes))
@@ -574,6 +599,7 @@ impl FdTable {
                     "socketpair" => a[1] & SOCK_CLOEXEC != 0,
                     _ => false,
                 };
+
                 if let Some(capture) = event.capture(arg)
                     && capture.bytes.len() >= 8
                 {
@@ -590,6 +616,7 @@ impl FdTable {
                         } else {
                             ("pipe:[]", Kind::Pipe)
                         };
+
                         process.fds.insert(
                             number,
                             Description {
@@ -657,6 +684,7 @@ impl FdTable {
                     .fds
                     .insert(result, anonymous("anon_inode:[io_uring]", false));
             }
+
             // What these made, the engine reads from the system when it can;
             // otherwise it is unknown, never mistaken for closed.
             "userfaultfd"
@@ -681,6 +709,7 @@ impl FdTable {
         else {
             return;
         };
+
         if let Some(description) = process.fds.get_mut(&fd)
             && let Kind::Socket(socket) = &mut description.kind
         {
@@ -689,6 +718,7 @@ impl FdTable {
             } else {
                 socket.local = Some(address.endpoint());
             }
+
             description.text = socket.text().into();
         }
     }

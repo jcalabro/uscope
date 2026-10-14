@@ -39,6 +39,7 @@ fn only<'a>(
                 .collect::<Vec<_>>()
         );
     }
+
     info(image, first)
 }
 
@@ -58,6 +59,7 @@ fn spelled<'a>(image: &'a ModuleImage, name: &str) -> &'a TypeInfo {
                 .collect::<Vec<_>>()
         );
     }
+
     info(image, first)
 }
 
@@ -108,6 +110,7 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
         let image = load_fixture_image(fixture).await;
 
         let vector = only(&image, Cpp, &["std"], "vector");
+
         // A type a class declares in its scope adds nothing to its layout.
         assert!(
             matches!(vector.kind, TypeKind::Record { .. }),
@@ -121,6 +124,7 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
             argument_type(&image, &vector.arguments[0]).name.as_ref(),
             "int"
         );
+
         // GCC describes no parameters for allocator<int>, so its name gives
         // them, resolved to the type they spell.
         let allocator = identity(argument_type(&image, &vector.arguments[1]));
@@ -187,6 +191,7 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
         let TypeKind::Record { members, .. } = &node.kind else {
             panic!("{fixture}: {node:?}");
         };
+
         let next = members
             .iter()
             .find(|member| member.name.as_deref() == Some("next"))
@@ -198,6 +203,7 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
         else {
             panic!("{fixture}: Node::next is not a pointer");
         };
+
         assert!(image.same_type(target, node.reference), "{fixture}");
     }
 }
@@ -220,6 +226,7 @@ async fn rust_identities_and_fat_pointers_follow_structure_not_spelling() {
             ["i32", "Global"],
             "{fixture}"
         );
+
         // rustc describes type parameters but not const ones, which the
         // name supplies.
         let wrapper = identity(only(&image, Rust, &["generics"], "Wrapper"));
@@ -239,14 +246,17 @@ async fn rust_identities_and_fat_pointers_follow_structure_not_spelling() {
             else {
                 panic!("{fixture}: {name} is not a slice: {slice:?}");
             };
+
             assert_eq!(info(&image, found).name.as_ref(), element, "{fixture}");
         }
+
         for name in ["&str", "alloc::boxed::Box<str, alloc::alloc::Global>"] {
             assert!(
                 matches!(named(&image, name).kind, TypeKind::Slice { text: true, .. }),
                 "{fixture}: {name}"
             );
         }
+
         let tail = named(&image, "&generics::Tail");
         assert!(
             matches!(tail.kind, TypeKind::Record { .. }),
@@ -279,6 +289,7 @@ async fn go_identities_come_from_kinds_and_instance_names() {
             assert_eq!(map.origin, ArgumentOrigin::Dwarf, "{fixture}");
             assert_eq!(argument_names(&image, map), ["string", "int"], "{fixture}");
         }
+
         let channel = identity(only(&image, Go, &[], "chan int"));
         assert_eq!(channel.go.map(|go| go.kind), Some(GoKind::Chan));
         assert_eq!(argument_names(&image, channel), ["int"], "{fixture}");
@@ -344,12 +355,15 @@ async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
     let VariableState::Available { text, .. } = &full.state else {
         panic!("{full:?}");
     };
+
     assert_eq!(text.as_deref().cloned(), Some(complete("hello")));
+
     // Three bytes short of the whole text.
     let limits = uscope::InspectionLimits {
         memory_bytes: full.usage.memory_bytes - 3,
         ..uscope::InspectionLimits::default()
     };
+
     let tight = inspect_text(&scenario, limits).await;
     assert_eq!(
         tight.completion,
@@ -362,6 +376,7 @@ async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
     else {
         panic!("{tight:?}");
     };
+
     assert_eq!(&*text.bytes, b"he", "{text:?}");
     assert!(
         matches!(
@@ -402,6 +417,7 @@ async fn size_of(scenario: &Scenario, text: &str) -> i128 {
     let uscope::Evaluation::Value { value, .. } = evaluation else {
         panic!("{text} is not a value: {evaluation:?}");
     };
+
     match available_value(&value.state) {
         uscope::VariableValue::Scalar(ScalarValue::Signed(size)) => *size,
         uscope::VariableValue::Scalar(ScalarValue::Unsigned(size)) => {
@@ -460,10 +476,12 @@ async fn expressions_name_types_by_their_identities() {
         } else {
             "generics stop here"
         };
+
         let scenario = stop_at_marker(fixture, source, marker).await;
         for (text, size) in sizes {
             assert_eq!(size_of(&scenario, text).await, *size, "{fixture}: {text}");
         }
+
         scenario.shutdown().await;
     }
 }
@@ -492,6 +510,7 @@ async fn rust_text_slices_read_as_text() {
     ] {
         assert_eq!(text_of(&variables.variables, name), text, "{name}");
     }
+
     scenario.shutdown().await;
 }
 
@@ -511,5 +530,6 @@ async fn inspect_text(
     let uscope::Evaluation::Value { value, .. } = evaluation else {
         panic!("text is not a value: {evaluation:?}");
     };
+
     value
 }

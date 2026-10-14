@@ -16,6 +16,7 @@ use crate::{AddressRange, Error, ImageAddress, Result, VirtualAddress};
 use super::frames::{
     describe_address, selected_code_instance, source_for_code_instance, source_line_changed,
 };
+
 use super::memory::read_logical_memory;
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::{ActiveKind, Controller, Inferior, ResumeGuard};
@@ -33,22 +34,27 @@ impl<P: InspectionOps> Controller<P> {
         let Some(location) = locate(self, inferior, pc) else {
             return Ok(Arc::from([]));
         };
+
         let presentation = self.presentation_for_stopped_thread(pid)?;
         let Some(instance_id) = selected_code_instance(&location, &presentation)? else {
             return Ok(Arc::from([]));
         };
+
         let Some(source) = source_for_code_instance(&self.module_image, &location, instance_id)
         else {
             return Ok(Arc::from([]));
         };
+
         let Some(instance) = self.module_image.code_instance(instance_id) else {
             return Ok(Arc::from([]));
         };
+
         let mut ranges = Vec::<AddressRange<ImageAddress>>::new();
         for line in self.module_image.line_entries_in(instance) {
             if line.range.end <= location.address {
                 continue;
             }
+
             let at = self.module_image.locate(line.range.start);
             if source_for_code_instance(&self.module_image, &at, instance_id)
                 .is_some_and(|candidate| !source_line_changed(Some(&source), Some(&candidate)))
@@ -59,6 +65,7 @@ impl<P: InspectionOps> Controller<P> {
                 });
             }
         }
+
         ranges.sort_unstable_by_key(|range| range.start);
 
         let mut decoder =
@@ -73,6 +80,7 @@ impl<P: InspectionOps> Controller<P> {
             if read_bytes > MOST_LINE_BYTES {
                 break;
             }
+
             let read = read_logical_memory(
                 &self.ptrace,
                 pid,
@@ -92,6 +100,7 @@ impl<P: InspectionOps> Controller<P> {
                 else {
                     break;
                 };
+
                 if matches!(flow, ControlFlow::Call | ControlFlow::IndirectCall) {
                     let target = (flow == ControlFlow::Call)
                         .then(|| {
@@ -108,9 +117,11 @@ impl<P: InspectionOps> Controller<P> {
                             .and_then(|target| self.callee_name(inferior, &modules, target)),
                     });
                 }
+
                 offset += length;
             }
         }
+
         Ok(targets.into())
     }
 
@@ -127,10 +138,12 @@ impl<P: InspectionOps> Controller<P> {
         {
             return Some(function.name);
         }
+
         let symbol = describe_address(modules, target).module?.image.symbol?;
         if symbol.offset != 0 {
             return None;
         }
+
         let name =
             crate::demangle::demangle(&symbol.name).unwrap_or_else(|| symbol.name.to_string());
         Some(name.strip_suffix("@plt").unwrap_or(&name).into())
@@ -163,6 +176,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !self.guard_unchosen_call(pid)? {
             return Ok(false);
         }
+
         self.continue_thread(pid)?;
         Ok(true)
     }
@@ -186,14 +200,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         else {
             return Ok(false);
         };
+
         let registers = self.ptrace.registers(pid)?;
         if registers.rip == chosen.get() {
             return Ok(false);
         }
+
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let Some((address, stack)) = self.call_return(inferior, pid, &registers)? else {
             return Ok(false);
         };
+
         let execution = self.active_execution()?;
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([address]))?;
         if let Some(start) = self.active_step_mut() {
@@ -203,6 +220,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 call: true,
             });
         }
+
         record!("{pid} runs the call at {:#x} to {address}", registers.rip);
         Ok(true)
     }

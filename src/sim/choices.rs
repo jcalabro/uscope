@@ -12,23 +12,31 @@
 pub enum Stream {
     /// The run's shape, chosen before it starts.
     Swarm,
+
     /// Which action the world takes next.
     Schedule,
+
     /// What the client asks the debugger to do.
     Client,
+
     /// What the program sees of the outside world, such as `AT_RANDOM`.
     Program,
+
     /// What happens between two of the controller's calls into the kernel.
     Preempt,
+
     /// When planned faults fire.
     Fault,
+
     /// Which breakpoints and watchpoints the client enables, disables, and
     /// makes temporary, and where it advances to. Drawn apart from
     /// [`Stream::Client`], so seeds that never use them choose as before.
     Control,
+
     /// Whether and how the profiler samples running threads. Drawn apart
     /// from the rest, so seeds that never sample choose as before.
     Sample,
+
     /// The shape of the model of the BPF engine's tracepoint stream.
     /// Drawn apart from the rest, so seeds choose as before it existed.
     Trace,
@@ -89,6 +97,7 @@ impl Choices {
     /// If `bound` is zero.
     pub fn below(&mut self, stream: Stream, bound: u64) -> u64 {
         assert!(bound > 0, "an empty range has nothing to choose");
+
         // Lemire's method: the high half of a 128-bit product, rejecting
         // the few low halves that would bias it.
         let threshold = bound.wrapping_neg() % bound;
@@ -131,8 +140,10 @@ impl Choices {
             if draw < weight {
                 return index;
             }
+
             draw -= weight;
         }
+
         unreachable!("a draw below the total weight falls in some weight")
     }
 
@@ -190,6 +201,7 @@ pub const fn fnv1a_continue(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = (hash ^ bytes[index] as u64).wrapping_mul(0x0100_0000_01b3);
         index += 1;
     }
+
     hash
 }
 

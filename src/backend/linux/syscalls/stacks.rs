@@ -20,6 +20,7 @@ use crate::syscalls::CallStack;
 use crate::unwind::sample::{
     FrameRules, SampledFrame, SampledState, StackEnd, unwind_memory, unwind_sample,
 };
+
 use crate::unwind::{MemoryReader, UnwindModule};
 use crate::{
     CodeRole, DebugFileOptions, ImageAddress, LoadBias, LoadedModule, ModuleId, ModuleImageId,
@@ -75,11 +76,14 @@ pub struct Frame {
     /// each frame after, the byte before its return address, inside the
     /// call, as strace names it.
     pub address: VirtualAddress,
+
     /// The mapped file, as `/proc/PID/maps` names it, and the address
     /// within its image.
     pub module: Option<(Arc<str>, ImageAddress)>,
+
     /// The function's symbol and the address's offset from it.
     pub symbol: Option<(Arc<str>, u64)>,
+
     /// The source file and line of the code the frame runs.
     pub source: Option<(String, u64)>,
 }
@@ -95,8 +99,10 @@ pub struct Stacks {
     processes: BTreeMap<Pid, Vec<Mapped>>,
     rules: FrameRules,
     next_module: u32,
+
     /// The identifier the next image read gets, the vDSO's among them.
     next_image: u32,
+
     /// The vDSO's image, read from uscope's own, which the kernel maps
     /// alike into every process, and the address it links at.
     vdso: Vdso,
@@ -175,6 +181,7 @@ impl Stacks {
             let (file, bias) = perf::identify(mmap)?;
             (self.image(&file, mmap.inode.unwrap_or(0)), bias)
         };
+
         let id = image
             .info
             .as_ref()
@@ -184,6 +191,7 @@ impl Stacks {
             image: id,
             load_bias: bias,
         };
+
         self.next_module += 1;
         Some(Mapped {
             start: mmap.start,
@@ -200,6 +208,7 @@ impl Stacks {
             Vdso::Unreadable => return None,
             Vdso::Unread => {}
         }
+
         let id = self.next_image_id();
         let vdso = perf::own_vdso().and_then(|(data, link)| {
             let path = std::path::Path::new(super::super::vdso::VDSO_NAME);
@@ -208,6 +217,7 @@ impl Stacks {
                 info: Some(Arc::new(info)),
                 identity: Some(Arc::new(Identity::of(&data))),
             };
+
             Some((image, link))
         });
         self.vdso = vdso.clone().map_or(Vdso::Unreadable, Vdso::Read);
@@ -266,6 +276,7 @@ impl Stacks {
         if let Some(&first) = stack.first() {
             self.cover(process, Some(first));
         }
+
         stack
             .iter()
             .enumerate()
@@ -281,6 +292,7 @@ impl Stacks {
         } else {
             address.wrapping_sub(1)
         };
+
         let mapped = self.mapping_at(process, code);
         let Some(mapped) = mapped else {
             return Frame {
@@ -290,6 +302,7 @@ impl Stacks {
                 source: None,
             };
         };
+
         let code_address = mapped
             .loaded
             .load_bias
@@ -336,6 +349,7 @@ impl Stacks {
         if let Some(&first) = stack.addresses.first() {
             self.cover(process, Some(first));
         }
+
         let mut frames = Vec::with_capacity(stack.addresses.len() + 1);
         for (index, &address) in stack.addresses.iter().enumerate() {
             let code = if index == 0 {
@@ -343,10 +357,12 @@ impl Stacks {
             } else {
                 address.wrapping_sub(1)
             };
+
             let Some(mapped) = self.mapping_at(process, code) else {
                 frames.push(builder.frame(FrameKind::Native, NONE, code, 0));
                 continue;
             };
+
             let image_address = mapped
                 .loaded
                 .load_bias
@@ -369,11 +385,14 @@ impl Stacks {
                 let inputs: Vec<LineInput<'_>> = lines.iter().map(OwnedLine::input).collect();
                 builder.symbolize(frame, module, &inputs);
             }
+
             frames.push(frame);
         }
+
         if let Some(reason) = stack.truncation() {
             frames.push(builder.truncation(reason, NONE));
         }
+
         builder.stack(&frames)
     }
 
@@ -418,9 +437,11 @@ impl Stacks {
         if known {
             return;
         }
+
         let Ok(mappings) = perf::mappings(process.get()) else {
             return;
         };
+
         let mut modules = Vec::new();
         for mapping in mappings {
             let mmap = decode::Mmap {
@@ -433,8 +454,10 @@ impl Stacks {
                 path: &mapping.path,
                 time: 0,
             };
+
             modules.extend(self.module(&mmap));
         }
+
         self.processes.insert(process, modules);
     }
 
@@ -449,6 +472,7 @@ impl Stacks {
         if let Some(image) = self.images.get(&key) {
             return image.clone();
         }
+
         let id = self.next_image_id();
         let image = crate::image::backing::read_input(file)
             .ok()

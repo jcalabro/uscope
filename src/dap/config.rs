@@ -23,6 +23,7 @@ pub enum Start {
     Attach {
         process: ProcessId,
         executable: Option<PathBuf>,
+
         /// The start time of a process another session held for this one,
         /// which the attach ends the hold of.
         held: Option<u64>,
@@ -47,9 +48,11 @@ pub enum Console {
     #[default]
     #[serde(rename = "internalConsole")]
     Internal,
+
     /// A terminal in the client's window.
     #[serde(rename = "integratedTerminal")]
     Integrated,
+
     /// A terminal in its own window.
     #[serde(rename = "externalTerminal")]
     External,
@@ -62,20 +65,26 @@ pub struct Configuration {
     pub stop_on_entry: bool,
     pub source_paths: SourcePathMap,
     pub syntax: AssemblySyntax,
+
     /// Signal handling applied over the exception filters: each signal's
     /// actions, as the console's `handle` command takes them.
     pub signals: Vec<(u64, Vec<String>)>,
+
     /// View files to present values with, ahead of the project's and the
     /// user's, and where the project's are: in `.uscope/views` under it.
     pub view_files: Vec<PathBuf>,
     pub working_directory: Option<PathBuf>,
+
     /// Whether processes the program forks are debugged in child sessions.
     pub follow_forks: bool,
+
     /// The settings a child session's configuration carries over.
     pub inherited: Map<String, Value>,
     pub threads: ThreadListing,
+
     /// Where modules' separate debug files are found.
     pub debug_files: DebugFileOptions,
+
     /// Whether steps stop in a language runtime's own code.
     pub step_into_runtime: bool,
 }
@@ -86,8 +95,10 @@ pub struct ThreadListing {
     /// Whether a program with a runtime's tasks, such as Go's goroutines,
     /// shows them as its threads, rather than its system threads.
     pub tasks: bool,
+
     /// Whether the tasks a runtime runs for its own work are listed.
     pub runtime_tasks: bool,
+
     /// The most tasks listed; an entry after them says how many more
     /// there are.
     pub max_tasks: usize,
@@ -135,40 +146,54 @@ const INHERITED: [&str; 13] = [
 #[expect(clippy::struct_excessive_bools, reason = "each is a launch option")]
 struct Arguments {
     program: Option<PathBuf>,
+
     #[serde(default)]
     args: Vec<String>,
     cwd: Option<PathBuf>,
+
     #[serde(default)]
     env: BTreeMap<String, Option<String>>,
+
     #[serde(default)]
     stop_on_entry: bool,
+
     #[serde(default, deserialize_with = "source_map")]
     source_map: Vec<[String; 2]>,
     disassembly_syntax: Option<Syntax>,
+
     #[serde(default)]
     signals: BTreeMap<String, Actions>,
+
     #[serde(default)]
     console: Console,
     pid: Option<Pid>,
     core_file: Option<PathBuf>,
     sysroot: Option<PathBuf>,
+
     #[serde(default)]
     module_paths: Vec<PathBuf>,
+
     #[serde(default)]
     allow_module_mismatch: bool,
+
     #[serde(default)]
     view_files: Vec<PathBuf>,
+
     #[serde(default)]
     debug_directories: Vec<PathBuf>,
+
     #[serde(default)]
     debuginfod: bool,
+
     #[serde(default)]
     follow_forks: bool,
     held: Option<Held>,
     threads: Option<Threads>,
+
     #[serde(default)]
     runtime_tasks: bool,
     max_tasks: Option<u32>,
+
     #[serde(default)]
     step_into_runtime: bool,
 }
@@ -215,6 +240,7 @@ pub fn launch(arguments: Value) -> Result<Configuration, String> {
                 .to_owned(),
         );
     }
+
     let program = parsed
         .program
         .clone()
@@ -230,6 +256,7 @@ pub fn launch(arguments: Value) -> Result<Configuration, String> {
         working_directory: parsed.cwd.clone(),
         console: parsed.console,
     };
+
     common(
         parsed,
         Start::Launch(launch),
@@ -279,6 +306,7 @@ pub fn attach(arguments: Value) -> Result<Configuration, String> {
             debug_files: debug_files(&parsed),
         }),
     };
+
     common(parsed, start, inherited, "attach configuration")
 }
 
@@ -315,6 +343,7 @@ fn common(
             .push(&from, &to)
             .map_err(|error| format!("invalid {what} at sourceMap: {error}"))?;
     }
+
     let mut signals = Vec::new();
     for (name, actions) in parsed.signals {
         let code = uscope::signal_named(&name)
@@ -323,22 +352,27 @@ fn common(
             Actions::One(action) => vec![action],
             Actions::Many(actions) => actions,
         };
+
         let mut policy = SignalPolicy {
             stop: false,
             print: false,
             pass: false,
         };
+
         for action in &actions {
             crate::cli::commands::apply_signal_action(&mut policy, action)
                 .map_err(|error| format!("invalid {what} at signals.{name}: {error}"))?;
         }
+
         signals.push((code, actions));
     }
+
     let max_tasks = match parsed.max_tasks {
         Some(0) => return Err(format!("invalid {what} at maxTasks: expected at least 1")),
         Some(max) => usize::try_from(max).unwrap_or(usize::MAX),
         None => ThreadListing::default().max_tasks,
     };
+
     Ok(Configuration {
         debug_files,
         threads: ThreadListing {
@@ -391,6 +425,7 @@ fn source_map<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<[String;
             while let Some(rule) = sequence.next_element::<[String; 2]>()? {
                 rules.push(rule);
             }
+
             Ok(rules)
         }
 
@@ -400,6 +435,7 @@ fn source_map<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<[String;
                 let to = map.next_value::<String>()?;
                 rules.push([from, to]);
             }
+
             Ok(rules)
         }
 
@@ -434,6 +470,7 @@ mod tests {
         let Start::Launch(launch) = &configuration.start else {
             panic!("not a launch");
         };
+
         assert_eq!(launch.program, PathBuf::from("/bin/true"));
         assert_eq!(launch.arguments, ["a", "b c"]);
         assert_eq!(
@@ -442,6 +479,7 @@ mod tests {
         );
         assert!(configuration.stop_on_entry);
         assert_eq!(configuration.syntax, AssemblySyntax::Att);
+
         // Object rules keep their written order, not their sorted order.
         assert_eq!(
             configuration
@@ -503,6 +541,7 @@ mod tests {
         ] {
             assert_eq!(launch(arguments).map(|_| ()), Err(expected.to_owned()));
         }
+
         for (arguments, expected) in [
             (
                 json!({}),
@@ -519,6 +558,7 @@ mod tests {
         ] {
             assert_eq!(attach(arguments).map(|_| ()), Err(expected.to_owned()));
         }
+
         assert_eq!(
             attach(json!({"coreFile": "c", "held": {"startTime": 1}})).map(|_| ()),
             Err("invalid attach configuration: `held` needs `pid`".to_owned())
@@ -583,11 +623,13 @@ mod tests {
                 } else {
                     json!(true)
                 };
+
                 let mut arguments = if matches!(key.as_str(), "pid" | "coreFile") {
                     json!({})
                 } else {
                     base.clone()
                 };
+
                 arguments[key] = wrong;
                 let error = match request {
                     "launch" => launch(arguments),
@@ -617,6 +659,7 @@ mod tests {
                 Some("launch") => launch(configuration.clone()),
                 _ => attach(configuration.clone()),
             };
+
             assert!(parsed.is_ok(), "{configuration}: {parsed:?}");
         }
     }
@@ -665,6 +708,7 @@ mod tests {
                 rest = inner;
             }
         }
+
         filled.push_str(rest);
         filled
     }

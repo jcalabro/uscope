@@ -24,6 +24,7 @@ use super::types::{
     AggregateMemberDeclaration, Bits, DieBuffers, DynamicAggregateLayoutKey, TypeArenaBuilder,
     TypeEntry,
 };
+
 use super::{Metadata, ValueDescription, WalkContext, Walked, dedup, die, row, walk_unit};
 use crate::debug_info::dwarf::budget::Meter;
 use crate::debug_info::dwarf::{DieMap, DwarfError, is_type_unit};
@@ -217,8 +218,10 @@ fn type_id(index: usize) -> Option<TypeId> {
 struct Cut {
     /// How many types the arena held.
     end: usize,
+
     /// How many DIEs it had taken for another's type.
     aliases: usize,
+
     /// What the unit's walk spent.
     budget: Meter,
     foreign: bool,
@@ -239,11 +242,13 @@ impl TypeArenaBuilder<'_, '_> {
         );
         let base = self.entries.base_len();
         check_cut_order(cuts);
+
         // The unit whose walk built a type, by its number.
         let unit_of = |id: usize| cuts.partition_point(|cut| cut.end <= id);
         let made = |made: Option<TypeId>, start: usize, end: usize| {
             made.filter(|id| (start..end).contains(&id.index()))
         };
+
         let mut units = cuts
             .iter()
             .enumerate()
@@ -277,6 +282,7 @@ impl TypeArenaBuilder<'_, '_> {
         for unit in units.iter_mut().rev() {
             unit.entries = entries.split_off(unit.start);
         }
+
         // A DIE taken for another's type goes to the unit that took it, and
         // a type's own to the unit that built it.
         let mut by_die = self.by_die.into_own();
@@ -285,10 +291,12 @@ impl TypeArenaBuilder<'_, '_> {
                 debug_assert!(false, "an alias names its type");
                 return None;
             };
+
             units[cuts.partition_point(|cut| cut.aliases <= position)]
                 .by_die
                 .insert(key, id);
         }
+
         for (key, id) in by_die.into_entries() {
             debug_assert!(
                 id.index() >= base,
@@ -297,9 +305,11 @@ impl TypeArenaBuilder<'_, '_> {
             );
             units[unit_of(id.index())].by_die.insert(key, id);
         }
+
         for id in self.explicit_names.into_own().iter() {
             units[unit_of(id)].explicit_names.insert(id);
         }
+
         let identity_start = self.identity_parts.base_len();
         for (own, parts) in self.identity_parts.into_own().into_iter().enumerate() {
             if let Some(parts) = parts {
@@ -307,34 +317,41 @@ impl TypeArenaBuilder<'_, '_> {
                 units[unit_of(id)].identity_parts.push((id, parts));
             }
         }
+
         for (id, parts) in self.go_identity_parts.into_own() {
             units[unit_of(id.index())]
                 .go_identity_parts
                 .insert(id, parts);
         }
+
         for (id, index) in self.go_dict_indices.into_own() {
             units[unit_of(id.index())].go_dict_indices.insert(id, index);
         }
+
         for (id, by_value) in self.passed_by_value.into_own() {
             units[unit_of(id.index())]
                 .passed_by_value
                 .insert(id, by_value);
         }
+
         for pending in self.pending_arguments {
             units[unit_of(pending.entry)]
                 .pending_arguments
                 .push(pending);
         }
+
         for declaration in self.record_member_declarations {
             units[unit_of(declaration.aggregate.index())]
                 .record_member_declarations
                 .push(declaration);
         }
+
         for (key, expression) in self.dynamic_record_layouts {
             units[unit_of(key.aggregate.index())]
                 .dynamic_record_layouts
                 .insert(key, expression);
         }
+
         Some(units)
     }
 
@@ -378,6 +395,7 @@ impl TypeArenaBuilder<'_, '_> {
                 before.filter(|_| made.is_some_and(|id| id.index() == first + own))
             })
         };
+
         let mut next = self.entries.len();
         let numbered = (0..unit.entries.len())
             .map(|own| {
@@ -397,6 +415,7 @@ impl TypeArenaBuilder<'_, '_> {
             if shared(own).is_some() {
                 continue;
             }
+
             self.entries.push(match entry {
                 TypeEntry::Resolved(mut info) => {
                     info.reference = renumbered.reference(info.reference);
@@ -408,42 +427,52 @@ impl TypeArenaBuilder<'_, '_> {
                 other => other,
             });
         }
+
         if self.void_type.is_none() {
             self.void_type = own_void.map(|id| renumbered.id(id));
         }
+
         if self.character_type.is_none() {
             self.character_type = own_character.map(|id| renumbered.id(id));
         }
+
         for own in unit.explicit_names.iter() {
             let id = type_id(own)?;
             self.explicit_names.insert(renumbered.id(id).index());
         }
+
         for (id, mut parts) in unit.identity_parts {
             for argument in &mut parts.template {
                 if let TypeArgument::Type(reference) = argument {
                     *reference = renumbered.reference(*reference);
                 }
             }
+
             let id = type_id(id)?;
             let index = renumbered.id(id).index();
             self.identity_parts.resize_with(index + 1, || None);
             self.identity_parts[index] = Some(parts);
         }
+
         for (id, mut parts) in unit.go_identity_parts {
             parts.map_references(|reference| renumbered.reference(reference));
             self.go_identity_parts.insert(renumbered.id(id), parts);
         }
+
         for (id, index) in unit.go_dict_indices {
             self.go_dict_indices.insert(renumbered.id(id), index);
         }
+
         for (id, by_value) in unit.passed_by_value {
             self.passed_by_value.insert(renumbered.id(id), by_value);
         }
+
         for mut pending in unit.pending_arguments {
             let id = type_id(pending.entry)?;
             pending.entry = renumbered.id(id).index();
             self.pending_arguments.push(pending);
         }
+
         self.record_member_declarations
             .extend(
                 unit.record_member_declarations
@@ -458,6 +487,7 @@ impl TypeArenaBuilder<'_, '_> {
             self.dynamic_record_layouts
                 .insert(key, pooled.expression(expression));
         }
+
         let mut by_die = unit.by_die;
         by_die.map_values(|id| renumbered.id(id));
         self.by_die.extend_own(by_die);
@@ -488,32 +518,39 @@ fn absorb_walked(
         {
             *id = types.id(*id);
         }
+
         if let Some(declaration) = &mut object.declaration {
             file(declaration);
         }
+
         if let Some(declaration) = &mut object.go_declaration {
             file(&mut declaration.location);
         }
+
         pooled.value(&mut object.value);
         pooled.frame_base(&mut object.frame_base);
         object.order = order.checked_add(object.order)?;
         into.objects.push(object);
     }
+
     into.functions
         .extend(unit.functions.drain(..).map(|mut function| {
             for object in &mut function.objects {
                 *object += row(objects);
             }
+
             if let Ok(captures) = &mut function.captures {
                 for capture in captures {
                     types.resolution(&mut capture.type_info);
                 }
             }
+
             if let Some(super::returns::ReturnConvention::SystemV(convention)) =
                 &mut function.returns
             {
                 types.resolution(&mut convention.ty);
             }
+
             function
         }));
     into.calls.absorb(std::mem::take(&mut unit.calls), pooled);
@@ -556,6 +593,7 @@ fn absorb_walked(
             .collect();
         into.function_generics.insert(instance, generics);
     }
+
     into.order = order.checked_add(unit.order)?;
     Some(())
 }
@@ -641,8 +679,10 @@ struct Merge<'m, 'a, 'data> {
     types: &'m mut TypeArenaBuilder<'a, 'data>,
     files: &'m mut Files,
     pool: &'m mut LocationsBuilder,
+
     /// Where each group's types added so far are numbered, by the group.
     groups: HashMap<usize, Vec<TypeId>>,
+
     /// Whether every unit added so far kept to its own types, the budget,
     /// and the tables' numbering.
     kept: bool,
@@ -661,6 +701,7 @@ impl Merge<'_, '_, '_> {
             self.kept = false;
             return;
         };
+
         if !self.kept
             || unit.result.is_err()
             || unit.types.foreign
@@ -676,10 +717,12 @@ impl Merge<'_, '_, '_> {
             self.kept = false;
             return;
         }
+
         let Ok((expressions, lists)) = self.pool.absorb(&unit.pool) else {
             self.kept = false;
             return;
         };
+
         let pooled = Pooled { expressions, lists };
         let files = unit
             .files
@@ -692,6 +735,7 @@ impl Merge<'_, '_, '_> {
             self.kept = false;
             return;
         };
+
         if absorb_walked(self.walked, &mut unit.walked, &renumbered, &pooled, &files).is_none() {
             self.kept = false;
         }
@@ -713,6 +757,7 @@ pub(super) fn walk_units_apart<'data>(
     walk_ahead: usize,
 ) -> bool {
     let units = &cx.catalog.units;
+
     // One worker would only add copying each unit's records, and a type
     // unit's declarations name files by suffixes, which name the files
     // interned before them.
@@ -722,11 +767,14 @@ pub(super) fn walk_units_apart<'data>(
     {
         return false;
     }
+
     let _phase = crate::span!("variables.walk_apart");
+
     // A unit whose references cannot be read fails the walk in order.
     let Ok(groups) = units.groups() else {
         return false;
     };
+
     // Claiming in order needs each group named by its first unit.
     for (unit, &group) in groups.iter().enumerate() {
         debug_assert!(
@@ -734,11 +782,13 @@ pub(super) fn walk_units_apart<'data>(
             "unit {unit}'s group {group} is not named by the group's first unit"
         );
     }
+
     debug_assert!(walk_ahead > 0, "a walk window of no units waits forever");
     let mut members = vec![Vec::new(); units.len()];
     for (unit, group) in groups.iter().enumerate() {
         members[*group].push(unit);
     }
+
     crate::count!(
         "unit_groups",
         members.iter().filter(|units| !units.is_empty()).count()
@@ -755,6 +805,7 @@ pub(super) fn walk_units_apart<'data>(
         groups: HashMap::default(),
         kept: true,
     };
+
     let order = members
         .iter()
         .enumerate()
@@ -775,6 +826,7 @@ pub(super) fn walk_units_apart<'data>(
     if merge.kept {
         return true;
     }
+
     checkpoint.restore(merge.walked, merge.types, merge.files, merge.pool);
     false
 }
@@ -799,6 +851,7 @@ fn walk_group<'data>(
     let mut types = frozen.split(home, &pools[0], &die_buffers);
     let mut walks = Vec::with_capacity(units.len());
     let mut cuts = Vec::with_capacity(units.len());
+
     // The group's units share the names they hold.
     let mut names = super::Names::default();
     for (&unit_index, pool) in units.iter().zip(&pools) {
@@ -808,6 +861,7 @@ fn walk_group<'data>(
             names: std::mem::take(&mut names),
             ..Walked::default()
         };
+
         let mut files = Files::default();
         let result = walk_unit(
             cx,
@@ -830,11 +884,13 @@ fn walk_group<'data>(
             break;
         }
     }
+
     let Some(built) = types.into_unit_types(&cuts) else {
         // The units' types cannot be taken apart, so none of them is kept:
         // each is walked in order instead.
         return units.iter().map(|&unit| (unit, None)).collect();
     };
+
     let mut built = built.into_iter();
     let mut walks = walks.into_iter();
     units

@@ -15,11 +15,13 @@ pub fn qualified_name(mangled: &str) -> Option<String> {
     if mangled == "_Dmain" {
         return Some("D main".to_owned());
     }
+
     let mut reader = Reader {
         text: mangled.as_bytes(),
         at: 0,
         depth: 0,
     };
+
     let name = reader.mangled_name()?;
     (reader.at == reader.text.len()).then_some(name)
 }
@@ -50,6 +52,7 @@ impl<'a> Reader<'a> {
         if found {
             self.at += 1;
         }
+
         found
     }
 
@@ -62,6 +65,7 @@ impl<'a> Reader<'a> {
         if self.depth >= DEPTH_LIMIT {
             return None;
         }
+
         self.depth += 1;
         let read = read(self);
         self.depth -= 1;
@@ -74,11 +78,13 @@ impl<'a> Reader<'a> {
         if !self.starts_with(b"_D") {
             return None;
         }
+
         self.at += 2;
         let name = self.qualified_name()?;
         if self.eat(b'Z') {
             return Some(name);
         }
+
         self.symbol_type()?;
         Some(name)
     }
@@ -89,6 +95,7 @@ impl<'a> Reader<'a> {
         if self.eat(b'M') {
             self.modifiers();
         }
+
         self.read_type()
     }
 
@@ -98,6 +105,7 @@ impl<'a> Reader<'a> {
         if !self.starts_with(b"_D") {
             return None;
         }
+
         self.at += 2;
         self.qualified_name()?;
         self.symbol_type()
@@ -114,17 +122,21 @@ impl<'a> Reader<'a> {
                 if !name.is_empty() {
                     name.push('.');
                 }
+
                 reader.symbol_name(&mut name)?;
                 let before = reader.at;
                 if reader.peek() == Some(b'M') || reader.peek().is_some_and(call_convention) {
                     if reader.eat(b'M') {
                         reader.modifiers();
                     }
+
                     if reader.function_without_return().is_some() && reader.starts_symbol_name() {
                         continue;
                     }
+
                     reader.at = before;
                 }
+
                 if !reader.starts_symbol_name() {
                     return Some(name);
                 }
@@ -144,6 +156,7 @@ impl<'a> Reader<'a> {
                     at: self.at,
                     depth: self.depth,
                 };
+
                 probe
                     .back_reference()
                     .is_some_and(|target| self.text[target].is_ascii_digit())
@@ -160,6 +173,7 @@ impl<'a> Reader<'a> {
             name.push_str("!(…)");
             return self.template_arguments();
         }
+
         name.push_str(self.named()?);
         Some(())
     }
@@ -169,12 +183,14 @@ impl<'a> Reader<'a> {
         if self.peek() != Some(b'Q') {
             return self.identifier();
         }
+
         let target = self.back_reference()?;
         let mut referred = Reader {
             text: self.text,
             at: target,
             depth: self.depth,
         };
+
         referred.identifier()
     }
 
@@ -185,6 +201,7 @@ impl<'a> Reader<'a> {
         if !self.peek()?.is_ascii_digit() || self.peek() == Some(b'0') {
             return None;
         }
+
         let length = self.number()?;
         let end = self.at.checked_add(length)?;
         let bytes = self.text.get(self.at..end)?;
@@ -198,6 +215,7 @@ impl<'a> Reader<'a> {
         if !identifier {
             return None;
         }
+
         self.at = end;
         Some(text)
     }
@@ -211,6 +229,7 @@ impl<'a> Reader<'a> {
                 .checked_add(usize::from(digit - b'0'))?;
             self.at += 1;
         }
+
         (self.at > start).then_some(value)
     }
 
@@ -221,6 +240,7 @@ impl<'a> Reader<'a> {
         if !self.eat(b'Q') {
             return None;
         }
+
         let mut distance = 0_usize;
         loop {
             let digit = self.next()?;
@@ -229,11 +249,13 @@ impl<'a> Reader<'a> {
                 b'a'..=b'z' => (digit - b'a', true),
                 _ => return None,
             };
+
             distance = distance.checked_mul(26)?.checked_add(usize::from(value))?;
             if last {
                 break;
             }
         }
+
         (distance != 0 && distance <= at).then(|| at - distance)
     }
 
@@ -275,11 +297,13 @@ impl<'a> Reader<'a> {
             at: self.at,
             depth: self.depth,
         };
+
         probe.modifiers();
         if probe.peek() == Some(b'Q') {
             let target = probe.back_reference()?;
             return self.text.get(target).copied();
         }
+
         probe.peek()
     }
 
@@ -300,6 +324,7 @@ impl<'a> Reader<'a> {
                 for _ in 0..length.checked_mul(2)? {
                     reader.next().filter(u8::is_ascii_hexdigit)?;
                 }
+
                 Some(())
             }
             b'A' => {
@@ -309,9 +334,11 @@ impl<'a> Reader<'a> {
                 } else {
                     count
                 };
+
                 for _ in 0..values {
                     reader.element_value()?;
                 }
+
                 Some(())
             }
             b'S' => {
@@ -319,6 +346,7 @@ impl<'a> Reader<'a> {
                 for _ in 0..count {
                     reader.element_value()?;
                 }
+
                 Some(())
             }
             b'f' => reader.symbol(),
@@ -341,6 +369,7 @@ impl<'a> Reader<'a> {
                 return Some(());
             }
         }
+
         self.eat(b'N');
         let start = self.at;
         while self
@@ -349,9 +378,11 @@ impl<'a> Reader<'a> {
         {
             self.at += 1;
         }
+
         if self.at == start || !self.eat(b'P') {
             return None;
         }
+
         self.eat(b'N');
         self.number().map(drop)
     }
@@ -362,10 +393,12 @@ impl<'a> Reader<'a> {
             if self.eat(b'x') || self.eat(b'y') || self.eat(b'O') {
                 continue;
             }
+
             if self.starts_with(b"Ng") {
                 self.at += 2;
                 continue;
             }
+
             return;
         }
     }
@@ -380,6 +413,7 @@ impl<'a> Reader<'a> {
                     _ => None,
                 }
             }
+
             // Modifiers, arrays, and pointers.
             b'x' | b'y' | b'O' | b'A' | b'P' => {
                 reader.at += 1;
@@ -405,6 +439,7 @@ impl<'a> Reader<'a> {
                 if reader.peek() == Some(b'Q') {
                     return reader.read_type();
                 }
+
                 reader.function()
             }
             byte if call_convention(byte) => reader.function(),
@@ -436,6 +471,7 @@ impl<'a> Reader<'a> {
         if !call_convention(self.next()?) {
             return None;
         }
+
         while self.peek() == Some(b'N')
             && self
                 .peek_at(1)
@@ -443,6 +479,7 @@ impl<'a> Reader<'a> {
         {
             self.at += 2;
         }
+
         loop {
             match self.peek()? {
                 b'X' | b'Y' | b'Z' => {
@@ -455,6 +492,7 @@ impl<'a> Reader<'a> {
                     if self.starts_with(b"Nk") {
                         self.at += 2;
                     }
+
                     if matches!(self.peek()?, b'I' | b'J' | b'K' | b'L') {
                         // A storage class: in, out, ref, or lazy. `I` also
                         // begins an identifier's type, which is read when
@@ -464,8 +502,10 @@ impl<'a> Reader<'a> {
                         if self.read_type().is_some() {
                             continue;
                         }
+
                         self.at = class;
                     }
+
                     self.read_type()?;
                 }
             }

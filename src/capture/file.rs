@@ -15,6 +15,7 @@ use super::{Capture, CaptureBuilder};
 use crate::image::{AlignedBytes, ImageError};
 
 pub const FILE_MAGIC: [u8; 8] = *b"USCOPEPF";
+
 pub const FILE_VERSION: u32 = 1;
 const INDEX_MAGIC: [u8; 8] = *b"USCOPEIX";
 const END_MAGIC: [u8; 8] = *b"USCOPEND";
@@ -25,10 +26,13 @@ const HEADER: usize = 16;
 pub enum FileError {
     #[error("the file is not a uscope capture")]
     NotACapture,
+
     #[error("the capture file's version is {0}, and this uscope reads version {FILE_VERSION}")]
     Version(u32),
+
     #[error("the capture holds no complete chunk")]
     Empty,
+
     #[error("a chunk of the capture is damaged: {0}")]
     Chunk(ImageError),
 }
@@ -77,6 +81,7 @@ impl<W: std::io::Write> Writer<W> {
             index.extend_from_slice(&offset.to_le_bytes());
             index.extend_from_slice(&length.to_le_bytes());
         }
+
         let length = index.len() as u64;
         index.extend_from_slice(&length.to_le_bytes());
         index.extend_from_slice(&END_MAGIC);
@@ -102,8 +107,10 @@ pub fn write(capture: &Capture, out: impl std::io::Write) -> std::io::Result<()>
 pub struct Read {
     /// Every chunk merged into one capture.
     pub capture: Capture,
+
     /// Chunks read.
     pub chunks: usize,
+
     /// Whether the file ended without its index, as one cut short does.
     pub truncated: bool,
 }
@@ -113,6 +120,7 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
     if bytes.len() < HEADER || bytes[..8] != FILE_MAGIC {
         return Err(FileError::NotACapture);
     }
+
     let version = u32::from_le_bytes(
         *bytes
             .get(8..)
@@ -122,6 +130,7 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
     if version != FILE_VERSION {
         return Err(FileError::Version(version));
     }
+
     let (spans, truncated) =
         index(bytes).map_or_else(|| (scan(bytes), true), |spans| (spans, false));
     let mut captures = Vec::with_capacity(spans.len());
@@ -129,9 +138,11 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
         let (Ok(offset), Ok(length)) = (usize::try_from(*offset), usize::try_from(*length)) else {
             return Err(FileError::Chunk(ImageError::TooLarge));
         };
+
         let chunk = bytes
             .get(offset..offset.saturating_add(length))
             .ok_or(FileError::Chunk(ImageError::Truncated))?;
+
         // Chunks are read from aligned copies: a table's records are read in
         // place, and the file's bytes need not be aligned.
         let mut aligned =
@@ -139,6 +150,7 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
         aligned.as_mut_bytes().copy_from_slice(chunk);
         captures.push(Capture::from_chunk(aligned.as_bytes()).map_err(FileError::Chunk)?);
     }
+
     let chunks = captures.len();
     let capture = match captures.pop() {
         None => return Err(FileError::Empty),
@@ -149,9 +161,11 @@ pub fn read(bytes: &[u8]) -> Result<Read, FileError> {
             for capture in &captures {
                 builder.absorb(capture);
             }
+
             builder.finish()
         }
     };
+
     Ok(Read {
         capture,
         chunks,
@@ -165,16 +179,19 @@ fn index(bytes: &[u8]) -> Option<Vec<(u64, u64)>> {
     if bytes[end + 8..] != END_MAGIC {
         return None;
     }
+
     let length = usize::try_from(u64::from_le_bytes(bytes[end..end + 8].try_into().ok()?)).ok()?;
     let start = end.checked_sub(length)?;
     let index = bytes.get(start..end)?;
     if index.len() < 12 || index[..8] != INDEX_MAGIC {
         return None;
     }
+
     let count = u32::from_le_bytes(index[8..12].try_into().ok()?) as usize;
     if index.len() != 12 + 16 * count {
         return None;
     }
+
     let spans: Vec<(u64, u64)> = index[12..]
         .as_chunks::<16>()
         .0
@@ -214,11 +231,14 @@ fn scan(bytes: &[u8]) -> Vec<(u64, u64)> {
         else {
             break;
         };
+
         if bytes.get(start..start + 8) != Some(&b"USCOPECP"[..]) {
             break;
         }
+
         spans.push((start as u64, length));
         position = end;
     }
+
     spans
 }

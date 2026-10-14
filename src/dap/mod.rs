@@ -83,6 +83,7 @@ pub async fn run(args: &DapArgs) -> Result<()> {
         )))),
         None => Log::default(),
     };
+
     let address = args.listen.or_else(|| {
         args.port
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
@@ -116,6 +117,7 @@ async fn terminated(signals: [Option<tokio::signal::unix::Signal>; 3]) {
             None => std::future::pending().await,
         }
     };
+
     tokio::select! {
         () = wait(terminate.take()) => {}
         () = wait(interrupt.take()) => {}
@@ -150,8 +152,10 @@ async fn listen(address: SocketAddr, log: Log) -> Result<()> {
             () = &mut stop => return Ok(()),
             accepted = listener.accept() => accepted.context("failed to accept a client")?,
         };
+
         log.record("--", &format!("client {peer} connected"));
         let (read, write) = stream.into_split();
+
         // A session ends early when the adapter is asked to stop.
         let (stopped, stopping) = tokio::sync::oneshot::channel::<()>();
         let session = serve(BufReader::new(read), write, None, log.clone(), async {
@@ -166,6 +170,7 @@ async fn listen(address: SocketAddr, log: Log) -> Result<()> {
                 true
             }
         };
+
         log.record("--", &format!("client {peer} disconnected"));
         if interrupted {
             return Ok(());
@@ -209,6 +214,7 @@ async fn serve<R, W>(
         console.abort();
         let _ = console.await;
     }
+
     let _ = reader.await;
     let _ = writer.await;
 }
@@ -246,11 +252,13 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                 return;
             }
         };
+
         if frame.origin {
             // Only a web page sends Origin; it must not drive a debugger.
             log.record("!!", "refused a message with an Origin header");
             return;
         }
+
         log.record("<-", &String::from_utf8_lossy(&frame.body));
         let message = match protocol::parse(&frame.body) {
             Ok(Incoming::Request {
@@ -266,12 +274,14 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                 {
                     cancelled.insert(request.to_string());
                 }
+
                 Inbound::Request {
                     seq,
                     command,
                     arguments,
                 }
             }
+
             Ok(Incoming::Response {
                 request_seq: Some(seq),
                 result,
@@ -279,6 +289,7 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                 if let Ok(mut responses) = responses.lock() {
                     responses.settle(seq, result);
                 }
+
                 continue;
             }
             Ok(Incoming::Response { .. }) => continue,
@@ -297,6 +308,7 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                 }
             }
         };
+
         if inbound.send(message).await.is_err() {
             return;
         }
@@ -318,6 +330,7 @@ async fn write_messages<W: AsyncWrite + Unpin>(
         {
             responses.sent(*ticket, seq);
         }
+
         let body: Value = message.to_json(seq);
         let text = body.to_string();
         log.record("->", &text);

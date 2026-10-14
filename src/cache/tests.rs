@@ -78,6 +78,7 @@ fn an_entry_reads_back_under_the_key_of_exactly_its_inputs() {
     for (index, key) in keys.iter().enumerate() {
         assert!(!keys[..index].contains(key), "{index}");
     }
+
     assert_eq!(Key::of(&[b"ab", b"c"]), keys[0]);
 
     let dir = ScratchDir::new("cache-read-back");
@@ -88,6 +89,7 @@ fn an_entry_reads_back_under_the_key_of_exactly_its_inputs() {
     cache.put(keys[1], &second).unwrap();
     assert_eq!(bytes_of(cache.get(keys[0])), first.as_bytes());
     assert_eq!(bytes_of(cache.get(keys[1])), second.as_bytes());
+
     // A later write replaces the entry whole.
     cache.put(keys[0], &second).unwrap();
     assert_eq!(bytes_of(cache.get(keys[0])), second.as_bytes());
@@ -141,6 +143,7 @@ fn a_reader_removes_only_the_entry_it_found_unusable() {
     let Lookup::Hit { stamp, .. } = cache.get(key) else {
         panic!("a hit")
     };
+
     cache.discard(key, &stamp);
     assert!(matches!(cache.get(key), Lookup::Miss));
 }
@@ -160,10 +163,12 @@ fn opening_evicts_the_entries_used_longest_ago() {
         cache.put(*key, &entry).unwrap();
         set_modified(&cache.path(*key), 1_000 + i64::try_from(age).unwrap() * 10);
     }
+
     let left = directory.join(format!(".{}.1.0.tmp", keys[0]));
     std::fs::write(&left, vec![0; usize::try_from(length).unwrap()]).unwrap();
     set_modified(&left, 1_005);
     std::fs::write(directory.join("notes"), b"mine").unwrap();
+
     // Keys 0 and 1 are the oldest, but 0 is read now.
     assert!(matches!(cache.get(keys[0]), Lookup::Hit { .. }));
 
@@ -248,6 +253,7 @@ fn the_first_source_that_names_a_cache_wins() {
         resolve(None, None, os("/xdg"), os("/home"), false),
         dir("/xdg/uscope/images")
     );
+
     // A relative XDG directory is ignored, as the specification says.
     assert_eq!(
         resolve(None, None, os("xdg"), os("/home"), false),
