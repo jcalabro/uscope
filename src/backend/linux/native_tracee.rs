@@ -204,10 +204,10 @@ impl NativeTracee {
         &self,
         thread: Tid,
     ) -> std::result::Result<(i32, i32, Option<i32>, Option<u64>), Errno> {
-        let raw = nix::sys::ptrace::getsiginfo(Pid::from_raw(thread))?;
-        let metadata = super::native::signal_metadata(&raw);
+        let bytes = super::sys::siginfo(Pid::from_raw(thread))?;
+        let (number, metadata) = super::native::decode_siginfo(&bytes);
         Ok((
-            raw.si_signo,
+            number,
             metadata.code,
             metadata.sender,
             metadata.fault_address,

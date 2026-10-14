@@ -113,7 +113,7 @@ Each step lists how we know it worked.
   buffer as well as a mapping. Miri tests act as the kernel: records that
   wrap, a full ring, an empty one. *Done when* `just miri` covers them, and
   the profiler benchmark shows no change.
-- [ ] **6. siginfo from bytes.** `signal_metadata` decodes the sender
+- [x] **6. siginfo from bytes.** `signal_metadata` decodes the sender
   and fault address from the 128 bytes `PTRACE_GETSIGINFO` returns, as
   `syscalls/ptrace.rs` already does, with no union reads. *Done when* the
   signal and crash tests pass, including a fault address and a sender pid.
@@ -290,4 +290,14 @@ Decisions, measurements, and surprises, newest last.
   miri`: either ordering made relaxed (a data race), the wrap dropped (an
   access out of bounds), and the size check dropped (a test fails).
   `just profile-overhead` shows every workload within its noise.
+- 2026-10-13, step 6: `native::decode_siginfo` reads a signal's number,
+  code, sender, and fault address from the 128 bytes `sys::siginfo`
+  returns. Live stops, the conformance tracee, and core dumps all use it,
+  so `core_dump.rs` lost its own copy. Reading the sender from the wrong
+  offset passed every live test: the one that checked it matched only
+  "sent by process ". It now requires the program's own pid, and fails on
+  that mutation (it showed uid 1000). A fault address from the wrong
+  offset fails the DAP crash test, and a code from the wrong offset fails
+  the signal tests. Outside `sys.rs`, the backend's only unsafe code is
+  the SIGURG handler.
 

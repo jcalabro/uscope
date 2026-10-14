@@ -556,16 +556,13 @@ fn parse_siginfo(bytes: &[u8]) -> Result<CoreSignal, CoreError> {
             bytes.len()
         )));
     }
-    let number = i32_at(bytes, 0);
-    let code = i32_at(bytes, 8);
-    // The union after the common header holds a fault address for kernel
-    // fault reports and the sender for user-generated signals.
+    let bytes = bytes.try_into().expect("its size was just checked");
+    let (number, metadata) = super::native::decode_siginfo(bytes);
     Ok(CoreSignal {
         number,
-        code,
-        fault_address: super::native::siginfo_has_fault_address(number, code)
-            .then(|| u64_at(bytes, 16)),
-        sender: super::native::siginfo_names_sender(code).then(|| i32_at(bytes, 16)),
+        code: metadata.code,
+        fault_address: metadata.fault_address,
+        sender: metadata.sender,
     })
 }
 

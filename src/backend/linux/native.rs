@@ -578,7 +578,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
         self.assert_owner_thread();
-        ptrace::getsiginfo(pid).map(|info| signal_metadata(&info))
+        super::sys::siginfo(pid).map(|bytes| decode_siginfo(&bytes).1)
     }
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
@@ -862,26 +862,23 @@ pub(super) const fn errno(error: rustix::io::Errno) -> Errno {
     Errno::from_raw(error.raw_os_error())
 }
 
-#[allow(
-    unsafe_code,
-    reason = "libc exposes siginfo sender fields through union accessors"
-)]
-pub(super) fn signal_metadata(info: &libc::siginfo_t) -> SignalMetadata {
-    let code = info.si_code;
-    let sender = if siginfo_names_sender(code) {
-        // SAFETY: these si_code values select a siginfo layout containing si_pid.
-        Some(unsafe { info.si_pid() })
-    } else {
-        None
+/// A signal's number and what its siginfo says of it, from the 128 bytes
+/// the kernel writes: the number at 0 and the code at 8, then a union at
+/// 16 whose layout the code selects, holding the sender's process or the
+/// faulting address.
+pub(super) fn decode_siginfo(bytes: &[u8; 128]) -> (i32, SignalMetadata) {
+    let i32_at = |offset: usize| {
+        i32::from_ne_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
     };
-    let fault_address = siginfo_has_fault_address(info.si_signo, code)
-        // SAFETY: a kernel-raised fault's siginfo layout contains si_addr.
-        .then(|| unsafe { info.si_addr() } as u64);
-    SignalMetadata {
+    let number = i32_at(0);
+    let code = i32_at(8);
+    let metadata = SignalMetadata {
         code,
-        sender,
-        fault_address,
-    }
+        sender: siginfo_names_sender(code).then(|| i32_at(16)),
+        fault_address: siginfo_has_fault_address(number, code)
+            .then(|| u64::from_ne_bytes(bytes[16..24].try_into().expect("eight bytes"))),
+    };
+    (number, metadata)
 }
 
 /// Whether a signal's siginfo names the process that sent it. Other user
