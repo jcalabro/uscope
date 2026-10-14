@@ -129,7 +129,7 @@ Each step lists how we know it worked.
   `ps_pglobal_lookup`, and `ps_getpid` directly, with a boxed handle and a
   fake `ProcessServices`. Check that no `&mut` path to the boxed handle
   is live while a callback runs. *Done when* `just miri` covers them.
-- [ ] **9. Keep it there.** A lint step that fails when
+- [x] **9. Keep it there.** A lint step that fails when
   `allow(unsafe_code)` appears outside the files listed in section 2.
   `dev/` says where unsafe code may live and that `just miri` covers it.
   *Done when* `just` passes and the check fails on a planted site.
@@ -334,3 +334,11 @@ Decisions, measurements, and surprises, newest last.
   yet. The handle now owns the process as a raw pointer from a leaked
   box, freed when it drops, and the test passes. The in-file unit test of
   a lookup without an object moved into the Miri test.
+- 2026-10-13, step 9: `scripts/unsafe-sites.sh`, the first step of
+  `just lint`, fails when a Rust file outside its list mentions
+  `unsafe_code`, tracked or not, or when `Cargo.toml` or
+  `fuzz/Cargo.toml` stops denying it. The fuzz crate did not deny unsafe
+  code before; it does now, and `fuzz_target!`'s expansion passes. The
+  list is section 2's, plus `main.rs` and `cli/config.rs` (step 4) and
+  the test files. A new file, an `expect` added to an existing one, and
+  a manifest set to allow each fail it. `dev/index.md` lists the files.

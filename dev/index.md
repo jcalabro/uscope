@@ -251,6 +251,26 @@ that states the caller and data invariants, and it must satisfy the configured
 lints. Prefer validated byte views and existing abstractions over widening an
 unsafe block.
 
+Unsafe code lives in a few files, which `scripts/unsafe-sites.sh` lists and
+`just lint` enforces:
+
+- `backend/linux/sys.rs`: what a child does before exec, the ptrace requests
+  nix cannot make, and `tgkill`.
+- `backend/linux/perf/sys.rs`: `perf_event_open`, its ioctls, and the ring
+  mapping.
+- `backend/linux/tls/thread_db.rs`: libthread_db and its callbacks.
+- `backend/linux/syscalls/ptrace.rs`: the SIGURG handler that interrupts a
+  blocking `waitpid`.
+- `timings/alloc.rs`: the counting allocator.
+- `cli/syscalls.rs`: `localtime_r`.
+- `main.rs` and `cli/config.rs`: removing environment variables before uscope
+  starts any other thread, and the global allocator.
+
+The rest of the backend reaches these through safe functions. Code that Miri
+can run has tests in `tests/miri.rs`, which `just miri` runs (see
+[testing](testing.md#miri)). Adding a file to the list needs a reason a safe
+crate cannot give.
+
 ## Before committing
 
 Review the diff for:

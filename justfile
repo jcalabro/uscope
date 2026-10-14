@@ -59,8 +59,10 @@ run *ARGS: build
 # Checks formatting and runs Clippy on development and release builds, which
 # differ in what the flight recorder compiles. Incremental checking halves the
 # release lint after an edit and leaves release builds as they are. The Rust
-# probe SDK is its own crate, with its own target directory.
+# probe SDK is its own crate, with its own target directory. Unsafe code stays
+# in the files scripts/unsafe-sites.sh lists.
 lint:
+    ./scripts/unsafe-sites.sh
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
     CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings
