@@ -101,6 +101,8 @@ pub(super) enum ScopeSegment {
 /// synthesizes for its runtime none.
 pub(super) fn go_runtime_type(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> Option<u64> {
     match entry.attr_value(DW_AT_GO_RUNTIME_TYPE)? {
+        // Go's linker writes the offset from `runtime.types` in the
+        // attribute's address form, not the descriptor's address.
         gimli::AttributeValue::Addr(offset) => Some(offset),
         value => value.udata_value(),
     }
