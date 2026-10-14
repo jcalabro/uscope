@@ -58,7 +58,8 @@ not current user documentation. Do not rewrite them while changing docs.
 - Resolve source paths while loading metadata, but read source files lazily and
   outside the controller thread.
 - Unsafe code is denied unless narrowly required. Every exception needs a
-  safety comment and must pass the configured lints.
+  safety comment and must pass the configured lints. Unsafe code must be
+  tested under Miri.
 
 ## Testing
 
