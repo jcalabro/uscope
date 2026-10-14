@@ -346,6 +346,28 @@ pub(super) const fn apply_user_registers(registers: &mut Registers, user: &libc:
     registers.gs_base = user.gs_base;
 }
 
+/// A change `PTRACE_SETREGS` would make to `current` that the model does
+/// not give its meaning: which call a thread at a system-call stop makes,
+/// the segment registers, or the trap and resume flags, which make the
+/// thread trap after every instruction or skip a debug exception.
+pub(super) fn unmodeled_register_change(
+    current: &libc::user_regs_struct,
+    written: &libc::user_regs_struct,
+) -> Option<&'static str> {
+    const TRAP_AND_RESUME: u64 = 0x0001_0100;
+    let segments =
+        |user: &libc::user_regs_struct| [user.cs, user.ss, user.ds, user.es, user.fs, user.gs];
+    if written.orig_rax != current.orig_rax {
+        Some("writing orig_rax")
+    } else if segments(written) != segments(current) {
+        Some("writing segment registers")
+    } else if (written.eflags ^ current.eflags) & TRAP_AND_RESUME != 0 {
+        Some("writing the trap or resume flag")
+    } else {
+        None
+    }
+}
+
 fn wait_event(status: WaitStatus) -> WaitEvent {
     let pid = Pid::from_raw(status.tid());
     let signal = |number| Signal::new(number).expect("the kernel reports real signals");
@@ -652,7 +674,14 @@ impl LinuxTraceOps for SimTrace {
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
         let mut kernel = self.kernel_mut();
-        let mut current = kernel.get_registers(tid(pid)).map_err(system)?;
+        let (mut current, orig_rax) = kernel.get_registers_and_call(tid(pid)).map_err(system)?;
+        if let Some(change) =
+            unmodeled_register_change(&user_registers(&current, orig_rax), &registers)
+        {
+            drop(kernel);
+            return self.gap(change);
+        }
+
         apply_user_registers(&mut current, &registers);
         kernel.set_registers(tid(pid), current).map_err(system)
     }
@@ -1037,6 +1066,52 @@ impl SimController {
                 .iter()
                 .map(|(id, record)| (id.get(), record.watchpoint.hit_count))
                 .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A register write the model would drop is a gap; one that keeps
+    /// what it does not model, as every write the controller reads back
+    /// and changes does, is not.
+    #[test]
+    fn unmodeled_register_writes_are_gaps() {
+        let current = user_registers(&Registers::default(), 39);
+        let moved = libc::user_regs_struct {
+            rip: 0x0040_1000,
+            rax: 7,
+            eflags: current.eflags | 0x1,
+            ..current
+        };
+        assert_eq!(unmodeled_register_change(&current, &moved), None);
+
+        for (written, change) in [
+            (
+                libc::user_regs_struct {
+                    orig_rax: u64::MAX,
+                    ..current
+                },
+                "writing orig_rax",
+            ),
+            (
+                libc::user_regs_struct {
+                    fs: 0x63,
+                    ..current
+                },
+                "writing segment registers",
+            ),
+            (
+                libc::user_regs_struct {
+                    eflags: current.eflags | 0x100,
+                    ..current
+                },
+                "writing the trap or resume flag",
+            ),
+        ] {
+            assert_eq!(unmodeled_register_change(&current, &written), Some(change));
         }
     }
 }

@@ -48,14 +48,6 @@ impl Kernel {
             .ok_or(Errno::ESRCH)
     }
 
-    /// `PTRACE_GETREGS`.
-    pub fn get_registers(&self, tid: Tid) -> Result<Registers, Errno> {
-        let registers = self.stopped(tid)?.registers;
-        #[cfg(test)]
-        let registers = self.reported(registers);
-        Ok(registers)
-    }
-
     /// `PTRACE_SETREGS`.
     pub fn set_registers(&mut self, tid: Tid, registers: Registers) -> Result<(), Errno> {
         #[cfg(test)]

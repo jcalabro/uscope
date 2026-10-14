@@ -84,7 +84,8 @@ fn dispatch(kernel: &mut Kernel, tid: Tid) -> bool {
     )]
     let code = argument(RDI) as i32;
 
-    // The call `orig_rax` names, which a tracer at its entry may change.
+    // The call `orig_rax` names. Linux lets a tracer at its entry change
+    // it; the edge fails a write to it as a model gap.
     let result = match kernel.threads[&tid].orig_rax {
         SYS_WRITE => write(kernel, tid, argument(RDI), argument(RSI), argument(RDX)),
         SYS_SCHED_YIELD => {
