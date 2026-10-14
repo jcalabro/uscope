@@ -1,5 +1,19 @@
 //! The `uscope` command-line debugger.
 
+// Production code returns errors instead of panicking; see dev/assertions.md.
+// Tests may unwrap.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 mod cli;
 mod dap;
 mod present;

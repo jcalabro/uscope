@@ -1,3 +1,17 @@
+// Production code returns errors instead of panicking; see dev/assertions.md.
+// Tests may unwrap.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 /// Appends a line to the flight recorder of a development build. Release
 /// builds drop the arguments unevaluated, so they may use code that only
 /// development builds compile.
