@@ -10,6 +10,9 @@ use nix::libc;
 use super::tracee::{dual_run, dual_run_then_exit};
 use crate::sim::cpu::{RAX, RDI, RSP};
 
+/// `rax` inside a system call, before it returns.
+const ENOSYS: u64 = (-(libc::ENOSYS as i64)).cast_unsigned();
+
 /// K-EXEC-1: a launched program first stops at its entry point for a
 /// SIGTRAP it sent itself, at the end of `execve`, and is named after its
 /// executable.
@@ -424,6 +427,34 @@ fn k_exit_3_sigkill_ends_every_thread_through_its_exit_event() {
             record.wait(worker);
         }
 
+        record.wait(leader);
+    });
+}
+
+/// K-EXIT-3: SIGKILL sent just after a thread is continued from a fork
+/// event finds the call returning, as K-EXIT-2 finds a thread held there:
+/// at its exit event `rax` holds what the call returned, or what the
+/// thread did after it, never the `-ENOSYS` it held inside the call.
+/// Where the thread is then depends on timing, so only that is compared.
+#[test]
+fn k_exit_3_sigkill_after_a_fork_event_finds_the_call_returned() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.resume(leader, None);
+        let result = record.tracee.kill();
+        record.result("kill", result);
+        record.wait(leader);
+        record.event_message(leader);
+        let inside = record
+            .tracee
+            .registers(leader)
+            .map(|(registers, _)| registers.general[RAX] == ENOSYS);
+        record.note(format!("rax of leader is -ENOSYS: {inside:?}"));
+        record.resume(leader, None);
         record.wait(leader);
     });
 }

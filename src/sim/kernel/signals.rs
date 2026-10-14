@@ -274,8 +274,10 @@ impl Kernel {
     /// fatal signal does (K-EXIT-1, K-EXIT-3). Any thread in a stop is taken
     /// out of it, losing a status not yet reported (K-WAIT-1, K-EXIT-2):
     /// one at the exit event of its own `exit` finishes exiting, and any
-    /// other runs to its exit. A group already exiting keeps its status,
-    /// and its threads at their exit events stay there (K-EXIT-4).
+    /// other runs to its exit. A system call a thread stopped inside, or
+    /// was resumed from inside and has not yet run to the end of, returns
+    /// on the way out. A group already exiting keeps its status, and its
+    /// threads at their exit events stay there (K-EXIT-4).
     pub(super) fn kill_process(&mut self, group: Tgid, exit: ExitStatus) {
         let Some(process) = self.processes.get_mut(&group) else {
             return;
@@ -294,7 +296,15 @@ impl Kernel {
             .filter(|thread| thread.tgid == group)
         {
             match thread.state {
-                State::Running | State::JobStopped => thread.state = State::Exiting(exit),
+                State::Running | State::JobStopped => {
+                    thread.state = State::Exiting(exit);
+
+                    // K-EXIT-3: the call the thread was resumed inside of
+                    // returns before the signal is taken.
+                    if let Some(result) = thread.returning.take() {
+                        thread.registers.general[super::RAX] = result;
+                    }
+                }
                 State::Stopped {
                     kind:
                         StopKind::Signal(_)
