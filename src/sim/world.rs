@@ -1708,7 +1708,35 @@ fn script(
         attach,
         follow: swarm.follow,
         catching: swarm.catching,
+        statements: statements(program, variant),
+        unoptimized_functions: (!variant.facts.optimized).then(|| {
+            variant
+                .facts
+                .functions
+                .iter()
+                .map(|function| (function.name.clone(), function.start..function.end))
+                .collect()
+        }),
     }
+}
+
+/// The lines of the source with statement rows at each address binutils
+/// list one at.
+fn statements(program: &Program, variant: &Variant) -> BTreeMap<u64, BTreeSet<u64>> {
+    let facts = &variant.facts;
+    let source = program
+        .source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let mut statements = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for &(address, line) in &facts.statements {
+        if facts.file(line) == source {
+            statements.entry(address).or_default().insert(line.line);
+        }
+    }
+
+    statements
 }
 
 /// Where, in unoptimized code, a row of a marker's line starts, with the

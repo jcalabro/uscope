@@ -2,7 +2,7 @@
 //! them, with the conditions the client knows the outcome of, and judging
 //! the hits counted at each stop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Client, protocol};
 use crate::sim::choices::Stream;
@@ -496,6 +496,7 @@ impl Client {
                 ""
             }
         ));
+        self.judge_locations(&breakpoint)?;
         let traps = image_traps(&breakpoint);
 
         // A temporary breakpoint may be gone at any stop, so only the hit
@@ -549,7 +550,13 @@ impl Client {
     pub(super) fn names_no_code(&self, spec: &BreakpointSpec, error: &Error) -> bool {
         match error {
             // A line outside every function names no code.
-            Error::SourceLineUnavailable { line, .. } if matches!(spec, BreakpointSpec::Source { line: wanted, .. } if wanted.get() == *line) =>
+            Error::SourceLineUnavailable { line, .. }
+                if matches!(spec, BreakpointSpec::Source { line: wanted, .. } if wanted.get() == *line)
+                    && !self
+                        .script
+                        .statements
+                        .values()
+                        .any(|lines| lines.contains(line)) =>
             {
                 self.note(format!("{spec} has no code"));
                 true
@@ -844,6 +851,10 @@ impl Client {
             self.judge_disabled_watches(snapshot)?;
         }
 
+        for breakpoint in snapshot.breakpoints.iter() {
+            self.judge_locations(breakpoint)?;
+        }
+
         // A temporary breakpoint the stop deleted is the client's no more.
         let remaining = |added: &Added| {
             snapshot
@@ -950,6 +961,93 @@ fn image_traps(breakpoint: &crate::Breakpoint) -> Vec<u64> {
         .collect()
 }
 
+impl Client {
+    /// Fails unless each of `breakpoint`'s locations is one binutils say
+    /// its spec names.
+    pub(super) fn judge_locations(&self, breakpoint: &crate::Breakpoint) -> Result<(), Failure> {
+        misplaced(
+            &breakpoint.spec,
+            &breakpoint.locations,
+            &self.script.statements,
+            self.script.unoptimized_functions.as_deref(),
+        )
+        .map_or(Ok(()), |message| {
+            Err(Failure::debugger(
+                "breakpoint locations",
+                format!(
+                    "breakpoint {} at {}: {message}",
+                    breakpoint.id, breakpoint.spec
+                ),
+            ))
+        })
+    }
+}
+
+/// What is wrong with `locations` for `spec`, judged by binutils' facts:
+/// a line's locations begin statement rows of that line or, when it has
+/// none, of the next line that has some; in unoptimized code, a
+/// function's lie within it.
+fn misplaced(
+    spec: &BreakpointSpec,
+    locations: &[crate::ResolvedBreakpointLocation],
+    statements: &BTreeMap<u64, BTreeSet<u64>>,
+    functions: Option<&[(String, std::ops::Range<u64>)]>,
+) -> Option<String> {
+    let mut addresses = Vec::new();
+    for location in locations {
+        match location.location {
+            BreakpointLocation::Image(address) => addresses.push(address.get()),
+            BreakpointLocation::Virtual(address) => {
+                return Some(format!("{:#x} is in no image", address.get()));
+            }
+        }
+    }
+
+    match spec {
+        BreakpointSpec::Source { line, .. } => {
+            let line = line.get();
+            let stops = statements
+                .values()
+                .flatten()
+                .copied()
+                .filter(|&known| known >= line)
+                .min();
+            addresses
+                .iter()
+                .find(|address| {
+                    stops.is_none_or(|stops| {
+                        !statements
+                            .get(address)
+                            .is_some_and(|lines| lines.contains(&stops))
+                    })
+                })
+                .map(|address| {
+                    stops.map_or_else(
+                        || format!("{address:#x} is past the source's last statement"),
+                        |stops| {
+                            format!(
+                                "{address:#x} begins no statement row of line {stops}, the \
+                                 first at or after {line} with any"
+                            )
+                        },
+                    )
+                })
+        }
+        BreakpointSpec::Function(name) => {
+            let functions = functions?;
+            addresses
+                .iter()
+                .find(|&&address| {
+                    !functions
+                        .iter()
+                        .any(|(known, range)| known == name && range.contains(&address))
+                })
+                .map(|address| format!("{address:#x} is outside every function named {name}"))
+        }
+        _ => None,
+    }
+}
+
 /// The condition a breakpoint or watchpoint is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConditionChoice {
@@ -980,5 +1078,62 @@ impl ConditionChoice {
         };
 
         Some(Condition::parse(&text).expect("the client's conditions parse"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn at(address: u64) -> crate::ResolvedBreakpointLocation {
+        crate::ResolvedBreakpointLocation {
+            location: BreakpointLocation::Image(crate::ImageAddress::new(address)),
+            code_instances: Arc::from([]),
+            library: None,
+        }
+    }
+
+    /// A line's breakpoint stops where a statement row of the line begins,
+    /// even one a later row at the address hides, or, for a line without
+    /// code, where the next line's do; a function's stops within it.
+    #[test]
+    fn misplaced_breakpoints_are_named() {
+        let statements = BTreeMap::from([
+            (0x10, BTreeSet::from([4])),
+            (0x20, BTreeSet::from([6, 2])),
+            (0x30, BTreeSet::from([6])),
+        ]);
+        let functions = [("f".to_owned(), 0x10..0x40)];
+        let line = |line| BreakpointSpec::Source {
+            path: "a.c".into(),
+            line: LineNumber::new(line).expect("a line"),
+        };
+        let judge = |spec: &BreakpointSpec, addresses: &[u64]| {
+            let locations = addresses
+                .iter()
+                .map(|&address| at(address))
+                .collect::<Vec<_>>();
+            misplaced(spec, &locations, &statements, Some(&functions))
+        };
+
+        assert_eq!(judge(&line(6), &[0x20, 0x30]), None);
+        assert_eq!(judge(&line(2), &[0x20]), None);
+        assert_eq!(judge(&line(5), &[0x30]), None, "5 has none, so 6's");
+        assert!(judge(&line(6), &[0x10]).is_some(), "0x10 is line 4's");
+        assert!(judge(&line(3), &[0x20]).is_some(), "3 slides to 4");
+        assert!(judge(&line(7), &[0x30]).is_some(), "nothing follows 6");
+
+        let function = BreakpointSpec::Function("f".to_owned());
+        assert_eq!(judge(&function, &[0x10]), None);
+        assert!(judge(&function, &[0x40]).is_some());
+        assert!(judge(&BreakpointSpec::Function("g".to_owned()), &[0x10]).is_some());
+
+        let other = crate::ResolvedBreakpointLocation {
+            location: BreakpointLocation::Virtual(crate::VirtualAddress::new(0x20)),
+            ..at(0)
+        };
+        assert!(misplaced(&line(6), &[other], &statements, None).is_some());
     }
 }

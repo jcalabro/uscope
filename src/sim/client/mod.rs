@@ -106,6 +106,15 @@ pub struct Script {
 
     /// Whether the client stops at system calls.
     pub catching: bool,
+
+    /// The source's lines with a statement row at each image address
+    /// binutils list one at: where a line's breakpoint may stop.
+    pub statements: BTreeMap<u64, BTreeSet<u64>>,
+
+    /// The functions the symbol table defines, with their image ranges, in
+    /// unoptimized code, where each function's code lies within its own
+    /// range.
+    pub unoptimized_functions: Option<Vec<(String, std::ops::Range<u64>)>>,
 }
 
 /// What the client shares with the world.

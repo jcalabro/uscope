@@ -89,6 +89,11 @@ pub struct Facts {
     /// before the last describe no instruction.
     pub ranges: Vec<Range>,
 
+    /// Every statement row, uncollapsed, as address and line: where each
+    /// line's code begins, though a later row at the address says what
+    /// executes there.
+    pub statements: Vec<(u64, Line)>,
+
     /// Where rows mark the beginning of a function's epilogue.
     pub epilogues: std::collections::BTreeSet<u64>,
 
@@ -105,6 +110,7 @@ impl Facts {
     pub(super) fn new(variant: VariantFacts) -> Result<Self, String> {
         let mut files = Vec::<String>::new();
         let mut ranges = Vec::<Range>::new();
+        let mut statements = Vec::new();
 
         // The row being collapsed: its address, line, and whether it is a
         // statement.
@@ -142,6 +148,10 @@ impl Facts {
                     Some(Line { file, line })
                 }
             };
+
+            if *statement && let Some(line) = line {
+                statements.push((*address, line));
+            }
 
             let same_address = open.is_some_and(|(start, ..)| start == *address);
 
@@ -188,6 +198,7 @@ impl Facts {
             files,
             functions,
             ranges,
+            statements,
             epilogues: variant.epilogues.into_iter().collect(),
             entry_values: variant
                 .entry_values
@@ -311,6 +322,15 @@ mod tests {
         assert_eq!(line(0x41).map(|line| line.line), Some(7));
         assert_eq!(facts.range(0x44), None);
         assert_eq!(facts.line_starts("a.c", 4).collect::<Vec<_>>(), [0x10]);
+        let statements = facts
+            .statements
+            .iter()
+            .map(|&(address, line)| (address, facts.file(line), line.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statements,
+            [(0x10, "a.c", 3), (0x10, "a.c", 4), (0x40, "a.c", 7)]
+        );
         assert_eq!(facts.function(0x2f).map(|f| f.name.as_str()), Some("f"));
         assert_eq!(facts.function(0x30), None);
 

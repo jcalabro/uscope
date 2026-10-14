@@ -455,6 +455,7 @@ impl Client {
             }
         };
 
+        self.judge_locations(&probe)?;
         if breakpoints.iter().any(|added| added.id() == probe.id) {
             return Err(protocol(format!(
                 "a probe for {spec} returned the client's own breakpoint {}",
