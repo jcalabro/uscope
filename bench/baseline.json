@@ -5,13 +5,13 @@
     "callgrind_instructions": null
   },
   "containers-rust-o0": {
-    "digest": "78978c585e0cd6a19d9bd7022710f30d",
+    "digest": "c1baf9df125ac6dea0f8c357485b83c9",
     "allocations": 893237,
     "callgrind_instructions": null
   },
   "containers-zig-self-hosted": {
-    "digest": "bbc201c39a2084751a8c976b86c3f4b7",
-    "allocations": 322094,
+    "digest": "04c9a1d1fa12fb5cd8238fa8ee41522a",
+    "allocations": 321038,
     "callgrind_instructions": null
   },
   "golden/containers-clang-O0": {

@@ -769,13 +769,14 @@ build_zig_fixture() {
 
 # Zig's own backend, which Debug builds use by default, describes optionals,
 # error unions, and tagged unions as variant parts, and a type declared in
-# another by its parent.
+# another by its parent. It builds different bytes on each run unless it
+# runs one job, and bench-smoke needs the same bytes as its baseline.
 build_zig_self_hosted_fixture() {
     local source="$1"
     local output="$2"
     shift 2
     local -a command=(
-        zig build-exe "$source" -target x86_64-linux-gnu -fno-llvm -fno-strip "$@"
+        zig build-exe "$source" -target x86_64-linux-gnu -fno-llvm -fno-strip -j1 "$@"
         "-femit-bin=${output}"
     )
     if [[ -z "$zig_version" ]]; then
