@@ -12,7 +12,7 @@ use uscope::{
     ThreadActivity, ThreadState, VirtualAddress,
 };
 
-use super::commands::Command;
+use super::commands::{Command, CommandSpec};
 use super::config::Section;
 use super::format;
 use super::terminal::{Role, plain};
@@ -558,13 +558,12 @@ impl Cli {
             .join("\n")
     }
 
-    /// Removes the displays numbered `ids`, or every display for `None`.
-    pub(super) fn undisplay(&self, ids: Option<&[u64]>) -> Result<String> {
-        let removed = self
-            .displays
-            .lock()
-            .expect("the displays are whole")
-            .remove(ids)?;
+    /// Removes the displays `words` number, or every display for `all`.
+    pub(super) fn undisplay(&self, words: &[&str], spec: &CommandSpec) -> Result<String> {
+        let mut displays = self.displays.lock().expect("the displays are whole");
+        let ids = super::commands::parse_display_ids(words, displays.list.len(), spec)?;
+        let removed = displays.remove(ids.as_deref())?;
+        drop(displays);
         Ok(format!(
             "{} {}",
             self.renderers.stdout.paint(Role::Success, "removed"),
