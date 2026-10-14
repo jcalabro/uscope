@@ -68,7 +68,9 @@ pub enum Verdict {
     /// A comparison failed, shown with the values it compared.
     Fails(String),
 
-    /// A variable it needs has no value.
+    /// It has no value: a variable it needs has none, named here, or an
+    /// expression it computes, described here, divides by zero or
+    /// overflows.
     Unknown(String),
 }
 
@@ -136,14 +138,25 @@ impl Expression {
         match self {
             Self::Number(value) => Ok(*value),
             Self::Variable(name) => values.get(name).copied().ok_or_else(|| name.clone()),
-            Self::Binary(left, operator, right) => {
-                let (left, right) = (left.evaluate(values)?, right.evaluate(values)?);
-                Ok(match operator {
-                    '+' => left.wrapping_add(right),
-                    '-' => left.wrapping_sub(right),
-                    '*' => left.wrapping_mul(right),
-                    '/' => left.checked_div(right).unwrap_or(0),
-                    _ => left.checked_rem(right).unwrap_or(0),
+            Self::Binary(left_operand, operator, right_operand) => {
+                let left = left_operand.evaluate(values)?;
+                let right = right_operand.evaluate(values)?;
+                let value = match operator {
+                    '+' => left.checked_add(right),
+                    '-' => left.checked_sub(right),
+                    '*' => left.checked_mul(right),
+                    '/' => left.checked_div(right),
+                    _ => left.checked_rem(right),
+                };
+
+                value.ok_or_else(|| {
+                    let why = if matches!(operator, '/' | '%') && right == 0 {
+                        "divides by zero"
+                    } else {
+                        "overflows"
+                    };
+
+                    format!("{self} {why}")
                 })
             }
         }
@@ -305,5 +318,49 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Expression::Variable(token.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn evaluate(condition: &str, values: &[(&str, i128)]) -> Verdict {
+        let markers = parse(&format!("x; // MARK: {condition}")).expect("a marker");
+        let values = values
+            .iter()
+            .map(|&(name, value)| (name.to_owned(), value))
+            .collect();
+        markers[0].condition.evaluate(&values)
+    }
+
+    /// A condition that divides by zero or overflows says nothing, as one
+    /// missing a variable says nothing: C gives such an expression no
+    /// value, so no answer of the debugger's contradicts it.
+    #[test]
+    fn a_condition_without_a_value_is_unknown() {
+        let unknown = |text: &str| Verdict::Unknown(text.to_owned());
+        let (a, b) = ("a", "b");
+        assert_eq!(
+            evaluate("a / b == 0", &[(a, 1), (b, 0)]),
+            unknown("(a / b) divides by zero")
+        );
+        assert_eq!(
+            evaluate("a % b == 0", &[(a, 1), (b, 0)]),
+            unknown("(a % b) divides by zero")
+        );
+        assert_eq!(
+            evaluate("a * a * a == 0", &[(a, 1 << 50)]),
+            unknown("((a * a) * a) overflows")
+        );
+        assert_eq!(evaluate("a == 1", &[]), unknown("a"));
+        assert_eq!(
+            evaluate("a / b == 2 && a % b == 1", &[(a, 7), (b, 3)]),
+            Verdict::Holds
+        );
+        assert!(matches!(
+            evaluate("a / b == 3", &[(a, 7), (b, 3)]),
+            Verdict::Fails(_)
+        ));
     }
 }
