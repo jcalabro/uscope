@@ -609,13 +609,14 @@ impl Tracer<'_> {
             }
             libc::PTRACE_EVENT_EXEC => {
                 // A thread other than the leader that executes takes the
-                // leader's id.
+                // leader's id. The leader is gone, and its call with it.
                 if let Ok(former) = ptrace::getevent(pid)
                     && let Ok(former) = u32::try_from(former)
                     && former != tid
                     && let Some(moved) = self.threads.remove(&former)
+                    && let Some(leader) = self.threads.insert(tid, moved)
                 {
-                    self.threads.insert(tid, moved);
+                    self.unfinished(tid, leader, Outcome::Unfinished);
                 }
                 let process = self.thread(tid).process;
                 if let Some(stacks) = &self.options.stacks {

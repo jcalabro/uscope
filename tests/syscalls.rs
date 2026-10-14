@@ -667,6 +667,41 @@ fn ndjson_carries_names_paths_errnos_and_stacks() {
     );
 }
 
+/// A thread other than the leader that executes a program takes the
+/// leader's id, and the leader's blocked call ends unfinished: it is
+/// reported, not lost.
+#[test]
+fn a_leaders_blocked_call_ends_when_another_thread_executes() {
+    let traced = uscope(&[
+        "--engine",
+        "ptrace",
+        "-f",
+        "--format",
+        "ndjson",
+        "-e",
+        "trace=pause",
+        "-o",
+        "-",
+        "--",
+    ])
+    .arg(Scenario::fixture("thread-exec"))
+    .output()
+    .expect("run uscope");
+    assert_eq!(traced.status.code(), Some(0), "{}", text(&traced.stderr));
+    let records: Vec<serde_json::Value> = text(&traced.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{line}: {error}")))
+        .collect();
+    let pauses: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "call" && record["name"] == "pause")
+        .collect();
+    assert_eq!(pauses.len(), 1, "{records:?}");
+    assert!(pauses[0]["tid"].is_u64(), "{records:?}");
+    assert_eq!(pauses[0]["tid"], pauses[0]["pid"], "{records:?}");
+    assert_eq!(pauses[0]["unfinished"], true, "{records:?}");
+}
+
 /// A cgroup below the test's own, removed when dropped.
 struct TestCgroup(PathBuf);
 
