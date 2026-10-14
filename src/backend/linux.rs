@@ -1705,7 +1705,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
             Request::Shutdown { reply } => {
-                self.begin_shutdown(Some(reply));
+                let waiting = self.inferior.is_some() || self.orphans.is_some();
+                if !self.shutting_down {
+                    self.begin_shutdown(Some(reply));
+                } else if !waiting {
+                    let _ = reply.send(Ok(()));
+                } else if self.shutdown_reply.is_none() {
+                    // A shutdown the controller began itself, as a failed
+                    // attach does, answers the client's when it ends.
+                    self.shutdown_reply = Some(reply);
+                } else {
+                    let _ = reply.send(Err(Error::RequestCancelled));
+                }
                 return self.inferior.is_some() || self.orphans.is_some();
             }
             Request::Kill { reply } => self.kill(reply),

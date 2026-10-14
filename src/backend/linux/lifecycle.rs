@@ -1318,6 +1318,14 @@ impl<P: LinuxTraceOps> Controller<P> {
 
 impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn begin_shutdown(&mut self, reply: Option<Reply<()>>) {
+        debug_assert!(
+            !self.shutting_down,
+            "shutdown began twice, which drops the first shutdown's reply"
+        );
+        debug_assert!(
+            self.shutdown_reply.is_none(),
+            "a shutdown reply waits with no shutdown under way"
+        );
         self.shutting_down = true;
         self.shutdown_reply = reply;
         if let Some(start) = self.deferred_start.take() {
@@ -1572,11 +1580,25 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Ends the session of an attached process whose threads all exited.
+    /// Its children still due are left to the orphans, as at its exit.
     fn forget_vanished_inferior(&mut self) {
+        let pending = self.settle_stopped_fork_children();
         let Some(mut inferior) = self.inferior.take() else {
             return;
         };
-        let outcome = inferior.waiter.take().map_or(Ok(()), Waiter::stop_and_join);
+        let killed = std::mem::take(&mut inferior.killed_children);
+        let waiter = inferior.waiter.take();
+        let outcome = if pending.is_empty() && killed.is_empty() {
+            waiter.map_or(Ok(()), Waiter::stop_and_join)
+        } else {
+            self.orphans = Some(Orphans {
+                parent: inferior.tgid,
+                children: pending,
+                killed,
+                waiter,
+            });
+            Ok(())
+        };
         self.reset_runtime_modules();
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::InferiorDetached {
@@ -1584,6 +1606,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             process_id: process_id(inferior.tgid),
         });
         self.settle_pending_edits(inferior.take_pending_edits());
+        self.answer_kill();
         self.finish_shutdown(outcome);
     }
 
@@ -1797,7 +1820,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             process_id: process_id(inferior.tgid),
         });
         self.settle_pending_edits(inferior.take_pending_edits());
+        self.answer_kill();
         self.finish_shutdown(first_error.map_or(Ok(()), Err));
+    }
+
+    /// Answers a kill that a detach overtook: the session ended, and the
+    /// signal was sent.
+    fn answer_kill(&mut self) {
+        if let Some(reply) = self.kill_reply.take() {
+            let _ = reply.send(Ok(()));
+        }
     }
 
     /// Kills the inferior and replies once its exit is processed.
@@ -1874,7 +1906,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .is_some_and(|inferior| inferior.origin == InferiorOrigin::Attached)
         {
-            self.begin_shutdown(None);
+            // A shutdown under way already releases the process.
+            if !self.shutting_down {
+                self.begin_shutdown(None);
+            }
         } else {
             let _ = self.kill_inferior();
         }

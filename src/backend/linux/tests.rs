@@ -2797,6 +2797,71 @@ fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
     assert!(harness.controller.orphans.is_none());
 }
 
+/// A client's shutdown after one the controller began itself, as a failed
+/// attach does, is answered once the first is done, not begun again.
+#[test]
+fn a_shutdown_requested_during_another_is_answered_when_it_ends() {
+    let mut harness = watch_harness(2);
+    harness.attached();
+    harness.controller.begin_shutdown(None);
+    assert!(
+        harness.controller.inferior.is_none(),
+        "the stopped process is detached at once"
+    );
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    let keeps_running = harness
+        .controller
+        .handle_message(ControllerMessage::Request(Request::Shutdown { reply }));
+    assert!(!keeps_running, "nothing is left to wait for");
+    assert!(
+        matches!(result.try_recv(), Ok(Ok(()))),
+        "the second shutdown is answered"
+    );
+}
+
+/// A kill requested while an attached process is being detached is
+/// answered when the detach ends the session.
+#[test]
+fn a_kill_during_a_detach_is_answered_when_it_ends() {
+    let mut harness = watch_harness(1);
+    harness.attached();
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.kill(reply);
+    harness.controller.begin_shutdown(None);
+    assert!(
+        harness.controller.inferior.is_none(),
+        "the process is detached"
+    );
+    assert!(
+        matches!(result.try_recv(), Ok(Ok(()))),
+        "the kill is answered"
+    );
+}
+
+/// An attached process whose threads all exit while it is detached hands
+/// a child killed for traps it kept to the orphans, whose exit the waiter
+/// still collects.
+#[test]
+fn a_vanished_attached_process_leaves_its_killed_child_to_be_reaped() {
+    let mut harness = watch_harness(1);
+    harness.attached();
+    let child = Pid::from_raw(6000);
+    let inferior = harness.inferior();
+    inferior.killed_children.insert(child);
+    inferior.threads.clear();
+    harness.controller.shutting_down = true;
+    harness.controller.detach_when_stopped().expect("detach");
+    assert!(harness.controller.inferior.is_none());
+    assert_eq!(
+        harness
+            .controller
+            .orphans
+            .as_ref()
+            .map(|orphans| orphans.killed.clone()),
+        Some(BTreeSet::from([child]))
+    );
+}
+
 /// A shutdown that meets a fork event its parent's SIGKILL superseded
 /// continues the parent from its exit stop, and the parent is soon reaped.
 /// The child it forked is found first, and released once it stops rather
