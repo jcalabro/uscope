@@ -845,8 +845,8 @@ static ENVIRONMENT: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync:
 ///
 /// # Safety
 ///
-/// No other thread may read or write the environment meanwhile, as before
-/// the async runtime starts.
+/// No other thread may read or write the environment meanwhile. `main`
+/// calls this before uscope starts any other thread.
 #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
 pub unsafe fn take_environment() {
     const VARIABLE: &str = "USCOPE_CONFIG";

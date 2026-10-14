@@ -103,7 +103,7 @@ Each step lists how we know it worked.
   inside. The raw ptrace requests and tgkill move here. *Done when*
   launch, attach, profiling launch, and syscall-trace launch tests pass,
   and `just stress` passes.
-- [ ] **4. Environment.** First a test: the debuggee sees neither
+- [-] **4. Environment.** Not done; see section 5. First a test: the debuggee sees neither
   `USCOPE_CONFIG` nor `USCOPE_FLIGHT_RECORDING`, under each way of
   launching (debugger, profiler, syscall tracer). Then remove the
   `remove_var` calls, and `env_remove` at each spawn. *Done when* that
@@ -144,6 +144,13 @@ Each step lists how we know it worked.
 - **Fuzz corpora under Miri.** Slow, and the parsers' crates run Miri
   upstream.
 - **Debuggee fixtures.** Their unsafe code is what they test.
+- **Step 4, the environment.** Every program uscope starts goes without
+  its two variables, not only debuggees: the pager, the editor, and the
+  web terminal's helper, which would otherwise write to its parent's
+  flight recording. `env_remove` would be needed at about ten spawns,
+  and a lint to keep new ones from forgetting. The two `remove_var`
+  calls run before uscope starts any other thread, which their comments
+  now say, so they stay.
 
 ## 6. Log
 

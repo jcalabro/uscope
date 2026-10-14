@@ -300,6 +300,10 @@ fn main() -> ExitCode {
     {
         return web::terminal::run_helper(std::env::args_os().skip(2));
     }
+    // Both of uscope's own variables are removed from the environment here,
+    // before uscope starts any other thread, so every program it starts
+    // goes without them. Removing them is unsafe only while another thread
+    // may read the environment, and none exists yet.
     #[cfg(debug_assertions)]
     start_flight_recording();
     // SAFETY: the process has no other thread yet.
@@ -331,8 +335,8 @@ fn start_flight_recording() {
 
     const VARIABLE: &str = "USCOPE_FLIGHT_RECORDING";
     let path = std::env::var_os(VARIABLE);
-    // SAFETY: this runs before the async runtime starts, while the process
-    // has no other thread that could read the environment.
+    // SAFETY: `main` calls this before uscope starts any other thread, so
+    // none can read the environment meanwhile.
     unsafe { std::env::remove_var(VARIABLE) };
     let started = match path {
         Some(path) if path.is_empty() => return,
