@@ -6,7 +6,7 @@
 
 use std::cell::Cell;
 
-use iced_x86::{Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{EncodingKind, Instruction, Mnemonic, OpKind, Register};
 
 use super::flags::{self, mask, sign_extend, with_status};
 use super::{
@@ -66,6 +66,20 @@ pub(super) fn execute(
     memory: &mut AddressSpace,
     accesses: &Cell<Accesses>,
 ) -> Step {
+    // Each arm below implements a mnemonic's general-register forms. One
+    // that shares the mnemonic but works on other registers, as SSE's
+    // `movsd` shares the string move's, or moves the stack by other than
+    // a quadword, is a different instruction.
+    let other_registers = (0..instruction.op_count()).any(|operand| {
+        instruction.op_kind(operand) == OpKind::Register
+            && !instruction.op_register(operand).is_gpr()
+    });
+    let narrow_stack = matches!(instruction.mnemonic(), Mnemonic::Push | Mnemonic::Pop)
+        && instruction.stack_pointer_increment().unsigned_abs() != 8;
+    if instruction.encoding() != EncodingKind::Legacy || other_registers || narrow_stack {
+        return Err(Stop::Unsupported);
+    }
+
     let mut cpu = Cpu {
         instruction,
         registers,
@@ -245,6 +259,11 @@ pub(super) fn execute(
         Mnemonic::Shld => {
             let bits = cpu.bits(0)?;
             let count = cpu.shift_count(2, bits)?;
+            if count as usize > bits {
+                // The result and flags are undefined.
+                return Err(Stop::Unsupported);
+            }
+
             if count != 0 {
                 let (destination, source) = (cpu.read(0)?, cpu.read(1)?);
                 let (result, status) = flags::shift_left_double(destination, source, count, bits);

@@ -405,4 +405,35 @@ mod tests {
             })
         ));
     }
+
+    /// A form the model does not implement is a gap, even when it shares
+    /// its mnemonic with one it does: SSE's `movsd` is not the string move,
+    /// a 16-bit push moves two bytes, and a 16-bit `shld` by more than 16
+    /// is undefined.
+    #[test]
+    fn forms_beyond_the_model_are_unsupported() {
+        for code in [
+            // movsd (%rax), %xmm0
+            [0xf2, 0x0f, 0x10, 0x00, 0, 0, 0, 0],
+            // movsd %xmm0, %xmm1
+            [0xf2, 0x0f, 0x10, 0xc8, 0, 0, 0, 0],
+            // push %ax
+            [0x66, 0x50, 0, 0, 0, 0, 0, 0],
+            // pop %ax
+            [0x66, 0x58, 0, 0, 0, 0, 0, 0],
+            // shld $17, %ax, %ax
+            [0x66, 0x0f, 0xa4, 0xc0, 0x11, 0, 0, 0],
+        ] {
+            let mut registers = Registers::default();
+            registers.general[RAX] = 0x8000;
+            registers.general[RSI] = 0x8000;
+            registers.general[RDI] = 0x8100;
+            registers.general[RSP] = 0x8800;
+            let outcome = run(&code, &mut registers);
+            assert!(
+                matches!(outcome, Outcome::Unsupported(_)),
+                "{code:02x?}: {outcome:?}"
+            );
+        }
+    }
 }
