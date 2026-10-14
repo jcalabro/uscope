@@ -107,7 +107,7 @@ impl Swarm {
         } else {
             Policy::Pct {
                 depth: pick(&[1, 2, 3, 4]),
-                horizon: pick(&[64, 512, 4096]),
+                horizon: pick(&[32, 128, 512]),
             }
         };
 

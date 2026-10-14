@@ -138,12 +138,17 @@ const PATIENCE: u64 = 10_000;
 
 impl Scheduler {
     pub fn new(policy: Policy, choices: &mut Choices) -> Self {
-        let mut change_points = match policy {
-            Policy::Walk(_) => Vec::new(),
-            Policy::Pct { depth, horizon } => (1..depth)
-                .map(|_| choices.below(Stream::Schedule, horizon) + 1)
-                .collect(),
-        };
+        // Distinct, so that each of the depth - 1 points drops an actor.
+        let mut change_points = Vec::new();
+        if let Policy::Pct { depth, horizon } = policy {
+            let points = depth.saturating_sub(1).min(horizon);
+            while (change_points.len() as u64) < points {
+                let point = choices.below(Stream::Schedule, horizon) + 1;
+                if !change_points.contains(&point) {
+                    change_points.push(point);
+                }
+            }
+        }
 
         change_points.sort_unstable();
         Self {
@@ -185,7 +190,13 @@ impl Scheduler {
                         .expect("an action is enabled")
                 });
                 self.waiting.remove(&action.actor());
-                if self.change_points.first() == Some(&step) {
+                // A point at a step that made no choice, as one a fault
+                // took, drops the actor that runs next.
+                if self
+                    .change_points
+                    .first()
+                    .is_some_and(|&point| point <= step)
+                {
                     self.change_points.remove(0);
                     self.drop_actor(action.actor());
                 }
@@ -271,6 +282,48 @@ mod tests {
         // Once the third yields too, the earliest to drop is highest again.
         scheduler.yielded(tid);
         assert_eq!(scheduler.choose(&enabled, change + 3, &mut choices), first);
+    }
+
+    /// A run of `depth` has `depth - 1` distinct change points, and each
+    /// one drops an actor even when no choice was made at its step, as at
+    /// a step a fault took.
+    #[test]
+    fn pct_honors_every_change_point() {
+        for seed in 0..64 {
+            let mut choices = Choices::new(seed);
+            let scheduler = Scheduler::new(
+                Policy::Pct {
+                    depth: 4,
+                    horizon: 4,
+                },
+                &mut choices,
+            );
+            let mut points = scheduler.change_points.clone();
+            points.dedup();
+            assert_eq!(points.len(), 3, "seed {seed}: {points:?}");
+        }
+
+        let mut choices = Choices::new(3);
+        let mut scheduler = Scheduler::new(
+            Policy::Pct {
+                depth: 1,
+                horizon: 8,
+            },
+            &mut choices,
+        );
+        scheduler.change_points = vec![3, 6];
+        let enabled = [Action::Run(1), Action::Run(2), Action::Run(3)];
+        let mut ran = Vec::new();
+        for step in [1, 2, 4, 5, 7, 8] {
+            ran.push(scheduler.choose(&enabled, step, &mut choices));
+        }
+
+        // Step 3 made no choice, so the actor that ran at step 4 drops.
+        assert_eq!([ran[1], ran[2]], [ran[0]; 2]);
+        assert_ne!(ran[3], ran[0]);
+        assert_eq!(ran[4], ran[3]);
+        assert!(!ran[..5].contains(&ran[5]), "the second point drops too");
+        assert!(scheduler.change_points.is_empty());
     }
 
     /// An actor that never runs out of work, as a controller whose calls
