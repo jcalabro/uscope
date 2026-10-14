@@ -46,6 +46,54 @@
       muslClang = pkgs.writeShellScriptBin "musl-clang" ''
         exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
       '';
+      # Ubuntu's builds of glibc: the loader and libraries the TLS fixtures
+      # built for them run on, in lib, and the startup files they link with,
+      # in dev. 18.04's and 20.04's describe their thread structures in
+      # libpthread; 22.04's in libc, as every glibc since 2.34 does.
+      ubuntuPackage = name: version: hash: pkgs.fetchurl {
+        urls = [
+          "https://launchpad.net/ubuntu/+archive/primary/+files/${name}_${version}_amd64.deb"
+          "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/${name}_${version}_amd64.deb"
+        ];
+        inherit hash;
+      };
+      ubuntuGlibc = { version, package, runtime, development }: pkgs.runCommand "ubuntu-glibc-${version}" {
+        runtime = ubuntuPackage "libc6" package runtime;
+        development = ubuntuPackage "libc6-dev" package development;
+        nativeBuildInputs = [ pkgs.binutils pkgs.zstd ];
+      } ''
+        unpack() { mkdir "$2"; (cd "$2" && ar x "$1" && tar xf data.tar.*); }
+        unpack "$runtime" runtime
+        unpack "$development" development
+        mkdir -p "$out/dev"
+        mv runtime/lib/x86_64-linux-gnu "$out/lib"
+        cd development/usr/lib/x86_64-linux-gnu
+        for file in Scrt1.o crti.o crtn.o libc_nonshared.a libpthread_nonshared.a; do
+          if [ -e "$file" ]; then cp "$file" "$out/dev"; fi
+        done
+      '';
+      ubuntuGlibcs = pkgs.linkFarm "ubuntu-glibc" (map
+        (release: { name = release.version; path = ubuntuGlibc release; })
+        [
+          {
+            version = "2.27";
+            package = "2.27-3ubuntu1.6";
+            runtime = "sha256-W4E9RRJJHNj7MLLrkZI0nudf/jyfIa4TbMeyQp9ww7I=";
+            development = "sha256-lq59LPOPBUfKPMyzNEyIAv31vNccS22a7QlVisjMh9s=";
+          }
+          {
+            version = "2.31";
+            package = "2.31-0ubuntu9.18";
+            runtime = "sha256-GyKBqsSTXf6h+J38GeRF/btFMDICr2BnnMuL8DXwgaA=";
+            development = "sha256-EQKZAPIxW5POSHeSrhvxXwkn5eUIgMCR5qRAsU1OFko=";
+          }
+          {
+            version = "2.35";
+            package = "2.35-0ubuntu3.15";
+            runtime = "sha256-eeNSViJ+FqYHwVTN6412/xLSDjHeKG6n/ZrTuW/gRS0=";
+            development = "sha256-zlGuIzqfgAoEDeLQzVmD74b1WMYjs0LICUIwHX9FP0g=";
+          }
+        ]);
       # GNU Fortran, alone: its wrapper's own gcc and binutils would shadow
       # the shell's.
       gfortran = pkgs.writeShellScriptBin "gfortran" ''
@@ -77,6 +125,9 @@
         # against: on the default search path they would shadow the shared C
         # library for every program.
         GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
+        # Ubuntu's glibc builds, one directory for each version, holding its
+        # lib and dev directories.
+        USCOPE_UBUNTU_GLIBC = "${ubuntuGlibcs}";
         # The vendored crates scripts/build-test-programs.sh builds the tokio
         # fixtures against, offline.
         USCOPE_FIXTURE_CRATES = "${tokioFixtureCrates}";
@@ -103,6 +154,9 @@
           clangLibcxx
           muslGcc
           muslClang
+          # Points fixtures built for Ubuntu's glibc at its loader and
+          # libraries.
+          patchelf
           gdb
           lldb
           # Shares fixtures' debug information through supplementary files,

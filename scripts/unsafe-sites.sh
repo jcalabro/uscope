@@ -9,7 +9,6 @@ set -euo pipefail
 allowed=(
   src/backend/linux/sys.rs                # pre_exec, raw ptrace requests, tgkill
   src/backend/linux/perf/sys.rs           # perf_event_open, its ioctls and mapping
-  src/backend/linux/tls/thread_db.rs      # libthread_db and its callbacks
   src/backend/linux/syscalls/ptrace.rs    # the SIGURG handler
   src/timings/alloc.rs                    # the counting allocator
   src/cli/syscalls.rs                     # localtime_r

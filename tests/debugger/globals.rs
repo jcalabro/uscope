@@ -614,7 +614,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     assert_variable_value(&tls_value, ScalarValue::Signed(213));
     // glibc's descriptors find a loaded library's TLS block in the DTV or
     // in static TLS space the loader set aside.
-    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
+    assert_eq!(tls_location_by_name(&scenario, "dso_tls").await.1, 213);
     let mut saw_load = false;
     while let Ok(event) = events.try_recv() {
         saw_load |= matches!(
@@ -674,7 +674,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         .await;
     assert_variable_value(&reloaded_value, ScalarValue::Signed(211));
     // Reloading reuses the module's TLS slot under a newer generation.
-    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
+    assert_eq!(tls_location_by_name(&scenario, "dso_tls").await.1, 213);
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -752,9 +752,9 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                 panic!("{fixture}: unavailable TLS variable {variable:?}");
             };
             values.push(*value);
-            // libthread_db and glibc's layout descriptors find the same
-            // storage, whose address the thread stored in its own pointer.
-            let (address, by_name) = tls_location_both_ways(&scenario, "tls_value").await;
+            // The variable found by name is the storage whose address the
+            // thread stored in its own pointer.
+            let (address, by_name) = tls_location_by_name(&scenario, "tls_value").await;
             assert_eq!(by_name, *value, "{fixture}");
             let pointer = scenario
                 .operation(
@@ -824,15 +824,22 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
 
 #[tokio::test]
 async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
-    // Each build, whether it is dynamically linked, with a library and a
-    // plugin as separate TLS modules, and its thread count. Statically linked
-    // glibc builds without threads lack glibc's thread library.
-    for (fixture, dynamic, threads) in [
+    // Each build, whether it loads a plugin, and its thread count. Builds
+    // with a plugin are dynamically linked, with the library and the plugin
+    // as separate TLS modules. Statically linked glibc builds without threads
+    // lack glibc's thread library. The builds for Ubuntu's glibc run on it:
+    // 2.27 and 2.31 describe their thread structures in libpthread, 2.35 in
+    // libc.
+    for (fixture, plugin, threads) in [
         ("tls-modules-gcc", true, 3),
         ("tls-modules-gcc-static", false, 3),
         ("tls-modules-clang-static-pie", false, 3),
         ("tls-modules-single-thread-gcc-static-pie", false, 1),
         ("tls-modules-single-thread-clang-static", false, 1),
+        ("tls-modules-glibc2.27", true, 3),
+        ("tls-modules-glibc2.31", true, 3),
+        ("tls-modules-glibc2.35", true, 3),
+        ("tls-modules-single-thread-glibc2.35", false, 1),
         ("tls-modules-musl-gcc-o0", true, 3),
         ("tls-modules-musl-clang-o2-nopie", true, 3),
         ("tls-modules-musl-gcc-static", false, 3),
@@ -849,7 +856,8 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
         // Before the C library sets the thread pointer up, no thread has TLS.
         // Only dynamically linked glibc needs its loader to identify the
         // executable's TLS, and its loader has not run yet.
-        if fixture != "tls-modules-gcc" {
+        let dynamic_glibc = fixture == "tls-modules-gcc" || fixture.contains("-glibc");
+        if !dynamic_glibc {
             let early = scenario
                 .operation("TLS at entry", scenario.handle().variable("main_tls"))
                 .await;
@@ -871,7 +879,7 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
             ),
             "{fixture}"
         );
-        support::assert_tls_modules(&mut scenario, fixture, dynamic, threads).await;
+        support::assert_tls_modules(&mut scenario, fixture, plugin, threads).await;
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0)),
@@ -879,6 +887,41 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
         );
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
+}
+
+/// glibc before 2.34 describes its thread structures only in libpthread, so
+/// the TLS of a program that never loads it cannot be found, which uscope
+/// says rather than guessing at the C library's layout.
+#[tokio::test]
+async fn tls_on_glibc_before_2_34_without_libpthread_is_unavailable_with_its_reason() {
+    let fixture = "tls-modules-single-thread-glibc2.31";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("tls_stop").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    for name in ["main_tls", "library_tls"] {
+        let variable = scenario
+            .operation("unlocatable TLS", scenario.handle().variable(name))
+            .await;
+        assert_eq!(
+            variable.state,
+            VariableState::Unavailable(VariableUnavailableReason::TlsUnavailable(
+                uscope::TlsUnavailableReason::LookupFailed(
+                    "no loaded module defines _thread_db_link_map_l_tls_modid, which glibc \
+                     before 2.34 defines only in libpthread"
+                        .into()
+                )
+            )),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
 /// The address and value of a TLS variable in the selected thread.
@@ -893,24 +936,13 @@ fn tls_location(variable: &uscope::Variable) -> (u64, i128) {
     }
 }
 
-/// Reads the variable with `libthread_db` and then with glibc's own layout
-/// descriptors, which must agree.
-pub async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i128) {
-    uscope::force_internal_tls_lookup(false);
-    let thread_library = tls_location(
+/// The address and value of the TLS variable `name` in the selected thread.
+pub async fn tls_location_by_name(scenario: &Scenario, name: &str) -> (u64, i128) {
+    tls_location(
         &scenario
-            .operation("TLS through libthread_db", scenario.handle().variable(name))
+            .operation("TLS by name", scenario.handle().variable(name))
             .await,
-    );
-    uscope::force_internal_tls_lookup(true);
-    let descriptors = tls_location(
-        &scenario
-            .operation("TLS through descriptors", scenario.handle().variable(name))
-            .await,
-    );
-    uscope::force_internal_tls_lookup(false);
-    assert_eq!(thread_library, descriptors, "{name}");
-    thread_library
+    )
 }
 
 fn catalog_global(image: &ModuleImage, qualified_name: &str) -> uscope::GlobalVariableInfo {

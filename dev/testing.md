@@ -218,7 +218,7 @@ relevant to the behavior. Common dimensions are:
 - no optimization and optimized output;
 - PIE and fixed-address executables;
 - frame pointers present and omitted;
-- glibc and musl thread/runtime layouts;
+- glibc and musl thread/runtime layouts, and older glibc builds;
 - selected compiler or runtime versions.
 
 Avoid a Cartesian product without a reason. Pick a compact set where each

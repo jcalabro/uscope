@@ -43,7 +43,7 @@ const POST_MORTEM_THREAD_NAME: &str = "uscope-core";
 /// Registers and memory recorded by a core dump.
 pub(super) struct CoreTarget {
     memory: CoreMemory,
-    /// Loaded images whose symbols answer `libthread_db` lookups.
+    /// Loaded images whose symbols locate the C library's thread structures.
     symbol_modules: Vec<SymbolModule>,
 }
 
@@ -167,9 +167,7 @@ impl InspectionOps for CoreTarget {
         module: TlsModule,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
-        let process = i32::try_from(self.memory.core().process.pid)
-            .map_err(|_| Arc::from("the core dump's process identifier is invalid"))?;
-        tls::tls_address(self, Pid::from_raw(process), thread, module, offset)
+        tls::tls_address(self, thread, module, offset)
     }
 }
 

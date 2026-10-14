@@ -5,8 +5,12 @@ narrower limits and report them when used.
 
 ## Host and target
 
-- The debugger runs on Linux x86-64.
+- The debugger runs on Linux x86-64, version 3.8 or newer. Catchpoints and
+  the ptrace syscall engine need 5.3, `--sysroot` 5.6, and the profiler 6.0.
 - It debugs native x86-64 Linux processes and core dumps.
+- Thread-local variables are read in programs that use musl, or glibc 2.27
+  or newer. glibc before 2.34 describes its thread structures only in
+  libpthread, so a program that has not loaded it shows them as unavailable.
 - Cross-architecture and remote targets are not supported.
 - Process control depends on Linux ptrace permissions.
 

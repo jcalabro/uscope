@@ -51,10 +51,6 @@ pub mod timings;
 #[doc(hidden)]
 pub mod unsafe_parts {
     pub use crate::backend::perf::sys::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
-    pub use crate::backend::tls::ProcessServices;
-    pub use crate::backend::tls::thread_db::{
-        Handle, ps_get_thread_area, ps_getpid, ps_lgetregs, ps_pdread, ps_pglobal_lookup, ps_ptread,
-    };
 }
 #[cfg(feature = "tools")]
 #[doc(hidden)]
@@ -252,16 +248,6 @@ pub fn signal_codes() -> impl Iterator<Item = u64> {
     backend::signal_codes()
 }
 
-/// Makes every glibc TLS lookup in this process compute addresses from
-/// glibc's own layout descriptors instead of asking `libthread_db`, which is
-/// otherwise used whenever it accepts the inferior's C library. Like gdb's
-/// `maint set force-internal-tls-address-lookup`, this exists to test that
-/// the two agree.
-#[doc(hidden)]
-pub fn force_internal_tls_lookup(forced: bool) {
-    backend::force_internal_tls_lookup(forced);
-}
-
 /// Exercises core-dump parsing and memory reads for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -313,6 +299,14 @@ pub fn fuzz_profile_import(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_debug_register_plan(data: &[u8]) {
     backend::fuzz_debug_register_plan(data);
+}
+
+/// Locates glibc TLS blocks in loader state made of arbitrary bytes, for
+/// the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_glibc_tls(data: &[u8]) {
+    backend::fuzz_glibc_tls(data);
 }
 
 /// Exercises ELF symbol-table normalization and symbol lookup invariants for

@@ -43,8 +43,16 @@ read. It does not fill gaps with guessed values.
 
 ## Platform support
 
-uscope currently runs on Linux x86-64. See [known limits](docs/reference/limitations.md)
-for details about targets, debug information, and editor support.
+uscope currently runs on Linux x86-64, version 3.8 or newer. Some features
+need a newer kernel: catchpoints and the ptrace syscall engine need 5.3, the
+BPF syscall engine 5.15, and the profiler 6.0.
+
+To read thread-local variables in a program that uses glibc, uscope needs
+glibc 2.27 or newer. Before glibc 2.34, the program must also have loaded
+libpthread.
+
+See [known limits](docs/reference/limitations.md) for details about targets,
+debug information, and editor support.
 
 ## Development
 

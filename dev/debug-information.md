@@ -186,6 +186,15 @@ range.
 Entry values and caller-state reconstruction need explicit evidence. Never
 substitute the current register value for a requested entry value.
 
+A thread-local variable's location is an offset in its module's TLS block,
+and the C library's structures say where each thread's copy of the block is.
+`src/backend/linux/tls.rs` reads musl's structures, whose layout is fixed
+ABI, and glibc's through the `_thread_db_*` descriptors glibc exports for
+debuggers, following glibc's own lookup. glibc defines the descriptors in
+libc since 2.34 and in libpthread before. The TLS fixtures run on Ubuntu's
+glibc 2.27, 2.31, and 2.35, which the dev shell provides in
+`USCOPE_UBUNTU_GLIBC`, as well as on the toolchain's glibc and musl.
+
 ## Types and layout
 
 Providers resolve ABI and language layout into explicit model facts:

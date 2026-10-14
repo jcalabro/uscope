@@ -327,16 +327,9 @@ impl InspectionOps for LinuxPtrace {
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.assert_owner_thread();
-        let process = thread_group_id(thread).map_err(|error| Arc::from(error.to_string()))?;
         // The address space is read through the thread, since the leader
         // may have exited before the rest of its process.
-        tls::tls_address(
-            &tls::LiveProcess { pid: thread },
-            process,
-            thread,
-            module,
-            offset,
-        )
+        tls::tls_address(&tls::LiveProcess { pid: thread }, thread, module, offset)
     }
 }
 

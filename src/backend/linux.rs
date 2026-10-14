@@ -103,19 +103,13 @@ mod step_targets;
 mod stepping;
 mod sys;
 pub mod syscalls;
-pub mod tls;
+mod tls;
 mod vdso;
 mod visualizers;
 mod watchpoints;
 mod writes;
 
 pub use post_mortem::{PostMortemSession, open_core};
-
-/// Makes glibc TLS lookups in this process use glibc's layout descriptors
-/// instead of `libthread_db`.
-pub fn force_internal_tls_lookup(forced: bool) {
-    tls::force_glibc_descriptors(forced);
-}
 
 /// Ends the job-control stop of a held process, and returns whether it
 /// did: a process no longer held is left alone.
@@ -177,6 +171,11 @@ pub fn fuzz_core_dump(data: &[u8]) {
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_debug_register_plan(data: &[u8]) {
     debug_registers::fuzz(data);
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_glibc_tls(data: &[u8]) {
+    tls::fuzz_glibc(data);
 }
 
 /// x86-64 debug registers report writes or any access, but never reads alone.

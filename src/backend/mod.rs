@@ -22,7 +22,6 @@ pub use linux::resume_address;
 #[cfg(any(test, feature = "sim"))]
 pub use linux::sim_edge;
 pub use linux::syscalls as syscall_engines;
-pub use linux::tls;
 
 /// Identifies a file independently of the path used to open it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,11 +233,6 @@ pub fn open_core(
     linux::open_core(options, channels)
 }
 
-/// Makes TLS lookups in this process bypass the platform's thread library.
-pub fn force_internal_tls_lookup(forced: bool) {
-    linux::force_internal_tls_lookup(forced);
-}
-
 /// Lets a held process run, unless it is no longer held.
 pub fn release_held(held: &crate::HeldProcess) -> Result<bool> {
     linux::release_held(held)
@@ -282,4 +276,9 @@ pub fn fuzz_core_dump(data: &[u8]) {
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_debug_register_plan(data: &[u8]) {
     linux::fuzz_debug_register_plan(data);
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_glibc_tls(data: &[u8]) {
+    linux::fuzz_glibc_tls(data);
 }

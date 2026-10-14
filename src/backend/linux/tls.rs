@@ -3,10 +3,8 @@
 //!
 //! Debug information locates a TLS variable by its offset in its module's
 //! TLS block, of which each thread has its own copy. Which copy a thread
-//! uses is recorded in C library structures. glibc is asked through its
-//! `libthread_db` ([`thread_db`]) or, for a version that library refuses or a
-//! statically linked program, read directly ([`glibc`]). musl has no thread
-//! debugging library, and the structures it is read through are fixed ABI
+//! uses is recorded in C library structures. glibc describes the layout of
+//! its structures in the inferior itself ([`glibc`]); musl's are fixed ABI
 //! ([`musl`]).
 //!
 //! On x86-64 both C libraries keep a thread's control block at its thread
@@ -31,7 +29,6 @@ use crate::VirtualAddress;
 
 mod glibc;
 mod musl;
-pub mod thread_db;
 
 /// The prefix of the file name of musl's dynamic loader, which is also its
 /// C library: `ld-musl-x86_64.so.1` on x86-64.
@@ -45,18 +42,11 @@ const GLIBC_SETUP_TLS: &str = "__libc_setup_tls";
 /// Where the thread control block keeps its DTV's address, after its own.
 const DTV_POINTER_OFFSET: u64 = 8;
 
-/// Makes every glibc TLS lookup in this process use glibc's layout
-/// descriptors rather than `libthread_db`, so tests can check that the two
-/// agree.
-pub(super) fn force_glibc_descriptors(forced: bool) {
-    glibc::force(forced);
-}
-
 /// The C library whose structures locate a program's TLS blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::backend) enum CLibrary {
     /// Dynamically linked glibc, or any C library not recognized as another,
-    /// whose lookups then fail with `libthread_db`'s reason.
+    /// whose lookups then fail for want of glibc's descriptors.
     Glibc,
     /// glibc linked into the executable.
     StaticGlibc,
@@ -165,14 +155,13 @@ pub(super) enum TlsModule {
 /// The address of `offset` within `module`'s TLS block for `thread`.
 pub(super) fn tls_address(
     services: &dyn ProcessServices,
-    process: Pid,
     thread: Pid,
     module: TlsModule,
     offset: u64,
 ) -> Result<VirtualAddress, Arc<str>> {
     let address = match module {
         TlsModule::Glibc { link_map } => {
-            return thread_db::tls_address(services, process, thread, link_map, offset);
+            glibc::tls_address(services, thread, link_map.get(), offset)
         }
         TlsModule::StaticGlibc => glibc::static_executable_tls_address(services, thread, offset),
         TlsModule::Musl { id } => musl::tls_address(services, thread, id, offset),
@@ -180,6 +169,12 @@ pub(super) fn tls_address(
     address
         .map(VirtualAddress::new)
         .map_err(|error| error.to_string().into())
+}
+
+/// Locates glibc TLS blocks in arbitrary memory for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_glibc(data: &[u8]) {
+    glibc::fuzz(data);
 }
 
 /// The thread pointer of `thread`, which addresses its control block once
@@ -221,7 +216,7 @@ fn read_word(services: &dyn ProcessServices, address: Option<u64>) -> Result<u64
 }
 
 /// Read-only process state that TLS lookups query.
-pub trait ProcessServices {
+pub(super) trait ProcessServices {
     fn read(&self, address: u64, output: &mut [u8]) -> bool;
     fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct>;
     /// The address of `symbol`, preferring its definition in `object`, a
