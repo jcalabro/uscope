@@ -51,6 +51,10 @@ pub mod timings;
 #[doc(hidden)]
 pub mod unsafe_parts {
     pub use crate::backend::perf::sys::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
+    pub use crate::backend::tls::ProcessServices;
+    pub use crate::backend::tls::thread_db::{
+        Handle, ps_get_thread_area, ps_getpid, ps_lgetregs, ps_pdread, ps_pglobal_lookup, ps_ptread,
+    };
 }
 #[cfg(feature = "tools")]
 #[doc(hidden)]

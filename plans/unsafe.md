@@ -125,7 +125,7 @@ Each step lists how we know it worked.
   `atexit`. Miri tests: threads that emit, exit, and reuse rings, with
   many seeds. *Done when* the probe recording tests pass, `just
   probe-cost` shows no regression, and `just miri` covers the SDK.
-- [ ] **8. libthread_db callbacks under Miri.** Call `ps_pdread`,
+- [x] **8. libthread_db callbacks under Miri.** Call `ps_pdread`,
   `ps_pglobal_lookup`, and `ps_getpid` directly, with a boxed handle and a
   fake `ProcessServices`. Check that no `&mut` path to the boxed handle
   is live while a callback runs. *Done when* `just miri` covers them.
@@ -321,3 +321,16 @@ Decisions, measurements, and surprises, newest last.
   A/B on the same day: 13.43–13.49 ns a zone before, 13.43–13.51 after.
   `lint` now formats and lints the SDK, `test` runs its tests, and a
   warm `just miri` takes about 4 s.
+- 2026-10-13, step 8: `thread_db::Handle` owns the `ps_prochandle`, and
+  `tests/miri.rs` calls the callbacks through it as libthread_db would:
+  reads, symbol lookups with and without an object, registers, the
+  thread area, and a service that panics. The first run stopped at the
+  inferior's addresses, which were written to libthread_db as integer
+  casts to pointers; they now carry no provenance. Then, with the handle
+  a `Box` in the agent and the pointer taken from it, moving the handle
+  through a function retagged the box, a callback's read through the
+  older pointer invalidated that tag, and freeing the box was undefined
+  behavior. `tls_address` never moved it that way, so nothing failed
+  yet. The handle now owns the process as a raw pointer from a leaked
+  box, freed when it drops, and the test passes. The in-file unit test of
+  a lookup without an object moved into the Miri test.

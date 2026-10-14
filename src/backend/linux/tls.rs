@@ -31,7 +31,7 @@ use crate::VirtualAddress;
 
 mod glibc;
 mod musl;
-mod thread_db;
+pub mod thread_db;
 
 /// The prefix of the file name of musl's dynamic loader, which is also its
 /// C library: `ld-musl-x86_64.so.1` on x86-64.
@@ -221,7 +221,7 @@ fn read_word(services: &dyn ProcessServices, address: Option<u64>) -> Result<u64
 }
 
 /// Read-only process state that TLS lookups query.
-pub(super) trait ProcessServices {
+pub trait ProcessServices {
     fn read(&self, address: u64, output: &mut [u8]) -> bool;
     fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct>;
     /// The address of `symbol`, preferring its definition in `object`, a

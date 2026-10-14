@@ -341,3 +341,157 @@ mod ring {
         assert_eq!(out, expected);
     }
 }
+
+mod thread_db {
+    use std::ffi::{c_int, c_long, c_void};
+    use std::ptr;
+
+    use nix::libc;
+    use nix::unistd::Pid;
+    use uscope::unsafe_parts::{
+        Handle, ProcessServices, ps_get_thread_area, ps_getpid, ps_lgetregs, ps_pdread,
+        ps_pglobal_lookup, ps_ptread,
+    };
+
+    const PS_OK: c_int = 0;
+    const PS_ERR: c_int = 1;
+    const PS_BADLID: c_int = 3;
+    const PS_NOSYM: c_int = 5;
+    const FS: c_int = 25;
+
+    /// A process of one thread, 41, with 16 bytes at 0x1000 and one
+    /// symbol. Reading 0xdead panics.
+    struct Process;
+
+    const MEMORY: [u8; 16] = *b"0123456789abcdef";
+
+    impl ProcessServices for Process {
+        fn read(&self, address: u64, output: &mut [u8]) -> bool {
+            assert_ne!(address, 0xdead, "a service that panics");
+            let Some(start) = address.checked_sub(0x1000) else {
+                return false;
+            };
+            let start = usize::try_from(start).unwrap();
+            let Some(bytes) = MEMORY.get(start..start + output.len()) else {
+                return false;
+            };
+            output.copy_from_slice(bytes);
+            true
+        }
+
+        fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct> {
+            // Each register holds its index in libthread_db's order.
+            (lwp.as_raw() == 41).then_some(libc::user_regs_struct {
+                r15: 0,
+                r14: 1,
+                r13: 2,
+                r12: 3,
+                rbp: 4,
+                rbx: 5,
+                r11: 6,
+                r10: 7,
+                r9: 8,
+                r8: 9,
+                rax: 10,
+                rcx: 11,
+                rdx: 12,
+                rsi: 13,
+                rdi: 14,
+                orig_rax: 15,
+                rip: 16,
+                cs: 17,
+                eflags: 18,
+                rsp: 19,
+                ss: 20,
+                fs_base: 21,
+                gs_base: 22,
+                ds: 23,
+                es: 24,
+                fs: 25,
+                gs: 26,
+            })
+        }
+
+        fn lookup_symbol(&self, object: Option<&str>, symbol: &str) -> Option<u64> {
+            (object.is_none_or(|object| object == "libc.so.6") && symbol == "_thread_db_dtv")
+                .then_some(0x2000)
+        }
+    }
+
+    /// What owns a handle while `libthread_db` holds its pointer, as an
+    /// agent does.
+    struct Agent<'a> {
+        _handle: Handle<'a>,
+    }
+
+    const fn at(address: usize) -> *const c_void {
+        ptr::without_provenance(address)
+    }
+
+    /// `libthread_db` keeps the pointer it was given while the handle moves
+    /// into its agent, and calls back through it for the agent's life.
+    #[test]
+    fn callbacks_answer_through_a_handle_that_moved() {
+        let handle = Handle::new(7, &Process);
+        let process = handle.as_ptr();
+        let agent = Box::new(Agent { _handle: handle });
+
+        // SAFETY: each call passes the handle's pointer, buffers of the
+        // sizes it names, and NUL-terminated names.
+        unsafe {
+            assert_eq!(ps_getpid(process), 7);
+
+            let mut bytes = [0_u8; 4];
+            let output = bytes.as_mut_ptr().cast();
+            assert_eq!(ps_pdread(process, at(0x1004), output, 4), PS_OK);
+            assert_eq!(&bytes, b"4567");
+            assert_eq!(ps_ptread(process, at(0x100c), output, 4), PS_OK);
+            assert_eq!(&bytes, b"cdef");
+            assert_eq!(ps_pdread(process, at(0x100e), output, 4), PS_ERR);
+            assert_eq!(ps_pdread(process, at(0xdead), output, 4), PS_ERR);
+            assert_eq!(
+                ps_pdread(process, at(0x1000), ptr::null_mut(), 0),
+                PS_OK,
+                "an empty read touches nothing"
+            );
+
+            let mut address = ptr::null_mut();
+            let symbol = c"_thread_db_dtv".as_ptr();
+            assert_eq!(
+                ps_pglobal_lookup(process, c"libc.so.6".as_ptr(), symbol, &raw mut address),
+                PS_OK
+            );
+            assert_eq!(address.addr(), 0x2000);
+            address = ptr::null_mut();
+            assert_eq!(
+                ps_pglobal_lookup(process, ptr::null(), symbol, &raw mut address),
+                PS_OK
+            );
+            assert_eq!(address.addr(), 0x2000);
+            let other = c"libm.so.6".as_ptr();
+            assert_eq!(
+                ps_pglobal_lookup(process, other, symbol, &raw mut address),
+                PS_NOSYM
+            );
+            assert_eq!(
+                ps_pglobal_lookup(process, other, ptr::null(), &raw mut address),
+                PS_ERR
+            );
+
+            let mut registers = [-1 as c_long; 27];
+            assert_eq!(ps_lgetregs(process, 41, registers.as_mut_ptr()), PS_OK);
+            assert!(registers.iter().copied().eq(0..27), "{registers:?}");
+            assert_eq!(ps_lgetregs(process, 42, registers.as_mut_ptr()), PS_BADLID);
+
+            let mut area = ptr::null_mut();
+            assert_eq!(ps_get_thread_area(process, 41, FS, &raw mut area), PS_OK);
+            assert_eq!(area.addr(), 21);
+            assert_eq!(ps_get_thread_area(process, 41, 0, &raw mut area), PS_ERR);
+            assert_eq!(
+                ps_get_thread_area(process, 42, FS, &raw mut area),
+                PS_BADLID
+            );
+        }
+        drop(agent);
+    }
+}

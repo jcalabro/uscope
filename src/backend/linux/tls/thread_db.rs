@@ -13,7 +13,7 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use nix::libc;
@@ -97,8 +97,40 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// The `ps_prochandle` `libthread_db` keeps for an agent's life and passes
+/// back to every callback. It owns the process as a raw pointer, so that
+/// moving it never asserts a unique borrow over a callback's.
+#[doc(hidden)]
+pub struct Handle<'a> {
+    process: NonNull<ProcessHandle<'a>>,
+}
+
+impl<'a> Handle<'a> {
+    #[must_use]
+    pub fn new(pid: c_int, services: &'a dyn ProcessServices) -> Self {
+        Self {
+            process: NonNull::from(Box::leak(Box::new(ProcessHandle { pid, services }))),
+        }
+    }
+
+    /// The pointer `libthread_db` holds.
+    #[must_use]
+    pub const fn as_ptr(&self) -> *mut c_void {
+        self.process.as_ptr().cast()
+    }
+}
+
+impl Drop for Handle<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the box was leaked in `new` and is freed once, here;
+        // libthread_db no longer holds the pointer, as an agent is deleted
+        // before its handle drops.
+        drop(unsafe { Box::from_raw(self.process.as_ptr()) });
+    }
+}
+
 struct Agent<'a> {
-    _process: Box<ProcessHandle<'a>>,
+    _process: Handle<'a>,
     raw: *mut ThreadAgent,
 }
 
@@ -120,10 +152,7 @@ impl AgentError {
 
 impl<'a> Agent<'a> {
     fn new(pid: Pid, services: &'a dyn ProcessServices) -> Result<Self, AgentError> {
-        let mut process = Box::new(ProcessHandle {
-            pid: pid.as_raw(),
-            services,
-        });
+        let process = Handle::new(pid.as_raw(), services);
         let mut raw = ptr::null_mut();
         // SAFETY: td_init takes no arguments and only initializes
         // libthread_db's own state; callers hold `THREAD_DB`.
@@ -136,9 +165,8 @@ impl<'a> Agent<'a> {
         }
         // SAFETY: both pointers are valid for writes for the duration of the
         // call. libthread_db retains the process pointer, which stays valid
-        // because the box's heap allocation does not move and `Agent` owns it
-        // until after td_ta_delete.
-        let created = unsafe { td_ta_new((&raw mut *process).cast(), &raw mut raw) };
+        // because `Agent` owns its handle until after td_ta_delete.
+        let created = unsafe { td_ta_new(process.as_ptr(), &raw mut raw) };
         if created != TD_OK || raw.is_null() {
             return Err(AgentError {
                 step: "agent creation",
@@ -201,9 +229,12 @@ pub(super) fn tls_address(
         return Err(format!("libthread_db LWP lookup failed with {}", td_error(mapped)).into());
     }
     let mut address = ptr::null_mut();
-    let link_map = usize::try_from(link_map.get())
-        .map_err(|_| Arc::from("TLS module address exceeds usize"))?
-        as *mut c_void;
+    // The inferior's addresses are not pointers of this process, so they
+    // carry no provenance.
+    let link_map = ptr::without_provenance_mut(
+        usize::try_from(link_map.get())
+            .map_err(|_| Arc::from("TLS module address exceeds usize"))?,
+    );
     // SAFETY: `handle` came from this live agent, `link_map` was read from the
     // inferior's loader rendezvous, and `address` is valid for one pointer.
     let resolved =
@@ -243,7 +274,8 @@ fn with_process<T>(
 ) -> Option<T> {
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: libthread_db only calls process-service functions with the
-        // exact boxed handle supplied to td_ta_new, which outlives the agent.
+        // pointer of the `Handle` supplied to td_ta_new, which outlives the
+        // agent. Nothing else borrows the process while a callback runs.
         let process = unsafe { process.cast::<ProcessHandle<'_>>().as_ref() }?;
         Some(operation(Pid::from_raw(process.pid), process.services))
     }))
@@ -251,8 +283,12 @@ fn with_process<T>(
     .flatten()
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_pdread(
+pub unsafe extern "C" fn ps_pdread(
     process: *mut c_void,
     address: *const c_void,
     output: *mut c_void,
@@ -275,8 +311,12 @@ unsafe extern "C" fn ps_pdread(
     .unwrap_or(PS_ERR)
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_ptread(
+pub unsafe extern "C" fn ps_ptread(
     process: *mut c_void,
     address: *const c_void,
     output: *mut c_void,
@@ -286,8 +326,12 @@ unsafe extern "C" fn ps_ptread(
     unsafe { ps_pdread(process, address, output, size) }
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_pglobal_lookup(
+pub unsafe extern "C" fn ps_pglobal_lookup(
     process: *mut c_void,
     object_name: *const c_char,
     symbol_name: *const c_char,
@@ -313,14 +357,18 @@ unsafe extern "C" fn ps_pglobal_lookup(
             return PS_ERR;
         };
         // SAFETY: `address` points to one writable psaddr_t result.
-        unsafe { address.write(value as *mut c_void) };
+        unsafe { address.write(ptr::without_provenance_mut(value)) };
         PS_OK
     })
     .unwrap_or(PS_ERR)
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_getpid(process: *mut c_void) -> c_int {
+pub unsafe extern "C" fn ps_getpid(process: *mut c_void) -> c_int {
     with_process(process, |pid, _| pid.as_raw()).unwrap_or(-1)
 }
 
@@ -356,8 +404,12 @@ const fn general_registers(native: &libc::user_regs_struct) -> [libc::c_long; X8
     ]
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_lgetregs(
+pub unsafe extern "C" fn ps_lgetregs(
     process: *mut c_void,
     lwp: c_int,
     output: *mut libc::c_long,
@@ -375,8 +427,12 @@ unsafe extern "C" fn ps_lgetregs(
     .unwrap_or(PS_ERR)
 }
 
+/// # Safety
+///
+/// `process` is a [`Handle`]'s pointer, and the other pointers are valid as
+/// the `proc_service` interface defines them.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ps_get_thread_area(
+pub unsafe extern "C" fn ps_get_thread_area(
     process: *mut c_void,
     lwp: c_int,
     index: c_int,
@@ -393,7 +449,7 @@ unsafe extern "C" fn ps_get_thread_area(
             return PS_ERR;
         };
         // SAFETY: `address` is one writable psaddr_t result.
-        unsafe { address.write(fs_base as *mut c_void) };
+        unsafe { address.write(ptr::without_provenance_mut(fs_base)) };
         PS_OK
     })
     .unwrap_or(PS_ERR)
@@ -418,45 +474,3 @@ unsupported_process_service!(ps_pstop(process: *mut c_void));
 unsupported_process_service!(ps_pcontinue(process: *mut c_void));
 unsupported_process_service!(ps_lstop(process: *mut c_void, lwp: c_int));
 unsupported_process_service!(ps_lcontinue(process: *mut c_void, lwp: c_int));
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn symbol_lookups_without_an_object_name_search_every_module() {
-        struct Symbols;
-
-        impl ProcessServices for Symbols {
-            fn read(&self, _: u64, _: &mut [u8]) -> bool {
-                false
-            }
-
-            fn registers(&self, _: Pid) -> Option<libc::user_regs_struct> {
-                None
-            }
-
-            fn lookup_symbol(&self, object: Option<&str>, symbol: &str) -> Option<u64> {
-                (object.is_none() && symbol == "_dl_stack_user").then_some(0x1234)
-            }
-        }
-
-        let mut process = ProcessHandle {
-            pid: 1,
-            services: &Symbols,
-        };
-        let mut address = ptr::null_mut();
-        // SAFETY: the handle and the result pointer are valid for the call,
-        // and libthread_db passes no object name for a symbol a statically
-        // linked program defines.
-        let result = unsafe {
-            ps_pglobal_lookup(
-                (&raw mut process).cast(),
-                ptr::null(),
-                c"_dl_stack_user".as_ptr(),
-                &raw mut address,
-            )
-        };
-        assert_eq!((result, address.addr()), (PS_OK, 0x1234));
-    }
-}

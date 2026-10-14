@@ -103,7 +103,7 @@ mod step_targets;
 mod stepping;
 mod sys;
 pub mod syscalls;
-mod tls;
+pub mod tls;
 mod vdso;
 mod visualizers;
 mod watchpoints;
