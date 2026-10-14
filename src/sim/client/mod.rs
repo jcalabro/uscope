@@ -359,16 +359,22 @@ impl Client {
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, Failure> {
-        self.handle
+        let snapshot = self
+            .handle
             .snapshot()
             .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))
+            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        self.forget_deleted(&snapshot);
+        Ok(snapshot)
     }
 
     /// The debugger's state, or `None` once it detached and exited.
     async fn state(&self) -> Result<Option<StateSnapshot>, Failure> {
         match self.handle.snapshot().await {
-            Ok(snapshot) => Ok(Some(snapshot)),
+            Ok(snapshot) => {
+                self.forget_deleted(&snapshot);
+                Ok(Some(snapshot))
+            }
             // A request sent just before the controller exited is dropped
             // unanswered.
             Err(Error::RequestQueueClosed | Error::RequestCancelled)
@@ -602,8 +608,11 @@ impl Client {
     }
 
     async fn launch(&self) -> Result<(), Failure> {
-        // A process's watchpoints end with it.
+        // A process's watchpoints end with it, and a stop the client never
+        // judged, as one a kill overtook, may have deleted a temporary
+        // breakpoint the new process must not have.
         self.shared.watches.borrow_mut().clear();
+        self.snapshot().await?;
         let options = LaunchOptions {
             arguments: self.script.arguments.iter().map(Into::into).collect(),
             stop_at_entry: self.script.stop_at_entry,

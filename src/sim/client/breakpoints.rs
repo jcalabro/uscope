@@ -876,12 +876,7 @@ impl Client {
         };
 
         breakpoints.retain(|added| !added.temporary || remaining(added));
-        self.shared.temporaries.borrow_mut().retain(|&id, _| {
-            snapshot
-                .breakpoints
-                .iter()
-                .any(|breakpoint| breakpoint.id.get() == id)
-        });
+        self.forget_deleted(snapshot);
         *self.baseline.borrow_mut() = Some(Baseline {
             process,
             counts: snapshot
@@ -981,6 +976,17 @@ fn image_traps(breakpoint: &crate::Breakpoint) -> Vec<u64> {
 }
 
 impl Client {
+    /// Forgets the temporary breakpoints `snapshot` shows a stop deleted,
+    /// which the kernel follows no more.
+    pub(super) fn forget_deleted(&self, snapshot: &StateSnapshot) {
+        self.shared.temporaries.borrow_mut().retain(|&id, _| {
+            snapshot
+                .breakpoints
+                .iter()
+                .any(|breakpoint| breakpoint.id.get() == id)
+        });
+    }
+
     /// Fails unless each of `breakpoint`'s locations is one binutils say
     /// its spec names.
     pub(super) fn judge_locations(&self, breakpoint: &crate::Breakpoint) -> Result<(), Failure> {
