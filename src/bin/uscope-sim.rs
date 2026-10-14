@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -92,6 +93,7 @@ struct Group {
     /// The shortest run's length in actions, then its seed, which breaks
     /// ties so that a sweep's choice does not depend on its threads.
     shortest: (u64, u64),
+    fingerprint: u64,
     report: String,
 }
 
@@ -107,11 +109,13 @@ fn record_failure(groups: &Mutex<BTreeMap<String, Group>>, outcome: &Outcome) {
     let group = groups.entry(failure.signature()).or_insert_with(|| Group {
         count: 0,
         shortest: run,
+        fingerprint: outcome.fingerprint,
         report: describe_failure(outcome),
     });
     group.count += 1;
     if run < group.shortest {
         group.shortest = run;
+        group.fingerprint = outcome.fingerprint;
         group.report = describe_failure(outcome);
     }
 
@@ -142,6 +146,7 @@ fn sweep(
     let done = AtomicBool::new(false);
     let sessions = AtomicU64::new(0);
     let groups = Mutex::new(BTreeMap::<String, Group>::new());
+    let escaped = Mutex::new(Vec::<u64>::new());
 
     // How many sessions planned each kind of fault, and how many of those
     // fired.
@@ -153,7 +158,21 @@ fn sweep(
             scope.spawn(|| {
                 while !done.load(Ordering::Relaxed) {
                     let seed = start.wrapping_add(next.fetch_add(1, Ordering::Relaxed));
-                    let outcome = run(seed, corpus, &settings);
+
+                    // A run catches the panics of its actions, but not of
+                    // what sets it up and tears it down; one there must not
+                    // end the sweep without naming its seed.
+                    let Ok(outcome) =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| run(seed, corpus, &settings)))
+                    else {
+                        sessions.fetch_add(1, Ordering::Relaxed);
+                        escaped
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(seed);
+                        continue;
+                    };
+
                     sessions.fetch_add(1, Ordering::Relaxed);
                     if let Some(plan) = outcome.swarm.fault {
                         let mut faults = faults.lock().unwrap_or_else(PoisonError::into_inner);
@@ -191,9 +210,15 @@ fn sweep(
         println!("{kind}: fired in {fired} of {planned} sessions that planned it");
     }
 
-    if groups.is_empty() {
+    let mut escaped = escaped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    escaped.sort_unstable();
+    if groups.is_empty() && escaped.is_empty() {
         println!("no failures");
         return ExitCode::SUCCESS;
+    }
+
+    for seed in &escaped {
+        println!("\nseed {seed:#x} panicked outside its actions: just sim-seed {seed:#x}");
     }
 
     for (signature, group) in &groups {
@@ -202,6 +227,16 @@ fn sweep(
             "\n{signature}\n{} sessions; the shortest, seed {seed:#x}, failed at action #{steps}\n{}",
             group.count, group.report
         );
+
+        // A seed is worth replaying only if it names the run that failed.
+        let again = run(seed, corpus, &settings).fingerprint;
+        if again != group.fingerprint {
+            println!(
+                "seed {seed:#x} ran differently when run again ({again:#x}, not {:#x}): \
+                 the simulation is not deterministic",
+                group.fingerprint
+            );
+        }
     }
 
     ExitCode::FAILURE
