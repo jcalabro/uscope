@@ -1189,7 +1189,9 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Resumes a stopped thread while the session detaches, to take a
     /// signal still queued for it, passing on a signal it stopped for as
-    /// the detach would. A published stop ends with it.
+    /// the detach would. A published stop ends with it. A thread SIGKILL
+    /// has taken out of its stop goes on to its exit, which the detach
+    /// awaits the same way.
     fn resume_to_drain(&mut self, pid: Pid) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
@@ -1198,7 +1200,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .take()
             .map(|pending| pending.signal)
             .filter(|signal| self.signals.get(*signal).pass);
-        self.ptrace.continue_execution(pid, signal)?;
+        match self.ptrace.continue_execution(pid, signal) {
+            Err(error) if !is_vanished_tracee(&error) => return Err(error),
+            _ => {}
+        }
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.thread_mut(pid)?.state = NativeThreadState::Running;
         if inferior.public_stop.take().is_some() {
@@ -1242,7 +1247,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             let mask = self.ptrace.signal_mask(thread)?;
             let continued = 1 << (Signal::SIGCONT.number() - 1);
             if mask & continued != 0 {
-                self.ptrace.set_signal_mask(thread, mask & !continued)?;
+                match self.ptrace.set_signal_mask(thread, mask & !continued) {
+                    // SIGKILL took the thread out of its stop, to its exit,
+                    // which the detach awaits.
+                    Err(error) if is_vanished_tracee(&error) => {
+                        inferior.thread_mut(thread)?.state = NativeThreadState::Running;
+                        return Ok(true);
+                    }
+                    result => result?,
+                }
+
                 inferior.held = Some(HeldStop::Draining { thread, mask });
             }
         }

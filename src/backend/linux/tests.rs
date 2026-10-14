@@ -1392,6 +1392,10 @@ impl LinuxTraceOps for FakeTrace {
 
     fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()> {
         self.record(format!("set_signal_mask {pid} {mask:#x}"));
+        if self.vanished.borrow().contains(&pid) {
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
+
         self.signal_masks.borrow_mut().insert(pid, mask);
         Ok(())
     }
@@ -2605,6 +2609,36 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
     );
 }
 
+/// SIGKILL from outside took a thread out of its stop just as the detach
+/// resumed it to collect a queued trap. The thread goes on to its exit, which
+/// the detach awaits, and the session still ends without an error.
+#[test]
+fn detaching_awaits_a_thread_killed_as_it_resumes_to_collect_a_trap() {
+    let mut harness = watch_harness(1);
+    harness.add(0x1_0000, 8).expect("arm");
+    let pid = harness.threads[0];
+    harness.attached();
+    harness.trace().queued_traps.borrow_mut().insert(pid);
+    harness.trace().sigkill(pid);
+    harness.trace().take_actions();
+
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    assert!(
+        result.try_recv().is_err(),
+        "the detach awaits the killed thread's exit: {:?}",
+        harness.trace().take_actions()
+    );
+
+    harness
+        .controller
+        .handle_detach_wait(WaitEvent::Signaled(pid, Signal::SIGKILL, false));
+    result
+        .blocking_recv()
+        .expect("shutdown reply")
+        .expect("the session ends with the process");
+}
+
 impl WatchHarness {
     /// Makes the harness's threads those of an attach that has seized and
     /// interrupted them, and returns the attach's reply.
@@ -3525,6 +3559,37 @@ fn a_held_process_attached_is_continued_and_the_program_never_sees_why() {
 /// that ended its stop, which it would take untraced. The detach takes it
 /// first, unblocking it for the while in a fork child still inside `fork`,
 /// which blocks nearly every signal.
+/// SIGKILL from outside took the one thread that could take a held
+/// process's `SIGCONT` out of its stop. It goes on to its exit, which the
+/// detach awaits.
+#[test]
+fn detaching_a_held_process_awaits_a_thread_killed_before_it_takes_the_sigcont() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.attached();
+    harness.inferior().held = Some(HeldStop::Continued);
+    harness.trace().queued_continue.borrow_mut().insert(pid);
+    harness
+        .trace()
+        .signal_masks
+        .borrow_mut()
+        .insert(pid, 0xffff_ffff_fffb_feff);
+    harness.trace().sigkill(pid);
+    harness.trace().take_actions();
+
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    assert!(result.try_recv().is_err(), "the detach awaits the exit");
+
+    harness
+        .controller
+        .handle_detach_wait(WaitEvent::Signaled(pid, Signal::SIGKILL, false));
+    result
+        .blocking_recv()
+        .expect("shutdown reply")
+        .expect("the session ends with the process");
+}
+
 #[test]
 fn detaching_a_held_process_takes_the_sigcont_it_has_not_yet_received() {
     let mut harness = watch_harness(1);
