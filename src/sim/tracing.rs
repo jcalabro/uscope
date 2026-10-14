@@ -1,46 +1,28 @@
 //! A model of the BPF engine's tracepoint stream. Each call the simulated
-//! kernel served is written as the stream program writes it into a ring
-//! of a chosen size, which a consumer drains every so many records, and
-//! counted into per-CPU statistics as the count program counts it. The
-//! real decoder reads the ring and the real folder the statistics, and
-//! the oracle checks that every call served is in the trace or counted
-//! lost, and in the statistics.
+//! kernel served is written as the stream program writes it and counted
+//! into per-CPU statistics as the count program counts it. The real
+//! decoder must read each record back as the call it was made of, and the
+//! real folder must count every call served.
 //!
-//! Its shape is drawn from [`Stream::Trace`] alone, so seeds choose as
-//! they did before it existed.
+//! The ring the records pass through, and the counter of those a full one
+//! loses, are the kernel's; the engine reads them through BPF maps the
+//! simulation does not reach, so they are not modeled.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
-use super::choices::{Choices, Stream};
 use super::kernel::syscalls::Served;
 use super::marks::{Mark, Marks};
 use crate::backend::syscall_engines::bpf::{self, RawErrnoKey, RawStatValue, Record};
 use crate::syscalls::stats::BUCKETS;
 use crate::syscalls::{Abi, Outcome, Pid, SyscallId, Tid};
 
-/// How many records the ring holds: so few that most are lost, a few, and
-/// more than a run makes.
-const CAPACITIES: [usize; 4] = [1, 4, 64, 1 << 16];
-
-/// How many records arrive between the consumer's drains.
-const DRAINS: [u64; 4] = [1, 3, 16, 1000];
-
 /// The CPUs calls are counted on.
 const CPUS: u32 = 4;
 
-/// The stream, the statistics, and what the oracle compares them with.
+/// The statistics, and what the oracle compares them with.
+#[derive(Default)]
 pub struct TraceModel {
-    capacity: usize,
-    drain_every: u64,
-    since_drain: u64,
-
-    /// Records written and not yet read, with the call each was made of.
-    ring: VecDeque<(Served, Vec<u8>)>,
     served: u64,
-    traced: u64,
-
-    /// What the stream program counts in its lost counter.
-    lost: u64,
     stats: BTreeMap<SyscallId, BTreeMap<u32, RawStatValue>>,
 
     /// Failures by slot and errno.
@@ -48,55 +30,16 @@ pub struct TraceModel {
 
     /// Each call's calls and errors, by errno, as served.
     expected: BTreeMap<SyscallId, (u64, u64, BTreeMap<u16, u64>)>,
-
-    /// Drops records without counting them, under
-    /// [`super::world::Sabotage::LoseTracedCalls`].
-    #[cfg(test)]
-    pub uncounted: bool,
 }
 
 impl TraceModel {
-    pub fn new(choices: &mut Choices) -> Self {
-        Self {
-            capacity: *choices.pick(Stream::Trace, &CAPACITIES),
-            drain_every: *choices.pick(Stream::Trace, &DRAINS),
-            since_drain: 0,
-            ring: VecDeque::new(),
-            served: 0,
-            traced: 0,
-            lost: 0,
-            stats: BTreeMap::new(),
-            errnos: BTreeMap::new(),
-            expected: BTreeMap::new(),
-
-            #[cfg(test)]
-            uncounted: false,
-        }
-    }
-
-    /// Writes and counts each call served, draining the ring as its
-    /// consumer would.
+    /// Writes, reads back, and counts each call served.
     pub fn feed(&mut self, served: Vec<Served>, marks: &mut Marks) -> Result<(), String> {
         for call in served {
             self.count(&call);
             self.served += 1;
-            if self.ring.len() < self.capacity {
-                let bytes = record(&call, self.served);
-                self.ring.push_back((call, bytes));
-            } else {
-                marks.hit(Mark::TraceLost);
-                #[cfg(test)]
-                if self.uncounted {
-                    continue;
-                }
-
-                self.lost += 1;
-            }
-
-            self.since_drain += 1;
-            if self.since_drain >= self.drain_every {
-                self.drain(marks)?;
-            }
+            decode(&call, &record(&call, self.served))?;
+            marks.hit(Mark::TraceDecoded);
         }
 
         Ok(())
@@ -134,57 +77,9 @@ impl TraceModel {
         }
     }
 
-    /// Reads every record in the ring with the real decoder, which must
-    /// give back the call it was made of.
-    fn drain(&mut self, marks: &mut Marks) -> Result<(), String> {
-        self.since_drain = 0;
-        while let Some((call, bytes)) = self.ring.pop_front() {
-            let event = match bpf::decode(&bytes) {
-                Ok(Record::Call(event)) => event,
-                other => return Err(format!("the record of {call:?} decoded as {other:?}")),
-            };
-
-            let outcome = call
-                .returned
-                .map_or(Outcome::ProcessExited, Outcome::of_return);
-            let read = (
-                event.thread,
-                event.process,
-                event.call,
-                event.args,
-                &event.outcome,
-            );
-            let made = (
-                Tid::new(call.tid.cast_unsigned()),
-                Pid::new(call.tgid.id().cast_unsigned()),
-                SyscallId::new(Abi::X86_64, call.number),
-                call.args,
-                &outcome,
-            );
-            if read != made {
-                return Err(format!(
-                    "the trace shows {read:?}, but the kernel served {made:?}"
-                ));
-            }
-
-            self.traced += 1;
-            marks.hit(Mark::TraceDecoded);
-        }
-
-        Ok(())
-    }
-
-    /// Drains what is left and judges the run's trace: every call served
-    /// was read or counted lost, and the folded statistics count each.
-    pub fn finish(&mut self, marks: &mut Marks) -> Result<(), String> {
-        self.drain(marks)?;
-        if self.traced + self.lost != self.served {
-            return Err(format!(
-                "the kernel served {} calls, but the trace holds {} and counts {} lost",
-                self.served, self.traced, self.lost
-            ));
-        }
-
+    /// Judges the run's statistics: the folded statistics count each call
+    /// served.
+    pub fn finish(&self) -> Result<(), String> {
         let folded = bpf::fold(
             Pid::new(0),
             self.stats
@@ -208,6 +103,40 @@ impl TraceModel {
 
         Ok(())
     }
+}
+
+/// Reads `bytes` with the real decoder, which must give back `call`, the
+/// call they were made of.
+fn decode(call: &Served, bytes: &[u8]) -> Result<(), String> {
+    let event = match bpf::decode(bytes) {
+        Ok(Record::Call(event)) => event,
+        other => return Err(format!("the record of {call:?} decoded as {other:?}")),
+    };
+
+    let outcome = call
+        .returned
+        .map_or(Outcome::ProcessExited, Outcome::of_return);
+    let read = (
+        event.thread,
+        event.process,
+        event.call,
+        event.args,
+        &event.outcome,
+    );
+    let made = (
+        Tid::new(call.tid.cast_unsigned()),
+        Pid::new(call.tgid.id().cast_unsigned()),
+        SyscallId::new(Abi::X86_64, call.number),
+        call.args,
+        &outcome,
+    );
+    if read != made {
+        return Err(format!(
+            "the trace shows {read:?}, but the kernel served {made:?}"
+        ));
+    }
+
+    Ok(())
 }
 
 /// A failed call's errno.

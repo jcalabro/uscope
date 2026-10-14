@@ -349,9 +349,6 @@ marks! {
 
     /// The decoder read a call from the model of the tracepoint stream.
     TraceDecoded,
-
-    /// The model of the tracepoint stream lost a call to a full ring.
-    TraceLost,
 }
 
 /// How many times a run reached each mark.

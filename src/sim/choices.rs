@@ -36,14 +36,10 @@ pub enum Stream {
     /// Whether and how the profiler samples running threads. Drawn apart
     /// from the rest, so seeds that never sample choose as before.
     Sample,
-
-    /// The shape of the model of the BPF engine's tracepoint stream.
-    /// Drawn apart from the rest, so seeds choose as before it existed.
-    Trace,
 }
 
 impl Stream {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::Swarm,
         Self::Schedule,
         Self::Client,
@@ -52,7 +48,6 @@ impl Stream {
         Self::Fault,
         Self::Control,
         Self::Sample,
-        Self::Trace,
     ];
 
     const fn name(self) -> &'static str {
@@ -65,7 +60,6 @@ impl Stream {
             Self::Fault => "fault",
             Self::Control => "control",
             Self::Sample => "sample",
-            Self::Trace => "trace",
         }
     }
 

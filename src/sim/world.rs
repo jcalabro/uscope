@@ -178,10 +178,6 @@ pub enum Sabotage {
     /// greater.
     MisreportCallArguments,
 
-    /// The model of the tracepoint stream drops a call from a full ring
-    /// without counting it lost.
-    LoseTracedCalls,
-
     /// The CPU executes the program's own instruction under a temporary
     /// breakpoint's trap, as [`Sabotage::SkipTraps`] does under any user
     /// breakpoint's.
@@ -450,12 +446,7 @@ impl<'a> World<'a> {
         choices.fill(Stream::Program, &mut random);
         let scheduler = Scheduler::new(swarm.policy, &mut choices);
         let sampler = Sampler::new(&mut choices);
-        #[cfg_attr(not(test), expect(unused_mut, reason = "only sabotage changes it"))]
-        let mut tracing = TraceModel::new(&mut choices);
-        #[cfg(test)]
-        {
-            tracing.uncounted = settings.sabotage == Some(Sabotage::LoseTracedCalls);
-        }
+        let tracing = TraceModel::default();
 
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
@@ -1623,8 +1614,8 @@ impl<'a> World<'a> {
 
         self.trace_served()?;
         self.tracing
-            .borrow_mut()
-            .finish(&mut self.machine.marks.borrow_mut())
+            .borrow()
+            .finish()
             .map_err(|message| Failure::debugger("tracing", message))?;
         let kernel = self.machine.kernel.borrow();
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;

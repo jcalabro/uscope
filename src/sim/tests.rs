@@ -463,11 +463,3 @@ fn a_misreported_call_argument_fails_catch_stops() {
         "catch stops"
     );
 }
-
-/// A model of the tracepoint stream that drops calls from a full ring
-/// without counting them lost hides them, which the tracing oracle
-/// catches.
-#[test]
-fn uncounted_lost_calls_fail_the_tracing_oracle() {
-    assert_eq!(first_failure_with(Sabotage::LoseTracedCalls), "tracing");
-}
