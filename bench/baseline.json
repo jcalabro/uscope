@@ -1,17 +1,17 @@
 {
   "containers-cpp-gcc-o2": {
-    "digest": "ec83799c3835be6eb07a6f190a685486",
+    "digest": "4fb13e3838b1140fdf9600ac4d934c94",
     "allocations": 287431,
     "callgrind_instructions": null
   },
   "containers-rust-o0": {
-    "digest": "3c4f29c22d3ea20182d3fb8a130356c3",
-    "allocations": 893232,
+    "digest": "78978c585e0cd6a19d9bd7022710f30d",
+    "allocations": 893237,
     "callgrind_instructions": null
   },
   "containers-zig-self-hosted": {
-    "digest": "70e8d7df21c6b5e3b7b221604cd379ce",
-    "allocations": 322087,
+    "digest": "49add622d8ff3f1803f78e140b9a2bf5",
+    "allocations": 322092,
     "callgrind_instructions": null
   },
   "golden/containers-clang-O0": {
@@ -415,7 +415,7 @@
     "callgrind_instructions": null
   },
   "server-go-o0": {
-    "digest": "509b0e86e426d36511a863531963fb04",
+    "digest": "0432c20fd7cf813fce92795671aac7d2",
     "allocations": 654228,
     "callgrind_instructions": null
   }
