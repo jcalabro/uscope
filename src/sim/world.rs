@@ -48,7 +48,7 @@ use super::corpus::{Corpus, Program, Run, Variant};
 use super::faults::{Faults, Plan};
 use super::kernel::shadow::Tracking;
 use super::kernel::watching::UserWatch;
-use super::kernel::{Kernel, Parent, State, StopKind, Tgid, Tid};
+use super::kernel::{Kernel, ModelGap, Parent, State, StopKind, Tgid, Tid};
 use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles::{self, HeardTrap};
@@ -267,6 +267,7 @@ pub fn run(seed: u64, corpus: &Corpus, settings: &Settings) -> Outcome {
         }
     }
 
+    let failure = failure.map(|found| blame_gap(found, world.machine.kernel.borrow().gap.as_ref()));
     let (lines, dropped) = world.trace.lines();
     let faults = world.machine.faults.borrow();
     Outcome {
@@ -282,6 +283,19 @@ pub fn run(seed: u64, corpus: &Corpus, settings: &Settings) -> Outcome {
         state,
         marks: world.machine.marks.borrow().clone(),
         unfired: faults.plan.filter(|_| faults.fired.is_none()),
+    }
+}
+
+/// A model gap answers the controller with an error Linux would not give,
+/// so whatever fails in the action that reached one is the gap's doing,
+/// whether a panic, an oracle, or the client.
+fn blame_gap(failure: Failure, gap: Option<&ModelGap>) -> Failure {
+    match gap {
+        Some(gap) => Failure {
+            step: failure.step,
+            ..Failure::model_gap(gap.0.clone())
+        },
+        None => failure,
     }
 }
 
@@ -1771,4 +1785,27 @@ fn catch_panic<T>(body: impl FnOnce() -> T) -> Result<T, Failure> {
             Failure::debugger("panic", message)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::report::FailureKind;
+
+    /// A failure in the action that reached a model gap is reported as the
+    /// gap, at the step that failed, so that it is not chased as a
+    /// debugger bug.
+    #[test]
+    fn a_failure_after_a_gap_is_the_gap() {
+        let failure = Failure {
+            step: 7,
+            ..Failure::debugger("panic", "panicked at src/backend/linux/lifecycle.rs")
+        };
+        let gap = ModelGap("PTRACE_LISTEN".to_owned());
+        let blamed = blame_gap(failure.clone(), Some(&gap));
+        assert_eq!(blamed.kind, FailureKind::ModelGap);
+        assert_eq!(blamed.message, "PTRACE_LISTEN");
+        assert_eq!(blamed.step, 7);
+        assert_eq!(blame_gap(failure, None).kind, FailureKind::Debugger);
+    }
 }
