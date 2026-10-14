@@ -10,7 +10,17 @@ use std::process::Command;
 
 use nix::errno::Errno;
 use nix::libc;
+use nix::sys::ptrace;
 use nix::unistd::Pid;
+
+use super::core_dump::FXSAVE_SIZE;
+
+// The kernel's numbers for the requests nix's `Request` lacks with musl.
+// glibc declares requests unsigned and musl signed, so they convert to
+// whichever `libc::ptrace` takes.
+const PTRACE_GETSIGMASK: u16 = 0x420a;
+const PTRACE_SETSIGMASK: u16 = 0x420b;
+const PTRACE_GET_SYSCALL_INFO: u16 = 0x420e;
 
 /// What a launched child does between fork and exec, in this order.
 #[derive(Default)]
@@ -140,7 +150,7 @@ fn install_filter(filter: &[libc::sock_filter]) -> io::Result<()> {
 /// `signal` to it. nix's wrappers cannot deliver real-time signals.
 #[allow(unsafe_code, reason = "a raw ptrace request")]
 pub(super) fn ptrace_with_signal(
-    request: libc::c_uint,
+    request: ptrace::Request,
     pid: Pid,
     signal: Option<i32>,
 ) -> Result<(), Errno> {
@@ -151,7 +161,7 @@ pub(super) fn ptrace_with_signal(
     // read no memory; `data` carries only the signal number to deliver.
     let result = unsafe {
         libc::ptrace(
-            request,
+            request as _,
             pid.as_raw(),
             std::ptr::null_mut::<libc::c_void>(),
             std::ptr::without_provenance_mut::<libc::c_void>(data),
@@ -163,23 +173,23 @@ pub(super) fn ptrace_with_signal(
 /// A stopped tracee's blocked signals.
 pub(super) fn signal_mask(pid: Pid) -> Result<u64, Errno> {
     let mut mask = 0;
-    signal_mask_request(libc::PTRACE_GETSIGMASK, pid, &mut mask)?;
+    signal_mask_request(PTRACE_GETSIGMASK, pid, &mut mask)?;
     Ok(mask)
 }
 
 /// Sets a stopped tracee's blocked signals.
 pub(super) fn set_signal_mask(pid: Pid, mask: u64) -> Result<(), Errno> {
     let mut mask = mask;
-    signal_mask_request(libc::PTRACE_SETSIGMASK, pid, &mut mask)
+    signal_mask_request(PTRACE_SETSIGMASK, pid, &mut mask)
 }
 
 #[allow(unsafe_code, reason = "nix does not wrap the signal mask requests")]
-fn signal_mask_request(request: libc::c_uint, pid: Pid, mask: &mut u64) -> Result<(), Errno> {
+fn signal_mask_request(request: u16, pid: Pid, mask: &mut u64) -> Result<(), Errno> {
     // SAFETY: the kernel's signal set is the eight bytes `mask` borrows,
     // which stay valid and exclusively borrowed throughout the call.
     let result = unsafe {
         libc::ptrace(
-            request,
+            request.into(),
             pid.as_raw(),
             std::mem::size_of::<u64>(),
             std::ptr::from_mut(mask).cast::<libc::c_void>(),
@@ -215,9 +225,27 @@ pub(super) fn syscall_info(pid: Pid) -> Result<[u8; 88], Errno> {
     // request passes, into the buffer, which outlives the call.
     let result = unsafe {
         libc::ptrace(
-            libc::PTRACE_GET_SYSCALL_INFO,
+            PTRACE_GET_SYSCALL_INFO.into(),
             pid.as_raw(),
             std::ptr::without_provenance_mut::<libc::c_void>(buffer.len()),
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+        )
+    };
+    Errno::result(result).map(|_| buffer)
+}
+
+/// A stopped tracee's x87 and SSE registers, as the FXSAVE image the kernel
+/// wrote, so the layout is the kernel's and not a C library's.
+#[allow(unsafe_code, reason = "a raw ptrace request")]
+pub(super) fn floating_registers(pid: Pid) -> Result<[u8; FXSAVE_SIZE], Errno> {
+    let mut buffer = [0_u8; FXSAVE_SIZE];
+    // SAFETY: PTRACE_GETFPREGS writes one 512-byte FXSAVE image on x86-64
+    // into the buffer, which is that size and outlives the call.
+    let result = unsafe {
+        libc::ptrace(
+            ptrace::Request::PTRACE_GETFPREGS as _,
+            pid.as_raw(),
+            std::ptr::null_mut::<libc::c_void>(),
             buffer.as_mut_ptr().cast::<libc::c_void>(),
         )
     };

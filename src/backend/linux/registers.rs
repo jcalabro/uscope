@@ -196,22 +196,6 @@ pub(super) type Fxsave = Arc<[u8; core_dump::FXSAVE_SIZE]>;
 const FXSAVE_X87_OFFSET: usize = 32;
 const FXSAVE_XMM_OFFSET: usize = 160;
 
-pub(super) fn native_fxsave(registers: &libc::user_fpregs_struct) -> Fxsave {
-    let mut bytes = Vec::with_capacity(core_dump::FXSAVE_SIZE);
-    for value in [registers.cwd, registers.swd, registers.ftw, registers.fop] {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes.extend_from_slice(&registers.rip.to_le_bytes());
-    bytes.extend_from_slice(&registers.rdp.to_le_bytes());
-    bytes.extend_from_slice(&registers.mxcsr.to_le_bytes());
-    bytes.extend_from_slice(&registers.mxcr_mask.to_le_bytes());
-    for word in registers.st_space.iter().chain(&registers.xmm_space) {
-        bytes.extend_from_slice(&word.to_le_bytes());
-    }
-    bytes.resize(core_dump::FXSAVE_SIZE, 0);
-    Arc::new(bytes.try_into().expect("FXSAVE image has its fixed size"))
-}
-
 pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
     let index = usize::from(dwarf - 17);
     let start = FXSAVE_XMM_OFFSET + index * 16;

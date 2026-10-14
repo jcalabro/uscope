@@ -6431,14 +6431,9 @@ fn glibc_signal_trampoline_expressions_find_the_kernels_saved_registers() {
         }
     }
 
-    let maps = std::fs::read_to_string("/proc/self/maps").expect("read our own maps");
-    let libc = maps
-        .lines()
-        .filter_map(|line| line.split_whitespace().nth(5))
-        .find(|path| path.ends_with("/libc.so.6"))
-        .expect("the tests link glibc");
+    let libraries = std::env::var_os("GLIBC_LIBRARIES").expect("the flake names glibc");
     let debug = crate::debug_info::load_module(
-        std::path::Path::new(libc),
+        &std::path::Path::new(&libraries).join("libc.so.6"),
         crate::ModuleImageId::new(1),
         &crate::debug_info::DebugFileSearch::default(),
     )

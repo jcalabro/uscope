@@ -72,6 +72,24 @@ just all
 
 Use focused checks while editing. `just all` is the final local gate.
 
+## Static builds
+
+`just build-static` builds a fully static uscope that runs on any x86-64
+Linux, at `target/x86_64-unknown-linux-musl/debug/uscope`. `just build-static
+release` builds an optimized one, with the web page embedded, under
+`release/`. The recipe fails if the binary would link anything dynamically.
+
+These builds link the musl and libunwind from the flake's `pkgsStatic`, so
+`flake.lock` pins their versions. The shell's `RUSTFLAGS` set the glibc loader
+for development builds. The recipe unsets `RUSTFLAGS` so that Cargo uses the
+musl target's own flags.
+
+uscope must not depend on its own C library when it reads a tracee. Write
+kernel ABI numbers, such as ioctl requests or the signal numbers a program
+uses, as the kernel defines them. Do not take them from `libc`, whose types
+and real-time signal range differ between glibc and musl. `just all` builds
+the static binary so that the musl build keeps compiling.
+
 ## Repository map
 
 | Path | Contents |

@@ -29,6 +29,7 @@ use nix::unistd::Pid;
 
 use super::super::native::{ptrace_with_signal, wait_for};
 use super::super::signals::{Signal, WaitEvent};
+use super::super::sys::tgkill;
 use super::info::{OP_ENTRY, OP_EXIT, OP_SECCOMP, SyscallInfo, call_id, syscall_info};
 use super::launch::{self, Gate, GateOptions};
 use super::{Sink, seccomp};
@@ -314,11 +315,11 @@ impl Tracer<'_> {
             return self.detach(tid, signal);
         }
         let request = match self.threads.get(&tid) {
-            Some(thread) if thread.pending.is_some() => libc::PTRACE_SYSCALL,
-            _ if self.mode == Mode::EveryCall => libc::PTRACE_SYSCALL,
-            _ => libc::PTRACE_CONT,
+            Some(thread) if thread.pending.is_some() => ptrace::Request::PTRACE_SYSCALL,
+            _ if self.mode == Mode::EveryCall => ptrace::Request::PTRACE_SYSCALL,
+            _ => ptrace::Request::PTRACE_CONT,
         };
-        record!("syscalls ptrace: resume {tid} with {request} and {signal:?}");
+        record!("syscalls ptrace: resume {tid} with {request:?} and {signal:?}");
         match ptrace_with_signal(request, pid, signal) {
             // A thread killed meanwhile reports its exit next.
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -332,7 +333,7 @@ impl Tracer<'_> {
             self.unfinished(tid, thread, Outcome::Unfinished);
         }
         match ptrace_with_signal(
-            libc::PTRACE_DETACH,
+            ptrace::Request::PTRACE_DETACH,
             Pid::from_raw(tid.cast_signed()),
             signal,
         ) {
@@ -661,7 +662,7 @@ impl Tracer<'_> {
                     // A group-stop: the thread stays stopped, as it would
                     // untraced, until a SIGCONT.
                     record!("syscalls ptrace: listen {tid}");
-                    return match ptrace_with_signal(libc::PTRACE_LISTEN, pid, None) {
+                    return match ptrace_with_signal(ptrace::Request::PTRACE_LISTEN, pid, None) {
                         Ok(()) | Err(Errno::ESRCH) => Ok(()),
                         Err(error) => Err(error),
                     };
@@ -980,7 +981,9 @@ impl Ticker {
         // nothing else in this process handles SIGURG.
         unsafe { nix::sys::signal::sigaction(Native::SIGURG, &action) }
             .map_err(TraceError::System)?;
-        let tracer = nix::sys::pthread::pthread_self();
+        // The thread by its kernel id: a `pthread_t` is a pointer with musl,
+        // which cannot move to the ticker thread.
+        let (process, tracer) = (nix::unistd::getpid(), nix::unistd::gettid());
         let done = Arc::new(AtomicBool::new(false));
         let ended = Arc::clone(&done);
         let thread = std::thread::Builder::new()
@@ -991,7 +994,7 @@ impl Ticker {
                     if ended.load(Ordering::Relaxed) {
                         break;
                     }
-                    let _ = nix::sys::pthread::pthread_kill(tracer, Native::SIGURG);
+                    let _ = tgkill(process, tracer, libc::SIGURG);
                 }
             })
             .map_err(|_| TraceError::System(Errno::EAGAIN))?;

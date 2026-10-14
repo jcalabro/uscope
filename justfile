@@ -20,7 +20,7 @@ check: lint test miri web-test docs
 # Runs everything to check before committing. The concurrent Miri tests try
 # more seeds than `check` does: ordering bugs planted in the probe SDK showed
 # only between seeds 48 and 61.
-all: check (miri-seeds "0..64") web-e2e stress sim bench-smoke
+all: check (miri-seeds "0..64") web-e2e stress sim bench-smoke build-static
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
@@ -53,6 +53,23 @@ build *ARGS="": build-test-programs
 # debugging uscope with uscope. The next `build` rebuilds the crate without it.
 build-debug *ARGS="":
     cargo build --profile test --config 'profile.test.package.uscope.debug=2' {{ARGS}}
+
+# Builds a fully static uscope, which runs on any x86-64 Linux, linked
+# against the flake's musl: PROFILE is debug, release, or another Cargo
+# profile, and the binary is target/x86_64-unknown-linux-musl/PROFILE/uscope.
+# Release builds embed the web page. Fails unless the binary is static.
+[script]
+build-static PROFILE="debug" *ARGS: web
+    # Unset, the musl target's own flags apply instead of the glibc ones.
+    unset RUSTFLAGS
+    cargo build --target x86_64-unknown-linux-musl --bin uscope \
+        --profile "$([[ "$1" == debug ]] && echo dev || echo "$1")" "${@:2}"
+    binary="target/x86_64-unknown-linux-musl/$1/uscope"
+    if readelf -lW "$binary" | grep -q INTERP || readelf -dW "$binary" | grep -q NEEDED; then
+        echo "error: $binary links dynamically" >&2
+        exit 1
+    fi
+    echo "$binary (static, musl $USCOPE_MUSL_VERSION)"
 
 # Builds uscope and runs it with the supplied arguments.
 run *ARGS: build

@@ -15,6 +15,8 @@
       };
       rust = pkgs.rust-bin.nightly."2026-07-11".default.override {
         extensions = [ "clippy" "miri" "rust-src" "rustfmt" ];
+        # For fully static builds of uscope: `just build-static`.
+        targets = [ "x86_64-unknown-linux-musl" ];
       };
       goStable = pkgs.go.overrideAttrs (_final: previous: {
         version = "1.27.1";
@@ -40,6 +42,9 @@
       # C libraries' thread layouts. Wrapping them keeps the cross toolchain's
       # environment out of the shell's native one.
       musl64 = pkgs.pkgsCross.musl64;
+      # Static musl builds of the libraries a static uscope links: musl and
+      # LLVM's libunwind, which Rust's standard library unwinds with.
+      pkgsStatic = pkgs.pkgsStatic;
       muslGcc = pkgs.writeShellScriptBin "musl-gcc" ''
         exec ${musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc "$@"
       '';
@@ -125,6 +130,9 @@
         # against: on the default search path they would shadow the shared C
         # library for every program.
         GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
+        # The shared glibc the fixtures run with, which tests read directly:
+        # uscope and its tests may link musl instead.
+        GLIBC_LIBRARIES = "${pkgs.glibc}/lib";
         # Ubuntu's glibc builds, one directory for each version, holding its
         # lib and dev directories.
         USCOPE_UBUNTU_GLIBC = "${ubuntuGlibcs}";
@@ -137,6 +145,15 @@
         PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
+        # `just build-static` links uscope against the musl and libunwind this
+        # flake pins, not the copies Rust ships, so its C dependencies compile
+        # against the headers of the C library they link. Cargo reads the
+        # target's RUSTFLAGS only when RUSTFLAGS is unset, which the recipe does.
+        CC_x86_64_unknown_linux_musl = "${pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+        AR_x86_64_unknown_linux_musl = "${pkgsStatic.stdenv.cc.bintools}/bin/x86_64-unknown-linux-musl-ar";
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "-C target-feature=+crt-static -C link-self-contained=no -C link-arg=-fuse-ld=mold -L ${pkgsStatic.llvmPackages.libunwind}/lib";
+        USCOPE_MUSL_VERSION = pkgsStatic.musl.version;
         # build.rs compiles the syscall tracer's BPF programs with clang
         # itself, not its wrapper, which adds host flags that a BPF target
         # rejects, against libbpf's BPF headers and the kernel's UAPI
