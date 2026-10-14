@@ -486,14 +486,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 progress_owed,
                 ..
             } => {
-                // A stepping thread that is exiting can step no further. A
+                // A stepping thread that is exiting, or that SIGKILL took out
+                // of its stop on the way to its exit, can step no further. A
                 // leader exiting alone is reported only after every other
                 // thread, which run on in the step's scope meanwhile.
                 let exiting = self
                     .inferior
                     .as_ref()
                     .and_then(|inferior| inferior.threads.get(&thread))
-                    .is_none_or(|stepping| matches!(stepping.state, NativeThreadState::Exiting));
+                    .is_none_or(|stepping| !matches!(stepping.state, NativeThreadState::Stopped));
                 if exiting {
                     return self.continue_scope_threads();
                 }
@@ -530,13 +531,14 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn start_next_repair(&mut self) -> Result<()> {
         let next = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-            // A thread that is exiting, as when SIGKILL ends its process,
-            // steps over nothing.
+            // Only a stopped thread steps over a trap. One exiting, or one
+            // SIGKILL took out of its stop to run to its exit, as when its
+            // process ends, steps over nothing.
             let exiting = |inferior: &Inferior, pid: &Pid| {
                 inferior
                     .threads
                     .get(pid)
-                    .is_none_or(|thread| matches!(thread.state, NativeThreadState::Exiting))
+                    .is_none_or(|thread| !matches!(thread.state, NativeThreadState::Stopped))
             };
             let group = inferior.repairs.front().expect("repair group exists");
             if group.current.is_some() {
