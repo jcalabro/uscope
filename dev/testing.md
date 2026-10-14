@@ -17,6 +17,7 @@ high-value scenarios over assertions that restate implementation details.
 | `tests/golden/` | Deterministic simulator programs and manifests |
 | `scripts/build-test-programs.sh`, `scripts/golden.sh` | Fixture and golden-program builds |
 | `scripts/contained.sh`, `.config/nextest.toml` | Resource containment and nextest process policy |
+| `loom/` | Loom models of concurrent protocols, built from their source |
 | `justfile` | Supported test, stress, simulator, web, and gate commands |
 
 ## Workflow
@@ -107,6 +108,7 @@ needlessly slow or fragile.
 | Web unit/component test | Store transitions, URL state, rendering, sandbox behavior | Real ptrace behavior |
 | Web end-to-end test | Browser/server integration and visible user workflows | Every branch of a pure helper |
 | Simulator | Long interleavings and oracle checks over modeled behavior | Kernel behavior without conformance evidence |
+| Loom model | Every schedule of a small protocol of threads and locks | Async tasks, syscalls, whole workflows |
 | Fuzz target | Structured malformed input and parser/validator bounds | Expected user workflows |
 
 Tests can cross layers when the boundary itself is the subject. Avoid
@@ -386,6 +388,33 @@ bugs show up only at a few dozen seeds, so try more after changing atomics.
 Under Miri the test process keeps Rust's default allocator. Miri cannot run
 mimalloc, and it checks a freed block's layout only on its own allocator.
 
+## Loom
+
+[Loom](https://docs.rs/loom) runs a concurrent protocol under every schedule
+of a few threads, which finds orderings that a test can't force and a stress
+run reaches only by luck. `just loom` runs the models in `loom/` in about a
+second.
+
+A model builds the protocol's own source file, not a copy. The file uses
+only the types `crate::sync` names, which are std's in uscope. The `loom/`
+crate includes the file with `#[path]` and gives it a `sync` of loom's
+types. Its `Mutex` also lets another thread run right after each unlock,
+which loom on its own never does. A `try_lock` handoff can't be checked
+without that. Tests that only std can run sit under
+`#[cfg(all(test, not(loom)))]`.
+
+Keep models small: two threads and three or four items find the
+interleaving bugs these protocols have. `just loom BOUND` sets how many
+preemptions a schedule may have: 3 by default, and 4 in `just all`. Each
+step up takes about ten times as long.
+
+Before trusting a new model, break the protocol on purpose and watch the
+model fail. Loom passes a model that never reaches the broken code.
+
+Loom only runs code built on its types: not tokio tasks, rayon, syscalls, or
+the kernel side of a shared ring. Model a protocol of threads and locks, and
+test the rest the usual ways.
+
 ## Choosing the final gate
 
 Every change runs `just`. Add these checks according to scope:
@@ -401,6 +430,7 @@ Every change runs `just`. Add these checks according to scope:
 | Fixture or golden program | `just build-test-programs`; record a manifest only when intentional |
 | Public docs | `just docs` plus executable-doc tests when affected |
 | Unsafe code | `just miri` |
+| A protocol `loom/` models | `just loom 4` |
 
 `just all` includes the repository's broad pre-commit checks. Run specialized
 long measurements only when the table calls for them; repeating them after

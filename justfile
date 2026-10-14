@@ -15,12 +15,12 @@ max_test_threads := "16"
 default: check
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test miri web-test docs
+check: lint test miri loom web-test docs
 
 # Runs everything to check before committing. The concurrent Miri tests try
 # more seeds than `check` does: ordering bugs planted in the probe SDK showed
 # only between seeds 48 and 61.
-all: check (miri-seeds "0..64") web-e2e stress sim bench-smoke build-static
+all: check (miri-seeds "0..64") (loom "4") web-e2e stress sim bench-smoke build-static
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
@@ -88,6 +88,8 @@ lint:
     cargo check --quiet --manifest-path fuzz/Cargo.toml
     cargo fmt --check --manifest-path sdk/rust-probes/Cargo.toml
     CARGO_TARGET_DIR="$PWD/target/sdk-probes" cargo clippy --quiet --manifest-path sdk/rust-probes/Cargo.toml --all-targets --features enabled -- -D warnings
+    cargo fmt --check --manifest-path loom/Cargo.toml
+    CARGO_TARGET_DIR="$PWD/target/loom" cargo clippy --quiet --manifest-path loom/Cargo.toml --all-targets -- -D warnings
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and
@@ -151,6 +153,15 @@ miri-seeds SEEDS *ARGS:
     cargo miri test --quiet --test miri -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
     export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
     cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
+
+# Runs the loom models in loom/, which check concurrent protocols under every
+# schedule of a few threads with at most BOUND preemptions each. Each
+# preemption allowed multiplies the schedules about tenfold: 3 takes about a
+# second, 4 a few, and 5 half a minute. The models build the protocols' own
+# source files against loom's types in a crate and target directory of their
+# own, so uscope is not rebuilt. Arguments go to the test harness.
+loom BOUND="3" *ARGS:
+    CARGO_TARGET_DIR="$PWD/target/loom" LOOM_MAX_PREEMPTIONS="$1" cargo test --quiet --manifest-path loom/Cargo.toml --lib -- "${@:2}"
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit
