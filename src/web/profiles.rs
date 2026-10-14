@@ -1073,18 +1073,13 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
     for block in &blocks {
         bytes.extend_from_slice(&block.flags.to_le_bytes());
     }
-    let rows: BTreeMap<u32, u32> = profile
-        .threads()
-        .into_iter()
-        .map(|thread| (thread.tid, thread.row))
-        .collect();
     let marks = profile
         .program_markers()
         .into_iter()
         .filter(|marker| range.0 <= marker.time && marker.time < range.1)
         .filter_map(|marker| {
             Some(protocol::ProfileMark {
-                thread: *rows.get(&marker.tid)?,
+                thread: marker.thread?,
                 time: marker.time - start,
                 kind: match marker.kind {
                     MarkerKind::Frame => protocol::ProfileMarkKind::Frame,

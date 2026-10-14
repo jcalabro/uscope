@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use super::Format;
 use crate::analysis::Granularity;
 use crate::capture::builder::{CaptureBuilder, LineInput};
-use crate::capture::records::{FrameKind, NONE};
+use crate::capture::records::{FrameKind, MarkerKind, NONE};
 use crate::profiler::{Profile, StackView, query};
 
 const NAMES: [&str; 5] = ["main", "a", "b::<[u8; 4]>", "c", "d"];
@@ -149,4 +149,27 @@ fn a_file_says_its_format_by_its_bytes_or_its_name() {
     );
     assert_eq!(Format::of_file(Path::new("trace.json"), b"{"), None);
     assert_eq!(Format::of_file(Path::new("program"), b"\x7fELF"), None);
+}
+
+/// A tid one process's thread had and another's took after it ended: each
+/// mark is on the thread that made it, in its process.
+#[test]
+fn a_mark_is_on_its_own_thread_when_a_tid_is_reused() {
+    let mut builder = CaptureBuilder::new();
+    let site = builder.site("frame", "/src/app.rs", 1, NONE, 0);
+    let first = builder.thread(10, 7, 100);
+    builder.thread_marker((first, site), 150, MarkerKind::Frame, None);
+    builder.thread_exit(7, 200);
+    builder.thread(20, 7, 300);
+    let profile = Profile::from_capture(builder.finish());
+    let trace: serde_json::Value =
+        serde_json::from_str(&super::chrome::export(&profile)).expect("a JSON trace");
+    let marks = trace["traceEvents"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|event| event["ph"] == "i")
+        .map(|event| (event["pid"].as_u64(), event["tid"].as_u64()))
+        .collect::<Vec<_>>();
+    assert_eq!(marks, [(Some(10), Some(7))]);
 }
