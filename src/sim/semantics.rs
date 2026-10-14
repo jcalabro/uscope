@@ -1024,7 +1024,8 @@ fn stored(
             address.to_string(),
             kernel.processes[&thread.tgid]
                 .space
-                .read_user(address.get(), raw.len() as u64),
+                .read_user(address.get(), raw.len() as u64)
+                .ok(),
             Mark::StorageTrue,
         ),
         VariableValueSource::Register(register) if innermost && raw.len() <= 8 => {

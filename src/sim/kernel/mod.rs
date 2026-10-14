@@ -1485,8 +1485,8 @@ impl Kernel {
 
                 self.raise(tid, info);
             }
-            Outcome::Unsupported(instruction) => {
-                self.gap(format!("instruction {instruction}"));
+            Outcome::Unsupported(description) => {
+                self.gap(description);
             }
             Outcome::Completed | Outcome::Syscall => {
                 unreachable!("{outcome:?} raises no exception")

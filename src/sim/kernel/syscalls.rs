@@ -5,6 +5,7 @@ use nix::libc;
 
 use super::{ENOSYS_RESULT, ExitStatus, Happening, Kernel, Tgid, Thread, Tid};
 use crate::sim::cpu::{R8, R9, R10, RAX, RDI, RDX, RSI, RSP};
+use crate::sim::memory::MemoryError;
 
 const SYS_WRITE: u64 = 1;
 const SYS_SCHED_YIELD: u64 = 24;
@@ -187,8 +188,13 @@ fn write(kernel: &mut Kernel, tid: Tid, fd: u64, buffer: u64, count: u64) -> u64
 
     let group = kernel.threads[&tid].tgid;
     let process = &kernel.processes[&group];
-    let Some(bytes) = process.space.read_user(buffer, count) else {
-        return failure(Errno::EFAULT);
+    let bytes = match process.space.read_user(buffer, count) {
+        Ok(bytes) => bytes,
+        Err(MemoryError::Fault(_)) => return failure(Errno::EFAULT),
+        Err(error) => {
+            kernel.gap(format!("write from {error}"));
+            return failure(Errno::EFAULT);
+        }
     };
 
     let root = process.root;

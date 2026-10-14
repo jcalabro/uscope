@@ -1158,7 +1158,7 @@ impl<'a> World<'a> {
             return Ok(Vec::new());
         };
 
-        let memory = |at: u64, size: u64| process.space.read_user(at, size);
+        let memory = |at: u64, size: u64| process.space.read_user(at, size).ok();
         let Some(truth) = views::truth(name, address, &memory) else {
             return Ok(Vec::new());
         };

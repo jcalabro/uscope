@@ -69,6 +69,14 @@ struct Region {
     backing: Backing,
 }
 
+/// Where the user half of the address space ends with 4-level paging.
+/// What an access at or past it does depends on the machine: a
+/// non-canonical address raises a general-protection fault, one in the
+/// kernel's half a page fault or, with linear address space separation, a
+/// general-protection fault, and with 5-level paging some are user
+/// addresses.
+pub const USER_HALF_END: u64 = 1 << 47;
+
 /// Why the CPU could not access memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryFault {
@@ -76,6 +84,38 @@ pub struct MemoryFault {
 
     /// [`SEGV_MAPERR`] or [`SEGV_ACCERR`].
     pub code: i32,
+}
+
+/// Why the CPU could not access memory, or why the model cannot say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryError {
+    Fault(MemoryFault),
+
+    /// What Linux does with an access at `address` depends on what the
+    /// model does not know, as `what` says: a model gap.
+    Unmodeled {
+        address: u64,
+        what: &'static str,
+    },
+}
+
+impl From<MemoryFault> for MemoryError {
+    fn from(fault: MemoryFault) -> Self {
+        Self::Fault(fault)
+    }
+}
+
+impl std::fmt::Display for MemoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fault(fault) => write!(
+                formatter,
+                "a fault with code {} at {:#x}",
+                fault.code, fault.address
+            ),
+            Self::Unmodeled { address, what } => write!(formatter, "{what} at {address:#x}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,18 +184,43 @@ impl AddressSpace {
 
     /// Checks that the CPU may access every byte of `[address, address +
     /// length)`, reporting the first byte it may not.
-    fn check(&self, address: u64, length: u64, access: Access) -> Result<(), MemoryFault> {
+    ///
+    /// Three kinds of access are gaps, since what Linux does depends on
+    /// what the model does not know: one reaching past [`USER_HALF_END`];
+    /// one where nothing is mapped and the stack is the next mapping
+    /// above, which Linux grows the stack down over, as far as its
+    /// resource limit and guard gap allow; and a read of memory mapped
+    /// writable or executable but not readable, which x86's page tables
+    /// cannot refuse, though protection keys refuse reads of
+    /// execute-only memory where the CPU has them.
+    fn check(&self, address: u64, length: u64, access: Access) -> Result<(), MemoryError> {
+        let end = address
+            .checked_add(length)
+            .filter(|&end| end <= USER_HALF_END)
+            .ok_or(MemoryError::Unmodeled {
+                address,
+                what: "an access past the user half of the address space",
+            })?;
         let mut current = address;
-        let end = address.checked_add(length).ok_or(MemoryFault {
-            address,
-            code: SEGV_MAPERR,
-        })?;
         while current < end {
             let Some(region) = self.region(current) else {
+                let below_stack = self
+                    .regions
+                    .range(current..)
+                    .next()
+                    .is_some_and(|(_, region)| region.backing == Backing::Stack);
+                if below_stack {
+                    return Err(MemoryError::Unmodeled {
+                        address: current,
+                        what: "an access the stack would grow over",
+                    });
+                }
+
                 return Err(MemoryFault {
                     address: current,
                     code: SEGV_MAPERR,
-                });
+                }
+                .into());
             };
 
             let allowed = match access {
@@ -165,10 +230,19 @@ impl AddressSpace {
             };
 
             if !allowed {
+                if access == Access::Read && (region.protection.write || region.protection.execute)
+                {
+                    return Err(MemoryError::Unmodeled {
+                        address: current,
+                        what: "a read of memory mapped writable or executable but not readable",
+                    });
+                }
+
                 return Err(MemoryFault {
                     address: current,
                     code: SEGV_ACCERR,
-                });
+                }
+                .into());
             }
 
             current = region.end;
@@ -234,23 +308,23 @@ impl AddressSpace {
     }
 
     /// A read by the CPU, which needs read permission.
-    pub fn read(&self, address: u64, bytes: &mut [u8]) -> Result<(), MemoryFault> {
+    pub fn read(&self, address: u64, bytes: &mut [u8]) -> Result<(), MemoryError> {
         self.check(address, bytes.len() as u64, Access::Read)?;
         self.copy_out(address, bytes);
         Ok(())
     }
 
     /// A write by the CPU, which needs write permission.
-    pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), MemoryFault> {
+    pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), MemoryError> {
         self.check(address, bytes.len() as u64, Access::Write)?;
         self.copy_in(address, bytes);
         Ok(())
     }
 
     /// Fetches up to `bytes.len()` instruction bytes from executable memory,
-    /// returning how many could be fetched, or the fault at `address` when
+    /// returning how many could be fetched, or the error at `address` when
     /// none could.
-    pub fn fetch(&self, address: u64, bytes: &mut [u8]) -> Result<usize, MemoryFault> {
+    pub fn fetch(&self, address: u64, bytes: &mut [u8]) -> Result<usize, MemoryError> {
         let mut count = 0;
         while count < bytes.len() {
             let current = address + count as u64;
@@ -362,13 +436,16 @@ impl AddressSpace {
     }
 
     /// Reads bytes as the kernel would for a system call: all of them, or
-    /// `None` when any is not readable.
-    #[must_use]
-    pub fn read_user(&self, address: u64, length: u64) -> Option<Vec<u8>> {
-        self.check(address, length, Access::Read).ok()?;
-        let mut bytes = vec![0; usize::try_from(length).ok()?];
+    /// why some are not readable.
+    pub fn read_user(&self, address: u64, length: u64) -> Result<Vec<u8>, MemoryError> {
+        self.check(address, length, Access::Read)?;
+        let length = usize::try_from(length).map_err(|_| MemoryError::Unmodeled {
+            address,
+            what: "a read longer than the host can hold",
+        })?;
+        let mut bytes = vec![0; length];
         self.copy_out(address, &mut bytes);
-        Some(bytes)
+        Ok(bytes)
     }
 
     /// The address space as `/proc/<pid>/maps` describes it.
@@ -438,10 +515,10 @@ mod tests {
         assert_eq!(byte, [0x90]);
         assert_eq!(
             space.write(code + 5, &[0xcc]),
-            Err(MemoryFault {
+            Err(MemoryError::Fault(MemoryFault {
                 address: code + 5,
                 code: SEGV_ACCERR
-            })
+            }))
         );
         assert!(space.poke(code, 0xcc));
         assert_eq!(space.peek(code), Some(0xcc));
@@ -455,19 +532,19 @@ mod tests {
         );
         assert_eq!(
             space.read(unmapped, &mut byte),
-            Err(MemoryFault {
+            Err(MemoryError::Fault(MemoryFault {
                 address: unmapped,
                 code: SEGV_MAPERR
-            })
+            }))
         );
         let mut fetched = [0; 15];
         assert_eq!(space.fetch(unmapped - 3, &mut fetched), Ok(3));
         assert_eq!(
             space.fetch(unmapped, &mut fetched),
-            Err(MemoryFault {
+            Err(MemoryError::Fault(MemoryFault {
                 address: unmapped,
                 code: SEGV_MAPERR
-            })
+            }))
         );
     }
 }

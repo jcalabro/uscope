@@ -350,7 +350,20 @@ shows it, as `PTRACE_GETREGS` hides a trap flag ptrace set.
 **Memory.** An address space is a map of 4 KiB pages with protections.
 Pages loaded from a golden image are shared by every session and copied on
 first write; fork copies the page map, not the pages. CPU accesses obey
-protections; ptrace accesses do not (K-MEM-1).
+protections; ptrace accesses do not (K-MEM-1). Where Linux's answer
+depends on what the model does not know, a CPU access, or a system
+call's read of the program's memory, is a model gap rather than a
+fault: an address past the 47-bit user half (non-canonical, the
+kernel's half, or a user address with 5-level paging, by the machine),
+and a branch there, which faults on the branch or at its target; an
+unmapped address with the stack the next mapping above, which Linux
+grows the stack over within its resource limit and guard gap (the
+model's stack never grows, and having no vDSO, takes more of the space
+below it for the stack's than Linux does); and a read of memory mapped
+writable or executable but not readable, which x86's page tables allow
+and protection keys may refuse. Bytes iced cannot decode are a gap too:
+an undefined opcode raises SIGILL and a too-long instruction SIGSEGV,
+and no probe pins either.
 
 **Loader.** `loader.rs` maps the `PT_LOAD` segments of a static or
 static-PIE executable (K-EXEC-2), builds the initial stack (arguments, an

@@ -16,19 +16,14 @@ use iced_x86::{
     Register,
 };
 
-use super::memory::{AddressSpace, MemoryFault};
+use super::memory::{AddressSpace, MemoryError, MemoryFault, USER_HALF_END};
 
 /// The longest x86-64 instruction.
 const MAX_INSTRUCTION_BYTES: usize = 15;
 
-pub const SIGILL: i32 = 4;
-
 pub const SIGFPE: i32 = 8;
 
 pub const SIGSEGV: i32 = 11;
-
-/// `si_code` of an invalid opcode.
-const ILL_ILLOPN: i32 = 2;
 
 /// `si_code` of an integer division by zero or overflow.
 const FPE_INTDIV: i32 = 1;
@@ -196,12 +191,24 @@ pub struct Executed {
 /// The effect of an instruction that did not complete normally.
 enum Stop {
     Fault(Fault),
+
+    /// The model does not implement the instruction.
     Unsupported,
+
+    /// The model does not know what Linux does with the instruction's
+    /// access at `address`, as `what` says.
+    Unmodeled {
+        address: u64,
+        what: &'static str,
+    },
 }
 
-impl From<MemoryFault> for Stop {
-    fn from(fault: MemoryFault) -> Self {
-        Self::Fault(fault.into())
+impl From<MemoryError> for Stop {
+    fn from(error: MemoryError) -> Self {
+        match error {
+            MemoryError::Fault(fault) => Self::Fault(fault.into()),
+            MemoryError::Unmodeled { address, what } => Self::Unmodeled { address, what },
+        }
     }
 }
 
@@ -225,7 +232,7 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace, trap: bool)
 
     let instruction = match decode(registers.rip, memory) {
         Ok(instruction) => instruction,
-        Err(fault) => return failed(Outcome::Fault(fault)),
+        Err(outcome) => return failed(outcome),
     };
 
     let mut next = *registers;
@@ -235,7 +242,21 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace, trap: bool)
     }
 
     let accesses = std::cell::Cell::new(Accesses::default());
-    match ops::execute(&instruction, &mut next, memory, &accesses) {
+    let executed = ops::execute(&instruction, &mut next, memory, &accesses).and_then(|outcome| {
+        // A branch to a non-canonical address faults on the branch; one
+        // to the kernel's half faults at its target, by a page fault or
+        // a general-protection fault by the machine.
+        if next.rip >= USER_HALF_END {
+            return Err(Stop::Unmodeled {
+                address: next.rip,
+                what: "a branch past the user half of the address space",
+            });
+        }
+
+        Ok(outcome)
+    });
+
+    match executed {
         Ok(outcome) => {
             next.rflags &= !TRAP;
             *registers = next;
@@ -268,36 +289,49 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace, trap: bool)
             }
         }
         Err(Stop::Fault(fault)) => failed(Outcome::Fault(fault)),
-        Err(Stop::Unsupported) => failed(Outcome::Unsupported(describe(&instruction))),
+        Err(Stop::Unsupported) => failed(Outcome::Unsupported(format!(
+            "instruction {}",
+            describe(&instruction)
+        ))),
+        Err(Stop::Unmodeled { address, what }) => failed(Outcome::Unsupported(format!(
+            "{what} at {address:#x}, by {}",
+            describe(&instruction)
+        ))),
     }
 }
 
-/// Decodes the instruction at `address`, or the fault fetching or decoding
-/// it raises.
-pub fn decode(address: u64, memory: &AddressSpace) -> Result<Instruction, Fault> {
+/// Decodes the instruction at `address`, or says what trying to execute
+/// it does instead: a fault fetching it, or a model gap.
+pub fn decode(address: u64, memory: &AddressSpace) -> Result<Instruction, Outcome> {
+    let unfetchable = |error| match error {
+        MemoryError::Fault(fault) => Outcome::Fault(fault.into()),
+        MemoryError::Unmodeled { address, what } => {
+            Outcome::Unsupported(format!("{what} at {address:#x}, fetching an instruction"))
+        }
+    };
+
     let mut bytes = [0; MAX_INSTRUCTION_BYTES];
-    let fetched = memory.fetch(address, &mut bytes)?;
+    let fetched = memory.fetch(address, &mut bytes).map_err(unfetchable)?;
     let mut decoder = Decoder::with_ip(64, &bytes[..fetched], address, DecoderOptions::NONE);
     let instruction = decoder.decode();
     match decoder.last_error() {
         iced_x86::DecoderError::None => Ok(instruction),
-        iced_x86::DecoderError::NoMoreBytes => {
-            // The instruction runs into memory that cannot be executed.
+        iced_x86::DecoderError::NoMoreBytes if fetched < MAX_INSTRUCTION_BYTES => {
+            // The instruction runs into memory that cannot be executed,
+            // where fetching stopped.
             let end = address + fetched as u64;
-            Err(memory
-                .fetch(end, &mut [0])
-                .err()
-                .map_or_else(|| invalid_opcode(address), Fault::from))
+            Err(memory.fetch(end, &mut [0]).map_or_else(unfetchable, |_| {
+                Outcome::Unsupported(format!("instruction fetching stopped at {end:#x}"))
+            }))
         }
-        _ => Err(invalid_opcode(address)),
-    }
-}
 
-const fn invalid_opcode(address: u64) -> Fault {
-    Fault {
-        signal: SIGILL,
-        code: ILL_ILLOPN,
-        address: Some(address),
+        // An undefined opcode raises SIGILL, and an instruction longer
+        // than fifteen bytes, which runs out of the bytes fetched, a
+        // general-protection fault's SIGSEGV. No probe pins either.
+        _ => Err(Outcome::Unsupported(format!(
+            "bytes that do not decode at {address:#x}: {:02x?}",
+            &bytes[..fetched]
+        ))),
     }
 }
 
@@ -417,6 +451,105 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// What Linux does depends on what the model does not know, so each of
+    /// these is a gap, never a fault, and changes nothing: an access in
+    /// the stack's growth window, which Linux grows the stack into up to
+    /// a limit; an address beyond the user half, which faults as a page
+    /// fault, a general-protection fault, or not at all by the machine;
+    /// a read of memory mapped writable or executable but not readable,
+    /// which x86 allows unless protection keys refuse it; a branch beyond
+    /// the user half, which faults on the branch or at its target by the
+    /// machine; and bytes iced cannot decode, an undefined opcode's
+    /// SIGILL or a too-long instruction's SIGSEGV.
+    #[test]
+    fn accesses_linux_answers_by_what_the_model_does_not_know_are_gaps() {
+        // A name, the code, and the registers it starts with.
+        type Case<'a> = (&'a str, &'a [u8], &'a [(usize, u64)]);
+
+        let stack = 0x7fff_fffd_e000;
+        let mut memory = AddressSpace::default();
+        memory.map(0x1000, 0x2000, Protection::READ_EXECUTE, Backing::Anonymous);
+        let write_only = Protection {
+            read: false,
+            write: true,
+            execute: false,
+        };
+        let execute_only = Protection {
+            read: false,
+            write: false,
+            execute: true,
+        };
+        memory.map(0x3000, 0x4000, write_only, Backing::Anonymous);
+        memory.map(0x5000, 0x6000, execute_only, Backing::Anonymous);
+        memory.map(
+            stack,
+            stack + 0x2_1000,
+            Protection::READ_WRITE,
+            Backing::Stack,
+        );
+
+        let cases: [Case<'_>; 10] = [
+            // push %rax
+            ("below the stack", &[0x50], &[(RSP, stack)]),
+            // mov (%rax), %rcx
+            (
+                "far below the stack",
+                &[0x48, 0x8b, 0x08],
+                &[(RAX, 0x10_0000)],
+            ),
+            ("past the user half", &[0x48, 0x8b, 0x08], &[(RAX, 1 << 47)]),
+            (
+                "non-canonical",
+                &[0x48, 0x8b, 0x08],
+                &[(RAX, 0x8000_0000_0000_0000)],
+            ),
+            ("wrapping", &[0x48, 0x8b, 0x08], &[(RAX, u64::MAX - 3)]),
+            ("write-only", &[0x48, 0x8b, 0x08], &[(RAX, 0x3000)]),
+            ("execute-only", &[0x48, 0x8b, 0x08], &[(RAX, 0x5000)]),
+            // jmp *%rax
+            (
+                "a branch past the user half",
+                &[0xff, 0xe0],
+                &[(RAX, 1 << 47)],
+            ),
+            // push %es, invalid in 64-bit mode
+            ("an undefined opcode", &[0x06], &[]),
+            // fifteen operand-size prefixes and a nop: sixteen bytes
+            ("a too-long instruction", &[0x66; 15], &[]),
+        ];
+
+        for (name, code, values) in cases {
+            let mut code = code.to_vec();
+            code.resize(16, 0x90);
+            assert!(memory.poke_bytes(0x1000, &code));
+            let mut registers = Registers {
+                rip: 0x1000,
+                ..Registers::default()
+            };
+            for &(index, value) in values {
+                registers.general[index] = value;
+            }
+
+            let before = registers;
+            let outcome = execute(&mut registers, &mut memory, false).outcome;
+            assert!(
+                matches!(outcome, Outcome::Unsupported(_)),
+                "{name}: {outcome:?}"
+            );
+            assert_eq!(registers, before, "{name}");
+        }
+
+        // Within the stack and the code, the same instructions run.
+        let mut registers = Registers {
+            rip: 0x1000,
+            ..Registers::default()
+        };
+        registers.general[RSP] = stack + 8;
+        assert!(memory.poke_bytes(0x1000, &[0x50]));
+        let outcome = execute(&mut registers, &mut memory, false).outcome;
+        assert_eq!(outcome, Outcome::Completed);
     }
 
     /// `syscall` saves the trap flag a single step sets in r11, though

@@ -183,7 +183,7 @@ fn judge_memory(
         }
 
         let address = stop.args[usize::from(capture.arg)];
-        let bytes = space.read_user(address, capture.bytes.len() as u64);
+        let bytes = space.read_user(address, capture.bytes.len() as u64).ok();
         if bytes.as_deref() != Some(&capture.bytes[..]) {
             return Err(format!(
                 "thread {tid} reports {:?} behind argument {} of {}, but memory holds \

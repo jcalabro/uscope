@@ -135,7 +135,7 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         } = threads[current];
         let memory = memories.get_mut(&process).expect("a process has memory");
         let instruction = cpu::decode(registers.rip, memory)
-            .map_err(|fault| format!("decoding at {:#x} faulted: {fault:?}", registers.rip))?;
+            .map_err(|outcome| format!("decoding at {:#x}: {outcome:?}", registers.rip))?;
         let before = registers;
         let outcome = cpu::execute(&mut registers, memory, true).outcome;
         native.resume(tid, None, true).map_err(failed)?;
