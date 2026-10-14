@@ -90,14 +90,15 @@ impl TokioRuntime {
     pub(super) fn future(
         &self,
         stop: &dyn RuntimeStop,
-        header: u64,
+        header: VirtualAddress,
     ) -> Result<(VirtualAddress, TypeReference), Arc<str>> {
         let tasks = self.task_layout()?;
         let unreadable = || Arc::<str>::from(format!("the task at {header:#x} is unreadable"));
         let vtable =
-            records::word(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
-        let poll = records::word(stop, vtable.wrapping_add(tasks.poll)).ok_or_else(unreadable)?;
-        let poll = stop.load_bias().wrapping_unload(VirtualAddress::new(poll));
+            records::pointer(stop, header.wrapping_add(tasks.vtable)).ok_or_else(unreadable)?;
+        let poll =
+            records::pointer(stop, vtable.wrapping_add(tasks.poll)).ok_or_else(unreadable)?;
+        let poll = stop.load_bias().wrapping_unload(poll);
         let layout = self
             .futures
             .lock()
@@ -108,10 +109,7 @@ impl TokioRuntime {
         let stage = header.wrapping_add(layout.stage);
         let variant = layout.stages.active(stop, stage)?;
         match &*variant.name {
-            "Running" => Ok((
-                VirtualAddress::new(stage.wrapping_add(layout.future)),
-                layout.ty,
-            )),
+            "Running" => Ok((stage.wrapping_add(layout.future), layout.ty)),
             "Finished" => Err("the task has finished, and holds its output".into()),
             _ => Err("the task's output has been taken".into()),
         }
@@ -119,7 +117,11 @@ impl TokioRuntime {
 
     /// Where the function that runs a task's outermost coroutine begins,
     /// once the future that holds it is past.
-    pub(super) fn entry(&self, stop: &dyn RuntimeStop, header: u64) -> Option<VirtualAddress> {
+    pub(super) fn entry(
+        &self,
+        stop: &dyn RuntimeStop,
+        header: VirtualAddress,
+    ) -> Option<VirtualAddress> {
         let (future, ty) = self.future(stop, header).ok()?;
         let chain = futures::walk(self.image.as_ref(), stop, future, ty);
         let outermost = chain.frames.last()?;

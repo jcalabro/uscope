@@ -1508,7 +1508,7 @@ impl Printer {
                 let address = frame
                     .module
                     .as_ref()
-                    .map_or(frame.address.get(), |(_, address)| address.get());
+                    .map_or_else(|| frame.address.get(), |(_, address)| address.get());
                 object.insert("address".into(), format!("{address:#x}").into());
                 if let Some((module, _)) = &frame.module {
                     object.insert("module".into(), module.as_ref().into());

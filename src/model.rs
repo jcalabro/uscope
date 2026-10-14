@@ -33,6 +33,21 @@ macro_rules! address_type {
             pub const fn get(self) -> u64 {
                 self.0
             }
+
+            /// The address `bytes` past this one, wrapping past the last.
+            #[must_use]
+            pub const fn wrapping_add(self, bytes: u64) -> Self {
+                Self(self.0.wrapping_add(bytes))
+            }
+
+            /// The address `bytes` past this one, or `None` past the last.
+            #[must_use]
+            pub const fn checked_add(self, bytes: u64) -> Option<Self> {
+                match self.0.checked_add(bytes) {
+                    Some(address) => Some(Self(address)),
+                    None => None,
+                }
+            }
         }
 
         impl fmt::Display for $name {

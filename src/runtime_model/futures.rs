@@ -132,7 +132,7 @@ pub fn walk(
     ty: TypeReference,
 ) -> AwaitChain {
     let mut frames = Vec::new();
-    let end = follow(image, stop, future.get(), ty, &mut frames);
+    let end = follow(image, stop, future, ty, &mut frames);
     frames.reverse();
     AwaitChain { frames, end }
 }
@@ -140,7 +140,7 @@ pub fn walk(
 fn follow(
     image: &dyn RuntimeImage,
     stop: &dyn RuntimeStop,
-    mut object: u64,
+    mut object: VirtualAddress,
     mut ty: TypeReference,
     frames: &mut Vec<AsyncFrame>,
 ) -> ChainEnd {
@@ -170,7 +170,7 @@ fn follow(
                 );
             };
             frames.push(AsyncFrame {
-                object: VirtualAddress::new(object),
+                object,
                 ty,
                 kind: AsyncFrameKind::Coroutine {
                     state: number,
@@ -201,7 +201,7 @@ fn follow(
         }
         match kind {
             Shape::Pointer(target) => {
-                let Some(pointer) = records::word(stop, object) else {
+                let Some(pointer) = records::pointer(stop, object) else {
                     return ChainEnd::Broken(
                         format!("the pointer at {object:#x} is unreadable").into(),
                     );
@@ -227,7 +227,7 @@ fn follow(
             },
             Shape::Other => {
                 frames.push(AsyncFrame {
-                    object: VirtualAddress::new(object),
+                    object,
                     ty,
                     kind: AsyncFrameKind::Leaf,
                 });
@@ -243,19 +243,19 @@ fn follow(
 fn held(
     image: &dyn RuntimeImage,
     stop: &dyn RuntimeStop,
-    object: u64,
+    object: VirtualAddress,
     data: u64,
     vtable: u64,
-) -> Result<(u64, TypeReference), ChainEnd> {
+) -> Result<(VirtualAddress, TypeReference), ChainEnd> {
     let (Some(pointer), Some(table)) = (
-        records::word(stop, object.wrapping_add(data)),
-        records::word(stop, object.wrapping_add(vtable)),
+        records::pointer(stop, object.wrapping_add(data)),
+        records::pointer(stop, object.wrapping_add(vtable)),
     ) else {
         return Err(ChainEnd::Broken(
             format!("the trait object at {object:#x} is unreadable").into(),
         ));
     };
-    let held = stop.load_bias().wrapping_unload(VirtualAddress::new(table));
+    let held = stop.load_bias().wrapping_unload(table);
     let Some(held) = image.trait_object_type(held) else {
         return Err(ChainEnd::Broken(
             format!("the vtable at {table:#x} is no future's the program describes").into(),
@@ -268,10 +268,10 @@ fn held(
 fn held_within(
     image: &dyn RuntimeImage,
     stop: &dyn RuntimeStop,
-    mut object: u64,
+    mut object: VirtualAddress,
     mut ty: TypeReference,
     steps: &[&str],
-) -> Result<(u64, TypeReference), Arc<str>> {
+) -> Result<(VirtualAddress, TypeReference), Arc<str>> {
     for step in steps {
         let found = if records::is_sum(image, ty) {
             let sum = records::sum(image, ty)?;

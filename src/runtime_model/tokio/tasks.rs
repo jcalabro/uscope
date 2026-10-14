@@ -21,12 +21,12 @@ use crate::{RecordedPlace, StackSegment, TaskState, ThreadId, VirtualAddress};
 struct Node {
     id: u64,
     state: u64,
-    next: u64,
+    next: VirtualAddress,
 }
 
 /// Where a page resumes within the runtimes' lists: the runtime's index,
 /// the shard, and the task with the task before it.
-type Resume = (usize, u64, Option<(u64, u64)>);
+type Resume = (usize, u64, Option<(VirtualAddress, VirtualAddress)>);
 
 impl TokioRuntime {
     /// Fills a page from `cursor`: the runtimes' lists, then the blocking
@@ -95,7 +95,7 @@ impl TokioRuntime {
         stop: &dyn RuntimeStop,
         census: &Census,
         runtime: Instance,
-        (mut shard, mut node): (u64, Option<(u64, u64)>),
+        (mut shard, mut node): (u64, Option<(VirtualAddress, VirtualAddress)>),
         limit: usize,
         page: &mut Partial<TaskPage>,
     ) -> bool {
@@ -136,9 +136,9 @@ impl TokioRuntime {
                     continue;
                 }
             };
-            let (mut at, mut previous) = node.take().unwrap_or((head, 0));
+            let (mut at, mut previous) = node.take().unwrap_or((head, records::NULL));
             let mut walked = 0;
-            while at != 0 {
+            while at != records::NULL {
                 if walked >= list.count {
                     whole = false;
                     page.gaps.push(
@@ -207,10 +207,10 @@ impl TokioRuntime {
         runtime: Instance,
         list: &List,
         index: u64,
-    ) -> Result<(u64, bool), Arc<str>> {
+    ) -> Result<(VirtualAddress, bool), Arc<str>> {
         // A set's one list is its thread's alone, behind no lock.
         if runtime.flavor == Flavor::Local {
-            let head = records::word(stop, list.shards).ok_or_else(|| {
+            let head = records::pointer(stop, list.shards).ok_or_else(|| {
                 Arc::<str>::from(format!(
                     "the local set's list at {:#x} is unreadable",
                     list.shards
@@ -226,21 +226,21 @@ impl TokioRuntime {
         let lock = owned.shard_lock;
         let state =
             records::read(stop, at.wrapping_add(lock.offset), lock.size).ok_or_else(unreadable)?;
-        let head = records::word(stop, at.wrapping_add(owned.head)).ok_or_else(unreadable)?;
+        let head = records::pointer(stop, at.wrapping_add(owned.head)).ok_or_else(unreadable)?;
         Ok((head, lock.is_held(state)))
     }
 
     /// Reads the task at `header`, the task after `previous` in its shard,
-    /// or its head when `previous` is zero.
+    /// or its head when `previous` is null.
     fn node(
         &self,
         stop: &dyn RuntimeStop,
         tasks: &Tasks,
         list: &List,
-        header: u64,
-        previous: u64,
+        header: VirtualAddress,
+        previous: VirtualAddress,
     ) -> Result<Node, Arc<str>> {
-        let word = |address: u64| {
+        let word = |address: VirtualAddress| {
             records::word(stop, address)
                 .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
         };
@@ -253,7 +253,7 @@ impl TokioRuntime {
             .into());
         }
         let (vtable, trailer) = self.trailer(stop, tasks, header)?;
-        let back = word(trailer.wrapping_add(tasks.prev))?;
+        let back = VirtualAddress::new(word(trailer.wrapping_add(tasks.prev))?);
         if back != previous {
             return Err(format!(
                 "the task at {header:#x} links back to {back:#x}, not {previous:#x}"
@@ -264,7 +264,7 @@ impl TokioRuntime {
         Ok(Node {
             id: word(header.wrapping_add(id_offset))?,
             state: word(header.wrapping_add(tasks.state))?,
-            next: word(trailer.wrapping_add(tasks.next))?,
+            next: VirtualAddress::new(word(trailer.wrapping_add(tasks.next))?),
         })
     }
 
@@ -273,13 +273,13 @@ impl TokioRuntime {
         &self,
         stop: &dyn RuntimeStop,
         tasks: &Tasks,
-        header: u64,
-    ) -> Result<(u64, u64), Arc<str>> {
-        let word = |address: u64| {
+        header: VirtualAddress,
+    ) -> Result<(VirtualAddress, VirtualAddress), Arc<str>> {
+        let word = |address: VirtualAddress| {
             records::word(stop, address)
                 .ok_or_else(|| Arc::<str>::from(format!("the task at {header:#x} is unreadable")))
         };
-        let vtable = word(header.wrapping_add(tasks.vtable))?;
+        let vtable = VirtualAddress::new(word(header.wrapping_add(tasks.vtable))?);
         self.checked_vtable(stop, vtable)?;
         let offset = word(vtable.wrapping_add(tasks.trailer_offset))?;
         Ok((vtable, header.wrapping_add(offset)))
@@ -292,7 +292,7 @@ impl TokioRuntime {
         stop: &dyn RuntimeStop,
         census: &Census,
         tasks: &Tasks,
-        header: u64,
+        header: VirtualAddress,
     ) -> Result<Resume, Arc<str>> {
         let stale = || Arc::<str>::from("the page's cursor names no task at this stop");
         let owner = records::word(stop, header.wrapping_add(tasks.owner)).ok_or_else(stale)?;
@@ -307,7 +307,7 @@ impl TokioRuntime {
             let id = records::word(stop, header.wrapping_add(id_offset)).ok_or_else(stale)?;
             let shard = id & (list.length - 1);
             let previous =
-                records::word(stop, trailer.wrapping_add(tasks.prev)).ok_or_else(stale)?;
+                records::pointer(stop, trailer.wrapping_add(tasks.prev)).ok_or_else(stale)?;
             if self.follows(stop, tasks, runtime, &list, shard, previous)? != header {
                 return Err(stale());
             }
@@ -317,7 +317,7 @@ impl TokioRuntime {
     }
 
     /// The task after `previous` in a shard, or its head when `previous`
-    /// is zero.
+    /// is null.
     fn follows(
         &self,
         stop: &dyn RuntimeStop,
@@ -325,13 +325,13 @@ impl TokioRuntime {
         runtime: Instance,
         list: &List,
         shard: u64,
-        previous: u64,
-    ) -> Result<u64, Arc<str>> {
-        if previous == 0 {
+        previous: VirtualAddress,
+    ) -> Result<VirtualAddress, Arc<str>> {
+        if previous == records::NULL {
             return Ok(self.shard(stop, runtime, list, shard)?.0);
         }
         let (_, trailer) = self.trailer(stop, tasks, previous)?;
-        records::word(stop, trailer.wrapping_add(tasks.next))
+        records::pointer(stop, trailer.wrapping_add(tasks.next))
             .ok_or_else(|| format!("the task at {previous:#x} is unreadable").into())
     }
 
@@ -344,12 +344,14 @@ impl TokioRuntime {
         runtime: Instance,
         number: u64,
         locator: Option<u64>,
-    ) -> Result<Option<(u64, Node)>, Arc<str>> {
+    ) -> Result<Option<(VirtualAddress, Node)>, Arc<str>> {
         let list = self.list(stop, runtime)?;
         let shard = number & (list.length - 1);
-        if let Some(header) = locator.filter(|header| *header != 0)
+        if let Some(header) = locator
+            .map(VirtualAddress::new)
+            .filter(|header| *header != records::NULL)
             && let Ok((_, trailer)) = self.trailer(stop, tasks, header)
-            && let Some(previous) = records::word(stop, trailer.wrapping_add(tasks.prev))
+            && let Some(previous) = records::pointer(stop, trailer.wrapping_add(tasks.prev))
             && self.follows(stop, tasks, runtime, &list, shard, previous) == Ok(header)
             && let Ok(found) = self.node(stop, tasks, &list, header, previous)
             && found.id == number
@@ -357,9 +359,9 @@ impl TokioRuntime {
             return Ok(Some((header, found)));
         }
         let (mut at, _) = self.shard(stop, runtime, &list, shard)?;
-        let mut previous = 0;
+        let mut previous = records::NULL;
         for _ in 0..=list.count {
-            if at == 0 {
+            if at == records::NULL {
                 return Ok(None);
             }
             let found = self.node(stop, tasks, &list, at, previous)?;
@@ -547,13 +549,15 @@ impl TokioRuntime {
             .map(|(.., layout)| layout.spawner)
             .ok_or("the runtime's flavor is unknown")?;
         let unreadable = || Arc::<str>::from("the blocking pool is unreadable");
-        let word = |address: u64| records::word(stop, address).ok_or_else(unreadable);
-        let inner = word(runtime.handle.wrapping_add(spawner))?.wrapping_add(pool.data);
+        let word = |address: VirtualAddress| records::word(stop, address).ok_or_else(unreadable);
+        let pointer =
+            |address: VirtualAddress| records::pointer(stop, address).ok_or_else(unreadable);
+        let inner = pointer(runtime.handle.wrapping_add(spawner))?.wrapping_add(pool.data);
         let lock = records::read(stop, inner.wrapping_add(pool.lock.offset), pool.lock.size)
             .ok_or_else(unreadable)?;
         let head = word(inner.wrapping_add(pool.head))?;
         let length = word(inner.wrapping_add(pool.len))?;
-        let buffer = word(inner.wrapping_add(pool.buffer))?;
+        let buffer = pointer(inner.wrapping_add(pool.buffer))?;
         let capacity = word(inner.wrapping_add(pool.capacity))?;
         if length > capacity || capacity > MAX_TASKS || (capacity > 0 && head >= capacity) {
             return Err(format!("its queue holds {length} of {capacity} from slot {head}").into());
@@ -562,14 +566,14 @@ impl TokioRuntime {
         for index in 0..length {
             let slot = (head + index) % capacity;
             let at = buffer.wrapping_add(slot.wrapping_mul(pool.task_size));
-            let header = word(at.wrapping_add(pool.task))?;
+            let header = pointer(at.wrapping_add(pool.task))?;
             let (vtable, _) = self.trailer(stop, tasks, header)?;
             let id_offset = word(vtable.wrapping_add(tasks.id_offset))?;
             queued.push(RuntimeTask {
                 state: TaskState::Runnable,
                 detail: Some("queued in the blocking pool".into()),
                 internal: self.is_launch(stop, vtable),
-                ..task(word(header.wrapping_add(id_offset))?, header)
+                ..task(word(header.wrapping_add(id_offset))?, header.get())
             });
         }
         Ok((queued, pool.lock.is_held(lock)))
@@ -582,19 +586,23 @@ const MAX_PATH: u64 = 4096;
 impl TokioRuntime {
     /// Where the program spawned the task whose header is at `header`, for
     /// a build that records it.
-    pub(super) fn spawned_at(&self, stop: &dyn RuntimeStop, header: u64) -> Option<RecordedPlace> {
+    pub(super) fn spawned_at(
+        &self,
+        stop: &dyn RuntimeStop,
+        header: VirtualAddress,
+    ) -> Option<RecordedPlace> {
         let spawns = self.layout.spawns.as_ref().ok()?;
         let tasks = self.task_layout().ok()?;
-        let vtable = records::word(stop, header.wrapping_add(tasks.vtable))?;
+        let vtable = records::pointer(stop, header.wrapping_add(tasks.vtable))?;
         let offset = records::word(stop, vtable.wrapping_add(spawns.offset))?;
-        let location = records::word(stop, header.wrapping_add(offset))?;
-        let file = records::word(stop, location.wrapping_add(spawns.file))?;
+        let location = records::pointer(stop, header.wrapping_add(offset))?;
+        let file = records::pointer(stop, location.wrapping_add(spawns.file))?;
         let length = records::word(stop, location.wrapping_add(spawns.length))?;
         if length > MAX_PATH {
             return None;
         }
         let mut path = vec![0; usize::try_from(length).ok()?];
-        if !stop.read(VirtualAddress::new(file), &mut path) {
+        if !stop.read(file, &mut path) {
             return None;
         }
         Some(RecordedPlace {
@@ -618,7 +626,7 @@ impl TokioRuntime {
     pub(super) fn started(
         &self,
         stop: &dyn RuntimeStop,
-        header: u64,
+        header: VirtualAddress,
         schedules: bool,
     ) -> Result<Option<StartedTask>, Arc<str>> {
         let tasks = self.task_layout()?;
@@ -643,7 +651,7 @@ impl TokioRuntime {
                 state: TaskState::Runnable,
                 detail: Some("being spawned".into()),
                 entry: self.entry(stop, header),
-                ..task(number, header)
+                ..task(number, header.get())
             },
             coroutine,
         }))
@@ -683,7 +691,12 @@ fn label(census: &Census, runtime: Instance, list: u64) -> crate::runtime_model:
 
 /// A task of a runtime's list, by its state: running on the thread that
 /// polls it, ready to be polled, suspended, or finished.
-fn owned_task(census: &Census, runtime: Instance, header: u64, node: &Node) -> RuntimeTask {
+fn owned_task(
+    census: &Census,
+    runtime: Instance,
+    header: VirtualAddress,
+    node: &Node,
+) -> RuntimeTask {
     let polls = |thread: &&super::ThreadContext| match runtime.flavor {
         Flavor::Local => thread.local == Some(runtime.handle),
         _ => thread.runtime == Some(runtime) && thread.worker,
@@ -722,6 +735,6 @@ fn owned_task(census: &Census, runtime: Instance, header: u64, node: &Node) -> R
         thread: thread.filter(|_| state == TaskState::Running),
         state,
         detail: Some(detail.into()),
-        ..task(node.id, header)
+        ..task(node.id, header.get())
     }
 }

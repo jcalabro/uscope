@@ -1916,7 +1916,7 @@ impl DwarfUnwindInfo {
     /// without saving them, by the calling convention it follows. Go's
     /// lets a callee overwrite registers the System V ABI preserves.
     fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
-        if self.view().is_go_code(address) || self.go().is_some_and(|go| go.is_go(address.get())) {
+        if self.view().is_go_code(address) || self.go().is_some_and(|go| go.is_go(address)) {
             &X86_64_GO_CALL_CLOBBERED_REGISTERS
         } else {
             &X86_64_SYSV_CALL_CLOBBERED_REGISTERS
@@ -1959,7 +1959,7 @@ impl UnwindInfo for DwarfUnwindInfo {
             return stub_cfa(pushed, registers);
         }
         self.go()
-            .and_then(|go| go.cfa(address.get(), registers))
+            .and_then(|go| go.cfa(address, registers))
             .unwrap_or(result)
     }
 
@@ -2005,12 +2005,12 @@ impl UnwindInfo for DwarfUnwindInfo {
         };
         let result = match result {
             Err(UnwindTermination::NoUnwindInfo { .. }) => go
-                .unwind(address.get(), registers, clobbered, memory)
+                .unwind(address, registers, clobbered, memory)
                 .unwrap_or(result),
             result => result,
         };
         result.map(|mut step| {
-            go.recover_frame_pointer(address.get(), registers, &mut step, memory);
+            go.recover_frame_pointer(address, registers, &mut step, memory);
             step
         })
     }
@@ -2018,14 +2018,14 @@ impl UnwindInfo for DwarfUnwindInfo {
     fn frame_pointer_rule(&self, address: ImageAddress) -> FramePointerRule {
         // Go's rules find the frame by SP, but its prologue keeps the chain.
         self.go()
-            .and_then(|go| go.frame_pointer_rule(address.get()))
+            .and_then(|go| go.frame_pointer_rule(address))
             .unwrap_or_else(|| crate::unwind::frame_pointer_rule(self, address))
     }
 
     fn task_register(&self, address: ImageAddress) -> Option<u16> {
         const R14: u16 = 14;
         self.go()
-            .is_some_and(|go| go.compiled(address.get()))
+            .is_some_and(|go| go.compiled(address))
             .then_some(R14)
     }
 }

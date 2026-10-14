@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::{GoFunction, GoTable};
 use crate::unwind::{FramePointerRule, MemoryReader, RegisterFile, UnwindStep};
-use crate::{UnwindTermination, VirtualAddress};
+use crate::{ImageAddress, UnwindTermination, VirtualAddress};
 
 /// DWARF register numbers on x86-64.
 const RBP: u16 = 6;
@@ -68,8 +68,9 @@ impl GoUnwind {
 
     /// The function Go compiled or assembled whose code contains an image
     /// address, with its index.
-    fn function(&self, address: u64) -> Option<(usize, &GoFunction)> {
+    fn function(&self, address: ImageAddress) -> Option<(usize, &GoFunction)> {
         let functions = self.table.functions();
+        let address = address.get();
         let after = functions.partition_point(|function| function.entry <= address);
         let index = after.checked_sub(1)?;
         let function = &functions[index];
@@ -77,7 +78,7 @@ impl GoUnwind {
     }
 
     /// Whether Go compiled or assembled the code at an image address.
-    pub fn is_go(&self, address: u64) -> bool {
+    pub fn is_go(&self, address: ImageAddress) -> bool {
         self.function(address).is_some()
     }
 
@@ -85,7 +86,7 @@ impl GoUnwind {
     /// assembled it: compiled code follows the register ABI, which keeps
     /// the goroutine's `g` in R14 throughout, where assembly may overwrite
     /// it. Every release whose table this reads has that ABI.
-    pub fn compiled(&self, address: u64) -> bool {
+    pub fn compiled(&self, address: ImageAddress) -> bool {
         self.function(address)
             .is_some_and(|(_, function)| !function.facts.assembly)
     }
@@ -94,11 +95,11 @@ impl GoUnwind {
     fn sp_delta(
         &self,
         function: &GoFunction,
-        address: u64,
+        address: ImageAddress,
     ) -> std::result::Result<u64, UnwindTermination> {
         let delta = self
             .table
-            .sp_delta(function, address)
+            .sp_delta(function, address.get())
             .map_err(|error| UnwindTermination::CorruptUnwindInfo {
                 description: error.to_string().into(),
             })?
@@ -114,7 +115,7 @@ impl GoUnwind {
     /// `None` when Go did not compile the code there.
     pub fn cfa(
         &self,
-        address: u64,
+        address: ImageAddress,
         registers: &RegisterFile,
     ) -> Option<std::result::Result<VirtualAddress, UnwindTermination>> {
         let (_, function) = self.function(address)?;
@@ -138,7 +139,7 @@ impl GoUnwind {
     /// compile the code there.
     pub fn unwind(
         &self,
-        address: u64,
+        address: ImageAddress,
         registers: &RegisterFile,
         clobbered: &[u16],
         memory: &mut dyn MemoryReader,
@@ -178,7 +179,7 @@ impl GoUnwind {
     /// assembly may have.
     pub fn caller_frame_pointer(
         &self,
-        address: u64,
+        address: ImageAddress,
         cfa: VirtualAddress,
     ) -> Option<CallerFramePointer> {
         let (index, function) = self.function(address)?;
@@ -189,7 +190,7 @@ impl GoUnwind {
             .frame_pointer_saved
             .get(index)
             .and_then(Option::as_ref)
-            .is_some_and(|saved| saved.contains(&address));
+            .is_some_and(|saved| saved.contains(&address.get()));
         Some(if delta >= 8 && saved {
             CallerFramePointer::Saved(VirtualAddress::new(cfa.get() - 16))
         } else if delta == 0 && !function.facts.assembly {
@@ -203,13 +204,13 @@ impl GoUnwind {
     /// chain, or `None` when Go did not compile the code there. Its rbp is
     /// the word below its return address once the prologue saved the
     /// caller's there; compiled Go code keeps no other value in it.
-    pub fn frame_pointer_rule(&self, address: u64) -> Option<FramePointerRule> {
+    pub fn frame_pointer_rule(&self, address: ImageAddress) -> Option<FramePointerRule> {
         let (index, function) = self.function(address)?;
         let saved = self
             .frame_pointer_saved
             .get(index)
             .and_then(Option::as_ref)
-            .is_some_and(|saved| saved.contains(&address));
+            .is_some_and(|saved| saved.contains(&address.get()));
         let delta = self.sp_delta(function, address).ok();
         Some(if saved && delta.is_some_and(|delta| delta >= 8) {
             FramePointerRule::Kept
@@ -221,7 +222,7 @@ impl GoUnwind {
     /// Applies [`Self::caller_frame_pointer`] to a reconstructed caller.
     pub fn recover_frame_pointer(
         &self,
-        address: u64,
+        address: ImageAddress,
         current: &RegisterFile,
         step: &mut UnwindStep,
         memory: &mut dyn MemoryReader,
