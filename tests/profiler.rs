@@ -1922,6 +1922,18 @@ fn a_forked_child_writes_no_instrumentation() {
     assert!(!profile.probe_counts().lost());
 }
 
+/// A program that executes itself again is listened to again: the new
+/// program's sites are switched on as the first's were.
+#[test]
+fn a_program_that_executes_itself_is_listened_to_again() {
+    let (profile, _) = record_probes(&["exec"], &RecordOptions::default());
+    let zones = profile.zones();
+    let names: Vec<&str> = zones.iter().map(|zone| zone.name.as_str()).collect();
+    assert_eq!(names, ["after"]);
+    assert_eq!(zones[0].flags, 0);
+    assert!(!profile.probe_counts().lost());
+}
+
 /// A program's trigger saves the window as it is, as the recording goes
 /// on.
 #[test]

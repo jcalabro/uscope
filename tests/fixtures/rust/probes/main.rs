@@ -7,6 +7,8 @@
 //! - `burst COUNT`: COUNT zones as fast as it can write them.
 //! - `churn COUNT`: COUNT threads, one after another, each one zone.
 //! - `fork`: a zone around a forked child, whose own zone records nothing.
+//! - `exec`: executes this program again as `execed`, which waits until
+//!   uscope listens to the new program and runs a zone.
 //! - `quiet`: says it is ready to be attached to, then zones until the
 //!   sites switch themselves off.
 //! - `cost COUNT`: times COUNT zones as they are, off unless uscope reads;
@@ -39,6 +41,10 @@ fn main() {
         "burst" => burst(count()),
         "churn" => churn(count()),
         "fork" => forked(),
+        "exec" => exec(),
+        "execed" => {
+            let _zone = zone!("after");
+        }
         "quiet" => quiet(),
         "cost-on" => cost(count()),
         mode => panic!("unknown mode {mode}"),
@@ -123,6 +129,13 @@ fn forked() {
     let mut status = 0;
     // SAFETY: the child is this process's.
     unsafe { waitpid(child, &raw mut status, 0) };
+}
+
+fn exec() {
+    let program = std::env::current_exe().expect("this program");
+    let error =
+        std::os::unix::process::CommandExt::exec(std::process::Command::new(program).arg("execed"));
+    panic!("exec: {error}");
 }
 
 fn quiet() {

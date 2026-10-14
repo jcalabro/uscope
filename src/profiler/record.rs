@@ -123,10 +123,12 @@ pub struct Processor {
     tasks_of: Option<u32>,
     located: std::collections::VecDeque<Located>,
     unclaimed: Vec<(u32, i64, u64)>,
-    /// Each process's modules with instrumentation, once mapped, and those
-    /// the collector has not taken yet.
+    /// Each process's modules with instrumentation, once mapped since it
+    /// last executed a program, those the collector has not taken yet, and
+    /// the processes that executed one since the collector last asked.
     probes_mapped: BTreeSet<(u32, usize)>,
     probes_found: Vec<(u32, Found)>,
+    probes_executed: BTreeSet<u32>,
     stacks: Stacks,
     triggered: bool,
     /// Whether frames are left for a viewer to symbolize.
@@ -176,6 +178,7 @@ impl Processor {
             unclaimed: Vec::new(),
             probes_mapped: BTreeSet::new(),
             probes_found: Vec::new(),
+            probes_executed: BTreeSet::new(),
             stacks: Stacks::default(),
             triggered: false,
             symbols_later: false,
@@ -370,6 +373,11 @@ impl Processor {
                 if exec {
                     // A new program replaces the address space.
                     self.processes.entry(pid).or_default().mapped.clear();
+                    // Its instrumentation went with it; the new program's
+                    // is found as it maps.
+                    self.probes_mapped.retain(|(process, _)| *process != pid);
+                    self.probes_found.retain(|(process, _)| *process != pid);
+                    self.probes_executed.insert(pid);
                     let process = self.builder.process(pid, at);
                     self.builder.process_name(process, &name);
                 }
@@ -731,14 +739,19 @@ impl Processor {
         }
     }
 
-    /// The modules with instrumentation process `pid` has mapped since
-    /// last asked.
-    pub fn found_probes(&mut self, pid: u32) -> Vec<Found> {
+    /// Whether process `pid` has executed a program since last asked,
+    /// which ends the instrumentation found before, and the modules with
+    /// instrumentation it has mapped since then.
+    pub fn found_probes(&mut self, pid: u32) -> (bool, Vec<Found>) {
+        let executed = self.probes_executed.remove(&pid);
         let (found, others) = std::mem::take(&mut self.probes_found)
             .into_iter()
             .partition(|(process, _)| *process == pid);
         self.probes_found = others;
-        found.into_iter().map(|(_, found)| found).collect()
+        (
+            executed,
+            found.into_iter().map(|(_, found)| found).collect(),
+        )
     }
 
     /// The row of a module's site.

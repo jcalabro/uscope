@@ -123,7 +123,11 @@ impl Collector {
     /// mapped since, then reads every ring.
     pub fn drain(&mut self, processor: &mut Processor) {
         let _span = crate::span!("probes drain");
-        for found in processor.found_probes(self.pid) {
+        let (executed, found) = processor.found_probes(self.pid);
+        if executed {
+            self.executed(processor);
+        }
+        for found in found {
             self.adopt(processor, &found);
         }
         if self.gone {
@@ -155,6 +159,22 @@ impl Collector {
             let _ = perf::write_memory(self.pid, instance.control + 12, &0_u32.to_le_bytes());
         }
         self.drain(processor);
+    }
+
+    /// Forgets the instrumentation of the program the process replaced. Its
+    /// threads' zones end where their records were last read: what they
+    /// wrote after cannot be read.
+    fn executed(&mut self, processor: &mut Processor) {
+        record!("probes: the process executed a program");
+        for instance in self.instances.drain(..) {
+            for ring in instance.rings.values() {
+                if let Some((_, row)) = ring.thread {
+                    processor.probe_thread_ended(row);
+                }
+            }
+        }
+        // The new program may be read even if the old one could not be.
+        self.gone = false;
     }
 
     /// Switches on a module's sites: the rings its threads already have
