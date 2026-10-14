@@ -2514,13 +2514,14 @@ for variant in musl-clang-static-pie gcc-static single-thread-clang-static; do
     program="$output_dir/tls-modules-${variant}"
     generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
 done
-# A core of a program on 2.31, before 2.34. The loaders of Ubuntu's 2.27 and
-# 2.35 leave the gaps between their C libraries' segments mapped, which
-# uscope cannot place in a core yet.
-program="$output_dir/tls-modules-glibc2.31"
-generate_core "${program}.core" 6 "$default_core_filter" \
-    "$program $output_dir/libtls-modules-glibc2.31.so $output_dir/libtls-plugin-glibc2.31.so" \
-    "$program" abort
+# Ubuntu's 2.27 and 2.35 loaders leave the gaps between their C libraries'
+# segments mapped without access.
+for version in 2.27 2.31 2.35; do
+    program="$output_dir/tls-modules-glibc${version}"
+    generate_core "${program}.core" 6 "$default_core_filter" \
+        "$program $output_dir/libtls-modules-glibc${version}.so $output_dir/libtls-plugin-glibc${version}.so" \
+        "$program" abort
+done
 for variant in gcc-o2 gcc-o2-nopie clang-o2; do
     program="$output_dir/locations-${variant}"
     generate_core "${program}.core" 6 "$default_core_filter" \

@@ -1921,8 +1921,8 @@ async fn core_tls_is_located_through_the_c_librarys_own_descriptors() {
 }
 
 /// The C library's thread structures in the dump locate each thread's TLS,
-/// with or without a dynamic loader: musl's, statically linked glibc's, and
-/// those of Ubuntu's glibc 2.31, which describes them in libpthread.
+/// with or without a dynamic loader: musl's, statically linked glibc's,
+/// and those of Ubuntu's glibc 2.27, 2.31, and 2.35.
 #[tokio::test]
 async fn cores_locate_every_threads_tls_in_every_module_on_each_c_library() {
     for (name, plugin, threads) in [
@@ -1930,7 +1930,9 @@ async fn cores_locate_every_threads_tls_in_every_module_on_each_c_library() {
         ("tls-modules-musl-clang-static-pie.core", false, 3),
         ("tls-modules-gcc-static.core", false, 3),
         ("tls-modules-single-thread-clang-static.core", false, 1),
+        ("tls-modules-glibc2.27.core", true, 3),
         ("tls-modules-glibc2.31.core", true, 3),
+        ("tls-modules-glibc2.35.core", true, 3),
     ] {
         let mut scenario = open_core(name);
         support::assert_tls_modules(&mut scenario, name, plugin, threads).await;
