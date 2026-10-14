@@ -191,7 +191,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         };
         if let Some(waiter) = inferior.waiter.take() {
-            let _ = waiter.stop_and_join_serving(|| take_queued(&mut seen));
+            let _ = waiter.stop_and_join(|| take_queued(&mut seen));
         }
         take_queued(&mut seen);
         // With the waiter gone, the statuses the kernel still holds are the

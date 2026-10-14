@@ -1,0 +1,21 @@
+[package]
+name = "uscope-loom"
+version = "0.0.0"
+publish = false
+edition = "2024"
+description = "Loom models of uscope's concurrent protocols, built from uscope's own source"
+
+[lints.rust]
+unsafe_code = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(loom)"] }
+
+[dependencies]
+loom = "0.7"
+
+# Loom runs each model thousands of times, so optimizing is worth more than
+# the build time it costs. Assertions and overflow checks stay on.
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -15,12 +15,12 @@ max_test_threads := "16"
 default: check
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test miri web-test docs
+check: lint test miri loom web-test docs
 
 # Runs everything to check before committing. The concurrent Miri tests try
 # more seeds than `check` does: ordering bugs planted in the probe SDK showed
 # only between seeds 48 and 61.
-all: check (miri-seeds "0..64") web-e2e stress sim bench-smoke build-static
+all: check (miri-seeds "0..64") (loom "4") loom-mutants web-e2e stress sim bench-smoke build-static
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
@@ -88,6 +88,8 @@ lint:
     cargo check --quiet --manifest-path fuzz/Cargo.toml
     cargo fmt --check --manifest-path sdk/rust-probes/Cargo.toml
     CARGO_TARGET_DIR="$PWD/target/sdk-probes" cargo clippy --quiet --manifest-path sdk/rust-probes/Cargo.toml --all-targets --features enabled -- -D warnings
+    cargo fmt --check --manifest-path loom/Cargo.toml
+    CARGO_TARGET_DIR="$PWD/target/loom" cargo clippy --quiet --manifest-path loom/Cargo.toml --all-targets -- -D warnings
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. Tests run inside a memory cap, and
@@ -151,6 +153,71 @@ miri-seeds SEEDS *ARGS:
     cargo miri test --quiet --test miri -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
     export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
     cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
+
+# Runs the loom models in loom/, which check concurrent protocols under every
+# schedule of a few threads with at most BOUND preemptions each. Each
+# preemption allowed multiplies the schedules about tenfold: 3 takes about a
+# second, 4 a few, and 5 half a minute. The models build the protocols' own
+# source files against loom's types in a crate and target directory of their
+# own, so uscope is not rebuilt. Arguments go to the test harness.
+loom BOUND="3" *ARGS:
+    CARGO_TARGET_DIR="$PWD/target/loom" LOOM_MAX_PREEMPTIONS="$1" cargo test --quiet --manifest-path loom/Cargo.toml --lib -- "${@:2}"
+
+# Breaks the protocols the loom models check and runs the models at BOUND
+# against each break, which they must fail: first the bugs in loom/mutants/,
+# which the models' mutex and condvar exist to catch, then each break
+# cargo-mutants makes. A break the models pass is a case they do not check,
+# unless it changes nothing; those are listed in loom/mutants.toml with the
+# reason. cargo-mutants mutates only files inside the crate it tests, so this
+# works on a copy of loom/ with each protocol's file moved in, under
+# target/loom-mutants: the source tree never changes. It takes under a
+# minute. Arguments go to cargo-mutants, e.g. `just loom-mutants 3 --list`.
+[script]
+loom-mutants BOUND="3" *ARGS:
+    out="$PWD/target/loom-mutants"
+    crate="$out/crate"
+    rm -rf "$crate" "$out/clean"
+    mkdir -p "$crate/.cargo"
+    cp -r loom/Cargo.toml loom/Cargo.lock loom/build.rs loom/src "$crate/"
+    cp loom/mutants.toml "$crate/.cargo/mutants.toml"
+    # Each `#[path = "..."]` line and the `mod NAME;` after it.
+    files=()
+    while read -r path name; do
+        cp "loom/src/$path" "$crate/src/$name.rs"
+        # Its own modules, such as its std tests, which cfg(loom) leaves out.
+        if [[ -d "loom/src/${path%.rs}" ]]; then cp -r "loom/src/${path%.rs}" "$crate/src/$name"; fi
+        files+=(--file "src/$name.rs")
+    done < <(awk '/^#\[path = "/ { split($0, part, "\""); path = part[2]; next } path && /^mod / { sub(/^mod /, ""); sub(/;$/, ""); print path, $0; path = "" }' loom/src/lib.rs)
+    sed -i '/^#\[path = "/d' "$crate/src/lib.rs"
+    cd "$crate"
+    export CARGO_TARGET_DIR="$out/target" LOOM_MAX_PREEMPTIONS="$1"
+    # A break counts as caught only if the models pass without it and it
+    # builds.
+    cargo test --quiet --lib >/dev/null
+    missed=0
+    for planted in "$OLDPWD"/loom/mutants/*.patch; do
+        name="$(basename "$planted" .patch)"
+        cp -r src "$out/clean"
+        if ! patch --quiet --batch -p1 < "$planted"; then
+            echo "error: $name no longer applies; make it again against the source" >&2
+            exit 1
+        fi
+        if ! cargo test --quiet --lib --no-run 2>/dev/null; then
+            echo "error: $name does not build" >&2
+            exit 1
+        fi
+        if timeout 300 cargo test --quiet --lib >/dev/null 2>&1; then
+            echo "MISSED  $name: $(head -1 "$planted")"
+            missed=1
+        else
+            echo "caught  $name"
+        fi
+        rm -rf src
+        mv "$out/clean" src
+    done
+    if (( missed )); then exit 1; fi
+    unset CARGO_TARGET_DIR
+    LOOM_MAX_PREEMPTIONS="$1" cargo mutants --output "$out" --jobs 4 --cargo-test-arg=--lib "${files[@]}" "${@:2}"
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit

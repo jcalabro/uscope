@@ -12,12 +12,12 @@
 //! first unit reached them. A unit that does, or a load that runs out of
 //! its budget or fails, is walked again in order instead.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use foldhash::HashMap;
 
 use super::identity::{IdentityParts, PendingArguments};
+use super::in_order::InOrder;
 use super::layered::{Layered, Marks, Rows};
 use super::location::{LocationListId, LocationsBuilder};
 use super::types::{
@@ -643,16 +643,20 @@ struct Merge<'m, 'a, 'data> {
     pool: &'m mut LocationsBuilder,
     /// Where each group's types added so far are numbered, by the group.
     groups: HashMap<usize, Vec<TypeId>>,
-    /// The next unit to add.
-    next: usize,
     /// Whether every unit added so far kept to its own types, the budget,
     /// and the tables' numbering.
     kept: bool,
 }
 
+impl super::in_order::Add<UnitWalk> for Merge<'_, '_, '_> {
+    fn add(&mut self, unit: Option<UnitWalk>) -> bool {
+        self.absorb(unit);
+        self.kept
+    }
+}
+
 impl Merge<'_, '_, '_> {
-    fn add(&mut self, unit: Option<UnitWalk>) {
-        self.next += 1;
+    fn absorb(&mut self, unit: Option<UnitWalk>) {
         let Some(mut unit) = unit else {
             self.kept = false;
             return;
@@ -692,40 +696,6 @@ impl Merge<'_, '_, '_> {
             self.kept = false;
         }
     }
-}
-
-/// How far past the units added a group's walk may begin: what is walked
-/// waits in memory until the units before it are added.
-struct Window {
-    added: Mutex<usize>,
-    progress: Condvar,
-    ahead: usize,
-}
-
-impl Window {
-    /// Waits until `group`, its first unit, is within the window, or the
-    /// walk is abandoned.
-    fn enter(&self, group: usize, abandoned: &AtomicBool) {
-        let added = self.added.lock().unwrap_or_else(PoisonError::into_inner);
-        drop(
-            self.progress
-                .wait_while(added, |added| {
-                    group >= *added + self.ahead && !abandoned.load(Ordering::Relaxed)
-                })
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-    }
-
-    /// Records that the units before `next` are added.
-    fn advance(&self, next: usize) {
-        *self.added.lock().unwrap_or_else(PoisonError::into_inner) = next;
-        self.progress.notify_all();
-    }
-}
-
-/// Units finished but not yet added, by unit.
-struct Finished {
-    units: std::collections::BTreeMap<usize, Option<UnitWalk>>,
 }
 
 /// Walks every group of units at once and adds what each unit recorded to
@@ -777,105 +747,36 @@ pub(super) fn walk_units_apart<'data>(
     let pool = &mut *pool.lock().unwrap_or_else(PoisonError::into_inner);
     debug_assert!(walked.calls.is_empty(), "only the walk records calls");
     let checkpoint = Checkpoint::take(walked, types, files, pool);
-    let merge = Mutex::new(Merge {
+    let merge = Merge {
         walked,
         types,
         files,
         pool,
         groups: HashMap::default(),
-        next: 0,
         kept: true,
-    });
-    let finished = Mutex::new(Finished {
-        units: std::collections::BTreeMap::new(),
-    });
-    let abandoned = AtomicBool::new(false);
-    // Each worker claims the next group, in the order of their first
-    // units, which name them, and waits to walk one that begins too far
-    // past the units added: what is walked waits in memory until the units
-    // before it are added. The units the adding waits for are in groups
-    // claimed before, so they are walked meanwhile.
+    };
     let order = members
         .iter()
         .enumerate()
         .filter_map(|(group, units)| (!units.is_empty()).then_some(group))
         .collect::<Vec<_>>();
-    let claimed = AtomicUsize::new(0);
     let workers = rayon::current_num_threads();
-    let window = Window {
-        added: Mutex::new(0),
-        progress: Condvar::new(),
-        ahead: walk_ahead.saturating_mul(workers),
-    };
+    let in_order = InOrder::new(&order, &members, merge, walk_ahead.saturating_mul(workers));
     rayon::in_place_scope(|scope| {
         for _ in 0..workers {
-            let (frozen, groups, members, order) = (&frozen, &groups, &members, &order);
-            let (merge, finished, abandoned) = (&merge, &finished, &abandoned);
-            let (claimed, window) = (&claimed, &window);
+            let (frozen, groups, in_order) = (&frozen, &groups, &in_order);
             scope.spawn(move |_| {
-                while let Some(&group) = order.get(claimed.fetch_add(1, Ordering::Relaxed)) {
-                    window.enter(group, abandoned);
-                    let group_units = &members[group];
-                    let walks = if abandoned.load(Ordering::Relaxed) {
-                        group_units.iter().map(|unit| (*unit, None)).collect()
-                    } else {
-                        walk_group(cx, frozen, (group, groups), group_units)
-                    };
-                    finished
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .units
-                        .extend(walks);
-                    add_ready(merge, finished, abandoned, window);
-                }
+                in_order.work(|group, units| walk_group(cx, frozen, (group, groups), units));
             });
         }
     });
-    let merge = merge.into_inner().unwrap_or_else(PoisonError::into_inner);
-    debug_assert!(!merge.kept || merge.next == units.len());
+    let (added, merge) = in_order.into_parts();
+    debug_assert!(!merge.kept || added == units.len());
     if merge.kept {
         return true;
     }
     checkpoint.restore(merge.walked, merge.types, merge.files, merge.pool);
     false
-}
-
-/// Adds the finished units that are next, in order, unless another walk is
-/// adding them: that one looks again once it is done.
-fn add_ready(
-    merge: &Mutex<Merge<'_, '_, '_>>,
-    finished: &Mutex<Finished>,
-    abandoned: &AtomicBool,
-    window: &Window,
-) {
-    while let Ok(mut merge) = merge.try_lock() {
-        loop {
-            let next = merge.next;
-            let Some(unit) = finished
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .units
-                .remove(&next)
-            else {
-                break;
-            };
-            merge.add(unit);
-            if !merge.kept {
-                abandoned.store(true, Ordering::Relaxed);
-            }
-        }
-        let next = merge.next;
-        window.advance(next);
-        drop(merge);
-        if !finished
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .units
-            .contains_key(&next)
-        {
-            break;
-        }
-    }
 }
 
 /// Walks the units of one group in order on the frozen arena, apart from

@@ -442,15 +442,17 @@ fn close_span() {
     }
 }
 
-/// Moves this thread's finished spans into the recording.
+/// Moves this thread's finished spans into the recording they were
+/// finished under, unless it has ended.
 fn flush_thread() {
-    let finished = THREAD.with(|thread| {
+    let Some((generation, finished)) = THREAD.with(|thread| {
         thread
             .borrow_mut()
             .as_mut()
-            .map(|state| std::mem::take(&mut state.finished))
-            .unwrap_or_default()
-    });
+            .map(|state| (state.generation, std::mem::take(&mut state.finished)))
+    }) else {
+        return;
+    };
     if finished.is_empty() {
         return;
     }
@@ -458,6 +460,7 @@ fn flush_thread() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_mut()
+        .filter(|collected| collected.generation == generation)
     {
         for event in finished {
             if collected.events.len() < MAX_EVENTS {

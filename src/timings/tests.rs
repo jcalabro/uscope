@@ -100,6 +100,32 @@ fn nothing_is_measured_without_a_recording() {
     assert!(report.phases.is_empty(), "{:?}", report.phases);
 }
 
+/// A thread keeps the spans it finished inside an open one until that one
+/// ends. When it ends under a later recording, the spans belong to the
+/// recording that ended, not to the later one.
+#[test]
+fn a_later_recording_reports_no_span_of_an_earlier_one() {
+    let (finished_inner, inner_finished) = std::sync::mpsc::channel();
+    let (end_outer, outer_ends) = std::sync::mpsc::channel::<()>();
+    let earlier = Recording::start(Options::default()).expect("no other recording");
+    let worker = std::thread::spawn(move || {
+        let outer = crate::span!("outer");
+        drop(crate::span!("earlier"));
+        finished_inner.send(()).expect("the test waits");
+        outer_ends.recv().expect("the test ends the outer span");
+        drop(outer);
+    });
+    inner_finished
+        .recv()
+        .expect("the worker finished its inner span");
+    drop(earlier.finish().unwrap());
+    let later = Recording::start(Options::default()).expect("the earlier one ended");
+    end_outer.send(()).expect("the worker waits");
+    worker.join().expect("the worker ends");
+    let report = later.finish().unwrap();
+    assert!(report.phases.is_empty(), "{:?}", report.phases);
+}
+
 #[test]
 fn a_report_bounds_its_labels() {
     let recording = Recording::start(Options::default()).expect("no other recording");

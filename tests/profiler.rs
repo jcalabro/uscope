@@ -811,7 +811,7 @@ fn segments_tile_a_recording_and_read_back_as_one() {
             "segment {number} took {recorder} ns of uscope's CPU time in {span}"
         );
         segment
-            .write_segment(scratch.path(), Duration::from_secs(3600))
+            .write_segment(scratch.path(), Duration::from_hours(1))
             .expect("write the segment");
     }
     // The helper thread's wait is in each segment it spanned.
@@ -862,7 +862,7 @@ fn a_segment_deletes_only_segments_older_than_kept() {
         .expect("a profile")
         .profile;
     let written = profile
-        .write_segment(scratch.path(), Duration::from_secs(3600))
+        .write_segment(scratch.path(), Duration::from_hours(1))
         .expect("write the segment");
     assert!(!old.exists() && other.exists() && written.exists());
     let read = Profile::read(scratch.path())

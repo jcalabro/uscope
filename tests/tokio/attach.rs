@@ -27,7 +27,7 @@ const SOURCE: &str = "server/src/main.rs";
 
 /// How long a client waits for an answer, which a server the debugger
 /// wrongly left stopped never sends.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
+const ANSWER_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// One connection to the server.
 struct Client {

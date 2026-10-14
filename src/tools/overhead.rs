@@ -297,7 +297,7 @@ fn run(
                 (None, Some(recording))
             }
         };
-        on.recv_timeout(Duration::from_secs(60))
+        on.recv_timeout(Duration::from_mins(1))
             .context("the program never started")?;
         let reader = BufReader::new(reader);
         let measured = match workload.measure {

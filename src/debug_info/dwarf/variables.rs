@@ -69,6 +69,7 @@ mod evaluate;
 mod generic;
 mod globals;
 mod identity;
+mod in_order;
 mod inspect;
 mod layered;
 mod location;

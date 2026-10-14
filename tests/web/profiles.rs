@@ -243,7 +243,7 @@ async fn a_directory_of_segments_is_served_as_one_profile() {
     std::fs::create_dir(&directory).expect("a directory");
     for _ in 0..2 {
         calls
-            .write_segment(&directory, Duration::from_secs(3600))
+            .write_segment(&directory, Duration::from_hours(1))
             .expect("write a segment");
     }
     let web = Web::start("profile", &[directory.to_str().expect("a path")]);

@@ -1,0 +1,3 @@
+# Breaks of the protocols that change nothing the models can see, which
+# `just loom-mutants` leaves out. Each says why it changes nothing.
+exclude_re = []

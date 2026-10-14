@@ -38,6 +38,8 @@ rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 unused = { level = "deny", priority = -1 }
+# loom/ builds the protocols it checks under cfg(loom).
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(loom)"] }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

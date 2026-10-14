@@ -75,6 +75,9 @@ Write a behavioral test before fixing a bug and watch it fail. Use the public
 `tests/support::Scenario` path for debugger workflows. Tests must wait for
 observable state, enforce deadlines, and leave no inferior process behind.
 
+A protocol of threads and locks whose orderings a test can't force gets a
+loom model in `loom/`; see [`dev/testing.md`](dev/testing.md#loom).
+
 During development, run the focused tests and checks that finish in seconds.
 Run the broader gate once the change is ready:
 
