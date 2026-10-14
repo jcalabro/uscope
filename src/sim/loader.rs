@@ -158,14 +158,26 @@ impl Image {
                 program_headers = Some(address + program_header_offset - file_offset);
             }
 
-            segments.push(prepare_segment(
+            let prepared = prepare_segment(
                 data,
                 address,
                 segment.size(),
                 file_offset,
                 file_size,
                 p_flags,
-            )?);
+            )?;
+
+            // Linux maps a later segment over an earlier one's page.
+            if segments
+                .iter()
+                .any(|other: &Segment| other.start < prepared.end && prepared.start < other.end)
+            {
+                return Err(LoadError::Unsupported(
+                    "segments that share a page do not load".into(),
+                ));
+            }
+
+            segments.push(prepared);
         }
 
         Ok(Self {
@@ -327,8 +339,9 @@ impl Image {
 }
 
 /// Reads one segment's pages as the kernel maps them: whole pages of the
-/// file from the segment's page-aligned offset, with a writable segment's
-/// bytes past its file contents zeroed.
+/// file from the segment's page-aligned offset. Where a segment reaches
+/// past its file contents, the kernel zeroes the rest of the last file
+/// page, which succeeds only if the segment is writable.
 fn prepare_segment(
     data: &[u8],
     address: u64,
@@ -350,12 +363,12 @@ fn prepare_segment(
     let mut pages = Vec::new();
     for page_address in (start..end).step_by(PAGE_BYTES) {
         let mut page = [0; PAGE_BYTES];
-        if page_address < file_end {
+        if file_size > 0 && page_address < file_end {
             let from = usize::try_from(offset + (page_address - start))
                 .map_err(|_| LoadError::Unsupported("segment offset overflows".into()))?;
             let available = data.len().saturating_sub(from).min(page.len());
             page[..available].copy_from_slice(&data[from..from + available]);
-            if protection.write && page_address + PAGE_SIZE > file_end {
+            if protection.write && memory_size > file_size && page_address + PAGE_SIZE > file_end {
                 let keep = usize::try_from(file_end - page_address).expect("within one page");
                 page[keep..].fill(0);
             }
@@ -376,4 +389,97 @@ fn prepare_segment(
         offset,
         pages,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A static executable of `size` bytes, each 0xaa past its headers,
+    /// with one `PT_LOAD` header per `(offset, address, file size, memory
+    /// size, flags)`.
+    fn executable(size: usize, loads: &[(u64, u64, u64, u64, u32)]) -> Vec<u8> {
+        let mut data = vec![0xaa; size];
+        let mut header = vec![0; 64];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2; // 64-bit
+        header[5] = 1; // little-endian
+        header[6] = 1; // version
+        header[16..18].copy_from_slice(&2_u16.to_le_bytes()); // ET_EXEC
+        header[18..20].copy_from_slice(&62_u16.to_le_bytes()); // x86-64
+        header[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        header[24..32].copy_from_slice(&loads[0].1.to_le_bytes()); // entry
+        header[32..40].copy_from_slice(&64_u64.to_le_bytes()); // phoff
+        header[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        header[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        let count = u16::try_from(loads.len()).expect("a few headers");
+        header[56..58].copy_from_slice(&count.to_le_bytes());
+        header[58..60].copy_from_slice(&64_u16.to_le_bytes());
+        for &(offset, address, file_size, memory_size, flags) in loads {
+            header.extend(object::elf::PT_LOAD.to_le_bytes());
+            header.extend(flags.to_le_bytes());
+            for word in [offset, address, address, file_size, memory_size, PAGE_SIZE] {
+                header.extend(word.to_le_bytes());
+            }
+        }
+
+        data[..header.len()].copy_from_slice(&header);
+        data
+    }
+
+    const R: u32 = object::elf::PF_R;
+    const RW: u32 = object::elf::PF_R | object::elf::PF_W;
+    const RX: u32 = object::elf::PF_R | object::elf::PF_X;
+
+    /// Linux maps segments that share a page over each other, which the
+    /// model does not: such an executable is refused, not loaded wrong.
+    #[test]
+    fn segments_sharing_a_page_do_not_load() {
+        let data = executable(
+            0x2000,
+            &[
+                (0, 0x40_0000, 0x200, 0x200, RX),
+                (0x200, 0x40_0200, 0x10, 0x20, RW),
+            ],
+        );
+        let result = Image::new("/shared", 1, &data);
+        assert!(
+            matches!(&result, Err(LoadError::Unsupported(why)) if why.contains("share a page")),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    /// The kernel zeroes the rest of a writable segment's last file page
+    /// only when the segment has bytes beyond the file's; otherwise the
+    /// page holds the file's next bytes, as a read-only segment's does. A
+    /// segment without file bytes maps none of the file, wherever its
+    /// offset points.
+    #[test]
+    fn only_a_segment_reaching_past_its_file_bytes_has_its_page_zeroed() {
+        let data = executable(
+            0x4000,
+            &[
+                (0, 0x40_0000, 0x200, 0x200, RX),
+                (0x1000, 0x40_1000, 0x10, 0x10, RW),
+                (0x2000, 0x40_2000, 0x10, 0x20, RW),
+                (0x3000, 0x40_3000, 0x10, 0x10, R),
+                (0x3010, 0x40_4010, 0, 0x20, RW),
+            ],
+        );
+        let image = Image::new("/tails", 1, &data).expect("an executable");
+        let (space, _) = image.load(&[], [0; 16]);
+        let byte = |address| space.peek_bytes(address, 1).expect("mapped")[0];
+        assert_eq!(byte(0x40_100f), 0xaa);
+        assert_eq!(
+            byte(0x40_1010),
+            0xaa,
+            "a writable segment of file bytes alone"
+        );
+        assert_eq!(byte(0x40_2010), 0, "a writable segment with more");
+        assert_eq!(byte(0x40_2fff), 0);
+        assert_eq!(byte(0x40_3010), 0xaa, "a read-only segment");
+        assert_eq!(byte(0x40_4000), 0, "a segment without file bytes");
+        assert_eq!(byte(0x40_4010), 0);
+    }
 }

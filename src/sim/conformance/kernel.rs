@@ -97,6 +97,43 @@ fn k_exec_2_a_program_loads_where_linux_puts_it() {
     });
 }
 
+/// K-EXEC-2: every page the image maps holds what Linux loads there: the
+/// file's bytes, the rest of a writable segment's last file page zeroed
+/// where the segment reaches past its file bytes, and zeros beyond.
+/// `data` has a writable segment without file bytes, `fork` one whose
+/// zeros span pages, and `containers` one with both.
+#[test]
+fn k_exec_2_a_programs_pages_hold_what_linux_loads() {
+    for program in ["data", "fork", "containers"] {
+        dual_run(program, &[], |record| {
+            let leader = record.leader();
+            let image = record.landmarks.image.clone();
+            let maps = record.tracee.maps(leader).unwrap_or_default();
+            for line in maps.lines() {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                let (start, end) = fields[0].split_once('-').expect("a range");
+                let start = u64::from_str_radix(start, 16).expect("a start");
+                let end = u64::from_str_radix(end, 16).expect("an end");
+                if end <= image.start || start >= image.end.next_multiple_of(4096) {
+                    continue;
+                }
+
+                // FNV-1a, over the bytes as ptrace reads them.
+                let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+                for address in (start..end).step_by(8) {
+                    let word = record.tracee.peek(leader, address).unwrap_or(0);
+                    for byte in word.to_le_bytes() {
+                        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+                    }
+                }
+
+                let place = format!("{}-{}", record.place(start), record.place(end));
+                record.note(format!("{place} {}: {hash:016x}", fields[1]));
+            }
+        });
+    }
+}
+
 /// K-TRAP-1: `int3` reports SIGTRAP with `SI_KERNEL` and `rip` past the
 /// trap, outside any system call; a single step reports `TRAP_TRACE` at
 /// the next instruction; a single step across `syscall` reports
