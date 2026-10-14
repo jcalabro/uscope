@@ -17,8 +17,10 @@ default: check
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: lint test miri web-test docs
 
-# Runs everything to check before committing.
-all: check web-e2e stress sim bench-smoke
+# Runs everything to check before committing. The concurrent Miri tests try
+# more seeds than `check` does: ordering bugs planted in the probe SDK showed
+# only between seeds 48 and 61.
+all: check (miri-seeds "0..64") web-e2e stress sim bench-smoke
 
 # Enters the pinned Nix development shell, or runs a command in it, with
 # nothing of the host's environment but the user and their terminal.
@@ -100,27 +102,38 @@ test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
     USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
 
 # How many seeds `just miri` tries its concurrent tests under: about as many
-# as run at once. Try more with `just miri_seeds=0..256 miri`.
+# as run at once. Try more with `just miri_seeds=0..256 miri`, or
+# `just miri-seeds 0..256`.
 miri_seeds := "0..8"
 
 # Runs tests/miri.rs, the tests of uscope's unsafe code, and the Rust probe
 # SDK's tests under Miri, which stops at undefined behavior: an access out of
 # bounds, misaligned, or after a free, a block freed with the wrong layout, a
-# data race, a pointer made from an integer. Tests named `concurrent` run
-# under many seeds, each a different schedule and weak-memory outcome; seeds
-# run at once, so only a failure's panic and seed, on stderr, are shown. Its
-# sysroot builds under target/. Arguments go to the test harnesses.
+# data race, a pointer made from an integer. Tests named `concurrent` then
+# run under many seeds (miri-seeds). Its sysroot builds under target/.
+# Arguments go to the test harnesses.
 [script]
-miri *ARGS:
+miri *ARGS: && (miri-seeds miri_seeds ARGS)
     export MIRI_SYSROOT="$PWD/target/miri/sysroot"
     cargo miri setup >/dev/null
-    seeds() { grep -v '^Trying seed: ' || true; }
     MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri -- --skip concurrent "$@"
-    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet --test miri -- concurrent "$@" 2>&1 >/dev/null | seeds
-    probes=(--manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib)
     export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
-    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet "${probes[@]}" -- --skip concurrent "$@"
-    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds={{miri_seeds}}" cargo miri test --quiet "${probes[@]}" -- concurrent "$@" 2>&1 >/dev/null | seeds
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- --skip concurrent "$@"
+
+# Runs the Miri tests named `concurrent` under SEEDS, a range of seeds, each a
+# different schedule and weak-memory outcome. Seeds run at once, so only a
+# failure's panic and seed, on stderr, are shown.
+[script]
+miri-seeds SEEDS *ARGS:
+    export MIRI_SYSROOT="$PWD/target/miri/sysroot"
+    cargo miri setup >/dev/null
+    export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-many-seeds=$1"
+    filters=()
+    for filter in "${@:2}"; do [[ -n "$filter" ]] && filters+=("$filter"); done
+    seeds() { grep -v '^Trying seed: ' || true; }
+    cargo miri test --quiet --test miri -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
+    export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
+    cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
 
 # Fills the image cache tests read with every fixture's image, built by this
 # checkout's loader: entries name the sources that built them, so an edit
