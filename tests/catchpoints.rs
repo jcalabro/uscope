@@ -272,6 +272,26 @@ async fn steps_that_make_a_caught_call_stop_at_its_entry_and_exit() {
     scenario.shutdown().await;
 }
 
+/// A thread stopped in a call the kernel will restart, as one attaching
+/// interrupted, makes the call again when it next runs. An instruction step
+/// from there stops at the restarted call's entry, which a catchpoint
+/// catches, rather than running the call unseen.
+#[tokio::test]
+async fn a_step_into_a_restarted_call_stops_at_its_entry() {
+    let child = support::ExternalProcess::spawn(&Scenario::fixture("attach-restart"));
+
+    // Attaching interrupts pause(2), which then restarts.
+    support::wait_for_system_call(child.process_id(), 34);
+    let mut scenario = Scenario::attached("attached in pause", child.attach().await);
+    catch(&scenario, &["pause"], CatchPhase::Entry, None).await;
+    let entry = scenario.step_to_stop(StepKind::Instruction).await;
+    assert_eq!(
+        (caught(&entry).call, caught(&entry).returned),
+        (call("pause"), None)
+    );
+    scenario.shutdown().await;
+}
+
 /// A breakpoint planted on a `syscall` instruction does not hide the call
 /// from a catchpoint: stepping over its trap stops at the call's entry,
 /// and the call's exit stops next.

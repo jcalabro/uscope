@@ -59,8 +59,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Whether a stopped thread's next instruction step makes a system
-    /// call: it is inside one, stopped at its entry or at an event, or
-    /// about to execute `syscall`.
+    /// call: it is inside one, stopped at its entry or at an event, inside
+    /// one the kernel will restart, or about to execute `syscall`.
     pub(super) fn steps_into_call(&self, pid: Pid) -> Result<bool> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let thread = inferior.thread(pid)?;
@@ -68,7 +68,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(true);
         }
 
-        let pc = self.ptrace.registers(pid)?.rip;
+        let registers = self.ptrace.registers(pid)?;
+        if super::registers::restarts_call(&registers) {
+            return Ok(true);
+        }
+
+        let pc = registers.rip;
         let read = read_logical_memory(
             &self.ptrace,
             pid,

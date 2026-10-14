@@ -125,6 +125,21 @@ const fn general_values(registers: &libc::user_regs_struct) -> [u64; 18] {
     ]
 }
 
+/// Whether a stopped thread is inside an interrupted system call that the
+/// kernel restarts, executing `syscall` again, when the thread next runs
+/// with no signal to handle.
+pub(super) const fn restarts_call(registers: &libc::user_regs_struct) -> bool {
+    const ERESTARTSYS: i64 = 512;
+    const ERESTARTNOINTR: i64 = 513;
+    const ERESTARTNOHAND: i64 = 514;
+    const ERESTART_RESTARTBLOCK: i64 = 516;
+    registers.orig_rax.cast_signed() >= 0
+        && matches!(
+            registers.rax.cast_signed().checked_neg(),
+            Some(ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK)
+        )
+}
+
 pub(super) fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFile {
     RegisterFile::new(
         GENERAL_REGISTERS

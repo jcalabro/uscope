@@ -150,19 +150,10 @@ fn function_ranges(
 /// restart before returning has no known `rax`: the restarted call replaces
 /// it.
 fn next_instruction_registers(native: &nix::libc::user_regs_struct) -> RegisterFile {
-    const ERESTARTSYS: i64 = 512;
-    const ERESTARTNOINTR: i64 = 513;
-    const ERESTARTNOHAND: i64 = 514;
-    const ERESTART_RESTARTBLOCK: i64 = 516;
     let mut registers = x86_64_registers(native);
     registers.set(FS_BASE, native.fs_base);
     registers.set(GS_BASE, native.gs_base);
-    let in_system_call = native.orig_rax.cast_signed() >= 0;
-    let restarting = matches!(
-        native.rax.cast_signed().checked_neg(),
-        Some(ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK)
-    );
-    if in_system_call && restarting {
+    if super::registers::restarts_call(native) {
         registers.remove(RAX);
     }
 
