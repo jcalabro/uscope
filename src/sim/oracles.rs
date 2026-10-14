@@ -433,8 +433,9 @@ pub fn clean_exit(kernel: &Kernel) -> Result<(), String> {
 
 /// Transparency, once the program ended. A process the tracer launched or
 /// attached to that exited by itself wrote, with the children it forked,
-/// exactly what it writes undisturbed, and exited as it does; one killed
-/// wrote only a beginning of that. A child its parent reaped shows in what
+/// exactly what it writes undisturbed, and exited as it does; one killed,
+/// which only SIGKILL does to a program that raises no signal, wrote only
+/// a beginning of that. A child its parent reaped shows in what
 /// the parent wrote. A child init reaped ran on alone once released: the
 /// corpus's children check their own work and exit 0 when it is right.
 pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
@@ -451,6 +452,15 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
         }
 
         let status = &ended.status;
+        if let ExitStatus::Signal(signal, _) = *status
+            && signal != nix::libc::SIGKILL
+        {
+            return Err(format!(
+                "process {tgid} died of signal {signal}; undisturbed it exits {}",
+                run.exit_code
+            ));
+        }
+
         let output = kernel
             .outputs
             .get(&ended.root)

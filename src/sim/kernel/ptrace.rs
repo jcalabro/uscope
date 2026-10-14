@@ -492,6 +492,20 @@ impl Kernel {
                 ..
             } => {
                 self.threads.get_mut(&tid).expect("the thread").state = State::Running;
+                #[cfg(test)]
+                let signal = if self.sabotage == Some(Sabotage::PassTrapsOnDetach)
+                    && matches!(
+                        state,
+                        State::Stopped {
+                            kind: StopKind::Signal(libc::SIGTRAP),
+                            ..
+                        }
+                    ) {
+                    Some(libc::SIGTRAP)
+                } else {
+                    signal
+                };
+
                 if let Some(signal) = signal {
                     self.act_by_default(tid, signal);
                 }

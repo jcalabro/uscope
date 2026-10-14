@@ -79,6 +79,17 @@ fn first_failure_with(sabotage: Sabotage) -> &'static str {
         .expect("a sabotaged run fails")
 }
 
+/// A program released from a trap's stop with its SIGTRAP dies of it,
+/// which transparency catches.
+#[test]
+fn traps_passed_on_detach_fail_transparency() {
+    assert!(fails_with(
+        Sabotage::PassTrapsOnDetach,
+        "transparency",
+        "died of signal 5"
+    ));
+}
+
 /// A kernel that misplaces the program's mappings makes the debugger
 /// misplace the program, which the client's check of where the debugger
 /// says it loaded catches. Misplaced breakpoints usually fail first.

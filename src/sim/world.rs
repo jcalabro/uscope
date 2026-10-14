@@ -182,6 +182,11 @@ pub enum Sabotage {
     /// without counting it lost.
     LoseTracedCalls,
 
+    /// `PTRACE_DETACH` from a stop at a trap passes the trap's SIGTRAP on, as
+    /// a debugger that detached with the stop's signal would, so the
+    /// released program dies of it.
+    PassTrapsOnDetach,
+
     /// `/proc/<pid>/maps` reports each file's mappings a page higher than
     /// they are, so the debugger places a position-independent program's
     /// addresses a page off.
