@@ -198,12 +198,10 @@ pub enum Observation {
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
 
-    /// The client continues `thread` alone from `stop`, or, with no
-    /// thread, the continue it was about to make was refused.
-    Alone {
-        stop: StopId,
-        thread: Option<ThreadId>,
-    },
+    /// The client continues a thread alone from a stop, or, with none,
+    /// the continue it was about to make was refused, or it released the
+    /// program.
+    Alone(Option<(StopId, ThreadId)>),
 
     /// A write of `length` bytes of code at `address` to `process` that
     /// wrote only the first `written`.
@@ -891,10 +889,7 @@ impl Client {
             }
         };
 
-        self.observe(Observation::Alone {
-            stop,
-            thread: Some(thread),
-        });
+        self.observe(Observation::Alone(Some((stop, thread))));
         let result = self
             .handle
             .continue_execution(
@@ -904,7 +899,7 @@ impl Client {
             )
             .await;
         if result.is_err() {
-            self.observe(Observation::Alone { stop, thread: None });
+            self.observe(Observation::Alone(None));
         }
 
         let execution = match result {
@@ -1204,6 +1199,9 @@ impl Client {
 
     async fn shutdown(&self) -> Result<(), Failure> {
         self.note("shutdown");
+
+        // Releasing the program ends any thread's running alone.
+        self.observe(Observation::Alone(None));
         let (reply, answer) = oneshot::channel();
         let sent = self
             .handle

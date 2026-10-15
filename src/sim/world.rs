@@ -1057,11 +1057,10 @@ impl<'a> World<'a> {
                     outer,
                 } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call, outer),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
-                Observation::Alone {
-                    stop,
-                    thread: Some(thread),
-                } if self.still_at(stop) => self.begin_alone(stop, thread),
-                Observation::Alone { .. } => self.alone = None,
+                Observation::Alone(Some((stop, thread))) if self.still_at(stop) => {
+                    self.begin_alone(stop, thread);
+                }
+                Observation::Alone(_) => self.alone = None,
                 Observation::ShortWrite {
                     process,
                     address,
@@ -1587,6 +1586,15 @@ impl<'a> World<'a> {
             return Ok(());
         };
 
+        // A controller that no longer debugs the process released it.
+        if self
+            .controller()
+            .is_none_or(|controller| controller.inferior() != Some(alone.process))
+        {
+            self.alone = None;
+            return Ok(());
+        }
+
         let kernel = self.machine.kernel.borrow();
         for (&tid, thread) in &kernel.threads {
             let before = alone.retired.get(&tid).copied().unwrap_or(0);
@@ -1605,10 +1613,9 @@ impl<'a> World<'a> {
 
         drop(kernel);
         let over = self.controller().is_none_or(|controller| {
-            controller.inferior() != Some(alone.process)
-                || controller
-                    .public_stop()
-                    .is_some_and(|stop| stop != alone.stop)
+            controller
+                .public_stop()
+                .is_some_and(|stop| stop != alone.stop)
         });
         if over {
             self.alone = None;
