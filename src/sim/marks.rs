@@ -57,6 +57,9 @@ marks! {
     /// A step out of a caller's frame the client selected completed.
     SteppedOutOfCaller,
 
+    /// The client stepped a thread alone.
+    ThreadStepped,
+
     /// A request naming a stale stop was refused.
     StaleStopRefused,
 

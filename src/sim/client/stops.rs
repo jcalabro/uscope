@@ -193,6 +193,17 @@ impl Client {
             _ => StackFrameId::INNERMOST,
         };
 
+        // Half of them step the thread alone, whose siblings stay stopped.
+        let alone = match context {
+            ExecutionContext::Thread(thread) if self.draw(2) == 0 => Some(thread),
+            _ => None,
+        };
+        if let Some(thread) = alone {
+            self.observe(Observation::Alone(Some((stop, thread))));
+        }
+
+        let scope = alone.map_or(ResumeScope::Process(*process_id), ResumeScope::Thread);
+
         let result = self
             .handle
             .start_step(
@@ -200,7 +211,7 @@ impl Client {
                 context,
                 frame,
                 kind,
-                ResumeScope::Process(*process_id),
+                scope,
                 ExceptionDisposition::Pass,
             )
             .await;
@@ -208,8 +219,15 @@ impl Client {
             Ok(execution) => {
                 self.note(format!("began step {kind:?} as execution {execution}"));
                 self.stepping.set(Some(execution));
+                if alone.is_some() {
+                    // Like a thread continued alone, it may wait forever for
+                    // a sibling that stays stopped.
+                    self.alone.set(Some(execution));
+                    self.mark(Mark::ThreadStepped);
+                }
             }
             Err(error) if self.refused_unarmed(&error).await? => {
+                self.observe(Observation::Alone(None));
                 self.observe(Observation::StepEnded(None));
             }
             Err(error) => {
