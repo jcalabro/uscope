@@ -14,8 +14,9 @@ static EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/web_asse
 #[cfg(debug_assertions)]
 const DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/build/web");
 
-/// Shown when the page has not been built.
-const UNBUILT: &str = "<!doctype html><meta charset=utf-8><title>uscope web</title>\
+/// Shown when the page has not been built. It has a `<head>` so that
+/// `rooted` names the base in it as in the built page.
+const UNBUILT: &str = "<!doctype html><head><meta charset=utf-8><title>uscope web</title></head>\
 <body style=\"font:15px system-ui;padding:2em\"><h1>The page is not built</h1>\
 <p>Run <code>just web</code>, then reload.</p>";
 
@@ -116,5 +117,15 @@ mod tests {
         }
 
         assert!(find("/missing.js").is_none());
+    }
+
+    #[test]
+    fn the_unbuilt_page_names_its_base() {
+        let page = rooted(UNBUILT.as_bytes(), "/debug/7/");
+        let page = String::from_utf8(page).expect("the page is UTF-8");
+        assert!(
+            page.contains("<meta name=\"uscope-base\" content=\"/debug/7/\" />"),
+            "{page}"
+        );
     }
 }
