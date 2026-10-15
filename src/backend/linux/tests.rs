@@ -5367,6 +5367,60 @@ fn a_hit_on_a_watchpoint_removed_while_running_is_dropped() {
     );
 }
 
+/// A thread that lost its slots to another user while running can't be
+/// armed when an edit's internal stop resumes the program. It stays stopped
+/// and the stop is published, as for a new thread that can't be armed;
+/// the program is neither killed nor released.
+#[test]
+fn a_thread_an_internal_stop_cannot_arm_stops_visibly() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+
+    let kept = harness.add(0x9000, 8).expect("arm");
+    let removed = harness.add(0xa000, 8).expect("arm");
+    harness.start_continue();
+    harness.published();
+    harness.inferior().thread_mut(second).expect("thread").armed = None;
+    harness.trace().refuse(second, 0, Errno::ENOSPC);
+    harness.trace().take_actions();
+
+    let mut reply = harness.edit(|reply| Edit::RemoveWatchpoint {
+        id: removed.id,
+        reply,
+    });
+    harness.settle_requested_stops();
+    reply.try_recv().expect("reply").expect("removed");
+
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.starts_with("kill") || action.starts_with("detach")),
+        "{actions:?}"
+    );
+    assert!(
+        harness.published().iter().any(|event| matches!(
+            event,
+            DebuggerEvent::InferiorStopped {
+                thread_id,
+                reason: StopReason::WatchpointArmFailed { .. },
+                ..
+            } if *thread_id == debug_thread_id(second)
+        )),
+        "the thread that can't be armed is stopped visibly"
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(
+        inferior
+            .threads
+            .values()
+            .all(|thread| thread.state == NativeThreadState::Stopped)
+    );
+    let _ = (first, kept);
+}
+
 /// The bytes of a watched word holding `value`.
 fn word(value: u64) -> Arc<[u8]> {
     Arc::from(value.to_le_bytes())

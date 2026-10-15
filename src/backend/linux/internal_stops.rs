@@ -17,7 +17,9 @@ use crate::{Error, VirtualAddress};
 use super::classify::visible_stop_priority;
 use super::native::LinuxTraceOps;
 use super::run_control::collect_repairs;
-use super::{ActiveKind, Controller, Edit, Inferior, NativeThreadState, Result, StopBarrier};
+use super::{
+    ActiveKind, Controller, Edit, Inferior, NativeThreadState, Result, StopBarrier, debug_thread_id,
+};
 
 impl<P: LinuxTraceOps> Controller<P> {
     /// Applies a breakpoint or watchpoint edit once every thread is stopped.
@@ -203,6 +205,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Resumes the active execution from a completed internal stop: steps
     /// every thread stopped at a breakpoint over it, then resumes the
     /// execution's threads as it had them running.
+    ///
+    /// A thread whose slots another user took can't be armed, and running
+    /// it would silently miss accesses the user asked to watch. The stop is
+    /// then published from it, as for a new thread that can't be armed.
     pub(super) fn resume_after_internal_stop(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.barrier = None;
@@ -210,8 +216,28 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
 
+        match self.sync_debug_registers() {
+            Err(error @ Error::WatchpointHardwareBusy { thread }) => {
+                let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+                let pid = inferior
+                    .threads
+                    .keys()
+                    .copied()
+                    .find(|&pid| debug_thread_id(pid) == thread)
+                    .ok_or_else(|| Error::internal("an unarmed thread is the inferior's"))?;
+                return self.begin_visible_stop(
+                    pid,
+                    StopReason::WatchpointArmFailed {
+                        thread_id: thread,
+                        description: error.to_string().into(),
+                    },
+                );
+            }
+            result => result?,
+        }
+
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.repairs = collect_repairs(inferior);
-        self.sync_debug_registers()?;
         self.advance_execution()
     }
 
