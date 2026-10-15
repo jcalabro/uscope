@@ -303,13 +303,19 @@ pub type Selected = std::alloc::System;
 /// mimalloc otherwise waits a second, and `MIMALLOC_PURGE_DELAY` still
 /// overrides it. Loading a large program frees gigabytes it built along the way, which
 /// otherwise stay resident through the rest of the load: some 2 GB of a
-/// 9 GB peak for the largest measured. A program calls it first, before
-/// it starts any thread.
+/// 9 GB peak for the largest measured.
+///
+/// # Safety
+///
+/// No other thread may run meanwhile: mimalloc stores the option without
+/// synchronizing with threads that read it. A program calls this first,
+/// before it starts any thread.
 #[cfg_attr(
     feature = "system-alloc",
     expect(clippy::missing_const_for_fn, reason = "mimalloc's is not const")
 )]
-pub fn return_freed_memory_promptly() {
+#[allow(unsafe_code, reason = "its caller must start no thread meanwhile")]
+pub unsafe fn return_freed_memory_promptly() {
     #[cfg(not(feature = "system-alloc"))]
     {
         // mimalloc's `mi_option_purge_delay`, in its second and third
@@ -323,8 +329,8 @@ pub fn return_freed_memory_promptly() {
         // SAFETY: the declaration matches mimalloc.h's `void
         // mi_option_set_default(mi_option_t option, long value)`, whose
         // enum is an int, and libmimalloc-sys links the library. It only
-        // stores the default, which is not thread-safe: the caller runs it
-        // before starting a thread.
+        // stores the default, which is not thread-safe: the caller
+        // guarantees no other thread runs.
         unsafe {
             unsafe extern "C" {
                 fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);

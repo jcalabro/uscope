@@ -1222,7 +1222,19 @@ fn json_string(out: &mut Vec<u8>, text: &str) {
     out.push(b'"');
 }
 
-/// The local zone's offset from UTC now, in seconds.
+/// What the wall clock read when the monotonic clock began, in
+/// nanoseconds, given both clocks' readings now; and the second the wall
+/// clock reads now, at which the local zone's offset is taken.
+fn clocks(wall: i128, monotonic: u64) -> (i128, i64) {
+    let realtime = wall - i128::from(monotonic);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "seconds since the epoch fit"
+    )]
+    (realtime, (wall / 1_000_000_000) as i64)
+}
+
+/// The local zone's offset from UTC at `seconds` since the epoch.
 #[allow(
     unsafe_code,
     reason = "libc's localtime_r is the only way to read the zone"
@@ -1319,15 +1331,11 @@ impl Printer {
                     None,
                 ),
             };
-        let realtime =
-            nix::time::clock_gettime(nix::time::ClockId::CLOCK_REALTIME).map_or(0, |time| {
-                i128::from(time.tv_sec()) * 1_000_000_000 + i128::from(time.tv_nsec())
-            }) - i128::from(monotonic());
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "seconds since the epoch fit"
-        )]
-        let zone = zone_offset((realtime / 1_000_000_000) as i64);
+        let wall = nix::time::clock_gettime(nix::time::ClockId::CLOCK_REALTIME).map_or(0, |time| {
+            i128::from(time.tv_sec()) * 1_000_000_000 + i128::from(time.tv_nsec())
+        });
+        let (realtime, now) = clocks(wall, monotonic());
+        let zone = zone_offset(now);
         Ok(Self {
             filter: plan.filter.clone(),
             format: args.format,
@@ -2500,5 +2508,18 @@ mod tests {
             Some(vec![1, 2, 3])
         );
         assert!(pids(&["0".to_owned()]).is_err());
+    }
+
+    /// The zone is the one in force now, not when the machine booted: a
+    /// clock change since then would shift every time by an hour.
+    #[test]
+    fn the_zone_is_taken_now_and_not_at_boot() {
+        const SECOND: i128 = 1_000_000_000;
+        let now = 1_700_000_000;
+        let up = 90 * 24 * 3600;
+        let wall = i128::from(now) * SECOND + 5;
+        let (realtime, at) = clocks(wall, u64::try_from(i128::from(up) * SECOND).unwrap());
+        assert_eq!(realtime, i128::from(now - up) * SECOND + 5);
+        assert_eq!(at, now);
     }
 }

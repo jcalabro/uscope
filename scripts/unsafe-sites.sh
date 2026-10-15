@@ -14,6 +14,7 @@ allowed=(
   src/cli/syscalls.rs                     # localtime_r
   src/cli/config.rs                       # remove_var before any thread starts
   src/main.rs                             # the same, and the global allocator
+  src/bin/microscope-tools.rs             # mimalloc's option before any thread starts
   tests/miri.rs                           # the tests of the files above
   tests/support/memory_cap.rs             # the tests' capped allocator
   tests/support/mod.rs                    # tgkill

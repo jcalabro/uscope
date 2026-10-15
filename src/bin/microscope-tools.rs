@@ -244,7 +244,11 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
-    microscope::timings::alloc::return_freed_memory_promptly();
+    // SAFETY: the process has no other thread yet.
+    #[allow(unsafe_code, reason = "mimalloc's options are set unsynchronized")]
+    unsafe {
+        microscope::timings::alloc::return_freed_memory_promptly();
+    }
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,

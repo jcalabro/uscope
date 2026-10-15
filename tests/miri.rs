@@ -74,6 +74,35 @@ mod allocator {
         }
     }
 
+    /// Refuses every request.
+    struct Refusing;
+
+    // SAFETY: refusing an allocation by returning null is allowed, and no
+    // block it returned is ever freed, since it returns none.
+    unsafe impl GlobalAlloc for Refusing {
+        unsafe fn alloc(&self, _: Layout) -> *mut u8 {
+            std::ptr::null_mut()
+        }
+
+        unsafe fn alloc_zeroed(&self, _: Layout) -> *mut u8 {
+            std::ptr::null_mut()
+        }
+
+        unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+    }
+
+    #[test]
+    fn a_refused_allocation_counts_nothing() {
+        let allocator = Counting::new(Refusing);
+        let layout = Layout::from_size_align(4096, 8).expect("a layout");
+        let before = own();
+
+        // SAFETY: the layout is non-zero, and no block comes back to free.
+        let (block, zeroed) = unsafe { (allocator.alloc(layout), allocator.alloc_zeroed(layout)) };
+        assert!(block.is_null() && zeroed.is_null());
+        assert_eq!(own(), before);
+    }
+
     /// This thread's counts, from its slot. Other threads of a test
     /// process, such as the harness's, may allocate while a test measures,
     /// and their counts can reach it late, so tests read their own threads'
@@ -315,16 +344,55 @@ mod ring {
         assert_eq!(out, bytes(0, 72));
     }
 
-    /// A head further ahead than the ring holds is not the kernel's: the
-    /// ring reads nothing and gives nothing back.
     #[test]
-    fn a_head_past_a_whole_ring_drains_nothing() {
-        let (mut memory, kernel) = ring(64);
+    fn a_span_that_ends_at_the_rings_end_drains_in_one_part() {
+        let (mut memory, mut kernel) = ring(64);
+        let mut out = Vec::new();
+        kernel.write(&bytes(0, 48));
+        kernel.publish();
+        memory.drain(&mut out);
+        kernel.write(&bytes(48, 16));
+        kernel.publish();
+        assert_eq!(memory.drain(&mut out), 16);
+        kernel.write(&bytes(64, 64));
+        kernel.publish();
+        assert_eq!(memory.drain(&mut out), 64);
+        assert_eq!(out, bytes(0, 128));
+        assert_eq!(memory.untrusted(), 0);
+    }
+
+    /// A head further ahead than the ring holds cannot be trusted: the
+    /// ring reads nothing, skips its tail to the head so that the kernel
+    /// can go on writing, and counts the span it skipped.
+    #[test]
+    fn a_head_past_a_whole_ring_is_skipped_and_counted() {
+        let (mut memory, mut kernel) = ring(64);
         kernel.word(DATA_HEAD).store(65, Ordering::Release);
         let mut out = Vec::new();
         assert_eq!(memory.drain(&mut out), 0);
         assert!(out.is_empty());
-        assert_eq!(kernel.tail(), 0);
+        assert_eq!(kernel.tail(), 65);
+        assert_eq!(memory.untrusted(), 1);
+
+        kernel.head = 65;
+        kernel.write(&bytes(0, 8));
+        kernel.publish();
+        assert_eq!(memory.drain(&mut out), 8);
+        assert_eq!(out, bytes(0, 8));
+        assert_eq!(memory.untrusted(), 1, "a trusted head counts nothing");
+    }
+
+    /// A tail past the head is not one the reader wrote: the same.
+    #[test]
+    fn a_tail_past_the_head_is_skipped_and_counted() {
+        let (mut memory, kernel) = ring(64);
+        kernel.word(DATA_HEAD).store(5, Ordering::Release);
+        kernel.word(DATA_TAIL).store(10, Ordering::Release);
+        let mut out = Vec::new();
+        assert_eq!(memory.drain(&mut out), 0);
+        assert!(out.is_empty());
+        assert_eq!(kernel.tail(), 5);
+        assert_eq!(memory.untrusted(), 1);
     }
 
     /// The kernel writes as the ring drains: every record arrives once,

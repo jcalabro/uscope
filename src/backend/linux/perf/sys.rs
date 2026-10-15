@@ -155,16 +155,20 @@ pub fn counts(fd: &OwnedFd) -> std::io::Result<(u64, u64)> {
 
 /// Opens an event for `pid` on `cpu`.
 pub fn open(attr: &Attr, pid: i32, cpu: i32) -> std::io::Result<OwnedFd> {
+    // The kernel writes its own size into the attributes it was given when
+    // it refuses them as too large, so it gets a copy of its own.
+    let mut attr = *attr;
+
     // SAFETY: `attr` is a valid, initialized perf_event_attr of the size
-    // it declares, and outlives the call, which writes nothing through it
-    // but its size on E2BIG.
+    // it declares, which the call may write and which outlives it. The
+    // integers are passed as the `long`s the variadic call reads.
     let fd = unsafe {
         libc::syscall(
             libc::SYS_perf_event_open,
-            std::ptr::from_ref(attr),
-            pid,
-            cpu,
-            -1_i32,
+            std::ptr::from_mut(&mut attr),
+            libc::c_long::from(pid),
+            libc::c_long::from(cpu),
+            libc::c_long::from(-1_i32),
             FLAG_FD_CLOEXEC,
         )
     };
@@ -247,6 +251,7 @@ impl Ring {
                 data: page,
                 size: pages * page,
                 owner: Owner::Mapping { length },
+                untrusted: 0,
             },
         })
     }
@@ -259,6 +264,12 @@ impl Ring {
     /// to `out` and returns their bytes to the kernel.
     pub fn drain(&mut self, out: &mut Vec<u8>) -> usize {
         self.memory.drain(out)
+    }
+
+    /// How many times the ring's head could not be trusted, so that the
+    /// ring skipped what lay before it.
+    pub const fn untrusted(&self) -> u64 {
+        self.memory.untrusted()
     }
 }
 
@@ -273,6 +284,9 @@ pub struct RingMemory {
     data: usize,
     size: usize,
     owner: Owner,
+
+    /// Heads [`RingMemory::drain`] could not trust.
+    untrusted: u64,
 }
 
 /// What a ring's memory is, and so how it is freed.
@@ -319,6 +333,7 @@ impl RingMemory {
             data: HEAP_DATA,
             size,
             owner: Owner::Heap(block),
+            untrusted: 0,
         };
 
         (memory, base)
@@ -337,15 +352,23 @@ impl RingMemory {
     /// Appends every record the kernel has written since the last drain
     /// to `out` and returns their bytes to the kernel. Records are whole:
     /// the kernel publishes its head only after a record is complete.
+    ///
+    /// A head more than a whole ring past the tail, or behind it, is not
+    /// one the kernel and this reader could have left. The ring reads
+    /// nothing of it, moves its tail to the head so that the kernel can go
+    /// on writing, and counts it in [`RingMemory::untrusted`].
     pub fn drain(&mut self, out: &mut Vec<u8>) -> usize {
         let head = self.word(DATA_HEAD).load(Ordering::Acquire);
         let tail = self.word(DATA_TAIL).load(Ordering::Relaxed);
         let size = self.size;
-        let Ok(available) = usize::try_from(head.wrapping_sub(tail)) else {
+        let available = usize::try_from(head.wrapping_sub(tail)).unwrap_or(usize::MAX);
+        if available == 0 {
             return 0;
-        };
+        }
 
-        if available == 0 || available > size {
+        if available > size {
+            self.untrusted += 1;
+            self.word(DATA_TAIL).store(head, Ordering::Release);
             return 0;
         }
 
@@ -369,6 +392,12 @@ impl RingMemory {
 
         self.word(DATA_TAIL).store(head, Ordering::Release);
         available
+    }
+
+    /// How many heads [`RingMemory::drain`] could not trust.
+    #[must_use]
+    pub const fn untrusted(&self) -> u64 {
+        self.untrusted
     }
 }
 
@@ -429,6 +458,8 @@ pub fn poll(rings: &[Ring], timeout: std::time::Duration) {
 
 /// The time-stamp counter.
 pub fn tsc() -> u64 {
-    // SAFETY: every x86-64 processor reads its time-stamp counter.
+    // SAFETY: RDTSC reads no memory. Every x86-64 processor has it; a
+    // process that `PR_SET_TSC` forbade it faults, which microscope never
+    // asks for and is not undefined behavior.
     unsafe { core::arch::x86_64::_rdtsc() }
 }

@@ -1757,6 +1757,7 @@ fn run(
         batch: Vec::new(),
         perf: Vec::new(),
         lost: 0,
+        untrusted: 0,
     };
 
     let result = reader.run(&mut loaded, stop, gate.as_ref().map(|gate| gate.pid));
@@ -1937,6 +1938,9 @@ struct Reader<'a> {
     batch: Vec<Record>,
     perf: Vec<u8>,
     lost: u64,
+
+    /// The mapping rings' heads that could not be trusted, as last counted.
+    untrusted: u64,
 }
 
 /// How long the reader waits for the ring before it looks at the world.
@@ -2141,6 +2145,17 @@ impl Reader<'_> {
         self.perf.clear();
         for events in &mut self.mappings {
             events.drain(&mut self.perf);
+        }
+
+        // A ring that skipped a span whose head it could not trust lost
+        // the mappings in it.
+        let untrusted = self.mappings.iter().map(perf::Events::untrusted).sum();
+        if untrusted > self.untrusted {
+            self.sink.event(TraceEvent::Lost {
+                time: monotonic(),
+                count: untrusted - self.untrusted,
+            });
+            self.untrusted = untrusted;
         }
 
         let mut records = Vec::new();

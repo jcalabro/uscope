@@ -348,7 +348,9 @@ fn site(state: &'static AtomicU8) -> u32 {
 fn now(clock: u8) -> u64 {
     #[cfg(target_arch = "x86_64")]
     if u16::from(clock) == abi::CLOCK_TSC {
-        // SAFETY: every x86-64 processor reads its time-stamp counter.
+        // SAFETY: RDTSC reads no memory. Every x86-64 processor has it; a
+        // process that `PR_SET_TSC` forbade it faults, which microscope
+        // does not ask for and is not undefined behavior.
         return unsafe { core::arch::x86_64::_rdtsc() };
     }
 
@@ -447,17 +449,41 @@ fn switch_sites_off() {}
 fn switch_sites_off() {
     let start = (&raw const __start_microscope_sites).cast::<u8>();
     let stop = (&raw const __stop_microscope_sites).cast::<u8>();
+
+    // SAFETY: the linker gathers every site into the section, whole, and
+    // each site's state offset names an `AtomicU8` static in its module.
+    unsafe { switch_off(start, stop) };
+}
+
+/// Writes zero to the state byte of each site in the table from `start` to
+/// `stop`.
+///
+/// The table and the state bytes are separate statics, which Rust's model
+/// does not let one pointer step between, so the walk steps with wrapping
+/// arithmetic, which promises the compiler nothing about where it lands.
+///
+/// # Safety
+///
+/// `start..stop` holds whole sites, and each site's state offset, from its
+/// field, names an `AtomicU8` that lives through the call.
+unsafe fn switch_off(start: *const u8, stop: *const u8) {
+    /// Where a site's state offset lies in it.
+    const STATE_FIELD: usize = 24;
+
     let mut site = start;
     while site < stop {
-        // SAFETY: the section is a table of sites, each of whose state
-        // offsets names an `AtomicU8` in the same module.
+        let field = site.wrapping_add(STATE_FIELD);
+
+        // SAFETY: the caller guarantees a whole site here, whose state
+        // offset is four bytes at any alignment, and the `AtomicU8` it
+        // names.
         unsafe {
-            let field = site.add(24);
             let offset = field.cast::<i32>().read_unaligned();
-            let state = &*field.offset(offset as isize).cast::<AtomicU8>();
+            let state = &*field.wrapping_offset(offset as isize).cast::<AtomicU8>();
             state.store(0, Ordering::Relaxed);
-            site = site.add(abi::SITE_SIZE);
         }
+
+        site = site.wrapping_add(abi::SITE_SIZE);
     }
 }
 

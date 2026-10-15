@@ -874,8 +874,16 @@ pub fn signal_thread(process: ProcessId, thread: microscope::ThreadId, signal: n
     };
 
     #[allow(unsafe_code, reason = "the C library has no wrapper for tgkill")]
-    // SAFETY: tgkill takes three integers and touches no memory of ours.
-    let sent = unsafe { nix::libc::syscall(nix::libc::SYS_tgkill, process, thread, signal) };
+    // SAFETY: tgkill takes three integers, passed as the `long`s the
+    // variadic call reads, and touches no memory of ours.
+    let sent = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_tgkill,
+            nix::libc::c_long::from(process),
+            nix::libc::c_long::from(thread),
+            nix::libc::c_long::from(signal),
+        )
+    };
     assert_eq!(
         sent,
         0,

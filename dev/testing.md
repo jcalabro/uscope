@@ -387,6 +387,11 @@ bugs show up only at a few dozen seeds, so try more after changing atomics.
 
 Under Miri the test process keeps Rust's default allocator. Miri cannot run
 mimalloc, and it checks a freed block's layout only on its own allocator.
+`tests/miri_global_allocator.rs` is the exception: it installs the counting
+allocator over the C library's as the process's own, so that every thread's
+allocations pass through it as they start and as their thread-locals are
+destroyed, as in microscope. It gives up the layout check to do so, which is
+why it is a target of its own.
 
 ## Loom
 

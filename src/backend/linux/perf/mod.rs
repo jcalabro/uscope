@@ -230,22 +230,31 @@ impl Events {
         self.rings.iter_mut().map(|ring| ring.drain(out)).sum()
     }
 
+    /// How many times a ring's head could not be trusted, so that the ring
+    /// skipped what it would have read.
+    pub fn untrusted(&self) -> u64 {
+        self.rings.iter().map(sys::Ring::untrusted).sum()
+    }
+
     /// Waits until a ring is a quarter full, or `timeout`.
     pub fn wait(&self, timeout: Duration) {
         sys::poll(&self.rings, timeout);
     }
 
-    /// What the events have counted so far, in their source's units, and
-    /// how many samples they have lost, exactly.
-    pub fn counts(&self) -> (u64, u64) {
-        self.rings
+    /// What the events have counted so far, in their source's units, how
+    /// many samples they have lost, exactly, and how many times a ring's
+    /// head could not be trusted.
+    pub fn counts(&self) -> (u64, u64, u64) {
+        let (counted, lost) = self
+            .rings
             .iter()
             .map(sys::Ring::fd)
             .chain(&self.followers)
             .filter_map(|fd| sys::counts(fd).ok())
             .fold((0, 0), |(count, lost), (more, also)| {
                 (count + more, lost + also)
-            })
+            });
+        (counted, lost, self.untrusted())
     }
 
     /// Starts or stops every event, and every event a thread inherited

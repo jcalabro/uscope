@@ -284,6 +284,8 @@ Unsafe code lives in a few files, which `scripts/unsafe-sites.sh` lists and
 - `cli/syscalls.rs`: `localtime_r`.
 - `main.rs` and `cli/config.rs`: removing environment variables before
   microscope starts any other thread, and the global allocator.
+- `main.rs` and `bin/microscope-tools.rs`: setting mimalloc's purge delay
+  before either starts any other thread.
 
 The rest of the backend reaches these through safe functions. Code that Miri
 can run has tests in `tests/miri.rs`, which `just miri` runs (see

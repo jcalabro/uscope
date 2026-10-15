@@ -281,8 +281,15 @@ pub(super) fn floating_registers(pid: Pid) -> Result<[u8; FXSAVE_SIZE], Errno> {
 /// Sends `signal` to one thread of `process`.
 #[allow(unsafe_code, reason = "neither nix nor rustix wraps tgkill")]
 pub(super) fn tgkill(process: Pid, thread: Pid, signal: i32) -> Result<(), Errno> {
-    // SAFETY: tgkill takes three integers and reads no memory.
-    let result =
-        unsafe { libc::syscall(libc::SYS_tgkill, process.as_raw(), thread.as_raw(), signal) };
+    // SAFETY: tgkill takes three integers, passed as the `long`s the
+    // variadic call reads, and reads no memory.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_tgkill,
+            libc::c_long::from(process.as_raw()),
+            libc::c_long::from(thread.as_raw()),
+            libc::c_long::from(signal),
+        )
+    };
     Errno::result(result).map(drop)
 }

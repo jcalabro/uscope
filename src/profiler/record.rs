@@ -98,6 +98,9 @@ pub struct Processor {
     /// Records held back for the next batch, past its watermark.
     carry: Vec<u8>,
 
+    /// The ring heads that could not be trusted, as last counted.
+    untrusted: u64,
+
     /// The latest time processed.
     latest: u64,
     first: Option<u64>,
@@ -175,6 +178,7 @@ impl Processor {
             // A stack keeps at least its innermost frame.
             limit: limit.max(1),
             carry: Vec::new(),
+            untrusted: 0,
             latest: 0,
             first: None,
             order: Vec::new(),
@@ -286,9 +290,11 @@ impl Processor {
         }
     }
 
-    /// Takes the events' counts so far: what they counted, and how many
-    /// samples they lost.
-    pub fn counts(&mut self, (counted, lost): (u64, u64)) {
+    /// Takes the events' counts so far: what they counted, how many
+    /// samples they lost, and how many times a ring's head could not be
+    /// trusted, whose skipped spans count as records that could not be
+    /// read.
+    pub fn counts(&mut self, (counted, lost, untrusted): (u64, u64, u64)) {
         for (kind, total) in [
             (AccountKind::Counted, counted),
             (AccountKind::LostSamples, lost),
@@ -296,6 +302,13 @@ impl Processor {
             let had = self.builder.account(kind as u32);
             self.builder.count(kind as u32, total.saturating_sub(had));
         }
+
+        let skipped = untrusted.saturating_sub(self.untrusted);
+        if skipped > 0 {
+            self.builder.count(AccountKind::Malformed as u32, skipped);
+        }
+
+        self.untrusted = untrusted;
     }
 
     /// Processes the records in `batch` and those held back before, in

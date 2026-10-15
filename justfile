@@ -126,8 +126,8 @@ test-bpf LAUNCHER="/run/wrappers/bin/microscope-bpf" *ARGS: build-test-programs
 # `just miri-seeds 0..256`.
 miri_seeds := "0..8"
 
-# Runs tests/miri.rs, the tests of microscope's unsafe code, and the Rust probe
-# SDK's tests under Miri, which stops at undefined behavior: an access out of
+# Runs tests/miri.rs and tests/miri_global_allocator.rs, the tests of
+# microscope's unsafe code, and the Rust probe SDK's tests under Miri, which stops at undefined behavior: an access out of
 # bounds, misaligned, or after a free, a block freed with the wrong layout, a
 # data race, a pointer made from an integer. Tests named `concurrent` then
 # run under many seeds (miri-seeds). Its sysroot builds under target/.
@@ -136,7 +136,7 @@ miri_seeds := "0..8"
 miri *ARGS: && (miri-seeds miri_seeds ARGS)
     export MIRI_SYSROOT="$PWD/target/miri/sysroot"
     cargo miri setup >/dev/null
-    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri -- --skip concurrent "$@"
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --test miri --test miri_global_allocator -- --skip concurrent "$@"
     export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
     MIRIFLAGS="-Zmiri-strict-provenance" cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- --skip concurrent "$@"
 
@@ -151,7 +151,7 @@ miri-seeds SEEDS *ARGS:
     filters=()
     for filter in "${@:2}"; do [[ -n "$filter" ]] && filters+=("$filter"); done
     seeds() { grep -v '^Trying seed: ' || true; }
-    cargo miri test --quiet --test miri -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
+    cargo miri test --quiet --test miri --test miri_global_allocator -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
     export CARGO_TARGET_DIR="$PWD/target/sdk-probes"
     cargo miri test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled --lib -- concurrent "${filters[@]}" 2>&1 >/dev/null | seeds
 

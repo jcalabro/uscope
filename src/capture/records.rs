@@ -484,7 +484,8 @@ pub enum AccountKind {
     /// 1000: 1001 is [`Truncation::NoUnwindInfo`].
     Truncated = 1000,
 
-    /// Records microscope could not decode.
+    /// Records microscope could not decode, and spans of a ring it skipped
+    /// because the ring's head could not be trusted.
     Malformed = 3,
 
     /// Bytes of stack the kernel copied.

@@ -95,6 +95,44 @@ fn read(ring: &Ring, tail: u64) -> (Vec<Event>, u64) {
     (events, position)
 }
 
+/// The walk that switches every site off reads each site's state offset
+/// from its field and steps a whole site at a time, to the table's end.
+#[test]
+fn switching_off_zeroes_each_sites_state_byte() {
+    const FIELD: usize = 24;
+
+    #[repr(C, align(8))]
+    struct Table {
+        sites: [[u8; abi::SITE_SIZE]; 2],
+        states: [AtomicU8; 3],
+    }
+
+    let mut table = Table {
+        sites: [[0; abi::SITE_SIZE]; 2],
+        states: [const { AtomicU8::new(1) }; 3],
+    };
+
+    // The first site's state is the first byte, the second site's the
+    // third, and nothing names the second.
+    let states = core::mem::offset_of!(Table, states);
+    for (site, state) in [(0, states), (1, states + 2)] {
+        let field = site * abi::SITE_SIZE + FIELD;
+        let offset = i32::try_from(state).unwrap() - i32::try_from(field).unwrap();
+        table.sites[site][FIELD..FIELD + 4].copy_from_slice(&offset.to_ne_bytes());
+    }
+
+    let start = ptr::from_ref(&table).cast::<u8>();
+
+    // SAFETY: the table holds two whole sites, whose offsets name state
+    // bytes of the same table, which outlives the call.
+    unsafe { switch_off(start, start.wrapping_add(2 * abi::SITE_SIZE)) };
+    let states = table
+        .states
+        .each_ref()
+        .map(|state| state.load(Ordering::Relaxed));
+    assert_eq!(states, [0, 1, 0]);
+}
+
 /// A message's text, by its length.
 fn text(event: &Event) -> &[u8] {
     &event.more[..event.argument as usize]
