@@ -89,6 +89,11 @@ pub struct Settings {
     /// Breaks the simulation on purpose, to check that the oracles notice.
     #[cfg(test)]
     pub sabotage: Option<Sabotage>,
+
+    /// Checks of what the client read whose failures pass unreported, so
+    /// that a sabotage test can reach a check they would otherwise preempt.
+    #[cfg(test)]
+    pub muted: &'static [&'static str],
 }
 
 /// A thread the client continued alone, with what each thread of its
@@ -222,6 +227,8 @@ impl Default for Settings {
 
             #[cfg(test)]
             sabotage: None,
+            #[cfg(test)]
+            muted: &[],
         }
     }
 }
@@ -421,6 +428,9 @@ struct World<'a> {
     /// The thread the client continued alone, until a stop ends that.
     alone: Option<Alone>,
 
+    /// The checks a sabotage test muted, which pass unreported.
+    muted: &'static [&'static str],
+
     /// The watchpoints the client knows of, with the bytes each watched at
     /// the last stop.
     watches: Vec<Intent>,
@@ -525,7 +535,12 @@ impl<'a> World<'a> {
             "program {} {:?}; {swarm}",
             variant.name, run.arguments
         ));
+        #[cfg(test)]
+        let muted = settings.muted;
+        #[cfg(not(test))]
+        let muted = &[];
         Self {
+            muted,
             swarm,
             program,
             variant,
@@ -1085,25 +1100,23 @@ impl<'a> World<'a> {
                         .unwrap_or_default();
                     // Entry values judge fewer variables, more narrowly, so
                     // they go first.
-                    let mut reached = semantics::entry_values(
+                    let entry = semantics::entry_values(
                         &self.machine.kernel.borrow(),
                         &variables,
                         &backtrace,
                         self.variant,
-                    )
-                    .map_err(|message| Failure::debugger("entry values", message))?;
-                    reached.extend(
-                        semantics::evaluations(
-                            &self.machine.kernel.borrow(),
-                            &variables,
-                            &backtrace,
-                            self.variant,
-                            source,
-                            &self.program.markers,
-                            &evaluations,
-                        )
-                        .map_err(|message| Failure::debugger("expressions", message))?,
                     );
+                    let mut reached = self.judged("entry values", entry)?.unwrap_or_default();
+                    let evaluated = semantics::evaluations(
+                        &self.machine.kernel.borrow(),
+                        &variables,
+                        &backtrace,
+                        self.variant,
+                        source,
+                        &self.program.markers,
+                        &evaluations,
+                    );
+                    reached.extend(self.judged("expressions", evaluated)?.unwrap_or_default());
                     let mut marks = self.machine.marks.borrow_mut();
                     for mark in reached {
                         marks.hit(mark);
@@ -1117,8 +1130,8 @@ impl<'a> World<'a> {
                         self.variant,
                         source,
                         &self.program.markers,
-                    )
-                    .map_err(|message| Failure::debugger("variables", message))?;
+                    );
+                    let inspected = self.judged("variables", inspected)?.flatten();
                     if inspected == Some(Inspected::Held) {
                         self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
                     }
@@ -1556,6 +1569,20 @@ impl<'a> World<'a> {
         self.check_sessions(truth)
     }
 
+    /// What `result` judged, or, where it failed `check`, the failure; or
+    /// nothing, where a sabotage test muted the check.
+    fn judged<T>(
+        &self,
+        check: &'static str,
+        result: Result<T, String>,
+    ) -> Result<Option<T>, Failure> {
+        match result {
+            Ok(judged) => Ok(Some(judged)),
+            Err(_) if self.muted.contains(&check) => Ok(None),
+            Err(message) => Err(Failure::debugger(check, message)),
+        }
+    }
+
     /// Notes what each other thread of the process has run when `thread`
     /// is about to be continued alone from `stop`.
     fn begin_alone(&mut self, stop: crate::StopId, thread: crate::ThreadId) {
@@ -1669,8 +1696,8 @@ impl<'a> World<'a> {
                     &self.shared.catches.borrow(),
                 );
                 let mut marks = self.machine.marks.borrow_mut();
-                catches::judge(&kernel, &truth, &known)
-                    .map_err(|message| Failure::debugger("catch stops", message))?
+                self.judged("catch stops", catches::judge(&kernel, &truth, &known))?
+                    .unwrap_or_default()
                     .into_iter()
                     .for_each(|mark| marks.hit(mark));
                 if truth.public_stop.is_some() {

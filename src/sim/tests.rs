@@ -275,12 +275,25 @@ fn some_failure_in(
     allowed: &[&str],
     gaps: bool,
 ) {
+    // The checks of what the client read judge the same values, and one
+    // catches most lies first, so the others pass while one is tested.
+    let muted = if STACK_CHECKS.contains(&check) {
+        JUDGED_STACK_CHECKS
+            .iter()
+            .copied()
+            .filter(|other| *other != check)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     let settings = Settings {
         sabotage: Some(sabotage),
+        muted: muted.leak(),
         ..Settings::default()
     };
 
-    for seed in 0..GATE_SEEDS {
+    for seed in 0..SABOTAGE_SEEDS {
         let Some(failure) = run(seed, corpus, &settings).failure else {
             continue;
         };
@@ -319,6 +332,11 @@ fn resumed_siblings_fail_thread_scope() {
     assert!(caught, "no sabotaged run failed thread scope");
 }
 
+/// How many seeds a sabotage test may run to find its failure. Most find it
+/// in far fewer; a lie only a few seeds in a thousand show still makes it
+/// fail by chance almost never.
+const SABOTAGE_SEEDS: u64 = 4 * GATE_SEEDS;
+
 /// The checks that read variables, any of which may catch a misreported
 /// stack first.
 const STACK_CHECKS: &[&str] = &[
@@ -329,6 +347,10 @@ const STACK_CHECKS: &[&str] = &[
     // What a stop at a call shows of a buffer on the stack.
     "catch stops",
 ];
+
+/// Those of [`STACK_CHECKS`] the world judges, which a sabotage test can
+/// mute.
+const JUDGED_STACK_CHECKS: &[&str] = &["variables", "expressions", "entry values", "catch stops"];
 
 /// A kernel that misreports small numbers on the stack shows variables
 /// with wrong values, which the variables oracle catches. The other
@@ -380,12 +402,13 @@ fn skewed_stack_words_fail_the_entry_values_oracle() {
     );
 }
 
-/// The same misreported values make conditions the client knows hold or
-/// fail decide hits wrongly, which the breakpoint-conditions check catches.
+/// A kernel whose reads of an unchanged stack value disagree makes
+/// conditions the client knows hold or fail decide hits wrongly, which the
+/// breakpoint-conditions check catches.
 #[test]
-fn skewed_stack_words_fail_breakpoint_conditions() {
+fn flickering_stack_words_fail_breakpoint_conditions() {
     some_failure_with(
-        Sabotage::SkewSmallStackWords,
+        Sabotage::FlickeringStackWords,
         "breakpoint conditions",
         STACK_CHECKS,
     );
