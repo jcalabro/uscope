@@ -944,6 +944,10 @@ struct FakeTrace {
     /// Threads holding a SIGTRAP queued behind an interrupt stop.
     queued_traps: RefCell<BTreeSet<Pid>>,
 
+    /// Threads past their exit, which no interrupt reaches, whose exit
+    /// status is due.
+    dead: RefCell<BTreeSet<Pid>>,
+
     /// Threads that would take a SIGCONT queued for their process.
     queued_continue: RefCell<BTreeSet<Pid>>,
 
@@ -1193,7 +1197,7 @@ impl LinuxTraceOps for FakeTrace {
 
     fn interrupt(&self, pid: Pid) -> Result<bool> {
         self.record(format!("interrupt {pid}"));
-        Ok(true)
+        Ok(!self.dead.borrow().contains(&pid))
     }
 
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
@@ -2615,6 +2619,42 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
     assert!(
         actions.contains(&format!("detach {pid} None")),
         "the collected trap is not delivered: {actions:?}"
+    );
+}
+
+/// A thread that reported its exit while the program ran, and is gone
+/// before an attached session's shutdown can interrupt it, is not lost:
+/// the shutdown awaits its exit status, and publishes its exit.
+#[test]
+fn shutting_down_publishes_the_exit_of_a_thread_too_far_gone_to_interrupt() {
+    let mut harness = watch_harness(2);
+    let [_, sibling] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+
+    harness.attached();
+    harness.start_continue();
+    harness
+        .inferior()
+        .thread_mut(sibling)
+        .expect("thread")
+        .state = NativeThreadState::Exiting;
+    harness.trace().dead.borrow_mut().insert(sibling);
+    harness.trace().take_actions();
+    while harness.events.try_recv().is_ok() {}
+
+    let (reply, _result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    harness
+        .controller
+        .handle_detach_wait(WaitEvent::Exited(sibling, 3));
+    let published = std::iter::from_fn(|| harness.events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        published.iter().any(|event| matches!(
+            event,
+            DebuggerEvent::ThreadExited { thread_id, .. } if *thread_id == debug_thread_id(sibling)
+        )),
+        "{published:?}"
     );
 }
 

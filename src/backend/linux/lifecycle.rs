@@ -1503,7 +1503,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             return;
         }
 
-        // An attached process is detached once every thread is stopped.
+        // An attached process is detached once every thread is stopped. A
+        // thread too far into its exit to be interrupted still reports its
+        // exit status, which the detach awaits, and publishes as an exit.
         let running = inferior
             .threads
             .iter()
@@ -1512,7 +1514,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
             .collect::<Vec<_>>();
         for tid in running {
-            if let Err(error) = self.interrupt_or_retire(tid) {
+            if let Err(error) = self.ptrace.interrupt(tid) {
                 self.finish_shutdown(Err(error));
                 return;
             }
