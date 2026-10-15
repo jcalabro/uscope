@@ -556,6 +556,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                     } else {
                         self.complete_user_step(thread, kind)?;
                     }
+                } else if self.arrival_left_to_a_lost_trap(thread)? {
+                    self.complete_user_step(thread, kind)?;
                 } else {
                     self.start_user_step(thread, kind)?;
                 }
@@ -887,6 +889,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.start_next_repair();
         }
 
+        self.forget_trap_judgement(pid, address);
         self.note_internal_sites(pid, address)?;
         let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {

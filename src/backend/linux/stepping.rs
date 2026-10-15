@@ -347,12 +347,24 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// The stop a step publishes from where its thread stopped: completion,
     /// an explicit stop where it lost track of its frame, or `None` to go on.
     pub(super) fn user_step_stop(&self, pid: Pid, kind: StepKind) -> Result<Option<StopReason>> {
-        match self.step_is_complete(pid, kind) {
-            Ok(true) => Ok(Some(StopReason::Step { kind })),
-            Ok(false) => Ok(None),
+        self.judge_user_step(pid, kind).map(|(reason, _)| reason)
+    }
+
+    /// The stop [`Self::user_step_stop`] publishes, and when there is none,
+    /// the trap the thread stands before whose hit is left to judge where
+    /// the step arrived.
+    fn judge_user_step(
+        &self,
+        pid: Pid,
+        kind: StepKind,
+    ) -> Result<(Option<StopReason>, Option<VirtualAddress>)> {
+        match self.step_completion(pid, kind) {
+            Ok(Completion::Complete) => Ok((Some(StopReason::Step { kind }), None)),
+            Ok(Completion::Incomplete) => Ok((None, None)),
+            Ok(Completion::AtTrap(address)) => Ok((None, Some(address))),
             Err(error) if is_lost_step_evidence(&error) => {
                 self.check_still_stopped(pid)?;
-                Ok(Some(step_incomplete(kind, &error)))
+                Ok((Some(step_incomplete(kind, &error)), None))
             }
             Err(error) => Err(error),
         }
@@ -586,6 +598,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        if let Some(start) = self.active_step_mut() {
+            start.judged_by_trap = None;
+        }
+
         match self.follow_poll_return(pid, kind)? {
             Some(Followed::Waits) => return self.continue_thread(pid),
             Some(Followed::Ended(reason)) => return self.begin_visible_stop(pid, reason),
@@ -627,12 +643,58 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
 
-        if let Some(reason) = self.user_step_stop(pid, kind)? {
+        let (reason, at_trap) = self.judge_user_step(pid, kind)?;
+        if let Some(reason) = reason {
             return self.begin_visible_stop(pid, reason);
+        }
+
+        if let Some(start) = self.active_step_mut() {
+            start.judged_by_trap = at_trap;
         }
 
         self.guard_returned_callee(pid)?;
         self.start_user_step(pid, kind)
+    }
+
+    /// Whether the stepping thread stands where the step left its arrival
+    /// for a trap's hit to judge, but the trap is gone, as an edit made
+    /// while the step ran takes it out before the thread runs it. The step
+    /// then judges the arrival itself.
+    pub(super) fn arrival_left_to_a_lost_trap(&self, pid: Pid) -> Result<bool> {
+        let Some(address) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { start, .. } => start.judged_by_trap,
+                _ => None,
+            })
+        else {
+            return Ok(false);
+        };
+
+        Ok(self.ptrace.registers(pid)?.rip == address.get()
+            && !self.before_breakpoint(pid, address)?)
+    }
+
+    /// Forgets the arrival a trap's hit was to judge once the stepping
+    /// thread hits that trap, at `address`.
+    pub(super) fn forget_trap_judgement(&mut self, pid: Pid, address: VirtualAddress) {
+        let owner = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { owner, start, .. } if start.judged_by_trap == Some(address) => {
+                    Some(*owner)
+                }
+                _ => None,
+            });
+        if owner.is_some_and(|owner| self.runs_step(owner, pid))
+            && let Some(start) = self.active_step_mut()
+        {
+            start.judged_by_trap = None;
+        }
     }
 
     /// When a step over or out whose frame returned enters a call its
@@ -1212,9 +1274,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .is_some_and(|site| site.installed))
     }
 
-    pub(super) fn step_is_complete(&self, pid: Pid, kind: StepKind) -> Result<bool> {
+    /// Whether the step is complete where its thread stopped, or is left
+    /// for the hit of a trap the thread stands before to judge.
+    fn step_completion(&self, pid: Pid, kind: StepKind) -> Result<Completion> {
         if kind == StepKind::Instruction {
-            return Ok(true);
+            return Ok(Completion::Complete);
         }
 
         let registers = self.ptrace.registers(pid)?;
@@ -1234,20 +1298,20 @@ impl<P: LinuxTraceOps> Controller<P> {
             || start.loops.as_ref().is_some_and(StepLoops::waits)
             || super::awaits::waits(start)
         {
-            return Ok(false);
+            return Ok(Completion::Incomplete);
         }
 
         if kind == StepKind::OverInstruction {
             // A stepped-over call completes when it returns to its caller's
             // stack, not when recursion reaches the same return address.
             let position = self.stack_position(pid, &registers);
-            return Ok(start.call_return.is_none_or(|(address, stack)| {
-                registers.rip == address.get() && position == stack
-            }));
+            return Ok(Completion::from(start.call_return.is_none_or(
+                |(address, stack)| registers.rip == address.get() && position == stack,
+            )));
         }
 
         if let Some(complete) = self.traversal_step_is_complete(pid, &registers, start, kind) {
-            return Ok(complete);
+            return Ok(Completion::from(complete));
         }
 
         let instruction = VirtualAddress::new(registers.rip);
@@ -1255,23 +1319,37 @@ impl<P: LinuxTraceOps> Controller<P> {
             // A trace trap can land immediately before an installed `int3`.
             // Resume once so breakpoint classification and user-over-plan
             // precedence happen through the normal breakpoint path.
-            return Ok(false);
+            return Ok(Completion::AtTrap(instruction));
         }
 
+        self.reaches_step_destination(pid, &registers, start, kind, instruction)
+            .map(Completion::from)
+    }
+
+    /// Whether the thread's instruction is where a source step `kind` from
+    /// `start` ends.
+    fn reaches_step_destination(
+        &self,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+        start: &StepStart,
+        kind: StepKind,
+        instruction: VirtualAddress,
+    ) -> Result<bool> {
         match kind {
             StepKind::Advance => Err(Error::internal("an advance runs as a step out")),
             StepKind::IntoNewTask => Err(Error::internal(STEPS_OVER)),
             StepKind::Instruction | StepKind::OverInstruction => Ok(true),
-            StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
-            _ if start.following => self.step_into_source_is_complete(pid, &registers, start),
+            StepKind::IntoSource => self.step_into_source_is_complete(pid, registers, start),
+            _ if start.following => self.step_into_source_is_complete(pid, registers, start),
             // Begun in code no debug information describes, a step over
             // has no source line to step over: it ends at the first source
             // statement it reaches, as stepping in does, and needs no frame.
             StepKind::OverSource if start.code_instance.is_none() => {
-                self.step_into_source_is_complete(pid, &registers, start)
+                self.step_into_source_is_complete(pid, registers, start)
             }
             StepKind::OverSource | StepKind::Out if let Some(caller) = start.returned_to => {
-                Ok(self.returned_step_is_complete(pid, &registers, caller, kind))
+                Ok(self.returned_step_is_complete(pid, registers, caller, kind))
             }
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
@@ -1279,10 +1357,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 };
 
                 let Some(code_instance) = start.code_instance else {
-                    return self.undescribed_step_out_is_complete(pid, &registers, activation);
+                    return self.undescribed_step_out_is_complete(pid, registers, activation);
                 };
 
-                let Some(location) = self.location_for_activation(pid, &registers, activation)?
+                let Some(location) = self.location_for_activation(pid, registers, activation)?
                 else {
                     return Ok(self.image_location(instruction).is_some_and(|location| {
                         source_step_destination(&self.module_image, &location, kind)
@@ -1300,7 +1378,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     // tail-called replacement, not the caller. Keep stepping
                     // when its return address could not be independently
                     // proven for accelerated traversal.
-                    let returned = activation.has_returned(self.stack_position(pid, &registers));
+                    let returned = activation.has_returned(self.stack_position(pid, registers));
                     if location.physical_instance != start.physical_instance && !returned {
                         return Ok(false);
                     }
@@ -2138,6 +2216,27 @@ const fn passes_over(role: CodeRole, start: &StepStart) -> bool {
 /// library, holds `location`.
 const fn undescribed(location: &ImageLocation) -> bool {
     location.physical_instance.is_none() && location.source.is_none()
+}
+
+/// What judging a step where its thread stopped found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    Complete,
+    Incomplete,
+
+    /// Nothing yet: the thread stands before the `int3` at this address,
+    /// and that trap's hit judges the arrival.
+    AtTrap(VirtualAddress),
+}
+
+impl From<bool> for Completion {
+    fn from(complete: bool) -> Self {
+        if complete {
+            Self::Complete
+        } else {
+            Self::Incomplete
+        }
+    }
 }
 
 /// Whether unwinding found no caller the debugger can trust.

@@ -626,6 +626,14 @@ type TestInstance = (u32, Option<u32>, Option<u32>, (u64, u64));
 /// An image whose functions `physical`, `middle`, and `leaf` have one code
 /// instance each.
 fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
+    lined_test_image(instances, crate::image::lines::LineTables::default())
+}
+
+/// An image as [`inline_test_image`] makes, whose code `lines` describe.
+fn lined_test_image(
+    instances: &[TestInstance],
+    lines: crate::image::lines::LineTables,
+) -> Arc<ModuleImage> {
     let source = |line: u32| SourceLocation {
         file: crate::SourceFileId::new(0),
         line: crate::LineNumber::new(u64::from(line)).expect("nonzero line"),
@@ -686,6 +694,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                 files.intern(PathBuf::from("/test/inline.c"));
                 files
             },
+            lines,
             ..crate::model::ModuleMetadata::default()
         },
     ))
@@ -4912,6 +4921,117 @@ fn a_step_ends_at_its_site_where_a_breakpoint_disabled_while_running_was_hit() {
             enabled: false,
             reply,
         }
+    });
+}
+
+/// A source step single-steps onto the start of a line, where a
+/// breakpoint's `int3` lies, and resumes once to hit it, so the hit judges
+/// the arrival. Before the thread runs, an edit's internal stop removes the
+/// trap. The step judges its arrival there as it resumes, rather than
+/// stepping on past a line it had to stop at.
+///
+/// The simulator found this. It needs the edit's stop to reach the thread
+/// before the one instruction it was resumed to run, which on a real kernel
+/// no fixture can force, so this drives the controller directly.
+fn a_step_resumed_to_a_trap_edited_away_while_running(
+    edit: fn(BreakpointId, Reply<Breakpoint>) -> Edit,
+) {
+    const SITE: u64 = 0x40;
+
+    // Line 24 at 0x20, and line 25 from the site to 0x60.
+    let mut lines = crate::image::lines::LineTables::default();
+    lines.begin_sequence().expect("few rows");
+    for (index, (address, line)) in [(0x20, 24), (SITE, 25), (0x60, 0)].into_iter().enumerate() {
+        let end = line == 0;
+        lines
+            .push_row(&crate::image::lines::Row {
+                address,
+                file: (!end).then(|| crate::SourceFileId::new(0)),
+                line,
+                statement: !end,
+                end_sequence: end,
+                ..crate::image::lines::Row::default()
+            })
+            .expect("few rows");
+        if !end {
+            lines
+                .push_range(
+                    AddressRange {
+                        start: ImageAddress::new(address),
+                        end: ImageAddress::new(address + 0x20),
+                    },
+                    u32::try_from(index).expect("few rows"),
+                    true,
+                )
+                .expect("few ranges");
+        }
+    }
+
+    let image = lined_test_image(&[(0, None, None, (0, 0x100))], lines);
+    let mut harness = watch_harness_of(2, &image);
+    harness.controller.unwind_info = Arc::new(FlatUnwindInfo);
+    let stepping = harness.threads[0];
+    let breakpoint = harness.add_breakpoint(SITE);
+    harness.start_continue();
+    {
+        let inferior = harness.inferior();
+        inferior.active.as_mut().expect("execution").kind =
+            step_execution(stepping, StepKind::IntoSource, StepStart::default());
+        inferior.thread_mut(stepping).expect("thread").expected = ExpectedStop::UserStep {
+            kind: StepKind::IntoSource,
+        };
+    }
+
+    // The single step lands before the trap, and resumes to hit it.
+    harness.published();
+    harness.trace().set_pc(stepping, SITE);
+    harness
+        .trap(stepping, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("trace trap");
+    assert_eq!(harness.stopped(), None, "the trap's hit judges the arrival");
+    assert!(
+        harness
+            .trace()
+            .take_actions()
+            .contains(&format!("step {stepping}"))
+    );
+
+    // The edit stops the thread before it runs the trap.
+    let mut edited = harness.edit(|reply| edit(breakpoint.id, reply));
+    harness.settle_requested_stops();
+    edited.try_recv().expect("reply").expect("edited");
+
+    assert_eq!(
+        harness.stopped(),
+        Some((
+            debug_thread_id(stepping),
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        )),
+        "the step ends at the line it reached"
+    );
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions.contains(&format!("step {stepping}")),
+        "the step runs no further: {actions:?}"
+    );
+}
+
+#[test]
+fn a_step_resumed_to_hit_a_breakpoint_removed_while_running_ends_where_it_stands() {
+    a_step_resumed_to_a_trap_edited_away_while_running(|id, reply| Edit::RemoveBreakpoint {
+        id,
+        reply,
+    });
+}
+
+#[test]
+fn a_step_resumed_to_hit_a_breakpoint_disabled_while_running_ends_where_it_stands() {
+    a_step_resumed_to_a_trap_edited_away_while_running(|id, reply| Edit::SetBreakpointEnabled {
+        id,
+        enabled: false,
+        reply,
     });
 }
 

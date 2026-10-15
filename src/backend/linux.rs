@@ -600,6 +600,10 @@ struct StepStart {
     /// The future the step waited for, once it was dropped and the step
     /// went on in the code that dropped it.
     dropped: Option<awaits::RunningFuture>,
+
+    /// Where the stepping thread stands before a trap, resumed to run it,
+    /// whose hit judges the step's arrival there.
+    judged_by_trap: Option<VirtualAddress>,
 }
 
 impl StepStart {
