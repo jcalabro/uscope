@@ -277,7 +277,7 @@ fn some_failure_in(
 ) {
     // The checks of what the client read judge the same values, and one
     // catches most lies first, so the others pass while one is tested.
-    let muted = if STACK_CHECKS.contains(&check) {
+    let muted = if STACK_CHECKS.contains(&check) || JUDGED_STACK_CHECKS.contains(&check) {
         JUDGED_STACK_CHECKS
             .iter()
             .copied()
@@ -348,9 +348,15 @@ const STACK_CHECKS: &[&str] = &[
     "catch stops",
 ];
 
-/// Those of [`STACK_CHECKS`] the world judges, which a sabotage test can
-/// mute.
-const JUDGED_STACK_CHECKS: &[&str] = &["variables", "expressions", "entry values", "catch stops"];
+/// The checks the world makes of what the client read, which a sabotage
+/// test can mute: those of [`STACK_CHECKS`] it judges, and registers.
+const JUDGED_STACK_CHECKS: &[&str] = &[
+    "variables",
+    "expressions",
+    "entry values",
+    "catch stops",
+    "registers",
+];
 
 /// A kernel that misreports small numbers on the stack shows variables
 /// with wrong values, which the variables oracle catches. The other
@@ -453,6 +459,34 @@ fn skewed_registers_fail_the_expressions_oracle() {
     );
 }
 
+/// The same misreported registers are what the frame a thread stopped in
+/// shows, which the registers oracle catches.
+#[test]
+fn skewed_registers_fail_the_registers_oracle() {
+    some_failure_saying(
+        Sabotage::SkewSmallRegisters,
+        "registers",
+        "frame 0 shows",
+        &[
+            "registers",
+            "breakpoint conditions",
+            "backtrace",
+            "stepping",
+        ],
+    );
+}
+
+/// Misreported small numbers on the stack change the registers a caller
+/// saved there, which its frame shows, and the registers oracle catches.
+#[test]
+fn skewed_stack_words_fail_the_registers_oracle() {
+    some_failure_with(
+        Sabotage::SkewSmallStackWords,
+        "registers",
+        &["registers", "breakpoint conditions"],
+    );
+}
+
 /// A kernel that keeps a thread's debug-register writes in a copy that
 /// reads them back arms nothing, so the thread's accesses to watched
 /// memory go unseen, which watch accounting catches.
@@ -478,14 +512,16 @@ fn missed_watch_traps_fail_watch_accounting() {
 /// next instruction makes the debugger count a hit no access made, which
 /// watch accounting catches even when a condition declines both hits. A
 /// repeated exception naming a slot whose watchpoint was removed meanwhile
-/// is a stop the debugger cannot classify, which the client reports.
+/// is a stop the debugger cannot classify, which the client reports. One
+/// raised again after a detach kills the released program with SIGTRAP,
+/// which transparency reports.
 #[test]
 fn repeated_watch_traps_fail_watch_accounting() {
     some_failure_saying(
         Sabotage::RepeatWatchTraps,
         "watch accounting",
         "accesses to it",
-        &["watch accounting", "protocol"],
+        &["watch accounting", "protocol", "transparency"],
     );
 }
 

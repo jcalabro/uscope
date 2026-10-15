@@ -223,6 +223,15 @@ pub enum Observation {
         evaluations: Vec<Evaluated>,
     },
 
+    /// The registers of frame `frame` at a stop, with the backtrace of
+    /// their thread.
+    Registers {
+        stop: StopId,
+        frame: StackFrameId,
+        registers: crate::RegisterSnapshot,
+        backtrace: Backtrace,
+    },
+
     /// A container a view presents, as a global's value, with its elements
     /// in one page and in pages of a smaller size.
     Presented {

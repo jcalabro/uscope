@@ -1253,6 +1253,83 @@ pub fn frame_lines(
     Ok(())
 }
 
+/// Registers: in the frame a thread stopped in, each general register, and
+/// `rip`, is what the thread holds. In a caller's physical frame, with no
+/// inline frame below it, `rip` is where the call it made returns, `rsp`
+/// is just above where that call pushed it, and each register a callee
+/// must preserve that the debugger shows a value for holds what it held
+/// when the caller made the call. Returns the marks the registers reached.
+pub fn registers(
+    kernel: &Kernel,
+    snapshot: &crate::RegisterSnapshot,
+    frame: crate::StackFrameId,
+    backtrace: &Backtrace,
+) -> Result<Vec<Mark>, String> {
+    let ExecutionContext::Thread(thread) = snapshot.context else {
+        return Ok(Vec::new());
+    };
+
+    let Some(thread) = stopped(kernel, thread).filter(|thread| !thread.shadow.lost) else {
+        return Ok(Vec::new());
+    };
+
+    let Some(frame) = backtrace.frames.iter().find(|shown| shown.id == frame) else {
+        return Ok(Vec::new());
+    };
+
+    let shown = |name: &str| {
+        let value = snapshot
+            .registers
+            .iter()
+            .find(|value| &*value.register.name == name)?;
+        Some(u64::from_le_bytes(value.bytes.as_deref()?.try_into().ok()?))
+    };
+    let judge = |name: &str, held: u64| match shown(name) {
+        Some(value) if value != held => Err(format!(
+            "frame {} shows {name} = {value:#x}, but it holds {held:#x}",
+            frame.level
+        )),
+        _ => Ok(()),
+    };
+
+    if frame.level == 0 {
+        for (index, name) in GENERAL_REGISTERS.iter().enumerate() {
+            judge(name, thread.registers.general[index])?;
+        }
+
+        judge("rip", thread.registers.rip)?;
+        return Ok(vec![Mark::StoppedRegistersTrue]);
+    }
+
+    // The call the frame made, which every frame below it is a call under.
+    let physical = backtrace
+        .frames
+        .iter()
+        .take_while(|below| below.level <= frame.level)
+        .all(|below| below.kind == FrameKind::Physical);
+    let calls = &thread.shadow.calls;
+    let made = usize::try_from(frame.level)
+        .ok()
+        .and_then(|level| calls.len().checked_sub(level))
+        .and_then(|index| calls.get(index))
+        .filter(|call| frame.instruction.map(VirtualAddress::get) == Some(call.return_address));
+    let Some(call) = made.filter(|_| physical) else {
+        return Ok(Vec::new());
+    };
+
+    judge("rip", call.return_address)?;
+    judge("rsp", call.slot + 8)?;
+    for name in ["rbx", "rbp", "r12", "r13", "r14", "r15"] {
+        let index = GENERAL_REGISTERS
+            .iter()
+            .position(|general| *general == name)
+            .expect("a callee-saved register is general");
+        judge(name, call.entry[index])?;
+    }
+
+    Ok(vec![Mark::CallerRegistersTrue])
+}
+
 /// The simulated CPU's general registers, in its order.
 const GENERAL_REGISTERS: [&str; 16] = [
     "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",

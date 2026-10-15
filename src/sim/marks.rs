@@ -60,6 +60,12 @@ marks! {
     /// The client stepped a thread alone.
     ThreadStepped,
 
+    /// The frame a thread stopped in showed the registers it holds.
+    StoppedRegistersTrue,
+
+    /// A caller's frame showed the registers its call left.
+    CallerRegistersTrue,
+
     /// A request naming a stale stop was refused.
     StaleStopRefused,
 

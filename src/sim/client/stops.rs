@@ -721,12 +721,29 @@ impl Client {
             Vec::new()
         };
 
+        let frame = variables.stack_frame;
         self.observe(Observation::Variables {
             stop,
             variables,
             backtrace: backtrace.clone(),
             evaluations,
         });
+
+        // Half the inspections also read the frame's registers.
+        if self.draw(2) == 0 {
+            let registers = self
+                .handle
+                .registers()
+                .await
+                .map_err(|error| protocol(format!("registers failed: {error}")))?;
+            self.observe(Observation::Registers {
+                stop,
+                frame,
+                registers,
+                backtrace: backtrace.clone(),
+            });
+        }
+
         Ok(())
     }
 

@@ -1089,51 +1089,25 @@ impl<'a> World<'a> {
                     backtrace,
                     evaluations,
                 } if self.still_at(stop) => {
-                    // The variables are judged only where the frame shows
-                    // the line binutils give, so its line is judged first.
-                    self.judge_backtrace(&backtrace)?;
-                    let source = self
-                        .program
-                        .source
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_default();
-                    // Entry values judge fewer variables, more narrowly, so
-                    // they go first.
-                    let entry = semantics::entry_values(
+                    self.judge_variables(&variables, &backtrace, &evaluations)?;
+                }
+
+                Observation::Registers {
+                    stop,
+                    frame,
+                    registers,
+                    backtrace,
+                } if self.still_at(stop) => {
+                    let judged = semantics::registers(
                         &self.machine.kernel.borrow(),
-                        &variables,
+                        &registers,
+                        frame,
                         &backtrace,
-                        self.variant,
                     );
-                    let mut reached = self.judged("entry values", entry)?.unwrap_or_default();
-                    let evaluated = semantics::evaluations(
-                        &self.machine.kernel.borrow(),
-                        &variables,
-                        &backtrace,
-                        self.variant,
-                        source,
-                        &self.program.markers,
-                        &evaluations,
-                    );
-                    reached.extend(self.judged("expressions", evaluated)?.unwrap_or_default());
+                    let reached = self.judged("registers", judged)?.unwrap_or_default();
                     let mut marks = self.machine.marks.borrow_mut();
                     for mark in reached {
                         marks.hit(mark);
-                    }
-
-                    drop(marks);
-                    let inspected = semantics::variables(
-                        &self.machine.kernel.borrow(),
-                        &variables,
-                        &backtrace,
-                        self.variant,
-                        source,
-                        &self.program.markers,
-                    );
-                    let inspected = self.judged("variables", inspected)?.flatten();
-                    if inspected == Some(Inspected::Held) {
-                        self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
                     }
                 }
 
@@ -1157,6 +1131,7 @@ impl<'a> World<'a> {
 
                 Observation::Backtrace { .. }
                 | Observation::Variables { .. }
+                | Observation::Registers { .. }
                 | Observation::Presented { .. } => {}
             }
         }
@@ -1567,6 +1542,64 @@ impl<'a> World<'a> {
         }
 
         self.check_sessions(truth)
+    }
+
+    /// Judges the variables of a frame at the stop still published, with
+    /// the expressions evaluated there.
+    fn judge_variables(
+        &self,
+        variables: &crate::VariableSnapshot,
+        backtrace: &crate::Backtrace,
+        evaluations: &[crate::sim::client::Evaluated],
+    ) -> Result<(), Failure> {
+        // The variables are judged only where the frame shows
+        // the line binutils give, so its line is judged first.
+        self.judge_backtrace(backtrace)?;
+        let source = self
+            .program
+            .source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        // Entry values judge fewer variables, more narrowly, so
+        // they go first.
+        let entry = semantics::entry_values(
+            &self.machine.kernel.borrow(),
+            variables,
+            backtrace,
+            self.variant,
+        );
+        let mut reached = self.judged("entry values", entry)?.unwrap_or_default();
+        let evaluated = semantics::evaluations(
+            &self.machine.kernel.borrow(),
+            variables,
+            backtrace,
+            self.variant,
+            source,
+            &self.program.markers,
+            evaluations,
+        );
+        reached.extend(self.judged("expressions", evaluated)?.unwrap_or_default());
+        let mut marks = self.machine.marks.borrow_mut();
+        for mark in reached {
+            marks.hit(mark);
+        }
+
+        drop(marks);
+        let inspected = semantics::variables(
+            &self.machine.kernel.borrow(),
+            variables,
+            backtrace,
+            self.variant,
+            source,
+            &self.program.markers,
+        );
+        let inspected = self.judged("variables", inspected)?.flatten();
+        if inspected == Some(Inspected::Held) {
+            self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
+        }
+
+        Ok(())
     }
 
     /// What `result` judged, or, where it failed `check`, the failure; or
