@@ -194,6 +194,13 @@ pub enum Observation {
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
 
+    /// The client continues `thread` alone from `stop`, or, with no
+    /// thread, the continue it was about to make was refused.
+    Alone {
+        stop: StopId,
+        thread: Option<ThreadId>,
+    },
+
     /// A write of `length` bytes of code at `address` to `process` that
     /// wrote only the first `written`.
     ShortWrite {
@@ -880,15 +887,23 @@ impl Client {
             }
         };
 
-        let execution = match self
+        self.observe(Observation::Alone {
+            stop,
+            thread: Some(thread),
+        });
+        let result = self
             .handle
             .continue_execution(
                 stop,
                 ResumeScope::Thread(thread),
                 ExceptionDisposition::Pass,
             )
-            .await
-        {
+            .await;
+        if result.is_err() {
+            self.observe(Observation::Alone { stop, thread: None });
+        }
+
+        let execution = match result {
             Ok(execution) => execution,
             Err(error) if self.refused_unarmed(&error).await? => return Ok(()),
             Err(error) => {

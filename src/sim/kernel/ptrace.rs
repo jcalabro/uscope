@@ -359,7 +359,41 @@ impl Kernel {
             _ => unreachable!("a resumed thread was stopped"),
         }
 
+        #[cfg(test)]
+        if self.sabotage == Some(Sabotage::ResumeSiblings) && !single_step {
+            self.resume_siblings(tid);
+        }
+
         Ok(())
+    }
+
+    /// Resumes each sibling of `tid` stopped with a signal or an event,
+    /// under [`Sabotage::ResumeSiblings`].
+    #[cfg(test)]
+    fn resume_siblings(&mut self, tid: Tid) {
+        let group = self.threads[&tid].tgid;
+        let siblings = self
+            .threads
+            .iter()
+            .filter(|&(&other, thread)| {
+                other != tid
+                    && thread.tgid == group
+                    && matches!(
+                        thread.state,
+                        State::Stopped {
+                            kind: StopKind::Signal(_) | StopKind::Event(..),
+                            ..
+                        }
+                    )
+            })
+            .map(|(&other, _)| other)
+            .collect::<Vec<_>>();
+        self.sabotage = None;
+        for sibling in siblings {
+            let _ = self.resume(sibling, None, false);
+        }
+
+        self.sabotage = Some(Sabotage::ResumeSiblings);
     }
 
     /// `PTRACE_SYSCALL`: resumes a stopped thread as `PTRACE_CONT` does,

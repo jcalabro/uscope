@@ -280,6 +280,26 @@ fn some_failure_in(
     panic!("no sabotaged run failed {check} saying {saying:?}");
 }
 
+/// A kernel that resumes a thread's stopped siblings with it makes them run
+/// while the client continued one thread alone, which thread scope
+/// catches. Siblings running behind the controller's back break much else,
+/// which other checks may catch first in other runs.
+#[test]
+fn resumed_siblings_fail_thread_scope() {
+    let corpus = Corpus::load().expect("load the golden corpus");
+    let settings = Settings {
+        sabotage: Some(Sabotage::ResumeSiblings),
+        ..Settings::default()
+    };
+
+    let caught = (0..GATE_SEEDS).any(|seed| {
+        run(seed, &corpus, &settings)
+            .failure
+            .is_some_and(|failure| failure.check == "thread scope")
+    });
+    assert!(caught, "no sabotaged run failed thread scope");
+}
+
 /// The checks that read variables, any of which may catch a misreported
 /// stack first.
 const STACK_CHECKS: &[&str] = &[

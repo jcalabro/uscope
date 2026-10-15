@@ -90,6 +90,15 @@ pub struct Settings {
     pub sabotage: Option<Sabotage>,
 }
 
+/// A thread the client continued alone, with what each thread of its
+/// process had run when it did.
+struct Alone {
+    stop: u64,
+    process: Tgid,
+    thread: Tid,
+    retired: BTreeMap<Tid, u64>,
+}
+
 /// A deliberate defect, for tests of the oracles.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +201,10 @@ pub enum Sabotage {
     /// a debugger that detached with the stop's signal would, so the
     /// released program dies of it.
     PassTrapsOnDetach,
+
+    /// Resuming a thread with `PTRACE_CONT` or `PTRACE_SYSCALL` also resumes
+    /// each of its siblings stopped with a signal or an event.
+    ResumeSiblings,
 
     /// `/proc/<pid>/maps` reports each file's mappings a page higher than
     /// they are, so the debugger places a position-independent program's
@@ -404,6 +417,9 @@ struct World<'a> {
     /// The step the client requested, until it ends.
     stepping: Option<Begun>,
 
+    /// The thread the client continued alone, until a stop ends that.
+    alone: Option<Alone>,
+
     /// The watchpoints the client knows of, with the bytes each watched at
     /// the last stop.
     watches: Vec<Intent>,
@@ -522,6 +538,7 @@ impl<'a> World<'a> {
             held: BTreeSet::new(),
             arrivals: BTreeMap::new(),
             stepping: None,
+            alone: None,
             watches: Vec::new(),
             baselines: BTreeMap::new(),
             watch_counts: BTreeMap::new(),
@@ -1039,6 +1056,11 @@ impl<'a> World<'a> {
                     call,
                 } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
+                Observation::Alone {
+                    stop,
+                    thread: Some(thread),
+                } if self.still_at(stop) => self.begin_alone(stop, thread),
+                Observation::Alone { .. } => self.alone = None,
                 Observation::ShortWrite {
                     process,
                     address,
@@ -1464,6 +1486,7 @@ impl<'a> World<'a> {
         }
 
         self.trace_served()?;
+        self.check_alone()?;
         self.auditor.check(
             &self.machine.kernel.borrow(),
             &mut self.machine.marks.borrow_mut(),
@@ -1528,6 +1551,67 @@ impl<'a> World<'a> {
         }
 
         self.check_sessions(truth)
+    }
+
+    /// Notes what each other thread of the process has run when `thread`
+    /// is about to be continued alone from `stop`.
+    fn begin_alone(&mut self, stop: crate::StopId, thread: crate::ThreadId) {
+        let Some(process) = self.controller().and_then(SimController::inferior) else {
+            return;
+        };
+
+        let kernel = self.machine.kernel.borrow();
+        let retired = kernel
+            .threads
+            .iter()
+            .filter(|(_, other)| other.tgid == process)
+            .map(|(&tid, other)| (tid, other.retired))
+            .collect();
+        drop(kernel);
+        self.alone = Some(Alone {
+            stop: stop.get(),
+            process,
+            thread: Tid::try_from(thread.get()).expect("a simulated thread id fits"),
+            retired,
+        });
+    }
+
+    /// Thread scope: while the client has continued one thread alone, no
+    /// other thread of its process runs an instruction, until a stop is
+    /// published. A thread it starts stays stopped too.
+    fn check_alone(&mut self) -> Result<(), Failure> {
+        let Some(alone) = &self.alone else {
+            return Ok(());
+        };
+
+        let kernel = self.machine.kernel.borrow();
+        for (&tid, thread) in &kernel.threads {
+            let before = alone.retired.get(&tid).copied().unwrap_or(0);
+            if tid != alone.thread && thread.tgid == alone.process && thread.retired != before {
+                return Err(Failure::debugger(
+                    "thread scope",
+                    format!(
+                        "thread {tid} ran {} instructions while the client continued thread {} \
+                         alone",
+                        thread.retired - before,
+                        alone.thread
+                    ),
+                ));
+            }
+        }
+
+        drop(kernel);
+        let over = self.controller().is_none_or(|controller| {
+            controller.inferior() != Some(alone.process)
+                || controller
+                    .public_stop()
+                    .is_some_and(|stop| stop != alone.stop)
+        });
+        if over {
+            self.alone = None;
+        }
+
+        Ok(())
     }
 
     /// The checks of each session's controller against the kernel, the
