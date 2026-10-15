@@ -198,7 +198,9 @@ An oracle states one invariant and compares independent facts. Among them:
   the controller's threads are exactly those;
 - code holds the program's bytes, or a trap the controller says it
   installed, and every site has an owner;
-- a memory read of code shows the program's bytes, never a planted trap;
+- a memory read of code shows the program's bytes, never a planted trap,
+  and writing the program's own bytes over a trap keeps it; a write ends
+  early only where SIGKILL took the thread;
 - each breakpoint location begins a statement row of its line in binutils'
   line table, or, in unoptimized code, lies in its function;
 - no breakpoint hit goes unseen, and hit counts and conditions decide stops
@@ -210,7 +212,11 @@ An oracle states one invariant and compares independent facts. Among them:
 - backtraces match the calls the CPU made, and in unoptimized code each
   frame's line and function are what binutils say;
 - variables, expressions, and entry values hold what memory and registers
-  hold, and a step ends where the source rules allow;
+  hold, in the frame a thread stopped in and in callers' frames, and a
+  step ends where the source rules allow, a step out of a caller's frame
+  included;
+- while a thread runs alone, continued or stepped, no other thread of its
+  process runs until a stop is published;
 - a presented container shows every element memory holds, by the program's
   views;
 - the event auditor reads every event: each exit reports the kernel's
@@ -227,7 +233,9 @@ checks. That proves consistency with itself, not correctness.
 
 A sabotage test introduces the exact lie the oracle is meant to catch and
 asserts that it fails with a useful message. Keep sabotage hooks narrow and
-test-only.
+test-only. A run ends at its first failure, and the checks of variables,
+expressions, and entry values read the same values, so a sabotage test of
+one mutes the others.
 
 ## Coverage marks
 
