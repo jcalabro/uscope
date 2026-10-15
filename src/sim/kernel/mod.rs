@@ -369,6 +369,10 @@ pub struct Thread {
     /// thread returns to its program (K-SYS-7).
     pub restarting: bool,
 
+    /// How many times the kernel rewound the thread over a `syscall` to
+    /// make a call again (K-SYS-7).
+    pub restarts: u64,
+
     /// Whether its tracer has resumed it, as it has not a thread it seized
     /// running, which makes calls before the tracer can catch them.
     pub resumed: bool,
@@ -497,6 +501,7 @@ impl Thread {
             syscall_stops: false,
             entered: false,
             restarting: false,
+            restarts: 0,
             resumed: false,
             report: None,
             trapped_at: None,
@@ -1021,6 +1026,7 @@ impl Kernel {
                 syscall_stops: false,
                 entered: false,
                 restarting: false,
+                restarts: 0,
                 resumed: false,
                 returning: None,
                 state: if traced {
@@ -1743,6 +1749,7 @@ impl Kernel {
         {
             thread.registers.general[RAX] = thread.orig_rax;
             thread.registers.rip -= SYSCALL_LENGTH;
+            thread.restarts += 1;
         }
     }
 

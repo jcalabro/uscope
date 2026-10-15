@@ -272,6 +272,10 @@ pub struct Begun {
     /// How many instructions the thread had completed.
     pub retired: u64,
 
+    /// How many times the kernel had rewound the thread to make a call
+    /// again.
+    pub restarts: u64,
+
     /// Whether the thread stood inside a system call, which returns before
     /// it executes anything else.
     pub inside_call: bool,
@@ -306,6 +310,7 @@ impl Begun {
             rip: thread.registers.rip,
             shadow: thread.shadow.clone(),
             retired: thread.retired,
+            restarts: thread.restarts,
             // At a call's entry, the call is still to be made.
             inside_call: thread.returning.is_some() || thread.entered,
             frame: presentation.map(|presentation| presentation.frame.clone()),
@@ -336,7 +341,8 @@ pub enum Judged {
 /// Stepping: a completed step left its thread where its kind says.
 ///
 /// - An instruction step executes one instruction, or, from inside a
-///   system call, finishes the call (K-TRAP-1).
+///   system call, finishes the call (K-TRAP-1). A `syscall` the kernel
+///   makes again executes again (K-SYS-7).
 /// - Stepping over an instruction steps one, or runs a call until it
 ///   returns to the same frame.
 /// - Stepping out of a physical frame returns to its caller's return
@@ -376,8 +382,10 @@ pub fn step(
     let start = begun.rip;
     let after = &thread.shadow.calls;
     let before = &begun.shadow.calls;
+    // A call the kernel made again executed its `syscall` again.
+    let again = thread.restarts - begun.restarts;
     let one_instruction = || {
-        if retired == 1 || begun.inside_call && retired == 0 && end == start {
+        if retired == 1 + again || begun.inside_call && retired == again && end == start {
             Ok(Some(Judged::Instructions))
         } else {
             Err(format!(
@@ -1346,6 +1354,27 @@ mod tests {
         };
 
         assert!(judge(&elsewhere, &[], Some(&advanced)).is_err());
+    }
+
+    /// An instruction step executes one instruction, and once more each
+    /// `syscall` the kernel rewound to make a call again.
+    #[test]
+    fn a_restarted_call_executes_its_syscall_again() {
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let (mut kernel, tid) = kernel_with_calls(variant, &[]);
+        let begun = Begun::new(&kernel.threads[&tid], StepKind::Instruction, None);
+        let mut ran = |retired: u64, restarts: u64| {
+            let thread = kernel.threads.get_mut(&tid).expect("the thread");
+            thread.retired = begun.retired + retired;
+            thread.restarts = begun.restarts + restarts;
+            step(&kernel, &begun, &[], variant)
+        };
+
+        assert_eq!(ran(1, 0), Ok(Some(Judged::Instructions)));
+        assert_eq!(ran(2, 1), Ok(Some(Judged::Instructions)));
+        assert!(ran(2, 0).is_err());
+        assert!(ran(1, 1).is_err());
     }
 
     /// A stopped thread of `variant` at its entry, `calls` deep, with each
