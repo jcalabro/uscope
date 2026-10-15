@@ -215,6 +215,8 @@ An oracle states one invariant and compares independent facts. Among them:
   hold, in the frame a thread stopped in and in callers' frames, and a
   step ends where the source rules allow, a step out of a caller's frame
   included;
+- the registers a frame shows are what the thread holds, or, in a caller,
+  what its call left there;
 - while a thread runs alone, continued or stepped, no other thread of its
   process runs until a stop is published;
 - a presented container shows every element memory holds, by the program's
@@ -234,8 +236,8 @@ checks. That proves consistency with itself, not correctness.
 A sabotage test introduces the exact lie the oracle is meant to catch and
 asserts that it fails with a useful message. Keep sabotage hooks narrow and
 test-only. A run ends at its first failure, and the checks of variables,
-expressions, and entry values read the same values, so a sabotage test of
-one mutes the others.
+expressions, entry values, and registers read the same values, so a
+sabotage test of one mutes the others.
 
 ## Coverage marks
 
