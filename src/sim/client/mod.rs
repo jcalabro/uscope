@@ -194,6 +194,15 @@ pub enum Observation {
     /// What the step ended with, when it ended without failing.
     StepEnded(Option<StopReason>),
 
+    /// A write of `length` bytes of code at `address` to `process` that
+    /// wrote only the first `written`.
+    ShortWrite {
+        process: ProcessId,
+        address: u64,
+        length: u64,
+        written: u64,
+    },
+
     /// The variables of the selected frame at a stop, with the backtrace of
     /// their thread.
     Variables {
@@ -964,16 +973,30 @@ impl Client {
         let expected = &page[start..start + usize::try_from(length).expect("small")];
         let covers_trap = aim.is_some_and(|trap| (address..address + length).contains(&trap));
         if self.draw(2) == 0 {
+            let snapshot = self.snapshot().await?;
+            let InferiorState::Stopped { process_id, .. } = snapshot.inferior else {
+                return Err(protocol(format!(
+                    "a write began from {:?}",
+                    snapshot.inferior
+                )));
+            };
+
             let written = self
                 .handle
                 .write_memory(VirtualAddress::new(address), expected)
                 .await
                 .map_err(|error| protocol(format!("writing {address:#x} failed: {error}")))?;
+            // A write ends early only where memory cannot be written, as
+            // when SIGKILL took the thread out of its stop.
             if written != length {
-                return Err(Failure::debugger(
-                    "memory",
-                    format!("writing {length} bytes of code at {address:#x} wrote {written}"),
-                ));
+                self.observe(Observation::ShortWrite {
+                    process: process_id,
+                    address,
+                    length,
+                    written,
+                });
+                self.note(format!("wrote {written} of {length} bytes at {address:#x}"));
+                return Ok(());
             }
 
             self.note(format!(

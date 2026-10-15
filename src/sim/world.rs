@@ -1039,6 +1039,12 @@ impl<'a> World<'a> {
                     call,
                 } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
+                Observation::ShortWrite {
+                    process,
+                    address,
+                    length,
+                    written,
+                } => self.judge_short_write(process, address, length, written)?,
                 Observation::Variables {
                     stop,
                     variables,
@@ -1120,6 +1126,35 @@ impl<'a> World<'a> {
         }
 
         Ok(())
+    }
+
+    /// A write that ended early met memory it could not write, which only
+    /// a program that SIGKILL took out of its stop has.
+    fn judge_short_write(
+        &self,
+        process: ProcessId,
+        address: u64,
+        length: u64,
+        written: u64,
+    ) -> Result<(), Failure> {
+        let tgid = tgid_of(process);
+        let kernel = self.machine.kernel.borrow();
+        let killed = kernel
+            .processes
+            .get(&tgid)
+            .map(|process| process.killed_externally)
+            .or_else(|| kernel.ended.get(&tgid).map(|ended| ended.killed_externally));
+        if killed == Some(true) {
+            return Ok(());
+        }
+
+        Err(Failure::debugger(
+            "memory",
+            format!(
+                "writing {length} bytes of code at {address:#x} wrote {written}, though \
+                 nothing killed the program"
+            ),
+        ))
     }
 
     /// Judges a container's presentation, and its pages, by the views
