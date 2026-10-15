@@ -12,9 +12,9 @@ use crate::sim::report::Failure;
 use crate::{
     Backtrace, BreakpointLocation, BreakpointOptions, BreakpointSpec, Error, ExceptionDisposition,
     ExecutionContext, Expression, FrameKind, InferiorState, LogMessage, PresentedFrame,
-    ResumeScope, ScalarValue, StackFrameId, StateSnapshot, StepKind, StopContext, StopId,
-    StopReason, ThreadState, UnwindTermination, VariableKind, VariableSnapshot, VariableState,
-    VariableValue, VariableValueSource, VirtualAddress,
+    ResumeScope, ScalarValue, StackFrame, StackFrameId, StateSnapshot, StepKind, StopContext,
+    StopId, StopReason, ThreadState, UnwindTermination, VariableKind, VariableSnapshot,
+    VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 /// Assigns `$pc` in a frame, and checks it reads back as assigned.
@@ -560,51 +560,38 @@ impl Client {
             Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
         };
 
-        // Code no debug information describes has no variables to show.
-        let undescribed = backtrace
-            .frames
-            .iter()
-            .find(|frame| Some(frame.id) == snapshot.selected_frame)
-            .is_some_and(|frame| frame.function.is_none());
-        let variables = match self.handle.variables().await {
-            Ok(variables) => variables,
-            Err(Error::VariableContextUnsupported) if undescribed => {
-                self.note("variables of code without debug information refused");
-                return Ok(());
-            }
-            Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
+        // A third of the inspections are of a caller's frame, which the
+        // client selects and then selects the innermost again, so that
+        // what it does next is of the frame it stopped in.
+        let outer = match &backtrace.frames[..] {
+            [_, callers @ ..] if !callers.is_empty() && self.draw(3) == 0 => Some(
+                self.choices
+                    .borrow_mut()
+                    .pick(Stream::Client, callers)
+                    .clone(),
+            ),
+            _ => None,
         };
+        if let Some(frame) = &outer {
+            self.select_frame(frame).await?;
+        }
 
-        self.note(format!(
-            "variables of frame {} in {}: {}",
-            variables.stack_frame,
-            variables.context,
-            variables
-                .variables
+        let selected = outer
+            .as_ref()
+            .map(|frame| frame.id)
+            .or(snapshot.selected_frame);
+        let inspected = self.inspect_frame(stop, &backtrace, selected).await;
+        if outer.is_some()
+            && let Some(was) = backtrace
+                .frames
                 .iter()
-                .map(|variable| variable.name.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        self.observe(Observation::Backtrace {
-            stop,
-            backtrace: backtrace.clone(),
-        });
+                .find(|frame| Some(frame.id) == snapshot.selected_frame)
+                .or_else(|| backtrace.frames.first())
+        {
+            self.select_frame(was).await?;
+        }
 
-        // Half the inspections also evaluate expressions, so that the
-        // variables oracle alone judges the rest.
-        let evaluations = if self.draw(2) == 0 {
-            self.evaluations(&variables, &backtrace).await
-        } else {
-            Vec::new()
-        };
-
-        self.observe(Observation::Variables {
-            stop,
-            variables,
-            backtrace,
-            evaluations,
-        });
+        inspected?;
 
         // Half the inspections of a program with views also present its
         // containers.
@@ -641,6 +628,94 @@ impl Client {
                     )));
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Reads the variables of frame `selected` of `backtrace`, the selected
+    /// thread's, and evaluates expressions in half the frames.
+    async fn inspect_frame(
+        &self,
+        stop: StopId,
+        backtrace: &Backtrace,
+        selected: Option<StackFrameId>,
+    ) -> Result<(), Failure> {
+        // Code no debug information describes has no variables to show.
+        let undescribed = backtrace
+            .frames
+            .iter()
+            .find(|frame| Some(frame.id) == selected)
+            .is_some_and(|frame| frame.function.is_none());
+        let variables = match self.handle.variables().await {
+            Ok(variables) => variables,
+            Err(Error::VariableContextUnsupported) if undescribed => {
+                self.note("variables of code without debug information refused");
+                return Ok(());
+            }
+            Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
+        };
+
+        self.note(format!(
+            "variables of frame {} in {}: {}",
+            variables.stack_frame,
+            variables.context,
+            variables
+                .variables
+                .iter()
+                .map(|variable| variable.name.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        self.observe(Observation::Backtrace {
+            stop,
+            backtrace: backtrace.clone(),
+        });
+
+        // Half the inspections also evaluate expressions, so that the
+        // variables oracle alone judges the rest.
+        let evaluations = if self.draw(2) == 0 {
+            self.evaluations(&variables, backtrace).await
+        } else {
+            Vec::new()
+        };
+
+        self.observe(Observation::Variables {
+            stop,
+            variables,
+            backtrace: backtrace.clone(),
+            evaluations,
+        });
+        Ok(())
+    }
+
+    /// Selects `frame` of the selected thread's backtrace, which the
+    /// debugger must answer with that frame and publish as selected.
+    async fn select_frame(&self, frame: &StackFrame) -> Result<(), Failure> {
+        let selected =
+            self.handle.select_frame(frame.id).await.map_err(|error| {
+                protocol(format!("selecting frame {} failed: {error}", frame.id))
+            })?;
+        if selected != *frame {
+            return Err(protocol(format!(
+                "selecting {frame:?} answered {selected:?}"
+            )));
+        }
+
+        let snapshot = self.snapshot().await?;
+        if snapshot.selected_frame != Some(frame.id) {
+            return Err(protocol(format!(
+                "after selecting frame {} the snapshot selects {:?}",
+                frame.id, snapshot.selected_frame
+            )));
+        }
+
+        self.note(format!(
+            "selected frame {} at level {}",
+            frame.id, frame.level
+        ));
+        if frame.level > 0 {
+            self.mark(Mark::OuterFrameInspected);
         }
 
         Ok(())

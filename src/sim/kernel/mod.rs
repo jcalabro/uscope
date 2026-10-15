@@ -1588,9 +1588,19 @@ impl Kernel {
             })
         };
 
+        // Below where the main thread's first call pushed its return
+        // address: what the program itself stored, not its entry's frame
+        // or what the kernel laid out at exec.
+        let computed = || {
+            self.threads
+                .get(&tgid.leader())
+                .and_then(|leader| leader.shadow.calls.first())
+                .is_some_and(|call| address < call.slot)
+        };
         let small_on_stack = || {
             (1..0x1000).contains(&word)
                 && !return_slot(false)
+                && computed()
                 && self.processes[&tgid].space.maps().lines().any(|line| {
                     line.ends_with("[stack]") && {
                         let range = line.split_whitespace().next().unwrap_or_default();

@@ -1055,45 +1055,75 @@ fn stored(
     Ok(Some(mark))
 }
 
-/// Entry values: where binutils say a variable of the innermost frame is
+/// Entry values: where binutils say a variable of a physical frame is
 /// exactly what a register held when its function was entered, the value
 /// the debugger shows for it is what the call that began the activation
-/// left in that register. An activation a jump entered is not judged: no
-/// call says what it began with. Nor is an inline frame, whose variables
-/// may share names with its function's: the facts describe only variables
-/// outside inlined code.
+/// left in that register. A caller's frame is found among the calls by its
+/// depth, and must be where the call below it returns to; its variables
+/// are judged at the call it made. An activation a jump entered is not
+/// judged: no call says what it began with. Nor is an inline frame, whose
+/// variables may share names with its function's: the facts describe only
+/// variables outside inlined code.
 pub fn entry_values(
     kernel: &Kernel,
     snapshot: &VariableSnapshot,
     backtrace: &Backtrace,
     variant: &Variant,
 ) -> Result<Vec<Mark>, String> {
-    let innermost = backtrace
-        .frames
-        .iter()
-        .find(|frame| frame.id == snapshot.stack_frame)
-        .is_some_and(|frame| frame.level == 0 && frame.kind == FrameKind::Physical);
     let ExecutionContext::Thread(thread) = snapshot.context else {
         return Ok(Vec::new());
     };
 
-    let Some(thread) = stopped(kernel, thread).filter(|_| innermost) else {
+    let Some(frame) = backtrace
+        .frames
+        .iter()
+        .find(|frame| frame.id == snapshot.stack_frame)
+        .filter(|frame| frame.kind == FrameKind::Physical)
+    else {
         return Ok(Vec::new());
     };
 
+    let Some((thread, instruction)) = stopped(kernel, thread).zip(frame.instruction) else {
+        return Ok(Vec::new());
+    };
+
+    // The calls below the frame, each of a physical frame nearer the stop.
+    let below = backtrace
+        .frames
+        .iter()
+        .filter(|other| other.level < frame.level && other.kind == FrameKind::Physical)
+        .count();
+    let calls = &thread.shadow.calls;
+    let Some(index) = calls.len().checked_sub(below + 1) else {
+        return Ok(Vec::new());
+    };
+
+    let at = if frame.level == 0 {
+        instruction.get()
+    } else {
+        instruction.get() - 1
+    };
     let bias = variant.image.bias();
-    let Some(address) = thread.registers.rip.checked_sub(bias) else {
+    let Some(address) = at.checked_sub(bias) else {
         return Ok(Vec::new());
     };
 
-    let Some(call) = thread.shadow.calls.last().filter(|call| {
-        variant
-            .facts
-            .function(address)
-            .is_some_and(|function| function.start + bias == call.target)
-    }) else {
+    let call = &calls[index];
+    let start = variant
+        .facts
+        .function(address)
+        .map(|function| function.start + bias);
+    let returns_here = calls
+        .get(index + 1)
+        .is_none_or(|callee| callee.return_address == instruction.get());
+    let reentered = thread
+        .shadow
+        .jumps(index)
+        .iter()
+        .any(|jump| jump.to == call.target);
+    if start != Some(call.target) || !returns_here || reentered {
         return Ok(Vec::new());
-    };
+    }
 
     let shown = snapshot
         .variables

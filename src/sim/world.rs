@@ -117,8 +117,9 @@ pub enum Sabotage {
     LateSingleSteps,
 
     /// Ptrace reads of small numbers other than zero on the main thread's
-    /// stack report them one greater. Zeros, which end chains of frames,
-    /// and slots where calls pushed return addresses stay as they are.
+    /// stack, below where its first call pushed its return address, report
+    /// them one greater. Zeros, which end chains of frames, and slots where
+    /// calls pushed return addresses stay as they are.
     SkewSmallStackWords,
 
     /// Ptrace reads of the same small numbers report every other one one
@@ -1053,24 +1054,26 @@ impl<'a> World<'a> {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or_default();
-                    let mut reached = semantics::evaluations(
+                    // Entry values judge fewer variables, more narrowly, so
+                    // they go first.
+                    let mut reached = semantics::entry_values(
                         &self.machine.kernel.borrow(),
                         &variables,
                         &backtrace,
                         self.variant,
-                        source,
-                        &self.program.markers,
-                        &evaluations,
                     )
-                    .map_err(|message| Failure::debugger("expressions", message))?;
+                    .map_err(|message| Failure::debugger("entry values", message))?;
                     reached.extend(
-                        semantics::entry_values(
+                        semantics::evaluations(
                             &self.machine.kernel.borrow(),
                             &variables,
                             &backtrace,
                             self.variant,
+                            source,
+                            &self.program.markers,
+                            &evaluations,
                         )
-                        .map_err(|message| Failure::debugger("entry values", message))?,
+                        .map_err(|message| Failure::debugger("expressions", message))?,
                     );
                     let mut marks = self.machine.marks.borrow_mut();
                     for mark in reached {

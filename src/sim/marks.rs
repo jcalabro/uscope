@@ -51,6 +51,9 @@ marks! {
     /// A memory write covered a trap the debugger planted.
     WroteOverTrap,
 
+    /// The client inspected a caller's frame, which it selected.
+    OuterFrameInspected,
+
     /// A request naming a stale stop was refused.
     StaleStopRefused,
 

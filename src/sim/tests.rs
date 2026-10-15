@@ -249,13 +249,24 @@ fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {
 /// contains `saying`.
 fn some_failure_saying(sabotage: Sabotage, check: &str, saying: &str, allowed: &[&str]) {
     let corpus = Corpus::load().expect("load the golden corpus");
+    some_failure_in(&corpus, sabotage, check, saying, allowed);
+}
+
+/// Like [`some_failure_saying`], for programs of `corpus`.
+fn some_failure_in(
+    corpus: &Corpus,
+    sabotage: Sabotage,
+    check: &str,
+    saying: &str,
+    allowed: &[&str],
+) {
     let settings = Settings {
         sabotage: Some(sabotage),
         ..Settings::default()
     };
 
     for seed in 0..GATE_SEEDS {
-        let Some(failure) = run(seed, &corpus, &settings).failure else {
+        let Some(failure) = run(seed, corpus, &settings).failure else {
             continue;
         };
 
@@ -306,10 +317,27 @@ fn skewed_stack_words_fail_the_expressions_oracle() {
 
 /// The same misreported values change the registers a caller saved there,
 /// from which the debugger recovers what the caller passed, which the
-/// entry values oracle catches.
+/// entry values oracle catches. Only optimized code keeps a variable where
+/// its function was entered with it, and unoptimized code keeps its
+/// variables on the stack, where the other checks catch the lie first, so
+/// only the optimized programs are run.
 #[test]
 fn skewed_stack_words_fail_the_entry_values_oracle() {
-    some_failure_with(Sabotage::SkewSmallStackWords, "entry values", STACK_CHECKS);
+    let mut corpus = Corpus::load().expect("load the golden corpus");
+    for program in &mut corpus.programs {
+        program.variants.retain(|variant| variant.facts.optimized);
+    }
+
+    corpus
+        .programs
+        .retain(|program| !program.variants.is_empty());
+    some_failure_in(
+        &corpus,
+        Sabotage::SkewSmallStackWords,
+        "entry values",
+        "",
+        STACK_CHECKS,
+    );
 }
 
 /// The same misreported values make conditions the client knows hold or
