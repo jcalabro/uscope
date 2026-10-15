@@ -82,7 +82,7 @@ impl Client {
             StepKind::IntoNewTask,
         ];
         let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
-        let before = self.snapshot().await?;
+        let mut before = self.snapshot().await?;
 
         // A source step must know which frame it starts in, so one from a
         // stop whose inline frame is ambiguous is refused, not guessed.
@@ -92,20 +92,10 @@ impl Client {
 
         // Stepping out of a frame without a caller to return to must be
         // refused, and change nothing.
-        let caller = if kind == StepKind::Out && !ambiguous {
-            let backtrace = self
-                .handle
-                .backtrace()
-                .await
-                .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
-            let caller = Caller::of(&backtrace);
-            if let Some(stop) = before.stop_id {
-                self.observe(Observation::Backtrace { stop, backtrace });
-            }
-
-            caller
+        let (caller, outer) = if kind == StepKind::Out && !ambiguous {
+            self.step_out_of(&mut before).await?
         } else {
-            Caller::Trusted
+            (Caller::Trusted, 0)
         };
 
         self.note(format!("step {kind:?}"));
@@ -116,6 +106,7 @@ impl Client {
                 presentation: before.presentation.clone(),
                 targets: BTreeSet::new(),
                 call: None,
+                outer,
             });
         }
 
@@ -154,6 +145,10 @@ impl Client {
             ) => {
                 if matches!(reason, StopReason::Syscall(_)) {
                     self.mark(Mark::CatchStepStop);
+                }
+
+                if outer > 0 {
+                    self.mark(Mark::SteppedOutOfCaller);
                 }
 
                 self.note(format!("stepped: {reason:?}"));
@@ -270,6 +265,7 @@ impl Client {
             presentation: before.presentation.clone(),
             targets: BTreeSet::new(),
             call: Some(target.call.get()),
+            outer: 0,
         });
         let result = self.handle.step_into(target.call).await;
         self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
@@ -310,7 +306,7 @@ impl Client {
                 .backtrace()
                 .await
                 .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
-            let caller = Caller::of(&backtrace);
+            let caller = Caller::of(&backtrace, 0);
             if let Some(stop) = before.stop_id {
                 self.observe(Observation::Backtrace { stop, backtrace });
             }
@@ -326,6 +322,7 @@ impl Client {
                 presentation: before.presentation.clone(),
                 targets,
                 call: None,
+                outer: 0,
             });
         }
 
@@ -574,6 +571,7 @@ impl Client {
         };
         if let Some(frame) = &outer {
             self.select_frame(frame).await?;
+            self.mark(Mark::OuterFrameInspected);
         }
 
         let selected = outer
@@ -689,6 +687,64 @@ impl Client {
         Ok(())
     }
 
+    /// The frame a step out is of, as how many frames below it the step
+    /// also returns from, and what it returns to. A third of the steps out
+    /// are of a caller's frame, which the client selects, and `before`
+    /// then shows.
+    async fn step_out_of(&self, before: &mut StateSnapshot) -> Result<(Caller, usize), Failure> {
+        let backtrace = self
+            .handle
+            .backtrace()
+            .await
+            .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
+        let chosen = if self.draw(3) == 0 {
+            self.outer_frame(&backtrace)
+        } else {
+            None
+        };
+
+        if let Some(stop) = before.stop_id {
+            self.observe(Observation::Backtrace {
+                stop,
+                backtrace: backtrace.clone(),
+            });
+        }
+
+        let Some(frame) = chosen else {
+            return Ok((Caller::of(&backtrace, 0), 0));
+        };
+
+        self.select_frame(&frame).await?;
+        *before = self.snapshot().await?;
+        let outer = usize::try_from(frame.level).expect("small");
+        Ok((Caller::of(&backtrace, frame.level), outer))
+    }
+
+    /// A caller's frame of `backtrace` to step out of, with a caller of its
+    /// own in the program's code, and no inline frame at or below it, so
+    /// that each frame below it is a call the step returns from.
+    fn outer_frame(&self, backtrace: &Backtrace) -> Option<StackFrame> {
+        let candidates = backtrace
+            .frames
+            .iter()
+            .take_while(|frame| frame.kind == FrameKind::Physical)
+            .filter(|frame| {
+                frame.level > 0 && matches!(Caller::of(backtrace, frame.level), Caller::Trusted)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return None;
+        }
+
+        Some(
+            self.choices
+                .borrow_mut()
+                .pick(Stream::Client, &candidates)
+                .clone(),
+        )
+    }
+
     /// Selects `frame` of the selected thread's backtrace, which the
     /// debugger must answer with that frame and publish as selected.
     async fn select_frame(&self, frame: &StackFrame) -> Result<(), Failure> {
@@ -714,9 +770,6 @@ impl Client {
             "selected frame {} at level {}",
             frame.id, frame.level
         ));
-        if frame.level > 0 {
-            self.mark(Mark::OuterFrameInspected);
-        }
 
         Ok(())
     }
@@ -985,7 +1038,7 @@ fn integer(state: &VariableState) -> Option<i128> {
     }
 }
 
-/// What a step out of the innermost frame would return to.
+/// What a step out of a frame would return to.
 #[derive(Debug, Clone)]
 enum Caller {
     /// A caller the unwinder found in the program's code, or none needed:
@@ -1001,8 +1054,10 @@ enum Caller {
 }
 
 impl Caller {
-    fn of(backtrace: &Backtrace) -> Self {
-        let Some(frame) = backtrace.frames.first() else {
+    /// What stepping out of the frame at `level` would return to.
+    fn of(backtrace: &Backtrace, level: u32) -> Self {
+        let level = usize::try_from(level).unwrap_or(usize::MAX);
+        let Some(frame) = backtrace.frames.get(level) else {
             return Self::Outermost(backtrace.termination.clone());
         };
 
@@ -1010,7 +1065,7 @@ impl Caller {
             return Self::Trusted;
         }
 
-        match backtrace.frames.get(1) {
+        match backtrace.frames.get(level + 1) {
             None => Self::Outermost(backtrace.termination.clone()),
             Some(caller) if caller.module.is_none() => {
                 caller.instruction.map_or(Self::Trusted, Self::Corrupt)

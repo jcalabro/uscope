@@ -1054,7 +1054,8 @@ impl<'a> World<'a> {
                     presentation,
                     targets,
                     call,
-                } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call),
+                    outer,
+                } => self.begin_step(thread, kind, presentation.as_ref(), &targets, call, outer),
                 Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
                 Observation::Alone {
                     stop,
@@ -1375,6 +1376,7 @@ impl<'a> World<'a> {
         presentation: Option<&crate::FramePresentation>,
         targets: &BTreeSet<u64>,
         call: Option<u64>,
+        outer: usize,
     ) {
         let mut kernel = self.machine.kernel.borrow_mut();
         let tid = Tid::try_from(thread.get()).expect("a simulated tid fits");
@@ -1383,6 +1385,7 @@ impl<'a> World<'a> {
         };
 
         let mut begun = Begun::new(stepped, kind, presentation);
+        begun.outer = outer;
         let bias = self.variant.image.bias();
         begun.targets = targets.iter().map(|address| address + bias).collect();
 

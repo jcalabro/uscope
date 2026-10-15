@@ -54,6 +54,9 @@ marks! {
     /// The client inspected a caller's frame, which it selected.
     OuterFrameInspected,
 
+    /// A step out of a caller's frame the client selected completed.
+    SteppedOutOfCaller,
+
     /// A request naming a stale stop was refused.
     StaleStopRefused,
 

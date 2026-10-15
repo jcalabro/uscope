@@ -286,6 +286,10 @@ pub struct Begun {
 
     /// For a step into one call of a line, where that call returns.
     pub into_return: Option<u64>,
+
+    /// For a step out of a caller's frame, how many frames below it the
+    /// step also returns from.
+    pub outer: usize,
 }
 
 impl Begun {
@@ -309,6 +313,7 @@ impl Begun {
                 .map_or(0, |presentation| presentation.hidden_inline_frames),
             targets: BTreeSet::new(),
             into_return: None,
+            outer: 0,
         }
     }
 }
@@ -411,7 +416,11 @@ pub fn step(
             // of the caller that a line describes.
             // A caller that returns before reaching described code takes the
             // step on to its own caller.
-            let returned = before.split_last().is_some_and(|(call, callers)| {
+            // Out of a caller's frame, the call that began it is the one
+            // returned from, with every call below it.
+            let stepped = before.len().checked_sub(begun.outer + 1);
+            let returned = stepped.is_some_and(|index| {
+                let (call, callers) = (&before[index], &before[..index]);
                 (end == call.return_address && after.as_slice() == callers)
                     || callers.starts_with(after)
                         && !described(call.return_address)
@@ -419,24 +428,25 @@ pub fn step(
                         && positions
                             .iter()
                             .filter(|position| {
-                                position.depth < before.len()
+                                position.depth <= index
                                     && activation_at(&begun.shadow, position.depth)
                                         == Some(position.activation)
                             })
                             .all(|position| !described(position.rip))
             });
-            let inline = matches!(begun.frame, Some(PresentedFrame::Inline(_)));
+            let inline = begun.outer == 0 && matches!(begun.frame, Some(PresentedFrame::Inline(_)));
             if returned || inline && after == before {
                 return Ok(Some(Judged::Instructions));
             }
 
             Err(format!(
-                "stepping out of {} frame at {start:#x}, {} calls deep, ended at {end:#x}, {} \
-                 calls deep; it returns to {:#x}",
+                "stepping out of {} frame {} up at {start:#x}, {} calls deep, ended at {end:#x}, \
+                 {} calls deep; it returns to {:#x}",
                 if inline { "an inline" } else { "the" },
+                begun.outer,
                 before.len(),
                 after.len(),
-                before.last().map_or(0, |call| call.return_address)
+                stepped.map_or(0, |index| before[index].return_address)
             ))
         }
         StepKind::IntoSource | StepKind::OverSource | StepKind::IntoNewTask => {

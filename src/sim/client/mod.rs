@@ -189,6 +189,10 @@ pub enum Observation {
 
         /// For a step into one call of a line, that call's instruction.
         call: Option<u64>,
+
+        /// For a step out of a caller's frame the client selected, how many
+        /// frames below it the step also returns from.
+        outer: usize,
     },
 
     /// What the step ended with, when it ended without failing.
