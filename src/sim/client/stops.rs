@@ -92,12 +92,37 @@ impl Client {
 
         // Stepping out of a frame without a caller to return to must be
         // refused, and change nothing.
-        let (caller, outer) = if kind == StepKind::Out && !ambiguous {
+        let (caller, outer, was) = if kind == StepKind::Out && !ambiguous {
             self.step_out_of(&mut before).await?
         } else {
-            (Caller::Trusted, 0)
+            (Caller::Trusted, 0, None)
         };
 
+        let result = self
+            .step_from(&before, kind, ambiguous, &caller, outer)
+            .await;
+
+        // A step out of a caller's frame that left the thread where it was
+        // leaves that frame selected, which the client selects back.
+        if let (Some(frame), Some(stop)) = (was, before.stop_id)
+            && self.snapshot().await?.stop_id == Some(stop)
+        {
+            self.select_frame(&frame).await?;
+        }
+
+        result
+    }
+
+    /// Steps from the stop `before` shows, out of the frame `outer` frames
+    /// up, which returns to `caller`.
+    async fn step_from(
+        &self,
+        before: &StateSnapshot,
+        kind: StepKind,
+        ambiguous: bool,
+        caller: &Caller,
+        outer: usize,
+    ) -> Result<(), Failure> {
         self.note(format!("step {kind:?}"));
         if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
@@ -113,7 +138,7 @@ impl Client {
         // Half the steps the oracle can judge run while the client goes on
         // acting, as it pauses, edits, or kills.
         if !ambiguous && matches!(caller, Caller::Trusted) && self.control(2) == 0 {
-            return self.start_step(&before, kind).await;
+            return self.start_step(before, kind).await;
         }
 
         let result = self.handle.step(kind).await;
@@ -126,7 +151,7 @@ impl Client {
             }
 
             let after = self.snapshot().await?;
-            if after != before {
+            if after != *before {
                 return Err(protocol(format!(
                     "a refused step changed the state from {before:?} to {after:?}"
                 )));
@@ -138,7 +163,7 @@ impl Client {
             return Ok(());
         }
 
-        match (result, &caller) {
+        match (result, caller) {
             (
                 Ok(reason),
                 Caller::Trusted | Caller::Outermost(UnwindTermination::NoUnwindInfo { .. }),
@@ -157,7 +182,7 @@ impl Client {
             (Err(error), _) if self.refused_unarmed(&error).await? => {}
             (Err(error), Caller::Outermost(_) | Caller::Corrupt(_)) => {
                 let after = self.snapshot().await?;
-                if after != before {
+                if after != *before {
                     return Err(protocol(format!(
                         "a refused step out changed the state from {before:?} to {after:?}"
                     )));
@@ -708,8 +733,11 @@ impl Client {
     /// The frame a step out is of, as how many frames below it the step
     /// also returns from, and what it returns to. A third of the steps out
     /// are of a caller's frame, which the client selects, and `before`
-    /// then shows.
-    async fn step_out_of(&self, before: &mut StateSnapshot) -> Result<(Caller, usize), Failure> {
+    /// then shows, with the frame selected until then.
+    async fn step_out_of(
+        &self,
+        before: &mut StateSnapshot,
+    ) -> Result<(Caller, usize, Option<StackFrame>), Failure> {
         let backtrace = self
             .handle
             .backtrace()
@@ -729,13 +757,19 @@ impl Client {
         }
 
         let Some(frame) = chosen else {
-            return Ok((Caller::of(&backtrace, 0), 0));
+            return Ok((Caller::of(&backtrace, 0), 0, None));
         };
 
+        let was = backtrace
+            .frames
+            .iter()
+            .find(|frame| Some(frame.id) == before.selected_frame)
+            .or_else(|| backtrace.frames.first())
+            .cloned();
         self.select_frame(&frame).await?;
         *before = self.snapshot().await?;
         let outer = usize::try_from(frame.level).expect("small");
-        Ok((Caller::of(&backtrace, frame.level), outer))
+        Ok((Caller::of(&backtrace, frame.level), outer, was))
     }
 
     /// A caller's frame of `backtrace` to step out of, with a caller of its
