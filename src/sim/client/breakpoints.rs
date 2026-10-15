@@ -276,10 +276,10 @@ impl Client {
         Ok(())
     }
 
-    /// Disables a watchpoint, or, at a stop, enables a disabled one, which
-    /// the debug registers may then refuse. A watch enabled while the
-    /// program ran would take bytes the oracles cannot know as its last
-    /// observed ones, so only a stop enables.
+    /// At a stop with a watchpoint disabled, enables one, which the debug
+    /// registers may then refuse; otherwise disables one. A watch enabled
+    /// while the program ran would take bytes the oracles cannot know as
+    /// its last observed ones, so only a stop enables.
     pub(super) async fn toggle_watch(&self, running: bool) -> Result<(), Failure> {
         let disabled = self
             .disabled_watches
@@ -287,7 +287,7 @@ impl Client {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        if !running && !disabled.is_empty() && self.control(2) == 0 {
+        if !running && !disabled.is_empty() {
             let id = *self.choices.borrow_mut().pick(Stream::Control, &disabled);
             return self.enable_watch(id).await;
         }
@@ -432,6 +432,22 @@ impl Client {
         Ok(())
     }
 
+    /// Where to break before the program starts. What a program does
+    /// first it may never do again, as a thread that runs its course at
+    /// once, so three in four early breakpoints aim at markers.
+    fn choose_early_spec(&self) -> BreakpointSpec {
+        let markers = self.script.markers.keys().copied().collect::<Vec<_>>();
+        if markers.is_empty() || self.draw(4) == 0 {
+            return self.choose_spec(Stream::Client);
+        }
+
+        let line = *self.choices.borrow_mut().pick(Stream::Client, &markers);
+        BreakpointSpec::Source {
+            path: self.script.source.clone(),
+            line: LineNumber::new(line).expect("lines count from one"),
+        }
+    }
+
     /// A location for a breakpoint or an advance: a function, or a line,
     /// half of them a marker's.
     pub(super) fn choose_spec(&self, stream: Stream) -> BreakpointSpec {
@@ -464,8 +480,13 @@ impl Client {
     pub(super) async fn add_breakpoint(
         &self,
         breakpoints: &mut Vec<Added>,
+        early: bool,
     ) -> Result<bool, Failure> {
-        let spec = self.choose_spec(Stream::Client);
+        let spec = if early {
+            self.choose_early_spec()
+        } else {
+            self.choose_spec(Stream::Client)
+        };
         let marker_line = match &spec {
             BreakpointSpec::Source { line, .. } => {
                 Some(line.get()).filter(|line| self.script.markers.contains_key(line))
@@ -473,7 +494,7 @@ impl Client {
             _ => None,
         };
 
-        let (options, condition) = self.choose_options(marker_line);
+        let (options, condition) = self.choose_options(marker_line, early);
         let breakpoint = match self.handle.add_breakpoint_with(spec.clone(), options).await {
             Ok(breakpoint) => breakpoint,
             Err(error) if self.names_no_code(&spec, &error) => return Ok(false),
@@ -725,7 +746,11 @@ impl Client {
 
     /// Chooses a new breakpoint's options: none, or a hit condition, a
     /// condition, and perhaps a message to log instead of stopping.
-    fn choose_options(&self, marker_line: Option<u64>) -> (BreakpointOptions, ConditionChoice) {
+    fn choose_options(
+        &self,
+        marker_line: Option<u64>,
+        early: bool,
+    ) -> (BreakpointOptions, ConditionChoice) {
         let (options, condition) = if self.draw(2) == 0 {
             (BreakpointOptions::default(), ConditionChoice::None)
         } else {
@@ -743,7 +768,9 @@ impl Client {
 
         let options = BreakpointOptions {
             enabled: self.control(16) != 0,
-            temporary: self.control(4) == 0,
+            // A temporary breakpoint from the start may be the one threads
+            // starting together all come to.
+            temporary: self.control(if early { 3 } else { 4 }) == 0,
             ..options
         };
 

@@ -431,10 +431,7 @@ impl Client {
             self.hold_forks().await?;
         }
 
-        let mut breakpoints = Vec::new();
-        for _ in 0..self.script.early_breakpoints {
-            self.add_breakpoint(&mut breakpoints).await?;
-        }
+        let mut breakpoints = self.prepare().await?;
 
         let mut launches = 0;
         let mut watched_launch = 0;
@@ -549,6 +546,22 @@ impl Client {
             self.observe(Observation::StepEnded(reason.cloned()));
             self.mark(Mark::UnwaitedStepEnded);
         }
+    }
+
+    /// What the client asks for before the program starts: its early
+    /// breakpoints, returned, and maybe a catchpoint, which sees the calls
+    /// a program makes first, as the clones that start its threads.
+    async fn prepare(&self) -> Result<Vec<Added>, Failure> {
+        let mut breakpoints = Vec::new();
+        for _ in 0..self.script.early_breakpoints {
+            self.add_breakpoint(&mut breakpoints, true).await?;
+        }
+
+        if self.script.catching && self.draw(2) == 0 {
+            self.add_catch().await?;
+        }
+
+        Ok(breakpoints)
     }
 
     /// Holds the children the program forks, for the world to hand to
@@ -717,7 +730,7 @@ impl Client {
                 }
             }
             1 => {
-                if self.add_breakpoint(breakpoints).await? {
+                if self.add_breakpoint(breakpoints, false).await? {
                     self.mark(Mark::EditWhileRunning);
                     during_step(Mark::EditDuringStep);
                 }
@@ -759,9 +772,29 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
-        let InferiorState::Stopped { process_id, .. } = snapshot.inferior else {
+        let InferiorState::Stopped {
+            process_id,
+            ref reason,
+            ..
+        } = snapshot.inferior
+        else {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
+
+        // From the first stop of a program that starts threads, a third of
+        // the actions resume a thread alone, often its main one, before any
+        // other move lets the main thread exit among the others: an
+        // execution of the main thread alone ends in its exit.
+        if matches!(reason, StopReason::Entry | StopReason::Attach)
+            && self
+                .script
+                .defined
+                .iter()
+                .any(|function| function == "rt_clone")
+            && self.draw(3) == 0
+        {
+            return self.continue_thread(snapshot, stop).await;
+        }
 
         let scope = ResumeScope::Process(process_id);
         if self.control(6) == 0 {
@@ -818,7 +851,7 @@ impl Client {
             }
             2 | 3 => self.step().await?,
             4 => {
-                self.add_breakpoint(breakpoints).await?;
+                self.add_breakpoint(breakpoints, false).await?;
             }
             5 => {
                 self.remove_breakpoint(breakpoints).await?;

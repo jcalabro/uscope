@@ -235,8 +235,14 @@ Marks record semantic events reached by a run: two threads stopped at
 breakpoints at once (`CoHit`), an attach that finds a thread already gone
 (`SeizeRefused`), a leader exiting while its threads run on
 (`LeaderExitedAlone`), a watchpoint hit on another thread
-(`WatchHitOnAnotherThread`), or another feature branch. Fixed gate seeds must
-cover required marks.
+(`WatchHitOnAnotherThread`), or another feature branch.
+
+Each mark must be reached by at least three of the gate's 2000 fixed seeds
+(`MARK_FLOOR` in `src/sim/tests.rs`), and the gate's failure lists how many
+seeds reached each one. A mark that only a seed or two reach is lost to any
+change that redraws the seeds. When a mark falls below the floor, make the
+swarm or client reach it more often; do not lower the floor for it. A sweep
+prints any mark no session reached.
 
 Marks are not line coverage. Add one when the behavior has a meaningful name
 and an oracle or test expectation. Do not add marks merely to make a percentage

@@ -609,9 +609,9 @@ impl Client {
 
         inspected?;
 
-        // Half the inspections of a program with views also present its
+        // Every inspection of a program with views also presents its
         // containers.
-        if self.script.views.is_some() && self.draw(2) == 0 {
+        if self.script.views.is_some() {
             self.present(stop).await?;
         }
 

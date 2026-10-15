@@ -31,9 +31,9 @@ impl Plan {
     /// Chooses a fault for a run, aimed early enough that most sessions
     /// reach it. Only a program that creates threads plans a fault near
     /// one, and only one that forks near a fork, which, rarer than a clone,
-    /// it aims at as often as at any other moment.
+    /// it aims at more often than at any other moment.
     pub fn choose(choices: &mut Choices, creates_threads: bool, forks: bool) -> Self {
-        let weights = [1, 1, u64::from(creates_threads), 2 * u64::from(forks)];
+        let weights = [1, 1, u64::from(creates_threads), 5 * u64::from(forks)];
         match choices.weighted(Stream::Fault, &weights) {
             0 => Self::KillAtStep(choices.below(Stream::Fault, 300) + 1),
             1 => Self::KillInsideCall(choices.below(Stream::Fault, 100) + 1),

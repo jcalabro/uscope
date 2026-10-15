@@ -1,7 +1,7 @@
 //! The simulation's gate: fixed seeds over every program and variant, and
 //! a check that a seed always names the same run.
 
-use super::marks::{Mark, Marks};
+use super::marks::Reach;
 use super::report::FailureKind;
 use super::world::Sabotage;
 use super::{Corpus, Settings, describe_failure, run};
@@ -9,23 +9,30 @@ use super::{Corpus, Settings, describe_failure, run};
 /// How many fixed seeds the gate runs.
 const GATE_SEEDS: u64 = 2000;
 
+/// How many fixed seeds must reach each mark. Each mark is reached by
+/// about eleven of every 2000 seeds or more, so a change that redraws the
+/// seeds fails the floor by chance about once in 300 times, and a mark that
+/// becomes a quarter as common fails it.
+const MARK_FLOOR: u64 = 3;
+
 /// How many seeds the determinism check runs twice.
 const DETERMINISM_SEEDS: u64 = 32;
 
-/// Every fixed seed runs a session the debugger handles correctly.
+/// Every fixed seed runs a session the debugger handles correctly, and
+/// enough of them reach each mark.
 #[test]
 fn fixed_seeds_pass_every_oracle() {
     let corpus = Corpus::load().expect("load the golden corpus");
     let settings = Settings::default();
     let mut failures = Vec::new();
-    let mut marks = Marks::default();
+    let mut reach = Reach::default();
     for seed in 0..GATE_SEEDS {
         let outcome = run(seed, &corpus, &settings);
         if outcome.failure.is_some() {
             failures.push(describe_failure(&outcome));
         }
 
-        marks.add(&outcome.marks);
+        reach.add(&outcome.marks);
     }
 
     assert!(
@@ -34,13 +41,10 @@ fn fixed_seeds_pass_every_oracle() {
         failures.len(),
         failures[0]
     );
-    let unreached = Mark::ALL
-        .into_iter()
-        .filter(|&mark| marks.count(mark) == 0)
-        .collect::<Vec<_>>();
+    let rare = reach.below(MARK_FLOOR);
     assert!(
-        unreached.is_empty(),
-        "no fixed seed reached {unreached:?}; counts: {marks:?}"
+        rare.is_empty(),
+        "fewer than {MARK_FLOOR} fixed seeds reached {rare:?}; {reach}"
     );
 }
 
@@ -227,15 +231,19 @@ fn late_single_steps_fail_the_stepping_oracle() {
 
 /// A kernel that hides a call the stepping thread stands at makes a step
 /// into another call of the line enter that one, which the stepping oracle
-/// catches, if code integrity has not caught the lie first.
+/// catches, if code integrity has not caught the lie first. A debugger
+/// misled about where an instruction ends can also send a thread into the
+/// middle of one, which the CPU cannot decode, a gap, within the action
+/// before any oracle looks.
 #[test]
 fn hidden_calls_fail_the_stepping_oracle() {
-    some_failure_saying(
+    some_failure_past(
         Sabotage::HideSteppedCalls,
         "stepping",
         "into the call returning to",
         // Reading the code the thread stands at shows the lie too.
         &["stepping", "code integrity"],
+        true,
     );
 }
 
@@ -248,17 +256,24 @@ fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {
 /// Like [`some_failure_with`], for a failure of `check` whose message
 /// contains `saying`.
 fn some_failure_saying(sabotage: Sabotage, check: &str, saying: &str, allowed: &[&str]) {
-    let corpus = Corpus::load().expect("load the golden corpus");
-    some_failure_in(&corpus, sabotage, check, saying, allowed);
+    some_failure_past(sabotage, check, saying, allowed, false);
 }
 
-/// Like [`some_failure_saying`], for programs of `corpus`.
+/// Like [`some_failure_saying`], also passing over model gaps on the way
+/// when `gaps` says so.
+fn some_failure_past(sabotage: Sabotage, check: &str, saying: &str, allowed: &[&str], gaps: bool) {
+    let corpus = Corpus::load().expect("load the golden corpus");
+    some_failure_in(&corpus, sabotage, check, saying, allowed, gaps);
+}
+
+/// Like [`some_failure_past`], for programs of `corpus`.
 fn some_failure_in(
     corpus: &Corpus,
     sabotage: Sabotage,
     check: &str,
     saying: &str,
     allowed: &[&str],
+    gaps: bool,
 ) {
     let settings = Settings {
         sabotage: Some(sabotage),
@@ -269,6 +284,10 @@ fn some_failure_in(
         let Some(failure) = run(seed, corpus, &settings).failure else {
             continue;
         };
+
+        if gaps && failure.kind == FailureKind::ModelGap {
+            continue;
+        }
 
         assert_eq!(failure.kind, FailureKind::Debugger, "{failure}");
         assert!(allowed.contains(&failure.check), "{failure}");
@@ -357,6 +376,7 @@ fn skewed_stack_words_fail_the_entry_values_oracle() {
         "entry values",
         "",
         STACK_CHECKS,
+        false,
     );
 }
 

@@ -62,6 +62,7 @@ pub(crate) mod world;
 use std::fmt::Write as _;
 
 pub use corpus::Corpus;
+pub use marks::Reach;
 pub use world::{Outcome, Settings, run};
 
 /// A failed run, written to be understood without rerunning it.

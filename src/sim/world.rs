@@ -804,7 +804,7 @@ impl<'a> World<'a> {
             .hand_over();
         let tgid = tgid_of(held.process_id);
         let decision = self.machine.choices.borrow_mut().below(Stream::Client, 8);
-        if decision == 1
+        if matches!(decision, 1..=3)
             && let Some(receiver) = self.shared.held.borrow_mut().as_mut()
         {
             receiver.close();
@@ -812,7 +812,7 @@ impl<'a> World<'a> {
                 .line("    the first session takes no more children".to_owned());
         }
 
-        if decision == 0 {
+        if decision <= 1 {
             self.release(held)?;
             return Ok(format!("follow {tgid} -> released"));
         }

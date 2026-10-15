@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use uscope::sim::{Corpus, Outcome, Settings, describe_failure, run};
+use uscope::sim::{Corpus, Outcome, Reach, Settings, describe_failure, run};
 
 #[derive(Parser)]
 #[command(about = "Deterministic simulation of uscope debugging sessions")]
@@ -151,11 +151,13 @@ fn sweep(
     // How many sessions planned each kind of fault, and how many of those
     // fired.
     let faults = Mutex::new(BTreeMap::<&'static str, (u64, u64)>::new());
+    let reach = Mutex::new(Reach::default());
     let began = Instant::now();
     let settings = Settings::default();
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
+                let mut reached = Reach::default();
                 while !done.load(Ordering::Relaxed) {
                     let seed = start.wrapping_add(next.fetch_add(1, Ordering::Relaxed));
 
@@ -182,8 +184,14 @@ fn sweep(
                         drop(faults);
                     }
 
+                    reached.add(&outcome.marks);
                     record_failure(&groups, &outcome);
                 }
+
+                reach
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .merge(&reached);
             });
         }
 
@@ -210,7 +218,30 @@ fn sweep(
         println!("{kind}: fired in {fired} of {planned} sessions that planned it");
     }
 
-    let mut escaped = escaped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    // A mark no session reached says what this sweep never tested.
+    let unreached = reach
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .below(1)
+        .into_iter()
+        .map(|(mark, _)| format!("{mark:?}"))
+        .collect::<Vec<_>>();
+    if !unreached.is_empty() {
+        println!("no session reached {}", unreached.join(", "));
+    }
+
+    let escaped = escaped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    report_failures(corpus, &settings, &groups, escaped)
+}
+
+/// Prints each group of failures, and the seeds whose runs panicked outside
+/// their actions. Succeeds when there were none.
+fn report_failures(
+    corpus: &Corpus,
+    settings: &Settings,
+    groups: &BTreeMap<String, Group>,
+    mut escaped: Vec<u64>,
+) -> ExitCode {
     escaped.sort_unstable();
     if groups.is_empty() && escaped.is_empty() {
         println!("no failures");
@@ -221,7 +252,7 @@ fn sweep(
         println!("\nseed {seed:#x} panicked outside its actions: just sim-seed {seed:#x}");
     }
 
-    for (signature, group) in &groups {
+    for (signature, group) in groups {
         let (steps, seed) = group.shortest;
         println!(
             "\n{signature}\n{} sessions; the shortest, seed {seed:#x}, failed at action #{steps}\n{}",
@@ -229,7 +260,7 @@ fn sweep(
         );
 
         // A seed is worth replaying only if it names the run that failed.
-        let again = run(seed, corpus, &settings).fingerprint;
+        let again = run(seed, corpus, settings).fingerprint;
         if again != group.fingerprint {
             println!(
                 "seed {seed:#x} ran differently when run again ({again:#x}, not {:#x}): \

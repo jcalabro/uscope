@@ -67,7 +67,7 @@ impl Adopter {
                     stop_id,
                     ..
                 } => {
-                    if self.draw(4) == 0 {
+                    if self.draw(3) == 0 {
                         break;
                     }
 

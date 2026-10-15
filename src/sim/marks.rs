@@ -402,11 +402,99 @@ impl Marks {
     pub const fn count(&self, mark: Mark) -> u64 {
         self.0[mark as usize]
     }
+}
 
-    /// Adds another run's counts to these.
-    pub fn add(&mut self, other: &Self) {
-        for (total, count) in self.0.iter_mut().zip(other.0) {
-            *total += count;
+/// How many runs reached each mark. One run that reaches a mark many times
+/// counts once: a mark few runs reach is lost to any change that redraws
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    runs: u64,
+    reached: [u64; Mark::ALL.len()],
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Self {
+            runs: 0,
+            reached: [0; Mark::ALL.len()],
         }
+    }
+}
+
+impl Reach {
+    /// Counts the marks one run reached.
+    pub fn add(&mut self, marks: &Marks) {
+        self.runs += 1;
+        for (reached, count) in self.reached.iter_mut().zip(marks.0) {
+            *reached += u64::from(count > 0);
+        }
+    }
+
+    /// Adds the runs `other` counted.
+    pub fn merge(&mut self, other: &Self) {
+        self.runs += other.runs;
+        for (reached, other) in self.reached.iter_mut().zip(other.reached) {
+            *reached += other;
+        }
+    }
+
+    /// How many runs reached `mark`.
+    #[must_use]
+    pub const fn runs(&self, mark: Mark) -> u64 {
+        self.reached[mark as usize]
+    }
+
+    /// The marks fewer than `floor` runs reached, with how many did, rarest
+    /// first.
+    #[must_use]
+    pub fn below(&self, floor: u64) -> Vec<(Mark, u64)> {
+        let mut rare = Mark::ALL
+            .into_iter()
+            .map(|mark| (mark, self.runs(mark)))
+            .filter(|&(_, runs)| runs < floor)
+            .collect::<Vec<_>>();
+        rare.sort_by_key(|&(_, runs)| runs);
+        rare
+    }
+}
+
+impl std::fmt::Display for Reach {
+    /// Each mark with how many runs reached it, rarest first.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "runs reaching each mark, of {}:", self.runs)?;
+        for (mark, runs) in self.below(u64::MAX) {
+            write!(formatter, "\n  {runs:>5} {mark:?}")?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run counts once for each mark it reached, however often it did.
+    #[test]
+    fn reach_counts_runs_not_hits() {
+        let mut marks = Marks::default();
+        marks.hit(Mark::CoHit);
+        marks.hit(Mark::CoHit);
+        let mut reach = Reach::default();
+        reach.add(&marks);
+        marks.hit(Mark::StepStop);
+        reach.add(&marks);
+        assert_eq!(reach.runs(Mark::CoHit), 2);
+        assert_eq!(reach.runs(Mark::StepStop), 1);
+        let rare = reach.below(2);
+        assert_eq!(rare.first(), Some(&(Mark::EntryStop, 0)));
+        assert!(rare.contains(&(Mark::StepStop, 1)));
+        assert!(!rare.iter().any(|&(mark, _)| mark == Mark::CoHit));
+
+        let mut merged = Reach::default();
+        merged.merge(&reach);
+        merged.merge(&reach);
+        assert_eq!(merged.runs(Mark::CoHit), 4);
     }
 }

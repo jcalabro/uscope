@@ -120,7 +120,12 @@ impl Swarm {
             .functions
             .iter()
             .any(|function| function == "rt_fork");
-        let fault = (pick(&[0, 1]) == 1).then(|| Plan::choose(choices, creates_threads, forks));
+
+        // A program that forks plans a fault in three seeds of four: what
+        // becomes of its children when it dies near a fork is much of what
+        // it exists to show.
+        let faulty = pick(if forks { &[0, 1, 1, 1] } else { &[0, 1] }) == 1;
+        let fault = faulty.then(|| Plan::choose(choices, creates_threads, forks));
         let mut pick = |options: &[u64]| *choices.pick(Stream::Swarm, options);
         Self {
             program,
@@ -142,7 +147,8 @@ impl Swarm {
                 _ => DebugBehavior::Contended(usize::try_from(pick(&[2, 3, 4, 4])).expect("small")),
             },
             watching: pick(&[0, 1]) == 1,
-            attach: (pick(&[0, 0, 1]) == 1).then(|| choices.below(Stream::Swarm, 1000)),
+            // Early enough that most attaches find the program still running.
+            attach: (pick(&[0, 1]) == 1).then(|| choices.below(Stream::Swarm, 500)),
             follow: forks && choices.below(Stream::Swarm, 2) == 1,
             catching: choices.below(Stream::Swarm, 3) == 0,
         }
