@@ -1,6 +1,6 @@
 //! Debug Adapter Protocol message types.
 //!
-//! Only the messages and fields uscope uses are modeled. Unknown fields are
+//! Only the messages and fields microscope uses are modeled. Unknown fields are
 //! ignored, absent or `null` arguments read as empty, and a client's `seq`
 //! is echoed exactly as sent, since some clients send strings.
 
@@ -503,7 +503,7 @@ pub struct DisconnectArguments {
     pub terminate_debuggee: Option<bool>,
 }
 
-/// `uscope/setValueFormat` arguments: how values are shown when a request
+/// `microscope/setValueFormat` arguments: how values are shown when a request
 /// does not say.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]

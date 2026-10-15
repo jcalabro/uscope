@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # tokio. Verified against tokio 1.52.3 and 1.53.2 by
 # tests/fixtures/rust/tokio/values, whose markers say what each value shows.

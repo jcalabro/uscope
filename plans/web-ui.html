@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>uscope web plan</title>
+<title>microscope web plan</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -497,7 +497,7 @@ td .q { color: var(--accent); }
 <body>
 <div class="page">
   <nav class="toc" aria-label="Contents">
-    <b>uscope web</b>
+    <b>microscope web</b>
     <a href="#decisions">Decisions</a>
     <a href="#interface">The interface</a>
     <a href="#flows">User flows</a>
@@ -528,14 +528,14 @@ td .q { color: var(--accent); }
       </div>
       <h1>A browser debugger you can send as a link</h1>
       <p class="lede">
-        <code>uscope web ./app</code> serves a dense, keyboard-driven React app and a WebSocket from
-        the uscope binary. Every pane is a view of one focus: a stop, a thread, a frame, a place in
+        <code>microscope web ./app</code> serves a dense, keyboard-driven React app and a WebSocket from
+        the microscope binary. Every pane is a view of one focus: a stop, a thread, a frame, a place in
         the code. The URL is that focus, so a link you paste to a coworker opens the same live
         session at the same place.
       </p>
       <div class="prose">
         <ul>
-          <li><b>One live session, many viewers.</b> Every tab connected to a <code>uscope web</code>
+          <li><b>One live session, many viewers.</b> Every tab connected to a <code>microscope web</code>
             process sees the same debugger, and each tab keeps its own focus.</li>
           <li><b>Never silently wrong.</b> A pane shows data only for the stop it read. While the
             program runs, old values stay on screen, dimmed and labelled with their stop.</li>
@@ -557,12 +557,12 @@ td .q { color: var(--accent); }
         <span>Already decided:</span>
         <span class="chip">Links join the same live session</span>
         <span class="chip">Custom WebSocket protocol, not DAP</span>
-        <span class="chip">Work happens in <span class="mono">../uscope-web-ui</span></span>
+        <span class="chip">Work happens in <span class="mono">../microscope-web-ui</span></span>
       </div>
       <div class="decisions">
         <article class="decision">
           <header><span class="id">D1</span><h3>What access does the startup link give?</h3></header>
-          <p><code>uscope web</code> prints one link when it starts. Share can make others.</p>
+          <p><code>microscope web</code> prints one link when it starts. Share can make others.</p>
           <div class="options">
             <div class="option rec"><span class="tag">Chosen</span><b>Control, and Share defaults to view</b><span class="why">You can drive your own session at once; links you hand out are read-only unless you choose otherwise.</span></div>
             <div class="option alt"><span class="tag">Passed</span><b>View, with control behind a second link</b><span class="why">Safer if the terminal output is ever pasted somewhere, at the cost of one more step every time.</span></div>
@@ -573,7 +573,7 @@ td .q { color: var(--accent); }
           <p>The page can open before the program runs, which leaves time to set breakpoints.</p>
           <div class="options">
             <div class="option rec"><span class="tag">Chosen</span><b>Wait for the first Continue</b><span class="why">Like gdb's <code>run</code>. The page opens on <code>main</code>, you set breakpoints, then press <kbd>F5</kbd>. <code>--run</code> starts it at once.</span></div>
-            <div class="option alt"><span class="tag">Passed</span><b>Start immediately</b><span class="why">Matches <code>uscope dap</code> launch. Early breakpoints need the command line or saved breakpoints.</span></div>
+            <div class="option alt"><span class="tag">Passed</span><b>Start immediately</b><span class="why">Matches <code>microscope dap</code> launch. Early breakpoints need the command line or saved breakpoints.</span></div>
           </div>
         </article>
         <article class="decision">
@@ -596,7 +596,7 @@ td .q { color: var(--accent); }
           <header><span class="id">D5</span><h3>Launch and attach from the page?</h3></header>
           <p>Picking a program or process in the browser means replacing the session's debugger in place.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Chosen</span><b>In phase 1</b><span class="why">Launch, attach, and open a core from the page from day one. <code>uscope web</code> with no program opens the picker; with one, it starts there. See <a href="#pick">Pick what to debug</a>.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>In phase 1</b><span class="why">Launch, attach, and open a core from the page from day one. <code>microscope web</code> with no program opens the picker; with one, it starts there. See <a href="#pick">Pick what to debug</a>.</span></div>
             <div class="option alt"><span class="tag">Passed</span><b>Later</b><span class="why">Command line only at first, with less lifecycle to build and test.</span></div>
           </div>
         </article>
@@ -604,7 +604,7 @@ td .q { color: var(--accent); }
           <header><span class="id">D6</span><h3>How are people named?</h3></header>
           <p>Presence shows who else is connected and where they are looking.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Chosen</span><b>Each person picks a name, kept in their browser</b><span class="why">No accounts. Default to the OS user for the person who started uscope, and <code>guest-2</code> and so on for others.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>Each person picks a name, kept in their browser</b><span class="why">No accounts. Default to the OS user for the person who started microscope, and <code>guest-2</code> and so on for others.</span></div>
             <div class="option alt"><span class="tag">Passed</span><b>Anonymous colors only</b><span class="why">Less to build. Less useful once three people are in.</span></div>
           </div>
         </article>
@@ -809,7 +809,7 @@ td .q { color: var(--accent); }
         <div><span class="m">3</span><p><b>Presence.</b> Who is connected, with what access. Hover a person to see their focus; click to go there.</p></div>
         <div><span class="m">4</span><p><b>Source, disassembly, and memory are three views of one place.</b> Switching keeps the address. The program counter line follows in each.</p></div>
         <div><span class="m">5</span><p><b>The stopped line, with values inline.</b> Values on lines just executed appear beside them; changed ones are marked. Hover any name to evaluate it.</p></div>
-        <div><span class="m">6</span><p><b>The console</b> runs expressions and uscope's commands, with completion from the frame's variables, members, and registers.</p></div>
+        <div><span class="m">6</span><p><b>The console</b> runs expressions and microscope's commands, with completion from the frame's variables, members, and registers.</p></div>
         <div><span class="m">7</span><p><b>Changed since the last stop</b>, with the old value beside it. Watches live in the URL, so a shared link brings them along.</p></div>
         <div><span class="m">8</span><p><b>Expansion survives stepping.</b> The tree remembers paths such as <code>args/req</code>, not row handles, and reopens them at each stop.</p></div>
         <div><span class="m">9</span><p><b>Stop history.</b> Every stop this session, clickable. An old stop opens with a banner, never with newer values.</p></div>
@@ -824,8 +824,8 @@ td .q { color: var(--accent); }
       <h3 id="pick">Pick what to debug</h3>
       <ol class="flow">
         <li>
-          <h4>Run uscope web alone</h4>
-          <div class="frag term"><span class="p">$</span> uscope web
+          <h4>Run microscope web alone</h4>
+          <div class="frag term"><span class="p">$</span> microscope web
 <span class="p">open</span>  <span class="u">http://127.0.0.1:7341/join#c-7f3a9d2e41b8</span></div>
           <p>No program yet. The page opens on the picker, which is also <kbd>Ctrl</kbd>+<kbd>K</kbd> › <i>Debug something else</i> later.</p>
         </li>
@@ -859,8 +859,8 @@ td .q { color: var(--accent); }
       <h3>Start a session and stop somewhere</h3>
       <ol class="flow">
         <li>
-          <h4>Run uscope web</h4>
-          <div class="frag term"><span class="p">$</span> uscope web ./build/kvstore --port 7000
+          <h4>Run microscope web</h4>
+          <div class="frag term"><span class="p">$</span> microscope web ./build/kvstore --port 7000
 <span class="p">debugging</span> ./build/kvstore <span class="p">(not started)</span>
 <span class="p">open</span>  <span class="u">http://127.0.0.1:7341/join#c-7f3a9d2e41b8</span>
 <span class="w">anyone with this link can control the program</span></div>
@@ -944,7 +944,7 @@ td .q { color: var(--accent); }
           <h4>They open it</h4>
           <div class="frag term"><span class="p">$</span> ssh -L 7341:127.0.0.1:7341 devbox
 <span class="p"># then open the link</span></div>
-          <p>uscope only listens on localhost, so a coworker on another machine tunnels in. On a shared box, the link just works.</p>
+          <p>microscope only listens on localhost, so a coworker on another machine tunnels in. On a shared box, the link just works.</p>
         </li>
         <li>
           <h4>Both of you are there</h4>
@@ -980,7 +980,7 @@ td .q { color: var(--accent); }
           <h4>The session has ended</h4>
           <div class="frag">
             <div class="banner">
-              <span><b>This session ended.</b> <span class="mono">uscope web</span> on 127.0.0.1:7341 is now debugging something else, or nothing.</span>
+              <span><b>This session ended.</b> <span class="mono">microscope web</span> on 127.0.0.1:7341 is now debugging something else, or nothing.</span>
             </div>
             <div class="row dim">link pointed at kvstore · server.c:49</div>
           </div>
@@ -1079,7 +1079,7 @@ td .q { color: var(--accent); }
               <div class="radio on"><i></i><span>Can view</span><small>See every pane, move their own focus, evaluate side-effect-free expressions.</small></div>
               <div class="radio"><i></i><span>Can control</span><small>Also run, step, set breakpoints, change memory and variables.</small></div>
               <div class="field"><span>http://127.0.0.1:7341/join#v-91c2e07a3f5d?to=/s/k7q2/stop/12/t/41872/f/0</span><b>Copy</b></div>
-              <span class="note">Works until uscope exits. Someone on another machine needs a tunnel: <span class="mono">ssh -L 7341:127.0.0.1:7341 devbox</span></span>
+              <span class="note">Works until microscope exits. Someone on another machine needs a tunnel: <span class="mono">ssh -L 7341:127.0.0.1:7341 devbox</span></span>
             </div>
           </div>
           <figcaption>Share defaults to view access (D1). The link carries a token and the current focus; once opened, the token is gone from the address bar.</figcaption>
@@ -1159,8 +1159,8 @@ td .q { color: var(--accent); }
       </div>
       <div class="prose">
         <ul>
-          <li><b>Session ids</b> are random and minted when <code>uscope web</code> starts, so a link from an earlier run says the session ended rather than opening something else.</li>
-          <li><b>Stop numbers</b> are uscope's own <code>StopId</code>s, which the debugger already checks on every request.</li>
+          <li><b>Session ids</b> are random and minted when <code>microscope web</code> starts, so a link from an earlier run says the session ended rather than opening something else.</li>
+          <li><b>Stop numbers</b> are microscope's own <code>StopId</code>s, which the debugger already checks on every request.</li>
           <li><b>Following</b> a new stop replaces the address rather than pushing history, so Back leaves the debugger instead of walking through every step. The stop strip is the history.</li>
         </ul>
       </div>
@@ -1179,7 +1179,7 @@ td .q { color: var(--accent); }
             </div>
             <div class="wire"><span>WebSocket</span><div class="line both"></div><span>JSON</span></div>
             <div class="box">
-              <h4>src/web <span class="sub">in the uscope binary</span></h4>
+              <h4>src/web <span class="sub">in the microscope binary</span></h4>
               <ul>
                 <li><b>server</b>: axum, embedded assets, tokens, Host and Origin checks</li>
                 <li><b>session</b>: one debugger, program output ring, presence, notices</li>
@@ -1296,13 +1296,13 @@ td .q { color: var(--accent); }
       <h2>Testing</h2>
       <div class="prose"><p>Each layer tests what only it can, in seconds, and every one uses the real server or the real browser.</p></div>
       <div class="layers">
-        <div class="layer"><b>Server scenarios</b><p>Rust tests start <code>uscope web</code> on a fixture and drive it with real WebSocket clients: tokens, roles, Host and Origin; two tabs continuing at once (one wins, one gets <code>staleStop</code>); stale handles; lag; a late joiner's output; disconnecting while running; shutdown leaving no inferior behind.</p><span class="speed">nextest · seconds</span></div>
+        <div class="layer"><b>Server scenarios</b><p>Rust tests start <code>microscope web</code> on a fixture and drive it with real WebSocket clients: tokens, roles, Host and Origin; two tabs continuing at once (one wins, one gets <code>staleStop</code>); stale handles; lag; a late joiner's output; disconnecting while running; shutdown leaving no inferior behind.</p><span class="speed">nextest · seconds</span></div>
         <div class="layer"><b>Recorded transcripts</b><p>Those scenarios save their traffic. Vitest replays it into the real store, so the UI's state logic is tested against what the real server says, with no hand-written mock server. A transcript that no longer matches the generated types fails.</p><span class="speed">vitest · &lt;1 s</span></div>
         <div class="layer"><b>Components</b><p>Vitest in real Chromium for pieces with real behavior: the value tree keeping expansion across a stop, changed marks, the gutter, URL to focus and back, key handling. Virtual lists and CodeMirror need real layout, so not jsdom.</p><span class="speed">vitest · seconds</span></div>
-        <div class="layer"><b>End to end</b><p>A handful of Playwright workflows against a real <code>uscope web</code>: launch, break, step, inspect; open a copied link in a second browser and see the same stop; reload and keep the focus; a viewer cannot continue.</p><span class="speed">playwright · ~20 s</span></div>
+        <div class="layer"><b>End to end</b><p>A handful of Playwright workflows against a real <code>microscope web</code>: launch, break, step, inspect; open a copied link in a second browser and see the same stop; reload and keep the focus; a viewer cannot continue.</p><span class="speed">playwright · ~20 s</span></div>
         <div class="layer"><b>Screenshots</b><p><code>just web-shot</code> stops a fixture somewhere interesting and saves light and dark screenshots, so an agent can see what it changed. For looking at, not asserting.</p><span class="speed">on demand</span></div>
       </div>
-      <div class="prose"><p>Recipes: <code>just web</code> builds, <code>just web-dev</code> runs Vite with hot reload against <code>uscope web --dev</code>, <code>just web-test</code> type-checks, lints, and runs Vitest, <code>just web-e2e</code> runs Playwright. <code>just</code> runs <code>web-test</code> and the server scenarios; <code>just all</code> adds <code>web-e2e</code>.</p></div>
+      <div class="prose"><p>Recipes: <code>just web</code> builds, <code>just web-dev</code> runs Vite with hot reload against <code>microscope web --dev</code>, <code>just web-test</code> type-checks, lints, and runs Vitest, <code>just web-e2e</code> runs Playwright. <code>just</code> runs <code>web-test</code> and the server scenarios; <code>just all</code> adds <code>web-e2e</code>.</p></div>
     </section>
 
     <!-- ===================================================== phases -->
@@ -1310,7 +1310,7 @@ td .q { color: var(--accent); }
       <span class="eyebrow">Order of work</span>
       <h2>Phases</h2>
       <ol class="phases">
-        <li><div><h3>Skeleton</h3><p>Flake tooling; <code>web/</code> with Vite, React, TypeScript, Biome, Vitest, Playwright; embedded assets; <code>uscope web</code> with a program, <code>--attach</code>, <code>--core</code>, or nothing; the picker for launching, attaching, and opening cores, replacing the session's debugger in place; tokens, roles, Host and Origin checks; <code>hello</code> and <code>state</code>; a page showing the session live in two tabs; recipes and the screenshot tool.</p></div></li>
+        <li><div><h3>Skeleton</h3><p>Flake tooling; <code>web/</code> with Vite, React, TypeScript, Biome, Vitest, Playwright; embedded assets; <code>microscope web</code> with a program, <code>--attach</code>, <code>--core</code>, or nothing; the picker for launching, attaching, and opening cores, replacing the session's debugger in place; tokens, roles, Host and Origin checks; <code>hello</code> and <code>state</code>; a page showing the session live in two tabs; recipes and the screenshot tool.</p></div></li>
         <li><div><h3>Run and see</h3><p>Run control, threads, call stack, source with the gutter, breakpoints with conditions, hit counts, and logpoints, program output and input, the URL scheme and copy link, presence and notices, keys, the main layout.</p></div></li>
         <li><div><h3>Inspect</h3><p>Scopes, the value tree with views and paging, watches in the URL, changed values, hover and inline values, editing values, the console with completion.</p></div></li>
         <li><div><h3>Low level</h3><p>Disassembly, memory, registers, watchpoints, signal policy, modules.</p></div></li>
@@ -1324,7 +1324,7 @@ td .q { color: var(--accent); }
       <h2>Limits</h2>
       <div class="prose">
         <ul>
-          <li><b>One program per <code>uscope web</code>.</b> The debugger reaps every child of its process, so two debuggers cannot share one. The picker replaces the session's program; to debug two at once, run two servers.</li>
+          <li><b>One program per <code>microscope web</code>.</b> The debugger reaps every child of its process, so two debuggers cannot share one. The picker replaces the session's program; to debug two at once, run two servers.</li>
           <li><b>No fork following.</b> DAP follows forks by asking the editor to start another session; the web equivalent needs a second server per child.</li>
           <li><b>No accounts or internet exposure.</b> Sharing assumes a shared machine or a tunnel.</li>
           <li><b>No recording.</b> A link to a past stop can show where it was, but not its values. Saving a stop as a core dump would make links that last; that is a later idea.</li>
@@ -1344,11 +1344,11 @@ td .q { color: var(--accent); }
     themeButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
   };
   let saved = "system";
-  try { saved = localStorage.getItem("uscope-plan-theme") || "system"; } catch (_) {}
+  try { saved = localStorage.getItem("microscope-plan-theme") || "system"; } catch (_) {}
   applyTheme(saved);
   themeButtons.forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.themeChoice);
-    try { localStorage.setItem("uscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
+    try { localStorage.setItem("microscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
   }));
 
   const app = document.getElementById("main-mockup");

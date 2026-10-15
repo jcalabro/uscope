@@ -2,8 +2,8 @@
 // thread exit, yielding, and the atomics barriers spin on. No futexes, TLS,
 // or signals: a waiting thread spins and yields.
 
-#ifndef USCOPE_GOLDEN_THREAD_H
-#define USCOPE_GOLDEN_THREAD_H
+#ifndef MICROSCOPE_GOLDEN_THREAD_H
+#define MICROSCOPE_GOLDEN_THREAD_H
 
 #include "rt.h"
 

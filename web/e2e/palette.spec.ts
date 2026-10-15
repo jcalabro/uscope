@@ -9,8 +9,8 @@ test.use({ program: [fixture("kvstore")] });
 const palette = (page: Page) => page.getByRole("dialog", { name: "Command palette" });
 const search = (page: Page) => palette(page).getByRole("combobox");
 
-test("the palette finds functions, files, lines, and commands", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("the palette finds functions, files, lines, and commands", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await expect(page.locator(".cm-line").first()).toBeVisible();
 
   // A function opens where it is declared.
@@ -59,8 +59,8 @@ test("the palette finds functions, files, lines, and commands", async ({ page, u
   await expect(page.getByTestId("status")).toContainText("Not started");
 });
 
-test("every stop is in the palette, and ? lists every key", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("every stop is in the palette, and ? lists every key", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   await page.keyboard.press("F5");
   await expect(page.getByTestId("stops")).toContainText("#3");
@@ -87,9 +87,9 @@ test("every stop is in the palette, and ? lists every key", async ({ page, uscop
 
 test("closing the file shown shows its neighbor, and a middle click closes a tab", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   const files = page.getByRole("navigation", { name: "Open files" });
   const tab = (name: string) => files.getByRole("button", { name, exact: true });
   await expect(tab("kvstore.c")).toBeVisible();
@@ -121,9 +121,9 @@ test("closing the file shown shows its neighbor, and a middle click closes a tab
 
 test("a new stop opens its file again, even on the line it was closed at", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const files = page.getByRole("navigation", { name: "Open files" });
   await files.getByRole("button", { name: "Close kvstore.c" }).click();
@@ -137,9 +137,9 @@ test("a new stop opens its file again, even on the line it was closed at", async
 
 test("a closed file opens again when asked for at the place it was closed", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const files = page.getByRole("navigation", { name: "Open files" });
   const closed = async () => {
@@ -169,9 +169,9 @@ test("a closed file opens again when asked for at the place it was closed", asyn
 
 test("a file's tab shows where it was, and the frame's file follows the frame", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const files = page.getByRole("navigation", { name: "Open files" });
   await page.keyboard.press("Control+g");
@@ -187,8 +187,8 @@ test("a file's tab shows where it was, and the frame's file follows the frame", 
   await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
 });
 
-test("a reload keeps the tab's files, and where each was shown", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("a reload keeps the tab's files, and where each was shown", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   const files = page.getByRole("navigation", { name: "Open files" });
   const tab = (name: string) => files.getByRole("button", { name, exact: true });
   await page.keyboard.press("Control+g");
@@ -207,8 +207,8 @@ test("a reload keeps the tab's files, and where each was shown", async ({ page, 
   await expect(page).toHaveURL(/[?&]src=[^&]*stdio\.h:50(&|$)/);
 });
 
-test("closing the last file drops it from the address", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("closing the last file drops it from the address", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const files = page.getByRole("navigation", { name: "Open files" });
   await page.keyboard.press("Control+p");

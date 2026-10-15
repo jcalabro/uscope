@@ -7,7 +7,7 @@ const GLYPHS = {
 };
 const SIZE = 40;
 
-uscope.draw(({ squares, turn }, { previous, paths }) => {
+microscope.draw(({ squares, turn }, { previous, paths }) => {
   const shapes = [];
   for (let square = 0; square < 64; square++) {
     const file = square % 8;
@@ -16,11 +16,11 @@ uscope.draw(({ squares, turn }, { previous, paths }) => {
     const y = (7 - rank) * SIZE;
     const name = "abcdefgh"[file] + (rank + 1);
     const piece = squares[square];
-    const moved = previous !== null && !uscope.same(previous.squares[square], piece);
-    shapes.push(uscope.rect({
+    const moved = previous !== null && !microscope.same(previous.squares[square], piece);
+    shapes.push(microscope.rect({
       x, y, width: SIZE, height: SIZE,
       fill: (file + rank) % 2 === 1 ? "#f0d9b5" : "#b58863",
-      stroke: moved ? uscope.theme.changed : undefined,
+      stroke: moved ? microscope.theme.changed : undefined,
       strokeWidth: 3,
       title: piece.variant === "Some"
         ? `${name}: ${piece.value.color.name} ${piece.value.kind.name}`
@@ -29,11 +29,11 @@ uscope.draw(({ squares, turn }, { previous, paths }) => {
     }));
     if (piece.variant === "Some") {
       const { color, kind } = piece.value;
-      shapes.push(uscope.text({
+      shapes.push(microscope.text({
         x: x + SIZE / 2, y: y + SIZE / 2, size: 32, anchor: "middle", baseline: "central",
         fill: "#111", text: GLYPHS[color.name][kind.name],
       }));
     }
   }
-  return uscope.picture({ width: 8 * SIZE, height: 8 * SIZE, shapes, caption: `${turn.name} to move` });
+  return microscope.picture({ width: 8 * SIZE, height: 8 * SIZE, shapes, caption: `${turn.name} to move` });
 });

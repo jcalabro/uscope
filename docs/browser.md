@@ -1,15 +1,15 @@
 # Browser
 
-`uscope web` serves one debugging or profiling session to one or more browser
-tabs.
+`microscope web` serves one debugging or profiling session to one or more
+browser tabs.
 
 ## Start a session
 
 ```sh
-uscope web ./program -- ARG...
-uscope web --attach PID
-uscope web --core core.1234
-uscope web profile.usprof
+microscope web ./program -- ARG...
+microscope web --attach PID
+microscope web --core core.1234
+microscope web profile.usprof
 ```
 
 With no target, the page lets you choose what to open. The server listens on
@@ -46,18 +46,18 @@ cannot read arbitrary process memory.
 Pass one profile to explore it or several profiles to compare them:
 
 ```sh
-uscope web current.usprof
-uscope web current.usprof baseline.usprof
+microscope web current.usprof
+microscope web current.usprof baseline.usprof
 ```
 
 The profile pages include call trees, functions, flame views, timelines,
 source and disassembly costs, blocked-time lanes, task stacks, and
 instrumentation zones when the recording contains them.
 
-A file with system calls, from `uscope syscalls -o FILE.usprof` or `uscope
-record --syscalls`, has a Syscalls view. It lists calls in a table you can
-group by call, class, process, thread, file, or call site, with a log of the
-calls themselves, a heat map of their latency over time, and tabs for files,
+A file with system calls, from `microscope syscalls -o FILE.usprof` or
+`microscope record --syscalls`, has a Syscalls view. It lists calls in a table
+you can group by call, class, process, thread, file, or call site, with a log of
+the calls themselves, a heat map of their latency over time, and tabs for files,
 network connections, and processes. See [System calls](syscalls.md).
 
 With no target, the page can also start a program and trace its system calls.
@@ -74,5 +74,5 @@ SSH tunnel to reach it remotely.
 address and has a session link can control the debugger, so do not expose it to
 an untrusted network.
 
-For a reverse proxy, `--public-url URL` gives uscope the external origin and
+For a reverse proxy, `--public-url URL` gives microscope the external origin and
 path. The proxy is responsible for authentication and access control.

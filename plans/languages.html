@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>uscope languages plan</title>
+<title>microscope languages plan</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -241,18 +241,18 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
         </div>
       </div>
-      <div class="eyebrow">uscope plan</div>
+      <div class="eyebrow">microscope plan</div>
       <h1>Odin, Fortran, D, Nim, and Ada</h1>
-      <p class="lede">uscope debugs C, C++, Rust, Go, and Zig. Five more languages compile to native code with DWARF that uscope can already partly read: Odin, Fortran, D, Nim, and Ada. Supporting them widens who can use uscope. More importantly, their compilers describe programs in ways ours do not, and every place where uscope quietly assumed C is a bug that can also hide in the languages it already supports.</p>
+      <p class="lede">microscope debugs C, C++, Rust, Go, and Zig. Five more languages compile to native code with DWARF that microscope can already partly read: Odin, Fortran, D, Nim, and Ada. Supporting them widens who can use microscope. More importantly, their compilers describe programs in ways ours do not, and every place where microscope quietly assumed C is a bug that can also hide in the languages it already supports.</p>
     </header>
 
     <section id="summary">
       <h2>Summary</h2>
       <div class="prose">
-        <p>Each language gets one commit, so its cost is visible on its own: its toolchain in the flake, how uscope recognizes its units, whatever its values need from the type layer, a small views file for its most common library types, and a few fixtures with high-value tests. General bugs the new compilers expose are fixed in commits of their own, each with a test written to fail first, so they can be kept whichever languages stay.</p>
+        <p>Each language gets one commit, so its cost is visible on its own: its toolchain in the flake, how microscope recognizes its units, whatever its values need from the type layer, a small views file for its most common library types, and a few fixtures with high-value tests. General bugs the new compilers expose are fixed in commits of their own, each with a test written to fail first, so they can be kept whichever languages stay.</p>
         <p>Every toolchain must come from the pinned flake. A language whose fixtures cannot be built hermetically is not supported.</p>
       </div>
-      <div class="callout">The first probes, one small program per language, already found real bugs: arrays in Fortran and Ada show one element too many, because uscope assumes C's lower bound of 0 where those languages' default is 1; nameless artificial variables, which gfortran emits, are listed as malformed; and Fortran's assumed-shape and allocatable arrays and its strings are not read at all.</div>
+      <div class="callout">The first probes, one small program per language, already found real bugs: arrays in Fortran and Ada show one element too many, because microscope assumes C's lower bound of 0 where those languages' default is 1; nameless artificial variables, which gfortran emits, are listed as malformed; and Fortran's assumed-shape and allocatable arrays and its strings are not read at all.</div>
     </section>
 
     <section id="considered">
@@ -264,13 +264,13 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
         <thead><tr><th>Language</th><th>Decision</th><th>Why</th></tr></thead>
         <tbody>
           <tr><td>Odin</td><td class="good">Support</td><td>The audience closest to Zig's and Jai's: games and low-level systems. LLVM backend, reasonable DWARF, in nixpkgs. Strings, slices, dynamic arrays, <code>any</code>, and unions are cheap; maps' layout is not described by DWARF and is internal to the runtime.</td></tr>
-          <tr><td>Fortran</td><td class="good">Support</td><td>A large HPC audience, mostly served by GDB. Its arrays use <code>DW_AT_data_location</code>, <code>DW_AT_allocated</code>, and bounds computed by DWARF expressions, which makes gfortran an excellent check of uscope's DWARF handling even if few Fortran users arrive.</td></tr>
+          <tr><td>Fortran</td><td class="good">Support</td><td>A large HPC audience, mostly served by GDB. Its arrays use <code>DW_AT_data_location</code>, <code>DW_AT_allocated</code>, and bounds computed by DWARF expressions, which makes gfortran an excellent check of microscope's DWARF handling even if few Fortran users arrive.</td></tr>
           <tr><td>D</td><td class="good">Support</td><td>Mature DWARF with its own <code>DW_LANG_D</code>, a real user base, and a mangling scheme of its own. LDC is in nixpkgs; GDC is not.</td></tr>
           <tr><td>Nim</td><td class="good">Support</td><td>Compiles through C, so its units are C with <code>#line</code> mappings back to <code>.nim</code> files and C++-style mangled function names: a test that source mapping and naming hold when the C file is not the real source.</td></tr>
           <tr><td>Ada</td><td class="good">Support</td><td>Nearly free to compile, since GNAT is GCC, and used seriously in safety-critical work. Its arrays have arbitrary bounds and its unconstrained arrays are fat pointers.</td></tr>
           <tr><td>C3</td><td class="muted">Later</td><td>The same shapes as Odin (LLVM, slices, optionals, <code>any</code>), so cheap once Odin works, but a very small user base.</td></tr>
           <tr><td>Crystal</td><td class="muted">Later</td><td>LLVM and DWARF, and fibers that would fit the task model built for goroutines and tokio. A small audience.</td></tr>
-          <tr><td>Jai</td><td class="muted">Not now</td><td>Its users are the most likely to want uscope, but its compiler cannot come from the flake, so its fixtures cannot be hermetic. If it is ever done, it is an opt-in local recipe outside every gate, which fails rather than skips when the compiler is missing, with nothing checked in that names the compiler.</td></tr>
+          <tr><td>Jai</td><td class="muted">Not now</td><td>Its users are the most likely to want microscope, but its compiler cannot come from the flake, so its fixtures cannot be hermetic. If it is ever done, it is an opt-in local recipe outside every gate, which fails rather than skips when the compiler is missing, with nothing checked in that names the compiler.</td></tr>
           <tr><td>Swift</td><td class="bad">No</td><td>Real Swift debugging relies on its reflection metadata and async runtime, not on DWARF alone: a project of its own.</td></tr>
           <tr><td>Haskell, OCaml</td><td class="bad">No</td><td>Their DWARF is mostly line tables and unwind information with few or no variables, and their execution models do not map onto ordinary frames.</td></tr>
           <tr><td>Julia, Mojo</td><td class="bad">No</td><td>They compile at run time in practice, which needs the GDB JIT interface: a different feature from language support.</td></tr>
@@ -357,7 +357,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       <div class="prose">
         <p>The point is to find bugs, so each test must let the program, not the test's author, say what is true. No language gets every fixture in every build; each gets the few that cover the most:</p>
         <ul>
-          <li><b>A values gallery</b> (<code>values.<i>ext</i></code>) that prints a <code>TRUTH</code> line for each value before it calls <code>reached</code>, the same format as the C, Go, and Rust galleries. The program computes what uscope must show, so a wrong element count, bound, or text fails without anyone having predicted it. Built unoptimized and optimized.</li>
+          <li><b>A values gallery</b> (<code>values.<i>ext</i></code>) that prints a <code>TRUTH</code> line for each value before it calls <code>reached</code>, the same format as the C, Go, and Rust galleries. The program computes what microscope must show, so a wrong element count, bound, or text fails without anyone having predicted it. Built unoptimized and optimized.</li>
           <li><b>A views fixture</b> (<code>containers.<i>ext</i></code>) with <code>VIEW:</code> markers, the same as the other languages' containers, so every view in the language's file must bind, page, and evaluate back.</li>
           <li><b>One stepping scenario</b> on the gallery: break on a function by the name the language writes, step into and out of it, and check the backtrace's names and lines.</li>
         </ul>
@@ -403,7 +403,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
       </div>
       <div class="phase">
         <header><span class="pid">L4</span><h3>Nim</h3><span class="st done">done</span></header>
-        <p>Nim units by their file names; procedures named as Nim mangles them (<code>values::reached</code>); Nim's own variables left out; its C treated as C for typedefs, bounds, and returns; a view for strings. Seqs keep their elements in a C flexible array member, which uscope does not read, so they wait on that. A gallery built through GCC unoptimized and Clang optimized, and a stepping scenario. About 60 lines of source and 150 of fixtures and tests.</p>
+        <p>Nim units by their file names; procedures named as Nim mangles them (<code>values::reached</code>); Nim's own variables left out; its C treated as C for typedefs, bounds, and returns; a view for strings. Seqs keep their elements in a C flexible array member, which microscope does not read, so they wait on that. A gallery built through GCC unoptimized and Clang optimized, and a stepping scenario. About 60 lines of source and 150 of fixtures and tests.</p>
       </div>
       <div class="phase">
         <header><span class="pid">L5</span><h3>Ada</h3><span class="st done">done</span></header>
@@ -431,7 +431,7 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
     <section id="findings">
       <h2>Findings</h2>
       <div class="prose">
-        <p>Bugs in uscope that the new compilers exposed, and what fixed them.</p>
+        <p>Bugs in microscope that the new compilers exposed, and what fixed them.</p>
       </div>
       <div class="scroller"><table class="data">
         <thead><tr><th>Bug</th><th>Found by</th><th>Status</th></tr></thead>
@@ -442,14 +442,14 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
           <tr><td>A subrange type used as a type, as GNAT's <code>Integer_8</code>, was unsupported, and so was every array of one.</td><td>GNAT</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A slice's text was read from its first word whatever its layout, so a D string, length first, read as garbage.</td><td>LDC</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A slice's text was read as bytes whatever its characters' width.</td><td>LDC</td><td><span class="st done">fixed</span></td></tr>
-          <tr><td>The pinned nightly rustc describes an unsized tail, <code>[u16]</code> in <code>Tail</code>, as one element inside the record's size, which uscope read as a slice.</td><td>rustc</td><td><span class="st done">fixed</span></td></tr>
+          <tr><td>The pinned nightly rustc describes an unsized tail, <code>[u16]</code> in <code>Tail</code>, as one element inside the record's size, which microscope read as a slice.</td><td>rustc</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>The <code>utf8</code> format refused an array of a typedef of bytes, as Odin's <code>u8</code>.</td><td>Odin</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A typedef in a language the evaluator did not know the meaning of typedefs in blocked evaluation of its values, as GNAT's access types and Nim's integers.</td><td>GNAT, Nim</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>An array's <code>DW_AT_byte_stride</code> or <code>DW_AT_bit_stride</code> was ignored, so a strided array was read as adjacent elements. A dimension's stride, as a Fortran array section's, is now read, and an array's own is unsupported rather than misread.</td><td>gfortran</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>A returned value was named by its function's DWARF name, so Nim's read <code>_ZN6values3addE3int3int</code>.</td><td>Nim</td><td><span class="st done">fixed</span></td></tr>
           <tr><td>The VS Code manifest named the Fortran language <code>fortran</code>, which no extension registers, so fixed-form sources took no breakpoints.</td><td>Modern Fortran</td><td><span class="st done">fixed</span></td></tr>
-          <tr><td>libiberty cannot read a D symbol whose type refers back to a function type, as <code>std.concurrency.FiberScheduler.create.wrap</code>. Not uscope's; uscope reads it.</td><td>LDC</td><td><span class="st todo">noted</span></td></tr>
-          <tr><td>Odin's <code>rawptr</code> carries <code>DW_AT_address_class 1</code>, so uscope refuses it as a pointer into another address space. Odin's quirk; uscope is right to refuse.</td><td>Odin</td><td><span class="st todo">noted</span></td></tr>
+          <tr><td>libiberty cannot read a D symbol whose type refers back to a function type, as <code>std.concurrency.FiberScheduler.create.wrap</code>. Not microscope's; microscope reads it.</td><td>LDC</td><td><span class="st todo">noted</span></td></tr>
+          <tr><td>Odin's <code>rawptr</code> carries <code>DW_AT_address_class 1</code>, so microscope refuses it as a pointer into another address space. Odin's quirk; microscope is right to refuse.</td><td>Odin</td><td><span class="st todo">noted</span></td></tr>
         </tbody>
       </table></div>
     </section>
@@ -479,11 +479,11 @@ figcaption { font-size: 13px; color: var(--ink-3); max-width: 90ch; }
     themeButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
   };
   let saved = "system";
-  try { saved = localStorage.getItem("uscope-plan-theme") || "system"; } catch (_) {}
+  try { saved = localStorage.getItem("microscope-plan-theme") || "system"; } catch (_) {}
   applyTheme(saved);
   themeButtons.forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.themeChoice);
-    try { localStorage.setItem("uscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
+    try { localStorage.setItem("microscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
   }));
 })();
 </script>

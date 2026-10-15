@@ -3,15 +3,15 @@
 ## Invocation
 
 ```text
-uscope [OPTIONS] EXECUTABLE [-- ARGS...]
-uscope [OPTIONS] --attach PID|NAME [EXECUTABLE]
-uscope [OPTIONS] --core CORE [EXECUTABLE]
-uscope [OPTIONS] --launch NAME [-- ARGS...]
-uscope TOOL
+microscope [OPTIONS] EXECUTABLE [-- ARGS...]
+microscope [OPTIONS] --attach PID|NAME [EXECUTABLE]
+microscope [OPTIONS] --core CORE [EXECUTABLE]
+microscope [OPTIONS] --launch NAME [-- ARGS...]
+microscope TOOL
 ```
 
-Use `uscope --help` for the complete current option list and `uscope TOOL
---help` for one tool.
+Use `microscope --help` for the complete current option list and `microscope
+TOOL --help` for one tool.
 
 ## Tools
 
@@ -24,7 +24,7 @@ Use `uscope --help` for the complete current option list and `uscope TOOL
 | `record` | Record a profile |
 | `syscalls` | Trace system calls, as strace does; see [System calls](../syscalls.md) |
 | `report` | Print a profile summary or call tree |
-| `convert` | Convert uscope, pprof, folded-stack, and Chrome-trace formats |
+| `convert` | Convert microscope, pprof, folded-stack, and Chrome-trace formats |
 | `symbolize` | Add source lines to a profile recorded for later symbolization |
 
 ## Target options

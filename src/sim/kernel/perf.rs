@@ -1,5 +1,5 @@
 //! Perf samples (K-PERF-*): what the kernel writes when it samples a
-//! thread in user code, for the events uscope's profiler opens, byte for
+//! thread in user code, for the events microscope's profiler opens, byte for
 //! byte as the recorder's decoder reads them.
 //!
 //! The kernel takes no sample of its own accord. A probe arms an execute

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use uscope::{
+use microscope::{
     DebuggerHandle, ExecutionContext, FrameKind, LineNumber, StackFrameId, StopContext,
     UnwindTermination,
 };
@@ -29,7 +29,7 @@ pub fn executes(execution: ExecutionContext) -> String {
 /// The context of a thread's or task's innermost frame at a stop.
 pub const fn innermost(stop: u64, execution: ExecutionContext) -> StopContext {
     StopContext {
-        stop: uscope::StopId::new(stop),
+        stop: microscope::StopId::new(stop),
         execution,
         frame: StackFrameId::INNERMOST,
     }
@@ -88,7 +88,11 @@ pub async fn backtrace(
 }
 
 /// One frame of a stack, as the page shows it.
-async fn frame_of(images: &Images, trace: &uscope::Backtrace, frame: &uscope::StackFrame) -> Frame {
+async fn frame_of(
+    images: &Images,
+    trace: &microscope::Backtrace,
+    frame: &microscope::StackFrame,
+) -> Frame {
     let image = match frame.module {
         Some(module) => images.get(module).await,
         None => None,
@@ -99,7 +103,7 @@ async fn frame_of(images: &Images, trace: &uscope::Backtrace, frame: &uscope::St
         Some(SourceLine {
             path: file.path.display().to_string(),
             line: location.line.get(),
-            column: location.column.map(uscope::ColumnNumber::get),
+            column: location.column.map(microscope::ColumnNumber::get),
         })
     });
     Frame {
@@ -316,7 +320,7 @@ pub async fn tasks(
     images: &Images,
     at: protocol::StopAt,
 ) -> Result<protocol::TaskList, Failure> {
-    let stop = uscope::StopId::new(at.stop);
+    let stop = microscope::StopId::new(at.stop);
     let page = handle.program_tasks_at(stop, None, TASK_LIMIT).await?;
     let mut tasks = Vec::with_capacity(page.tasks.len());
     for task in page.tasks.iter() {
@@ -349,19 +353,19 @@ pub async fn tasks(
                 number: task.id.number,
             },
             state: match task.state {
-                uscope::TaskState::Running => protocol::TaskState::Running,
-                uscope::TaskState::Runnable => protocol::TaskState::Runnable,
-                uscope::TaskState::Blocked => protocol::TaskState::Blocked,
-                uscope::TaskState::Exited => protocol::TaskState::Exited,
-                uscope::TaskState::Unknown(_) => protocol::TaskState::Unknown,
+                microscope::TaskState::Running => protocol::TaskState::Running,
+                microscope::TaskState::Runnable => protocol::TaskState::Runnable,
+                microscope::TaskState::Blocked => protocol::TaskState::Blocked,
+                microscope::TaskState::Exited => protocol::TaskState::Exited,
+                microscope::TaskState::Unknown(_) => protocol::TaskState::Unknown,
             },
             place: format::task_place(task, &trace, &known, plain),
             detail: match &task.state {
-                uscope::TaskState::Unknown(reason) => Some(reason.to_string()),
+                microscope::TaskState::Unknown(reason) => Some(reason.to_string()),
                 _ => task.detail.as_deref().map(str::to_owned),
             },
             labels: format::task_labels(task),
-            thread: task.thread.map(uscope::ThreadId::get),
+            thread: task.thread.map(microscope::ThreadId::get),
         });
     }
 

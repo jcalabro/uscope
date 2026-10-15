@@ -1,9 +1,9 @@
-//! The browser debugger, `uscope web`.
+//! The browser debugger, `microscope web`.
 //!
 //! One server debugs one program at a time and serves it to every tab that
 //! joins: the page, `/api/login`, which turns a join link's token into a
 //! cookie, and `/api/ws`, the WebSocket each tab talks over. Like the CLI
-//! and the DAP adapter, it is a client of [`uscope::DebuggerHandle`].
+//! and the DAP adapter, it is a client of [`microscope::DebuggerHandle`].
 
 mod assets;
 mod auth;
@@ -34,7 +34,7 @@ use axum::extract::{State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
-use uscope::{CoreDumpOptions, ProcessId};
+use microscope::{CoreDumpOptions, ProcessId};
 
 use auth::{Origins, Tokens};
 use protocol::Role;
@@ -51,11 +51,11 @@ const MAX_MESSAGE: usize = 1024 * 1024;
 #[expect(clippy::struct_excessive_bools, reason = "each is a flag")]
 #[command(after_help = "\
 Common forms:
-  uscope web                       choose what to debug in the page
-  uscope web EXECUTABLE [-- ARGS]  load a program, which runs at the first continue
-  uscope web PROFILE.usprof        explore a profile `uscope record` wrote
-  uscope web --attach PID
-  uscope web --core CORE [EXECUTABLE]")]
+  microscope web                       choose what to debug in the page
+  microscope web EXECUTABLE [-- ARGS]  load a program, which runs at the first continue
+  microscope web PROFILE.usprof        explore a profile `microscope record` wrote
+  microscope web --attach PID
+  microscope web --core CORE [EXECUTABLE]")]
 pub struct WebArgs {
     /// Executable to launch, or the one that wrote --core, or a profile to
     /// explore.
@@ -217,10 +217,10 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         auth::PublicUrl::url,
     );
     let tokens = Tokens::mint().context("failed to mint access tokens")?;
-    let debug_files = uscope::DebugFileOptions {
+    let debug_files = microscope::DebugFileOptions {
         directories: args.debug_directories.clone(),
         debuginfod: args.debuginfod,
-        ..uscope::DebugFileOptions::default()
+        ..microscope::DebugFileOptions::default()
     };
 
     let session = Session::new(cwd, link_base, tokens, debug_files, args.views.clone());
@@ -253,7 +253,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         let mut stdout = std::io::stdout().lock();
         writeln!(
             stdout,
-            "uscope web: serving http://{}",
+            "microscope web: serving http://{}",
             app.origins.primary()
         )?;
         if let Some(public) = &app.public {
@@ -293,7 +293,7 @@ pub async fn run(args: &WebArgs) -> Result<()> {
         // Whatever it started is ended below, not left half launched.
         // Loading cannot be interrupted, so a large program is waited for.
         if !starting.is_finished() {
-            eprintln!("uscope web: stopping once the program has loaded");
+            eprintln!("microscope web: stopping once the program has loaded");
         }
 
         let _ = starting.await;
@@ -381,7 +381,7 @@ fn open_profile(profiles: &profiles::Profiles, path: &std::path::Path) -> Result
     let read = std::fs::File::open(path)
         .and_then(|mut file| std::io::Read::read(&mut file, &mut magic))
         .unwrap_or(0);
-    if uscope::profiler::Format::of_file(path, &magic[..read]).is_none() {
+    if microscope::profiler::Format::of_file(path, &magic[..read]).is_none() {
         return Ok(None);
     }
 

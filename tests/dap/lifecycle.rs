@@ -9,7 +9,7 @@ use crate::support::{ExternalProcess, ScratchDir};
 #[test]
 fn every_client_profile_runs_a_program_to_its_breakpoints_and_exit() {
     let path = source("c/basic.c");
-    let line = line_of(&path, "return uscope_value;");
+    let line = line_of(&path, "return microscope_value;");
     for profile in Profile::ALL {
         let mut dap = Dap::start(format!("{profile:?}"));
         let started = dap.launch(
@@ -87,7 +87,7 @@ fn launches_pass_arguments_environment_and_directory_and_report_output() {
         &fixture("process-environment"),
         json!({
             "args": ["one", "two words"],
-            "env": {"USCOPE_FIXTURE_VALUE": "set", "USCOPE_FIXTURE_REMOVED": null},
+            "env": {"MICROSCOPE_FIXTURE_VALUE": "set", "MICROSCOPE_FIXTURE_REMOVED": null},
             "cwd": directory.path(),
         }),
         &Configuration::default(),
@@ -217,7 +217,7 @@ fn requests_out_of_order_are_refused_without_ending_the_session() {
     );
     dap.initialize(Profile::Neovim);
     assert_eq!(
-        dap.request_error("initialize", json!({"adapterID": "uscope"})),
+        dap.request_error("initialize", json!({"adapterID": "microscope"})),
         "the session is already initialized"
     );
     assert_eq!(

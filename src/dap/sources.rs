@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use microscope::{BreakpointSpec, LineNumber, LoadedModuleRecord, ModuleId, ModuleImage};
 use serde_json::{Value, json};
-use uscope::{BreakpointSpec, LineNumber, LoadedModuleRecord, ModuleId, ModuleImage};
 
 use super::protocol::{
     BreakpointLocationsArguments, ErrorBody, GotoTargetsArguments, ModulesArguments,
@@ -19,7 +19,7 @@ impl Session {
         let handle = self.target_handle()?;
         let records = match handle.loaded_modules().await {
             Ok(snapshot) => snapshot.modules.to_vec(),
-            Err(uscope::Error::NotRunning) => Vec::new(),
+            Err(microscope::Error::NotRunning) => Vec::new(),
             Err(other) => return Err(error(other)),
         };
 
@@ -314,7 +314,7 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         };
 
         let mut status = match image.separate_debug_file() {
-            Some(uscope::DebugFile::Unusable { path, reason }) => format!(
+            Some(microscope::DebugFile::Unusable { path, reason }) => format!(
                 "{status}; cannot use the debug file {}: {reason}",
                 path.display()
             ),

@@ -1,6 +1,6 @@
 //! What a test reads at a stop of an async Rust program.
 
-use uscope::{
+use microscope::{
     Backtrace, Evaluation, Expression, InspectedValue, ScalarValue, VariableState, VariableValue,
 };
 

@@ -3,7 +3,7 @@
 A view presents a value as the thing it stands for: a `std::string` as its
 text, a `Vec` as its elements, a hand-rolled C vector as the integers it
 holds. The value as stored stays one step away, as the `[raw]` child,
-`print/r`, or `set views off`. uscope builds in views for the C++, Rust, Go,
+`print/r`, or `set views off`. microscope builds in views for the C++, Rust, Go,
 Zig, Odin, D, Nim, and Ada standard libraries, and anyone can write views
 for their own types in the same language; [Writing views](writing-views.md) is a
 tutorial.
@@ -14,7 +14,7 @@ inspection's budget, so a view can never hang the debugger, and a value a
 view cannot make sense of shows as stored, with the reason, never as a
 plausible wrong value.
 
-Every example on this page runs as one of uscope's tests, against a small
+Every example on this page runs as one of microscope's tests, against a small
 world of C types:
 
 - `intvec`, a vector `{int *data; unsigned long n; unsigned long cap}`, as
@@ -73,13 +73,13 @@ and why no view binds; or `error:` and why the file itself is refused.
 
 ## Files
 
-A view file begins with the language's version, `uscope-views 1`, and holds
+A view file begins with the language's version, `microscope-views 1`, and holds
 views. `#` begins a comment. A view names the language of the types it
 applies to and a pattern of those types, and its body says how to present
 them:
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 
 # A vector of integers, as its elements.
 view c intvec {
@@ -101,8 +101,8 @@ The language is `c`, `c++`, `rust`, `go`, `zig`, `odin`, `d`, `nim`, `ada`, or `
 not begin with its version is refused, and a view with an error is skipped
 while the rest of its file is read:
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view kotlin intvec {
     show empty("")
 }
@@ -148,8 +148,8 @@ namespaces such as libc++'s `std::__1` may be spelled or left out.
 - In D, `std.array.Appender(T)` names `Appender!T` in the module
   `std.array`.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ app::**::Pair<T, N> {
     show sequence(N) for i in range(N) => *((T*)&items[0] + i)
 }
@@ -157,8 +157,8 @@ view c++ app::**::Pair<T, N> {
 p => len=3 [2, 3, 4]
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ detail::Pair<T, N> {
     show empty("")
 }
@@ -171,9 +171,9 @@ p => unbound: no view's pattern names the type
 
 ## Expressions
 
-A view's expressions are uscope's own ([Expressions](expressions.md)), evaluated
-with `self` as the value presented. A member of `self` is named by its own
-name, and a view's `let`s and the arguments its pattern captured shadow
+A view's expressions are microscope's own ([Expressions](expressions.md)),
+evaluated with `self` as the value presented. A member of `self` is named by its
+own name, and a view's `let`s and the arguments its pattern captured shadow
 members. Nothing the program's frame names is visible, so a view means the
 same thing at every stop.
 
@@ -192,8 +192,8 @@ Views may also call:
   point to the member's type, or be a `void *`.
 - `global(NAME)`, a global of the module whose value the view presents.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view rust alloc::**::Box<T> {
     show value(*inner(self))
 }
@@ -201,8 +201,8 @@ view rust alloc::**::Box<T> {
 b => 42
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c run_queue {
     show sequence(nr) for n in list(&tasks, p => p->next) if n != &tasks
         => container_of(n, task, node)->pid
@@ -215,8 +215,8 @@ queue => len=2 [10, 20]
 slot => 7
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c run_queue {
     show value(container_of(&nr, task, node)->pid)
 }
@@ -268,8 +268,8 @@ the next line unless that line begins another statement or ends the view.
   value, such as `utf8` of bytes that are not text, leaves the value as it
   would be.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c intvec {
     let size = length or n
     check size <= cap && cap < 1000
@@ -281,8 +281,8 @@ v => children: [0] = 10, [1] = 20, [2] = 30, room = 1, [raw]
 bad => problem: check `size <= cap` failed: `size` is 9, `cap` is 4
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ app::Handle<T> {
     type Cell = app::Cell<T>
     show value(((Cell*)cell)->value)
@@ -293,8 +293,8 @@ handle => 5
 handle => children: offset = 0, [raw]
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c tagged {
     hide value
     format kind as hex
@@ -312,8 +312,8 @@ something => children: kind = 0x1, [raw]
 item => {mode: READ | WRITE, color: BLUE, elapsed: 1.5s, label: "hi", letter: 'A'}
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c entry {
     hide mode, color, label, letter
     format elapsed as time(ms)
@@ -333,8 +333,8 @@ word => children: [0] = 111, [1] = 107, [2] = 33, [3] = 63, [raw]
 blob => len=4 [255, 0, 1, 2]
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c entry {
     hide mode, color, elapsed, letter
     format label as bytes
@@ -386,8 +386,8 @@ something => unbound: line 7: `format kind`: the format writes an array of 16-bi
 
 `if` and `match` may also begin a statement of their own.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c str_t {
     show text(p, len)
 }
@@ -400,8 +400,8 @@ nothing => None
 something => 7
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c tagged {
     show if kind == 0 {
         empty("None")
@@ -415,8 +415,8 @@ nothing => tagged 0: 0
 something => tagged 1: 7
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c tagged {
     show if kind == 0 { empty("None") } else { empty("kind {kind} holding {value}") }
 }
@@ -425,8 +425,8 @@ nothing => None
 something => kind 1 holding 7
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c entry {
     summary "{elapsed as duration(ms)} since {mode as flags(Access)}, {mode}"
 }
@@ -434,8 +434,8 @@ view c entry {
 item => 1.5s since READ | WRITE, 3
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c tagged {
     show match kind {
         0 => empty("None")
@@ -448,8 +448,8 @@ something => 7
 strange => problem: `kind` is 5, which no arm of the match names
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ app::detail::Pair<T, N> {
     show record { first = first, rest = items[0] }
 }
@@ -462,8 +462,8 @@ p => children: first = 1, rest = 2, [raw]
 something => (1, 7)
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ app::Either<_, _> {
     show dynamic(&storage, arg(typeof(self), index))
 }
@@ -473,8 +473,8 @@ pointer => 0x90000
 neither => problem: the type has no type argument 5
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c++ app::Erased {
     show dynamic(object, T of manage)
 }
@@ -503,8 +503,8 @@ After a generator, `if COND` keeps only the values for which `COND` holds,
 and `let NAME = EXPR` names a value computed once for each value, which the
 rest of the view's generators, filters, and element may use.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c list {
     show sequence(count) for x in list(head, n => n->next) => x->value
 }
@@ -518,8 +518,8 @@ balanced => len=3 {1: 10, 2: 20, 3: 30}
 balanced => children: 1: 10, 2: 20, 3: 30, [raw]
 ```
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c table {
     show map(n) for i in range(cap) let slot = slots[i] if slot.used != 0 => slot.key : slot.value
 }
@@ -536,8 +536,8 @@ generators that end before it are a problem. Without one, the generators are
 counted as far as the inspection's budget allows; a count the budget cut
 short is shown as at least that many, as `len>=40`.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c list {
     show sequence(_) for x in list(head, n => n->next) => x->value
 }
@@ -551,8 +551,8 @@ node that leads back to one already visited is a cycle, and a tree deeper
 than any a library builds is refused; either is a problem, as is a sequence
 without a count that passes its limit.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c list {
     show sequence(count) for x in list(head, n => n->next) => x->value
 }
@@ -593,15 +593,15 @@ view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
 - Each item the kernel yields is a word for each variable its clause
   names, and each variable is that word, an integer, which the view casts
   to the pointer it is.
-- A kernel can only compute. It may import nothing but uscope's `read` and
+- A kernel can only compute. It may import nothing but microscope's `read` and
   `yield`, so a module that imports anything else, starts itself, or uses
   floats or SIMD is refused. Its reads and its work are charged to the
   inspection's budget like the view's own.
 - A kernel that traps, returns a failure, or yields the wrong number of
   words makes the value's presentation a problem.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c list {
     show sequence(count) for at in kernel("rust-btree", head) => at
 }
@@ -619,7 +619,7 @@ sparse => unbound: `kernel("nowhere")`: no kernel has that name
 
 A view calls the kernels of its own source before the built-in ones:
 
-- uscope builds in `rust-btree`, from `views/kernels/rust-btree.zig`;
+- microscope builds in `rust-btree`, from `views/kernels/rust-btree.zig`;
 - a view file's kernels are `NAME.wasm` files beside it, loaded with it;
 - a module's own views call the kernels the module carries (see Where views
   come from).
@@ -631,18 +631,18 @@ trusted as a module.
 A kernel is a core WebAssembly module. It imports at most `read(address:
 i64, buffer: i32, length: i32) -> i32`, which fills its buffer from the
 program's memory, and `yield(words: i32, count: i32) -> i32`, which yields
-an item and returns whether uscope wants another, both from the module
-`uscope_kernel_v1`. It exports its `memory` and `run(arguments: i32, count:
-i32) -> i32`, which uscope calls with the arguments in memory it adds after
+an item and returns whether microscope wants another, both from the module
+`microscope_kernel_v1`. It exports its `memory` and `run(arguments: i32, count:
+i32) -> i32`, which microscope calls with the arguments in memory it adds after
 the kernel's own, and which returns 0 once it has yielded every item. A
-read that uscope cannot make ends the run, as any read a view makes does.
-`sdk/c/uscope_kernel.h`, `sdk/zig/uscope_kernel.zig`, and the
-`uscope-views` crate's `kernel` module write the rest.
+read that microscope cannot make ends the run, as any read a view makes does.
+`sdk/c/microscope_kernel.h`, `sdk/zig/microscope_kernel.zig`, and the
+`microscope-views` crate's `kernel` module write the rest.
 
 A run is a pure function of its arguments and the bytes its reads return,
 so a recording of them replays it without the program. `views record FILE
 EXPR` presents a value and its first page of children and writes each
-kernel run that took to `FILE`, and `uscope views replay FILE` runs the
+kernel run that took to `FILE`, and `microscope views replay FILE` runs the
 kernels again, the built-in one each names or the module given with
 `--kernel FILE.wasm`, and fails unless each does what it did.
 
@@ -657,8 +657,8 @@ views, or one view with `or` alternatives, and neither needs to know a
 library's version, because the program's debug information says which
 layout it has.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c intvec {
     show sequence(count) for i in range(count) => data[i]
 }
@@ -671,8 +671,8 @@ memory it needs cannot be read, or when its count disagrees with its range.
 The value then shows as stored, with the reason. An element the program
 cannot provide is said to be unavailable and ends the summary's preview.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c intvec {
     show sequence(n) for i in range(n) => data[i]
 }
@@ -693,8 +693,8 @@ own. An `extend` holds `let`s, `type`s, `field`s, `hide`s, and `format`s,
 never a `show`, and every `extend` whose pattern names a type adds to its
 view. One with no view to add to adds to the value's members.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c intvec {
     show sequence(n) for i in range(n) => data[i]
     field capacity = cap
@@ -713,7 +713,7 @@ something => {kind: 0x1, value: 7}
 
 ## Visualizers
 
-`visualize` gives a value a drawing in the web page, `uscope web`: a
+`visualize` gives a value a drawing in the web page, `microscope web`: a
 chess position as a board, a framebuffer as an image, samples as a plot.
 The view says which data the drawing needs; a **renderer**, a small
 JavaScript file, turns that data into shapes ([Visualizers](visualizers.md)). The
@@ -748,16 +748,16 @@ visualize "NAME" {
 - `NAME` names a renderer, 1 to 64 letters, digits, `_`, and `-`. A view
   calls the renderers of its own source before the built-in ones: a view
   file's are `NAME.js` files beside it, read with it; a module's own views
-  call the renderers the module carries; and uscope builds in `line-plot`,
+  call the renderers the module carries; and microscope builds in `line-plot`,
   `bar-chart`, `scatter-plot`, `histogram`, `box-plot`, `donut-chart`,
   `heatmap`, `flame-graph`, `bitmap`, `bits`, and `mesh`, from
   `views/visualizers/`.
-- `uscope web --views FILE` loads a view file and the renderers beside it
+- `microscope web --views FILE` loads a view file and the renderers beside it
   for the page, and the page's Reload views reads them again, so a
   renderer can be written while the program is stopped.
 
-```uscope-view-example
-uscope-views 1
+```microscope-view-example
+microscope-views 1
 view c intvec {
     show sequence(n) for i in range(n) => data[i]
     visualize "line-plot" { values = self }
@@ -785,17 +785,17 @@ elements, as `len=3 [1, 2, 3]`, and a map's and its first entries, as
 A type's view is the first that binds, from these sources in order:
 
 1. **The session's files**: those given with `--views FILE`, to the
-   terminal or `uscope web`, or the debug adapter's `viewFiles`, and
+   terminal or `microscope web`, or the debug adapter's `viewFiles`, and
    those `views load FILE` loads, the latest first. `views clear` forgets those loaded, and `views` lists them all.
 2. **The project's and the user's files**: every `*.views` file in
-   `.uscope/views` at the project root, then in
-   `$XDG_CONFIG_HOME/uscope/views` (or `~/.config/uscope/views`), each
+   `.microscope/views` at the project root, then in
+   `$XDG_CONFIG_HOME/microscope/views` (or `~/.config/microscope/views`), each
    directory's in name order. The project root is the nearest directory,
-   from the one uscope runs in upwards (for the debug adapter, the launch
-   request's `cwd`), that holds `.uscope/` or `.git`, so a session started
+   from the one microscope runs in upwards (for the debug adapter, the launch
+   request's `cwd`), that holds `.microscope/` or `.git`, so a session started
    anywhere in a project finds its views.
 3. **The program's own**: views a module carries in its
-   `.debug_uscope_views` section, which present only that module's own
+   `.debug_microscope_views` section, which present only that module's own
    types, so that one library never restyles another's.
 4. **The built-in views**, in `views/`, one file per library.
 
@@ -803,16 +803,16 @@ Loading views never asks first, since a view can only read. A file, or a
 view in one, that cannot be used is reported once, with where and why, and
 the session goes on without it.
 
-A C or C++ program carries a view file by including `uscope_views.h`, from
-uscope's `sdk/c`, and writing `USCOPE_VIEWS_FILE("views/app.views");` at
-file scope, and a kernel by writing `USCOPE_KERNEL("tree",
+A C or C++ program carries a view file by including `microscope_views.h`, from
+microscope's `sdk/c`, and writing `MICROSCOPE_VIEWS_FILE("views/app.views");` at
+file scope, and a kernel by writing `MICROSCOPE_KERNEL("tree",
 "kernels/tree.c", "build/tree.wasm");`, the kernel's name, its source or a
-link to it, and its module. A Rust program, with the `uscope-views` crate
+link to it, and its module. A Rust program, with the `microscope-views` crate
 in `sdk/rust`, writes
-`uscope_views::uscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`
-and `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`. A renderer
-is carried with `USCOPE_VISUALIZER("board", "views/board.js");` or
-`uscope_views::uscope_visualizer!("board", PATH);`, its name and its
+`microscope_views::microscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`
+and `microscope_views::microscope_kernel!("tree", SOURCE, MODULE);`. A renderer
+is carried with `MICROSCOPE_VISUALIZER("board", "views/board.js");` or
+`microscope_views::microscope_visualizer!("board", PATH);`, its name and its
 JavaScript, and draws the values of the module's own views. Both read the
 files when the program is built, into a section that is not loaded when it
 runs and that `strip --strip-debug` removes with the rest of the debug
@@ -891,7 +891,7 @@ The built-in views cover:
   of `errors.New`, `fmt.Errorf`, and `errors.Join` as their text, or the
   errors they join, with the errors they wrap as `wrapped`. An error whose
   `Error` method computes its text, as `*fs.PathError`'s does, shows the
-  parts it computes the text from, since uscope calls no function in the
+  parts it computes the text from, since microscope calls no function in the
   program.
 - Zig: `std.ArrayList` and the managed list, a list or slice of bytes as
   text when it is text, `std.Deque`, `std.PriorityQueue`, `std.HashMap`,
@@ -945,8 +945,8 @@ are:
 - `info view EXPR` says which view presents a value, from which file and
   line, and why each view tried before it did not bind. `views explain
   TYPE` says the same of a type, and `views check` of every type a view's
-  pattern names. Without a session, `uscope views explain PROGRAM TYPE`
-  and `uscope views check PROGRAM` do so from the program's debug
+  pattern names. Without a session, `microscope views explain PROGRAM TYPE`
+  and `microscope views check PROGRAM` do so from the program's debug
   information alone; `views check` fails when a view loaded for the
   session or carried by the program presents no type, binds no type it
   names, or has a drawing that does not bind. `views check` also shows

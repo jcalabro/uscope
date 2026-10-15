@@ -1,4 +1,4 @@
-//! The ptrace engine's tracer for `uscope syscalls --engine ptrace`: exact
+//! The ptrace engine's tracer for `microscope syscalls --engine ptrace`: exact
 //! and synchronous, for programs it launches or, at a high price, attaches
 //! to.
 //!
@@ -1058,7 +1058,7 @@ impl Ticker {
         let done = Arc::new(AtomicBool::new(false));
         let ended = Arc::clone(&done);
         let thread = std::thread::Builder::new()
-            .name("uscope-ticker".into())
+            .name("microscope-ticker".into())
             .spawn(move || {
                 loop {
                     std::thread::park_timeout(TICK);

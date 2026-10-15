@@ -1,5 +1,5 @@
 {
-  "name": "uscope-web",
+  "name": "microscope-web",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.11.0",

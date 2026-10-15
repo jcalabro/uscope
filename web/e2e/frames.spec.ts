@@ -6,8 +6,8 @@ import { expect, fixture, join, test } from "./server";
 
 test.use({ program: [fixture("tail-frames-gcc-o2")] });
 
-test("the stack marks the functions that left by tail calls", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("the stack marks the functions that left by tail calls", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   const adder = page.getByRole("textbox", { name: "Add a breakpoint" });
   await adder.fill("leaf");
   await adder.press("Enter");

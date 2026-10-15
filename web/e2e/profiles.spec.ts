@@ -11,15 +11,15 @@ test.use({ program: [] });
 
 test("a profile is explored, and its address opens the same view", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("calls.usprof");
   execFileSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["record", "-o", file, "--function", "leaf", "--", fixture("profile-stacks-gcc-o0"), "1"],
     { stdio: "ignore" },
   );
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   await expect(page).toHaveURL(/\/profile\/[0-9a-f]{16}$/);
   const accounting = page.getByTestId("accounting");
@@ -90,15 +90,15 @@ test("a profile is explored, and its address opens the same view", async ({
 
 test("each thread's lane says how long it was off its CPU, and the footer what recording cost", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("off-cpu.usprof");
   execFileSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["record", "-o", file, "--", fixture("profile-offcpu")],
     { stdio: "ignore" },
   );
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   const lanes = page.getByTestId("timeline");
   // The sleeper naps five times for 20 ms; the spinners share one CPU.
@@ -111,12 +111,15 @@ test("each thread's lane says how long it was off its CPU, and the footer what r
   for (const spinner of await spinners.all()) {
     await expect(spinner).toHaveAttribute("title", /, (?!0 ns)[\d.]+ \S+ preempted$/);
   }
-  await expect(page.getByTestId("accounting")).toContainText(/uscope [\d.]+% of a CPU/);
+  await expect(page.getByTestId("accounting")).toContainText(/microscope [\d.]+% of a CPU/);
 });
 
-test("a program recorded from the page grows live, stops, and saves", async ({ page, uscope }) => {
-  await join(page, uscope.link);
-  await page.goto(new URL("/pick?tab=profile", uscope.origin).href);
+test("a program recorded from the page grows live, stops, and saves", async ({
+  page,
+  microscope,
+}) => {
+  await join(page, microscope.link);
+  await page.goto(new URL("/pick?tab=profile", microscope.origin).href);
   await page.getByLabel("Program").fill(fixture("spin"));
   await page.getByRole("button", { name: "Record" }).click();
   await expect(page).toHaveURL(/\/profile\/[0-9a-f]{16}/);
@@ -141,7 +144,7 @@ test("a program recorded from the page grows live, stops, and saves", async ({ p
 
 test("a profile shows where tasks waited, by task, and a lane per task", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   // The program waits on its standard input the whole time it is recorded.
   const file = info.outputPath("waits.usprof");
@@ -149,7 +152,7 @@ test("a profile shows where tasks waited, by task, and a lane per task", async (
   const exited = new Promise((done) => program.once("exit", done));
   try {
     execFileSync(
-      path.join(root, "target", "debug", "uscope"),
+      path.join(root, "target", "debug", "microscope"),
       ["record", "-o", file, "--pid", String(program.pid), "--task-snapshots", "0.05"].concat([
         "--duration",
         "2",
@@ -160,7 +163,7 @@ test("a profile shows where tasks waited, by task, and a lane per task", async (
     program.stdin?.end("x");
     await exited;
   }
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   await expect(page.getByTestId("accounting")).toContainText("task snapshots");
 
@@ -190,15 +193,15 @@ test("a profile shows where tasks waited, by task, and a lane per task", async (
 
 test("a program's zones show in tracks, and Find Zone measures one and filters by a label", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("zones.usprof");
   execFileSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["record", "-o", file, "--", fixture("probes"), "zones"],
     { stdio: "ignore" },
   );
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   await expect(page.getByTestId("accounting")).toContainText("probe events, lost 0");
   await page.getByRole("button", { name: "Zones", exact: true }).click();
@@ -269,13 +272,13 @@ test("a program's zones show in tracks, and Find Zone measures one and filters b
 
 test("a Go program's own pprof profile opens in its unit, without a timeline", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const allocs = info.outputPath("allocs.pb.gz");
   execFileSync(fixture("pprof-files"), [allocs, info.outputPath("goroutine.pb.gz")], {
     stdio: "ignore",
   });
-  const served = await uscope.start([allocs]);
+  const served = await microscope.start([allocs]);
   await join(page, served.link);
   await expect(page.getByTestId("untimed")).toContainText("pprof's alloc_space (bytes)");
   await page.getByRole("button", { name: "Functions" }).click();
@@ -288,18 +291,18 @@ test("a Go program's own pprof profile opens in its unit, without a timeline", a
 
 test("a profile is diffed with a range of its own, and with another profile", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const recorded = (symbol: string, name: string) => {
     const file = info.outputPath(name);
     execFileSync(
-      path.join(root, "target", "debug", "uscope"),
+      path.join(root, "target", "debug", "microscope"),
       ["record", "-o", file, "--function", symbol, "--", fixture("profile-stacks-gcc-o0"), "1"],
       { stdio: "ignore" },
     );
     return file;
   };
-  const served = await uscope.start([
+  const served = await microscope.start([
     recorded("leaf", "calls.usprof"),
     recorded("middle", "middle.usprof"),
   ]);
@@ -338,15 +341,15 @@ test("a profile is diffed with a range of its own, and with another profile", as
 
 test("a function's samples show on its source lines and its instructions", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("calls.usprof");
   execFileSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["record", "-o", file, "--function", "leaf", "--", fixture("profile-stacks-gcc-o0"), "1"],
     { stdio: "ignore" },
   );
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   await page.getByRole("button", { name: "Functions" }).click();
   await page

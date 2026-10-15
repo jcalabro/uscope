@@ -2,7 +2,7 @@
 //! run, and breakpoint and watchpoint edits while the inferior runs.
 
 use super::*;
-use uscope::{ExceptionDisposition, ResumeScope, ThreadId, WatchAccess, WatchpointSpec};
+use microscope::{ExceptionDisposition, ResumeScope, ThreadId, WatchAccess, WatchpointSpec};
 
 /// The thread-steps fixture, unoptimized and optimized.
 const THREAD_STEPS: [&str; 2] = ["thread-steps-gcc-o0", "thread-steps-clang-o2"];
@@ -263,7 +263,7 @@ async fn a_single_thread_step_keeps_every_other_thread_stopped() {
                 .start_step(
                     snapshot.stop_id.expect("stopped"),
                     main,
-                    uscope::StackFrameId::INNERMOST,
+                    microscope::StackFrameId::INNERMOST,
                     StepKind::Instruction,
                     ResumeScope::Thread(racer),
                     ExceptionDisposition::Pass,
@@ -310,7 +310,7 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
             "add while running",
             handle.add_breakpoint(BreakpointSpec::Source {
                 path: "spin.c".into(),
-                line: uscope::LineNumber::new(10).expect("line"),
+                line: microscope::LineNumber::new(10).expect("line"),
             }),
         )
         .await;
@@ -333,13 +333,13 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
     assert!(
         !published
             .iter()
-            .any(|event| matches!(event, uscope::DebuggerEvent::InferiorContinued { .. })),
+            .any(|event| matches!(event, microscope::DebuggerEvent::InferiorContinued { .. })),
         "the edits published a resume: {published:?}"
     );
     let stops = published
         .iter()
         .filter_map(|event| match event {
-            uscope::DebuggerEvent::InferiorStopped { execution_id, .. } => Some(*execution_id),
+            microscope::DebuggerEvent::InferiorStopped { execution_id, .. } => Some(*execution_id),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -351,7 +351,7 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
     assert_eq!(
         published
             .iter()
-            .filter(|event| matches!(event, uscope::DebuggerEvent::BreakpointsChanged { .. }))
+            .filter(|event| matches!(event, microscope::DebuggerEvent::BreakpointsChanged { .. }))
             .count(),
         2
     );
@@ -362,8 +362,8 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
 /// the process from it.
 async fn resume_from_hit(
     scenario: &Scenario,
-    events: &mut tokio::sync::broadcast::Receiver<uscope::DebuggerEvent>,
-    breakpoint: uscope::BreakpointId,
+    events: &mut tokio::sync::broadcast::Receiver<microscope::DebuggerEvent>,
+    breakpoint: microscope::BreakpointId,
     context: &str,
 ) {
     loop {
@@ -371,7 +371,7 @@ async fn resume_from_hit(
             .await
             .unwrap_or_else(|_| panic!("{context}: no stop"))
             .unwrap_or_else(|error| panic!("{context}: event stream failed: {error}"));
-        let uscope::DebuggerEvent::InferiorStopped {
+        let microscope::DebuggerEvent::InferiorStopped {
             process_id,
             stop_id,
             reason,
@@ -431,11 +431,11 @@ async fn breakpoints_edited_while_threads_hit_them_report_only_current_breakpoin
         let mut stop = None;
         loop {
             match events.try_recv() {
-                Ok(uscope::DebuggerEvent::BreakpointsChanged { revision }) => {
+                Ok(microscope::DebuggerEvent::BreakpointsChanged { revision }) => {
                     removal = Some(revision);
                 }
 
-                Ok(uscope::DebuggerEvent::InferiorStopped {
+                Ok(microscope::DebuggerEvent::InferiorStopped {
                     revision,
                     process_id,
                     stop_id,
@@ -526,7 +526,7 @@ async fn watchpoints_are_armed_and_disarmed_while_running() {
     let stale = scenario
         .operation(
             "resolve the flag",
-            handle.resolve_watch_target(&uscope::Expression::parse("hot_stop").expect("path")),
+            handle.resolve_watch_target(&microscope::Expression::parse("hot_stop").expect("path")),
         )
         .await;
 
@@ -696,7 +696,7 @@ async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
         };
 
         let main = ThreadId::new(process_id.get());
-        let at_exit = |snapshot: &uscope::StateSnapshot| {
+        let at_exit = |snapshot: &microscope::StateSnapshot| {
             snapshot.threads.iter().any(|thread| {
                 thread.id == main
                     && matches!(&thread.state, ThreadState::Stopped {

@@ -28,7 +28,7 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
     let image = load_fixture_image("crash-rust-o0").await;
     let first_code = image
         .code_instances()
-        .flat_map(uscope::CodeInstance::ranges)
+        .flat_map(microscope::CodeInstance::ranges)
         .map(|range| range.start)
         .min()
         .expect("the fixture has code");
@@ -39,7 +39,7 @@ async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
     );
     assert!(
         image
-            .locate(uscope::ImageAddress::new(0))
+            .locate(microscope::ImageAddress::new(0))
             .function
             .is_none()
     );
@@ -80,7 +80,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 Some(node),
                 "{fixture}: {node:?}"
             );
-            if let uscope::TypeNode::Resolved(info) = node {
+            if let microscope::TypeNode::Resolved(info) = node {
                 assert!(
                     !info.name.contains("<recursive type>"),
                     "{fixture}: construction placeholder escaped into finalized type metadata: {info:?}"
@@ -102,7 +102,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let resolved = image
             .types()
             .filter_map(|node| match node {
-                uscope::TypeNode::Resolved(info) => Some(info),
+                microscope::TypeNode::Resolved(info) => Some(info),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -111,9 +111,9 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 info.name.as_ref() == "aliased_int"
                     && matches!(
                         info.kind,
-                        uscope::TypeKind::Named {
+                        microscope::TypeKind::Named {
                             target: Some(_),
-                            relationship: uscope::NamedTypeRelationship::Synonym,
+                            relationship: microscope::NamedTypeRelationship::Synonym,
                         }
                     )
             }),
@@ -122,7 +122,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         assert!(
             resolved.iter().any(|info| {
                 info.name.as_ref() == "const int *"
-                    && matches!(info.kind, uscope::TypeKind::Pointer { .. })
+                    && matches!(info.kind, microscope::TypeKind::Pointer { .. })
             }),
             "{fixture}: {resolved:#?}"
         );
@@ -131,8 +131,8 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 info.name.as_ref() == "int * const"
                     && matches!(
                         info.kind,
-                        uscope::TypeKind::Modified {
-                            modifier: uscope::TypeModifier::Const,
+                        microscope::TypeKind::Modified {
+                            modifier: microscope::TypeModifier::Const,
                             ..
                         }
                     )
@@ -146,11 +146,11 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         assert!(
             image.types().any(|node| matches!(
                 node,
-                uscope::TypeNode::Resolved(uscope::TypeInfo {
+                microscope::TypeNode::Resolved(microscope::TypeInfo {
                     name,
-                    kind: uscope::TypeKind::Named {
+                    kind: microscope::TypeKind::Named {
                         target: Some(_),
-                        relationship: uscope::NamedTypeRelationship::Synonym,
+                        relationship: microscope::NamedTypeRelationship::Synonym,
                     },
                     ..
                 }) if name.as_ref() == "aliased_int"
@@ -166,14 +166,14 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 .globals()
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
-            let uscope::GlobalVariableType::Resolved(info) = &global.type_info else {
+            let microscope::GlobalVariableType::Resolved(info) = &global.type_info else {
                 panic!("{fixture}: {name} has type {:?}", global.type_info);
             };
 
             assert!(
                 matches!(
                     &info.kind,
-                    uscope::TypeKind::Record { members, .. } if members.len() == 1
+                    microscope::TypeKind::Record { members, .. } if members.len() == 1
                 ),
                 "{fixture}: {name} must be a one-member record: {info:?}"
             );
@@ -188,7 +188,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
                 .find(|global| global.name.as_ref() == name)
                 .unwrap_or_else(|| panic!("{fixture}: missing global {name}"));
             match &global.type_info {
-                uscope::GlobalVariableType::Resolved(info) => info.clone(),
+                microscope::GlobalVariableType::Resolved(info) => info.clone(),
                 other => panic!("{fixture}: {name} has type {other:?}"),
             }
         };
@@ -197,7 +197,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
             assert!(
                 matches!(
                     &global_type(name).kind,
-                    uscope::TypeKind::Array { dimensions, .. } if dimensions[0].count == count
+                    microscope::TypeKind::Array { dimensions, .. } if dimensions[0].count == count
                 ),
                 "{fixture}: {name}"
             );
@@ -217,18 +217,18 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         let modifiers = image
             .types()
             .filter_map(|node| match node {
-                uscope::TypeNode::Resolved(uscope::TypeInfo {
-                    kind: uscope::TypeKind::Modified { modifier, .. },
+                microscope::TypeNode::Resolved(microscope::TypeInfo {
+                    kind: microscope::TypeKind::Modified { modifier, .. },
                     ..
                 }) => Some(*modifier),
                 _ => None,
             })
             .collect::<Vec<_>>();
         for expected in [
-            uscope::TypeModifier::Const,
-            uscope::TypeModifier::Volatile,
-            uscope::TypeModifier::Restrict,
-            uscope::TypeModifier::Atomic,
+            microscope::TypeModifier::Const,
+            microscope::TypeModifier::Volatile,
+            microscope::TypeModifier::Restrict,
+            microscope::TypeModifier::Atomic,
         ] {
             assert!(
                 modifiers.contains(&expected),
@@ -239,22 +239,26 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
 
     // Every function carries the language of the unit defining it.
     for (fixture, function, language) in [
-        ("variables-gcc-o0", "main", uscope::SourceLanguage::C),
+        ("variables-gcc-o0", "main", microscope::SourceLanguage::C),
         (
             "variables-cpp-clang-o0",
             "main",
-            uscope::SourceLanguage::Cpp,
+            microscope::SourceLanguage::Cpp,
         ),
-        ("variables-rust-o0", "main", uscope::SourceLanguage::Rust),
+        (
+            "variables-rust-o0",
+            "main",
+            microscope::SourceLanguage::Rust,
+        ),
         (
             "variables-zig-o0",
             "inspectScalars",
-            uscope::SourceLanguage::Zig,
+            microscope::SourceLanguage::Zig,
         ),
         (
             "variables-go-o0",
             "inspectScalars",
-            uscope::SourceLanguage::Go,
+            microscope::SourceLanguage::Go,
         ),
     ] {
         let found = images[fixture]
@@ -270,7 +274,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     // the runtime model binds to.
     assert_eq!(
         go.constant("runtime._Grunning"),
-        Some(uscope::IntegerValue::Signed(2))
+        Some(microscope::IntegerValue::Signed(2))
     );
     assert!(
         go.constant("runtime.waitReasonChanReceive").is_some(),
@@ -289,9 +293,9 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     assert!(
         go.types().any(|node| matches!(
             node,
-            uscope::TypeNode::Resolved(uscope::TypeInfo {
-                kind: uscope::TypeKind::Named {
-                    relationship: uscope::NamedTypeRelationship::Distinct,
+            microscope::TypeNode::Resolved(microscope::TypeInfo {
+                kind: microscope::TypeKind::Named {
+                    relationship: microscope::NamedTypeRelationship::Distinct,
                     target: Some(_),
                 },
                 ..
@@ -302,7 +306,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     let go_names = go
         .types()
         .filter_map(|node| match node {
-            uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
+            microscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -325,9 +329,9 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     assert!(
         zig.types().any(|node| matches!(
             node,
-            uscope::TypeNode::Resolved(uscope::TypeInfo {
-                kind: uscope::TypeKind::Named {
-                    relationship: uscope::NamedTypeRelationship::Encoding,
+            microscope::TypeNode::Resolved(microscope::TypeInfo {
+                kind: microscope::TypeKind::Named {
+                    relationship: microscope::NamedTypeRelationship::Encoding,
                     target: Some(_),
                 },
                 ..
@@ -340,7 +344,7 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     assert!(
         rust.types()
             .filter_map(|node| match node {
-                uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
+                microscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
                 _ => None,
             })
             .all(|name| name != "AliasedInt"),
@@ -376,7 +380,7 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
     for range in instance.ranges() {
         for address in range.start.get()..range.end.get() {
             if image
-                .locate(uscope::ImageAddress::new(address))
+                .locate(microscope::ImageAddress::new(address))
                 .source
                 .is_some()
             {
@@ -427,34 +431,37 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     assert!(located.function.is_none());
 
     // The row before still describes the function it belongs to.
-    let before = uscope::ImageAddress::new(extent.start.get() - 1);
+    let before = microscope::ImageAddress::new(extent.start.get() - 1);
     assert!(image.locate(before).source.is_some());
 }
 
-fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
+fn type_edges(kind: &microscope::TypeKind) -> Vec<microscope::TypeReference> {
     let mut edges = Vec::new();
     match kind {
-        uscope::TypeKind::Enumeration { underlying, .. } => {
+        microscope::TypeKind::Enumeration { underlying, .. } => {
             edges.extend(underlying.iter().copied());
         }
-        uscope::TypeKind::Pointer { target, .. } | uscope::TypeKind::Named { target, .. } => {
+        microscope::TypeKind::Pointer { target, .. }
+        | microscope::TypeKind::Named { target, .. } => {
             edges.extend(target.iter().copied());
         }
-        uscope::TypeKind::Reference { target, .. } | uscope::TypeKind::Modified { target, .. } => {
+        microscope::TypeKind::Reference { target, .. }
+        | microscope::TypeKind::Modified { target, .. } => {
             edges.push(*target);
         }
-        uscope::TypeKind::Array { element, .. } | uscope::TypeKind::Slice { element, .. } => {
+        microscope::TypeKind::Array { element, .. }
+        | microscope::TypeKind::Slice { element, .. } => {
             edges.push(*element);
         }
-        uscope::TypeKind::Record { members, bases, .. } => {
+        microscope::TypeKind::Record { members, bases, .. } => {
             edges.extend(members.iter().map(|member| member.type_ref));
             edges.extend(bases.iter().map(|base| base.type_ref));
         }
-        uscope::TypeKind::Union { members, .. } => {
+        microscope::TypeKind::Union { members, .. } => {
             edges.extend(members.iter().map(|member| member.type_ref));
         }
 
-        uscope::TypeKind::Variant {
+        microscope::TypeKind::Variant {
             common_members,
             bases,
             discriminant,
@@ -464,8 +471,8 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
             edges.extend(common_members.iter().map(|member| member.type_ref));
             edges.extend(bases.iter().map(|base| base.type_ref));
             match discriminant.as_ref() {
-                uscope::VariantDiscriminant::Stored(member) => edges.push(member.type_ref),
-                uscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
+                microscope::VariantDiscriminant::Stored(member) => edges.push(member.type_ref),
+                microscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
                 _ => {}
             }
 
@@ -596,7 +603,7 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
 /// wrapper shares its function's name everywhere but has a role of its own.
 #[tokio::test]
 async fn go_code_roles_follow_the_runtimes_traceback() {
-    use uscope::CodeRole::{
+    use microscope::CodeRole::{
         Ordinary, Outermost, Panic, RuntimeInternal, SignalTrampoline, StackSwitch, TrapEntry,
         Wrapper,
     };

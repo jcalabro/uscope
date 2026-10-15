@@ -3,7 +3,7 @@
 
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, ValueChildQuery,
     ValueChildRelationship, ValueChildren, VariableKind, VariableState, VariableUnavailableReason,
 };
@@ -382,7 +382,7 @@ async fn a_future_prints_as_its_state() {
             let scenario = stopped_at(fixture, at(marker)).await;
             let future = evaluated(&scenario, "$future").await;
             assert_eq!(
-                uscope::value_summary(future.type_info.as_ref(), &future.state),
+                microscope::value_summary(future.type_info.as_ref(), &future.state),
                 expected,
                 "{fixture} {marker}"
             );

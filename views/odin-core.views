@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Odin's maps and core library. Verified against Odin dev-2026-05 by
 # tests/fixtures/odin/containers.odin. Odin's slices, strings, dynamic

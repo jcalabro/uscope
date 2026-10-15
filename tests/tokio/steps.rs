@@ -4,7 +4,7 @@
 
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     BreakpointSpec, InferiorState, LaunchOptions, LineNumber, StepKind, StopReason, TaskEnding,
     ThreadActivity, VariableKind,
 };
@@ -286,7 +286,7 @@ async fn a_task_condition_stops_only_in_its_task() {
                     scenario.handle().set_breakpoint_condition(
                         round.id,
                         Some(
-                            uscope::Condition::parse(&format!("$task == {task}"))
+                            microscope::Condition::parse(&format!("$task == {task}"))
                                 .expect("a condition"),
                         ),
                     ),

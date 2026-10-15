@@ -88,7 +88,7 @@ pub struct ModuleMetadata {
     /// were.
     pub locals_left_out: Option<Arc<str>>,
 
-    /// The bytes of the image's `.debug_uscope_views` section, which holds
+    /// The bytes of the image's `.debug_microscope_views` section, which holds
     /// views for its own types; empty when it has none.
     pub embedded_views: Vec<u8>,
 
@@ -584,7 +584,7 @@ pub struct ModuleImage {
     resume_code: RangeIndex<CodeInstanceId>,
 
     /// The views the image carries for its own types, in its
-    /// `.debug_uscope_views` section, read on first use.
+    /// `.debug_microscope_views` section, read on first use.
     views: std::sync::OnceLock<Arc<crate::view::ViewSet>>,
 
     /// The separate debug file found for the image.

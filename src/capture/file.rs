@@ -24,10 +24,10 @@ const HEADER: usize = 16;
 /// Why bytes are not a capture file.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FileError {
-    #[error("the file is not a uscope capture")]
+    #[error("the file is not a microscope capture")]
     NotACapture,
 
-    #[error("the capture file's version is {0}, and this uscope reads version {FILE_VERSION}")]
+    #[error("the capture file's version is {0}, and this microscope reads version {FILE_VERSION}")]
     Version(u32),
 
     #[error("the capture holds no complete chunk")]

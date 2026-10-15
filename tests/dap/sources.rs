@@ -239,13 +239,13 @@ fn stack_frames_show_the_parameters_line_and_module_a_client_asks_for() {
 /// breakpoint on the line before the client's first is refused.
 fn positions(base: u64) -> Vec<u64> {
     let path = source("c/basic.c");
-    let line = line_of(&path, "return uscope_value;") - 1 + base;
+    let line = line_of(&path, "return microscope_value;") - 1 + base;
     let before_first = i64::try_from(base).expect("a small base") - 1;
     let mut dap = Dap::start(format!("lines from {base}"));
     let mark = dap.mark();
     dap.request(
         "initialize",
-        json!({"adapterID": "uscope", "linesStartAt1": base == 1, "columnsStartAt1": base == 1}),
+        json!({"adapterID": "microscope", "linesStartAt1": base == 1, "columnsStartAt1": base == 1}),
     );
     dap.event(mark, "initialized", |_| true);
     let launch = dap.send("launch", json!({"program": fixture("basic")}));

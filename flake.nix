@@ -1,5 +1,5 @@
 {
-  description = "uscope Linux debugger development environment";
+  description = "microscope Linux debugger development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -15,7 +15,7 @@
       };
       rust = pkgs.rust-bin.nightly."2026-07-11".default.override {
         extensions = [ "clippy" "miri" "rust-src" "rustfmt" ];
-        # For fully static builds of uscope: `just build-static`.
+        # For fully static builds of microscope: `just build-static`.
         targets = [ "x86_64-unknown-linux-musl" ];
       };
       goStable = pkgs.go.overrideAttrs (_final: previous: {
@@ -42,7 +42,7 @@
       # C libraries' thread layouts. Wrapping them keeps the cross toolchain's
       # environment out of the shell's native one.
       musl64 = pkgs.pkgsCross.musl64;
-      # Static musl builds of the libraries a static uscope links: musl and
+      # Static musl builds of the libraries a static microscope links: musl and
       # LLVM's libunwind, which Rust's standard library unwinds with.
       pkgsStatic = pkgs.pkgsStatic;
       muslGcc = pkgs.writeShellScriptBin "musl-gcc" ''
@@ -131,35 +131,36 @@
         # library for every program.
         GLIBC_STATIC_LIBRARIES = "${pkgs.glibc.static}/lib";
         # The shared glibc the fixtures run with, which tests read directly:
-        # uscope and its tests may link musl instead.
+        # microscope and its tests may link musl instead.
         GLIBC_LIBRARIES = "${pkgs.glibc}/lib";
         # Ubuntu's glibc builds, one directory for each version, holding its
         # lib and dev directories.
-        USCOPE_UBUNTU_GLIBC = "${ubuntuGlibcs}";
+        MICROSCOPE_UBUNTU_GLIBC = "${ubuntuGlibcs}";
         # The vendored crates scripts/build-test-programs.sh builds the tokio
         # fixtures against, offline.
-        USCOPE_FIXTURE_CRATES = "${tokioFixtureCrates}";
+        MICROSCOPE_FIXTURE_CRATES = "${tokioFixtureCrates}";
         # The web UI's end-to-end tests drive the browsers nixpkgs builds,
         # which must match the pinned @playwright/test exactly.
         PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
         PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
         RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
-        # `just build-static` links uscope against the musl and libunwind this
-        # flake pins, not the copies Rust ships, so its C dependencies compile
-        # against the headers of the C library they link. Cargo reads the
-        # target's RUSTFLAGS only when RUSTFLAGS is unset, which the recipe does.
+        # `just build-static` links microscope against the musl and libunwind
+        # this flake pins, not the copies Rust ships, so its C dependencies
+        # compile against the headers of the C library they link. Cargo reads
+        # the target's RUSTFLAGS only when RUSTFLAGS is unset, which the recipe
+        # does.
         CC_x86_64_unknown_linux_musl = "${pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
         AR_x86_64_unknown_linux_musl = "${pkgsStatic.stdenv.cc.bintools}/bin/x86_64-unknown-linux-musl-ar";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS = "-C target-feature=+crt-static -C link-self-contained=no -C link-arg=-fuse-ld=mold -L ${pkgsStatic.llvmPackages.libunwind}/lib";
-        USCOPE_MUSL_VERSION = pkgsStatic.musl.version;
+        MICROSCOPE_MUSL_VERSION = pkgsStatic.musl.version;
         # build.rs compiles the syscall tracer's BPF programs with clang
         # itself, not its wrapper, which adds host flags that a BPF target
         # rejects, against libbpf's BPF headers and the kernel's UAPI
         # headers, whose syscall numbers also generate src/syscalls' tables.
-        USCOPE_BPF_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
-        USCOPE_BPF_INCLUDE = "${pkgs.libbpf}/include:${pkgs.linuxHeaders}/include";
+        MICROSCOPE_BPF_CLANG = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+        MICROSCOPE_BPF_INCLUDE = "${pkgs.libbpf}/include:${pkgs.linuxHeaders}/include";
         packages = with pkgs; [
           rust
           cargo-fuzz
@@ -220,15 +221,15 @@
         });
       };
 
-      # The privilege `uscope syscalls` needs for its BPF engine, and
+      # The privilege `microscope syscalls` needs for its BPF engine, and
       # `just test-bpf` for its tests: a wrapper around env that raises
       # CAP_BPF and CAP_PERFMON into the ambient set before it runs its
-      # command, so they reach uscope through nix develop, systemd-run, and
+      # command, so they reach microscope through nix develop, systemd-run, and
       # nextest. Only root and the wheel group may run it. A host imports
       # it into its own NixOS or system-manager configuration; neither the
       # dev shell nor the nix store can make a binary with capabilities.
-      nixosModules.uscope-bpf = { pkgs, ... }: {
-        security.wrappers.uscope-bpf = {
+      nixosModules.microscope-bpf = { pkgs, ... }: {
+        security.wrappers.microscope-bpf = {
           source = "${pkgs.coreutils}/bin/env";
           owner = "root";
           group = "wheel";

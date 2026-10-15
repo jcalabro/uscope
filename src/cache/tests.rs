@@ -8,7 +8,7 @@ struct ScratchDir(PathBuf);
 
 impl ScratchDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("uscope-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("microscope-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -251,13 +251,13 @@ fn the_first_source_that_names_a_cache_wins() {
     assert_eq!(resolve(None, None, os("/xdg"), os("/home"), true), None);
     assert_eq!(
         resolve(None, None, os("/xdg"), os("/home"), false),
-        dir("/xdg/uscope/images")
+        dir("/xdg/microscope/images")
     );
 
     // A relative XDG directory is ignored, as the specification says.
     assert_eq!(
         resolve(None, None, os("xdg"), os("/home"), false),
-        dir("/home/.cache/uscope/images")
+        dir("/home/.cache/microscope/images")
     );
     assert_eq!(resolve(None, None, None, None, false), None);
 }

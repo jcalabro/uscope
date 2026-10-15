@@ -16,16 +16,16 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// A uscope command for a terminal that supports color, with history kept
+/// A microscope command for a terminal that supports color, with history kept
 /// under `state` and no color settings in the environment. It runs in
 /// `state`, whose project an interactive session keeps its breakpoints in.
 fn command(executable: &Path, state: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
     command
         .arg(executable)
         .current_dir(state)
         .env("XDG_STATE_HOME", state)
-        .env("USCOPE_CONFIG", "")
+        .env("MICROSCOPE_CONFIG", "")
         .env("TERM", "xterm-256color")
         // Output taller than the terminal goes through the pager.
         .env("PAGER", "cat")
@@ -36,7 +36,7 @@ fn command(executable: &Path, state: &Path) -> Command {
 }
 
 fn spawn(command: Command) -> OsSession {
-    let mut session = Session::spawn(command).expect("spawn uscope in a PTY");
+    let mut session = Session::spawn(command).expect("spawn microscope in a PTY");
     session.set_expect_timeout(Some(TIMEOUT));
     session
 }
@@ -46,7 +46,7 @@ fn repl(executable: &Path, state: &Path) -> OsSession {
     let mut command = command(executable, state);
     command.args(["--color", "never"]);
     let mut session = spawn(command);
-    session.expect("(uscope) ").expect("initial prompt");
+    session.expect("(microscope) ").expect("initial prompt");
     session
 }
 
@@ -71,7 +71,7 @@ fn interactive_named_prompt_preserves_rustyline_cursor_width() {
     let state = support::ScratchDir::new("repl-color");
     let mut session = spawn(command(&fixture("basic"), state.path()));
     session
-        .expect("\x1b[2m(uscope) \x1b[0m")
+        .expect("\x1b[2m(microscope) \x1b[0m")
         .expect("dimmed prompt");
 
     session.send("quit").expect("type command");
@@ -79,7 +79,7 @@ fn interactive_named_prompt_preserves_rustyline_cursor_width() {
     session.send(b"help ").expect("insert at prompt start");
     session.send_line("").expect("execute edited command");
     session.expect("aliases").expect("edited command output");
-    session.expect("(uscope) ").expect("redrawn prompt");
+    session.expect("(microscope) ").expect("redrawn prompt");
     session.send_line("quit").expect("quit repl");
     session.expect(Eof).expect("repl exited");
 }
@@ -90,7 +90,7 @@ fn interactive_prompt_honors_no_color() {
     let mut command = command(&fixture("basic"), state.path());
     command.env("NO_COLOR", "1");
     let mut session = spawn(command);
-    let prompt = session.expect("(uscope) ").expect("plain prompt");
+    let prompt = session.expect("(microscope) ").expect("plain prompt");
     assert!(
         !contains_sgr(prompt.as_bytes()),
         "NO_COLOR prompt contained color: {:?}",
@@ -108,10 +108,14 @@ fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
 
     session.send("invalid-command").expect("type invalid line");
     session.send(ControlCode::EndOfText).expect("send Ctrl-C");
-    session.expect("(uscope) ").expect("Ctrl-C redrew prompt");
+    session
+        .expect("(microscope) ")
+        .expect("Ctrl-C redrew prompt");
 
     session.send(ControlCode::FormFeed).expect("send Ctrl-L");
-    session.expect("(uscope) ").expect("Ctrl-L redrew prompt");
+    session
+        .expect("(microscope) ")
+        .expect("Ctrl-L redrew prompt");
 
     session
         .send(ControlCode::EndOfTransmission)
@@ -130,7 +134,7 @@ fn interactive_errors_omit_repl_context() {
     session
         .expect("error: no function named 'asdf' was found")
         .expect("concise interactive error");
-    session.expect("(uscope) ").expect("prompt after error");
+    session.expect("(microscope) ").expect("prompt after error");
 
     session.send_line("quit").expect("quit repl");
     session.expect(Eof).expect("repl exited");
@@ -146,7 +150,7 @@ fn interactive_clear_command_and_cls_alias_clear_the_terminal() {
         session
             .expect("\x1b[2J\x1b[H")
             .expect("terminal clear sequence");
-        session.expect("(uscope) ").expect("prompt after clear");
+        session.expect("(microscope) ").expect("prompt after clear");
     }
 
     session.send_line("quit").expect("quit repl");
@@ -160,7 +164,7 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
 
     session.send_line("").expect("send initial empty line");
     session
-        .expect("(uscope) ")
+        .expect("(microscope) ")
         .expect("empty line before any command is a no-op");
 
     session.send_line("break main").expect("set breakpoint");
@@ -168,17 +172,17 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
         .expect("breakpoint 1 set")
         .expect("breakpoint reply");
     session
-        .expect("(uscope) ")
+        .expect("(microscope) ")
         .expect("prompt after breakpoint");
 
     session.send_line("run").expect("run inferior");
     session.expect("=> 10 | ").expect("main stop");
-    session.expect("(uscope) ").expect("prompt after run");
+    session.expect("(microscope) ").expect("prompt after run");
 
     session.send_line("next").expect("send next");
     session.expect("=> 11 | ").expect("first source step");
     session
-        .expect("(uscope) ")
+        .expect("(microscope) ")
         .expect("prompt after first source step");
 
     for line in [12, 13] {
@@ -187,7 +191,7 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
             .expect(format!("=> {line} | ").as_str())
             .expect("repeated source step");
         session
-            .expect("(uscope) ")
+            .expect("(microscope) ")
             .expect("prompt after repeated source step");
     }
 
@@ -200,7 +204,9 @@ fn interactive_history_persists_across_sessions() {
     {
         let mut session = repl(&fixture("basic"), state.path());
         session.send_line("help quit").expect("record command");
-        session.expect("(uscope) ").expect("prompt after command");
+        session
+            .expect("(microscope) ")
+            .expect("prompt after command");
         session.send_line("quit").expect("quit first repl");
         session.expect(Eof).expect("first repl exited");
     }
@@ -239,7 +245,7 @@ fn kept_command(project: &Path, state: &Path) -> Command {
     command
         .current_dir(project)
         .env(
-            "USCOPE_CONFIG",
+            "MICROSCOPE_CONFIG",
             manifest.join("tests/support/settings/ascii.toml"),
         )
         .args(["--color", "never", "--source-map"])
@@ -258,7 +264,7 @@ fn kept_session(project: &Path, state: &Path, said: &[&str]) -> OsSession {
             .unwrap_or_else(|error| panic!("expected {text:?}: {error}"));
     }
 
-    session.expect("(uscope) ").expect("initial prompt");
+    session.expect("(microscope) ").expect("initial prompt");
     session
 }
 
@@ -267,7 +273,7 @@ fn run(session: &mut OsSession, line: &str, expected: &str) {
     session
         .expect(expected)
         .unwrap_or_else(|error| panic!("{line}: expected {expected:?}: {error}"));
-    session.expect("(uscope) ").expect("next prompt");
+    session.expect("(microscope) ").expect("next prompt");
 }
 
 fn quit(mut session: OsSession) {
@@ -289,7 +295,7 @@ fn quit_killing(mut session: OsSession) {
 fn an_interactive_session_keeps_its_breakpoints_for_the_next_one() {
     let scratch = support::ScratchDir::new("kept-breakpoints");
     let project = project_with_sources(scratch.path());
-    let state = project.join(".uscope/state");
+    let state = project.join(".microscope/state");
     let saved = state.join("breakpoints.toml");
 
     let mut session = kept_session(&project, scratch.path(), &[]);
@@ -414,7 +420,9 @@ fn interactive_quit_asks_before_killing_a_launched_program() {
         .expect("kill it and quit? (y or n) ")
         .expect("the question");
     session.send_line("n").expect("answer no");
-    session.expect("(uscope) ").expect("the session goes on");
+    session
+        .expect("(microscope) ")
+        .expect("the session goes on");
     run(&mut session, "where", "main at ");
     session.send_line("q").expect("type quit's alias");
     session
@@ -432,10 +440,10 @@ fn interactive_output_taller_than_the_terminal_goes_through_the_pager() {
         .expect("write the settings");
     let mut command = command(&fixture("basic"), state.path());
     command
-        .env("USCOPE_CONFIG", &settings)
+        .env("MICROSCOPE_CONFIG", &settings)
         .args(["--color", "never"]);
     let mut session = spawn(command);
-    session.expect("(uscope) ").expect("initial prompt");
+    session.expect("(microscope) ").expect("initial prompt");
     session
         .get_process_mut()
         .set_window_size(80, 10)
@@ -461,7 +469,7 @@ fn interactive_tab_completes_commands_locations_and_members() {
     session
         .expect("temporary breakpoint 1 set at inspect_records")
         .expect("the completed breakpoint");
-    session.expect("(uscope) ").expect("prompt");
+    session.expect("(microscope) ").expect("prompt");
     run(&mut session, "run", "stopped at breakpoint 1");
 
     // A member of what a pointer points to, which the debugger reads.
@@ -471,6 +479,6 @@ fn interactive_tab_completes_commands_locations_and_members() {
     session
         .expect("(inner_record) record->inner = {signed_value = -7, unsigned_value = 9}")
         .expect("the completed member");
-    session.expect("(uscope) ").expect("prompt");
+    session.expect("(microscope) ").expect("prompt");
     quit_killing(session);
 }

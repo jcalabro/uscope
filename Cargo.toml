@@ -1,10 +1,10 @@
 [package]
-name = "uscope"
+name = "microscope"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A Linux x86-64 native debugger"
-repository = "https://github.com/jcalabro/uscope"
+repository = "https://github.com/microscope-dev/microscope"
 readme = "README.md"
 keywords = ["debugger", "dwarf", "linux", "ptrace"]
 categories = ["command-line-utilities", "development-tools::debugging"]
@@ -18,18 +18,18 @@ sim = []
 # Allocates with the C library's allocator instead of mimalloc, for heap
 # profilers such as Valgrind's that cannot see mimalloc.
 system-alloc = []
-# Developer tools: `uscope-tools` dumps every answer a program's debug
+# Developer tools: `microscope-tools` dumps every answer a program's debug
 # information gives, loads programs for benchmarks, and summarizes timings.
 tools = []
 
 [[bin]]
-name = "uscope-tools"
-path = "src/bin/uscope-tools.rs"
+name = "microscope-tools"
+path = "src/bin/microscope-tools.rs"
 required-features = ["tools"]
 
 [[bin]]
-name = "uscope-sim"
-path = "src/bin/uscope-sim.rs"
+name = "microscope-sim"
+path = "src/bin/microscope-sim.rs"
 required-features = ["sim"]
 
 [lints.rust]
@@ -84,7 +84,7 @@ rayon = "1.11"
 twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
 # The instrumentation ABI, which the collector reads: the SDK without its
 # `enabled` feature is that and nothing else.
-uscope-probes = { path = "sdk/rust-probes" }
+microscope-probes = { path = "sdk/rust-probes" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.14"
@@ -144,8 +144,8 @@ overflow-checks = true
 
 # Generating debuginfo for this crate more than doubles the incremental rebuild
 # after an edit. Dependencies keep theirs since they are rarely rebuilt. Pass
-# `--config 'profile.test.package.uscope.debug=2'` when stepping through a test.
-[profile.test.package.uscope]
+# `--config 'profile.test.package.microscope.debug=2'` when stepping through a test.
+[profile.test.package.microscope]
 debug = 0
 # The crate has more modules than an incremental build's 256 default codegen
 # units, so a clean build merged them and ran fewer at once.

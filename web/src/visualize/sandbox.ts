@@ -1,5 +1,5 @@
 // The page's side of the sandbox: one hidden, sandboxed frame per tab,
-// served by uscope at /visualizer-frame, which keeps a worker per card.
+// served by microscope at /visualizer-frame, which keeps a worker per card.
 // The page talks to it over a port it hands the frame, never through the
 // window, runs at most four draws at once, and ends a draw that takes
 // longer than two seconds by ending its worker. A live renderer keeps a
@@ -21,7 +21,7 @@ export interface RendererFailure {
   column: number | null;
 }
 
-/** The colors `uscope.theme` holds, in the page's current theme. */
+/** The colors `microscope.theme` holds, in the page's current theme. */
 export interface Palette {
   ink: string;
   ink2: string;

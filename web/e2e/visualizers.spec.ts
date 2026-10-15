@@ -6,7 +6,7 @@ import { copyFile, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { Page } from "@playwright/test";
 import { card, drawAt } from "./drawings";
-import { expect, fixture, join, root, test, type Uscope } from "./server";
+import { expect, fixture, join, type Microscope, root, test } from "./server";
 
 /** The squares a board's drawing outlines as changed since the stop before. */
 async function outlined(page: Page): Promise<string[]> {
@@ -20,8 +20,11 @@ async function outlined(page: Page): Promise<string[]> {
 test.describe("a program's own renderer", () => {
   test.use({ program: [fixture("chess")] });
 
-  test("draws a board, marks what moved, and opens a square's part", async ({ page, uscope }) => {
-    await join(page, uscope.link);
+  test("draws a board, marks what moved, and opens a square's part", async ({
+    page,
+    microscope,
+  }) => {
+    await join(page, microscope.link);
     await drawAt(page, "main.rs:108");
     const board = card(page, "self");
     await expect(page.getByRole("button", { name: /Drawings\s*1/ })).toBeVisible();
@@ -56,9 +59,9 @@ test.describe("a program's own renderer", () => {
 
   test("Draw as… pins any value to any renderer, which says why it cannot draw it", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await join(page, uscope.link);
+    await join(page, microscope.link);
     await drawAt(page, "main.rs:108");
     const add = page.getByRole("textbox", { name: "Add a watch", exact: true });
     await add.fill("self.fullmove");
@@ -76,9 +79,9 @@ test.describe("a program's own renderer", () => {
   });
 });
 
-/** Starts uscope on life with `views`, and joins it. */
-async function life(page: Page, uscope: Uscope, views: string): Promise<Uscope> {
-  const server = await uscope.start(["--views", views, fixture("life")]);
+/** Starts microscope on life with `views`, and joins it. */
+async function life(page: Page, microscope: Microscope, views: string): Promise<Microscope> {
+  const server = await microscope.start(["--views", views, fixture("life")]);
   await join(page, server.link);
   return server;
 }
@@ -107,8 +110,8 @@ async function cells(page: Page): Promise<{ alive: number; born: number }> {
 }
 
 test.describe("a session's views file", () => {
-  test("draws memory read at once, as pixels, at each stop", async ({ page, uscope }) => {
-    await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
+  test("draws memory read at once, as pixels, at each stop", async ({ page, microscope }) => {
+    await life(page, microscope, path.join(root, "tests/fixtures/c/life/life.views"));
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     await expect(board.locator(".drawing-caption")).toHaveText("generation 1");
@@ -133,7 +136,7 @@ test.describe("a session's views file", () => {
 
   test("a card lists its inputs, copies them, and names the pixel under the pointer", async ({
     page,
-    uscope,
+    microscope,
   }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "clipboard", {
@@ -145,7 +148,7 @@ test.describe("a session's views file", () => {
         },
       });
     });
-    await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
+    await life(page, microscope, path.join(root, "tests/fixtures/c/life/life.views"));
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     await expect(board.locator(".drawing-caption")).toHaveText("generation 1");
@@ -185,7 +188,7 @@ test.describe("a session's views file", () => {
 
   test("a picture of thousands of shapes is drawn on a canvas that still names and opens them", async ({
     page,
-    uscope,
+    microscope,
   }) => {
     const directory = test.info().outputPath("views");
     const { mkdir } = await import("node:fs/promises");
@@ -193,7 +196,7 @@ test.describe("a session's views file", () => {
     const views = path.join(directory, "cells.views");
     await writeFile(
       views,
-      `uscope-views 1
+      `microscope-views 1
 extend c life {
     visualize "cells" {
         cells = bytes(&cells[0][0], sizeof(cells))
@@ -205,13 +208,13 @@ extend c life {
     // A rect a cell: 3,072 shapes, each titled and selectable.
     await writeFile(
       path.join(directory, "cells.js"),
-      `uscope.draw(({ cells, columns }) => uscope.picture({
+      `microscope.draw(({ cells, columns }) => microscope.picture({
   width: columns * 6, height: (cells.length / columns) * 6,
   shapes: Array.from(cells, (alive, index) => {
     const column = index % columns, row = Math.floor(index / columns);
-    return uscope.rect({
+    return microscope.rect({
       x: column * 6, y: row * 6, width: 6, height: 6,
-      fill: alive ? uscope.theme.ink : uscope.theme.surface,
+      fill: alive ? microscope.theme.ink : microscope.theme.surface,
       title: \`\${column},\${row}: \${alive ? "alive" : "dead"}\`,
       select: \`cells[\${row}][\${column}]\`,
     });
@@ -219,7 +222,7 @@ extend c life {
 }));
 `,
     );
-    await life(page, uscope, views);
+    await life(page, microscope, views);
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     const canvas = board.locator("canvas.picture");
@@ -241,8 +244,8 @@ extend c life {
     await expect(part).toContainText("1");
   });
 
-  test("a new session's first drawing has nothing before it", async ({ page, uscope }) => {
-    await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
+  test("a new session's first drawing has nothing before it", async ({ page, microscope }) => {
+    await life(page, microscope, path.join(root, "tests/fixtures/c/life/life.views"));
     await drawAt(page, "life.c:59");
     await page.keyboard.press("F5");
     await expect(card(page, "life").locator(".drawing-caption")).toHaveText("generation 2");
@@ -269,7 +272,7 @@ extend c life {
 
   test("a renderer is told the width its card offers, from its first drawing and when it changes", async ({
     page,
-    uscope,
+    microscope,
   }) => {
     const directory = test.info().outputPath("views");
     const { mkdir } = await import("node:fs/promises");
@@ -277,13 +280,13 @@ extend c life {
     const views = path.join(directory, "width.views");
     await writeFile(
       views,
-      'uscope-views 1\nextend c life {\n    visualize "width" { generation = generation }\n}\n',
+      'microscope-views 1\nextend c life {\n    visualize "width" { generation = generation }\n}\n',
     );
     await writeFile(
       path.join(directory, "width.js"),
-      "uscope.draw((_, { width }) => uscope.picture({ width: 10, height: 10, shapes: [], caption: String(width) }));\n",
+      "microscope.draw((_, { width }) => microscope.picture({ width: 10, height: 10, shapes: [], caption: String(width) }));\n",
     );
-    await life(page, uscope, views);
+    await life(page, microscope, views);
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     const caption = board.locator(".drawing-caption");
@@ -304,21 +307,24 @@ extend c life {
     await expect(caption).toHaveText(String(await offered()));
   });
 
-  test("a card draws again in the colors of the system's new scheme", async ({ page, uscope }) => {
+  test("a card draws again in the colors of the system's new scheme", async ({
+    page,
+    microscope,
+  }) => {
     const directory = test.info().outputPath("views");
     const { mkdir } = await import("node:fs/promises");
     await mkdir(directory, { recursive: true });
     const views = path.join(directory, "scheme.views");
     await writeFile(
       views,
-      'uscope-views 1\nextend c life {\n    visualize "scheme" { generation = generation }\n}\n',
+      'microscope-views 1\nextend c life {\n    visualize "scheme" { generation = generation }\n}\n',
     );
     await writeFile(
       path.join(directory, "scheme.js"),
-      "uscope.draw((_, { theme }) => uscope.picture({ width: 10, height: 10, shapes: [], caption: theme + ' ' + uscope.theme.ink }));\n",
+      "microscope.draw((_, { theme }) => microscope.picture({ width: 10, height: 10, shapes: [], caption: theme + ' ' + microscope.theme.ink }));\n",
     );
     await page.emulateMedia({ colorScheme: "light" });
-    await life(page, uscope, views);
+    await life(page, microscope, views);
     await drawAt(page, "life.c:59");
     const caption = card(page, "life").locator(".drawing-caption");
     const ink = () =>
@@ -330,13 +336,13 @@ extend c life {
     await expect(caption).toHaveText(`dark ${await ink()}`);
   });
 
-  test("a pointer draws as what it points to", async ({ page, uscope }) => {
-    await life(page, uscope, path.join(root, "tests/fixtures/c/life/life.views"));
+  test("a pointer draws as what it points to", async ({ page, microscope }) => {
+    await life(page, microscope, path.join(root, "tests/fixtures/c/life/life.views"));
     await drawAt(page, "step");
     await expect(card(page, "life").locator(".drawing-caption")).toHaveText("generation 0");
   });
 
-  test("reloading views draws with the renderer as it is now", async ({ page, uscope }) => {
+  test("reloading views draws with the renderer as it is now", async ({ page, microscope }) => {
     const directory = test.info().outputPath("views");
     const { mkdir } = await import("node:fs/promises");
     await mkdir(directory, { recursive: true });
@@ -344,7 +350,7 @@ extend c life {
     const renderer = path.join(directory, "life.js");
     await copyFile(path.join(root, "tests/fixtures/c/life/life.views"), views);
     await copyFile(path.join(root, "tests/fixtures/c/life/life.js"), renderer);
-    await life(page, uscope, views);
+    await life(page, microscope, views);
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     await expect(board.locator(".drawing-caption")).toHaveText("generation 1");
@@ -359,7 +365,7 @@ extend c life {
 
   test("a card says why it cannot draw, and the page stays responsive", async ({
     page,
-    uscope,
+    microscope,
   }) => {
     const directory = test.info().outputPath("views");
     const { mkdir } = await import("node:fs/promises");
@@ -367,7 +373,7 @@ extend c life {
     const views = path.join(directory, "failing.views");
     await writeFile(
       views,
-      `uscope-views 1
+      `microscope-views 1
 extend c life {
     visualize "throws" { generation = generation }
     visualize "forever" { generation = generation }
@@ -382,17 +388,20 @@ extend c life {
     await writeFile(
       path.join(directory, "throws.js"),
       // biome-ignore lint/suspicious/noTemplateCurlyInString: the renderer's own template
-      "uscope.draw(({ generation }) => {\n  throw new RangeError(`no generation ${generation}`);\n});\n",
+      "microscope.draw(({ generation }) => {\n  throw new RangeError(`no generation ${generation}`);\n});\n",
     );
-    await writeFile(path.join(directory, "forever.js"), "uscope.draw(() => { for (;;) {} });\n");
+    await writeFile(
+      path.join(directory, "forever.js"),
+      "microscope.draw(() => { for (;;) {} });\n",
+    );
     await writeFile(
       path.join(directory, "invalid.js"),
-      `uscope.draw(() => uscope.picture({ width: 10, height: 10, shapes: [
-  uscope.rect({ x: 0, y: 0, width: 10, height: 10, fill: "url(https://example.com/x)" }),
+      `microscope.draw(() => microscope.picture({ width: 10, height: 10, shapes: [
+  microscope.rect({ x: 0, y: 0, width: 10, height: 10, fill: "url(https://example.com/x)" }),
 ] }));
 `,
     );
-    await life(page, uscope, views);
+    await life(page, microscope, views);
     await drawAt(page, "life.c:59");
     const board = card(page, "life");
     const tab = (name: string) => board.getByRole("button", { name, exact: true });

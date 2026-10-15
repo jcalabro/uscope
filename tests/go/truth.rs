@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState};
+use microscope::{LaunchOptions, StopReason, TaskPage, TaskSnapshot, TaskState};
 
 use crate::support::{Scenario, ScratchDir};
 

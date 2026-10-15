@@ -3,5 +3,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    uscope::fuzz_elf_symbols(data);
+    microscope::fuzz_elf_symbols(data);
 });

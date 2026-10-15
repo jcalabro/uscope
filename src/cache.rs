@@ -1,5 +1,5 @@
 //! The image cache: sealed images by their inputs' contents, so that a
-//! program uscope has loaded before loads by reading and validating one
+//! program microscope has loaded before loads by reading and validating one
 //! file.
 //!
 //! An entry's key digests the exact bytes the image was built from (the
@@ -17,8 +17,8 @@
 //! the cache is private to its user.
 //!
 //! One process has one cache, chosen by the option a program passes to
-//! [`configure`], then `USCOPE_CACHE_DIR` (empty for none), and otherwise
-//! `$XDG_CACHE_HOME/uscope/images` or `~/.cache/uscope/images`, or none
+//! [`configure`], then `MICROSCOPE_CACHE_DIR` (empty for none), and otherwise
+//! `$XDG_CACHE_HOME/microscope/images` or `~/.cache/microscope/images`, or none
 //! under nextest, whose tests choose their own.
 
 use std::ffi::OsStr;
@@ -33,7 +33,7 @@ use crate::image::backing::FileStamp;
 use crate::image::{AlignedBytes, Image, ImageError, Limits};
 
 /// The environment variable that names the cache's directory.
-pub const DIRECTORY_VARIABLE: &str = "USCOPE_CACHE_DIR";
+pub const DIRECTORY_VARIABLE: &str = "MICROSCOPE_CACHE_DIR";
 
 /// The most bytes a cache keeps; opening one evicts its oldest entries
 /// beyond this.
@@ -94,7 +94,7 @@ pub fn resolve(
         .filter(|xdg| Path::new(xdg).is_absolute())
         .map(PathBuf::from)
         .or_else(|| home.map(|home| Path::new(home).join(".cache")))?;
-    Some(base.join("uscope").join("images"))
+    Some(base.join("microscope").join("images"))
 }
 
 fn resolve_here(setting: Option<Setting>) -> Option<PathBuf> {
@@ -184,8 +184,8 @@ impl Key {
     #[must_use]
     pub fn of(inputs: &[&[u8]]) -> Self {
         let mut digest = twox_hash::XxHash3_128::new();
-        digest.write(b"uscope image\0");
-        digest.write(env!("USCOPE_SOURCES_DIGEST").as_bytes());
+        digest.write(b"microscope image\0");
+        digest.write(env!("MICROSCOPE_SOURCES_DIGEST").as_bytes());
         for revision in crate::image::revisions() {
             digest.write(&revision.to_le_bytes());
         }

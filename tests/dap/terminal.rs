@@ -18,7 +18,7 @@ fn a_program_launched_in_a_terminal_is_debugged_with_its_streams_in_the_terminal
         json!({
             "console": "integratedTerminal",
             "args": ["one", "two words"],
-            "env": {"USCOPE_FIXTURE_VALUE": "set", "USCOPE_FIXTURE_REMOVED": null},
+            "env": {"MICROSCOPE_FIXTURE_VALUE": "set", "MICROSCOPE_FIXTURE_REMOVED": null},
             "cwd": directory.path(),
         }),
         &Configuration {

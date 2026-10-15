@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
     BreakpointLocation, ByteOrder, CodeRole, Condition, ConditionOwner, ContextShortfall,
     CoreDumpInfo, CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly,
@@ -27,7 +27,7 @@ const HEX_DUMP_BYTES_PER_LINE: usize = 16;
 
 /// An expression's error, with a caret line under the text it is about and
 /// the hint that rewrites it, when there is one.
-pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
+pub fn expression_error(text: &str, error: &microscope::ExpressionError) -> String {
     let start = (error.span.start as usize).min(text.len());
     let end = (error.span.end as usize).clamp(start, text.len());
     let column = text.get(..start).map_or(0, |prefix| prefix.chars().count());
@@ -49,10 +49,10 @@ pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
 }
 
 /// How a task ended, as a stop says it: `task 7 finished`.
-pub const fn task_ending(ending: uscope::TaskEnding) -> &'static str {
+pub const fn task_ending(ending: microscope::TaskEnding) -> &'static str {
     match ending {
-        uscope::TaskEnding::Finished => "finished",
-        uscope::TaskEnding::Cancelled => "was cancelled",
+        microscope::TaskEnding::Finished => "finished",
+        microscope::TaskEnding::Cancelled => "was cancelled",
     }
 }
 
@@ -134,7 +134,7 @@ pub fn command_help(command: &CommandSpec, renderer: Renderer) -> String {
 
 /// A new catchpoint: `catchpoint c1: syscalls openat, read, at entry and
 /// exit, if $ret < 0`.
-pub fn catchpoint(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> String {
+pub fn catchpoint(catchpoint: &microscope::Catchpoint, renderer: Renderer) -> String {
     format!(
         "{} {}",
         renderer.paint(Role::Success, "catchpoint"),
@@ -142,7 +142,7 @@ pub fn catchpoint(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> String
     )
 }
 
-fn catchpoint_line(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> String {
+fn catchpoint_line(catchpoint: &microscope::Catchpoint, renderer: Renderer) -> String {
     let mut names: Vec<String> = catchpoint
         .calls
         .iter()
@@ -156,9 +156,9 @@ fn catchpoint_line(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> Strin
     };
 
     let phase = match catchpoint.phase {
-        uscope::CatchPhase::Entry => "at entry",
-        uscope::CatchPhase::Exit => "at exit",
-        uscope::CatchPhase::Both => "at entry and exit",
+        microscope::CatchPhase::Entry => "at entry",
+        microscope::CatchPhase::Exit => "at exit",
+        microscope::CatchPhase::Both => "at entry and exit",
     };
 
     let condition = catchpoint
@@ -174,7 +174,7 @@ fn catchpoint_line(catchpoint: &uscope::Catchpoint, renderer: Renderer) -> Strin
 }
 
 /// Every catchpoint, one a line, with its hits.
-pub fn catchpoints(catchpoints: &[uscope::Catchpoint], renderer: Renderer) -> String {
+pub fn catchpoints(catchpoints: &[microscope::Catchpoint], renderer: Renderer) -> String {
     if catchpoints.is_empty() {
         return renderer.paint(Role::Metadata, "no catchpoints").to_string();
     }
@@ -228,7 +228,7 @@ fn hit_condition(
 
 /// A catchpoint's stop: `stopped at catchpoint c1 as the call began:
 /// openat(AT_FDCWD, "/etc/hosts", O_RDONLY)`.
-fn caught_stop(stop: &uscope::SyscallStop, renderer: Renderer) -> String {
+fn caught_stop(stop: &microscope::SyscallStop, renderer: Renderer) -> String {
     format!(
         "{} at {} {} {}",
         renderer.paint(Role::Current, "stopped"),
@@ -243,7 +243,7 @@ fn caught_stop(stop: &uscope::SyscallStop, renderer: Renderer) -> String {
 }
 
 /// `catchpoint c1` or `catchpoints c1, c2`.
-fn catchpoint_ids(ids: &[uscope::CatchpointId], renderer: Renderer) -> String {
+fn catchpoint_ids(ids: &[microscope::CatchpointId], renderer: Renderer) -> String {
     let noun = if ids.len() == 1 {
         "catchpoint"
     } else {
@@ -1033,11 +1033,12 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
         .threads
         .iter()
         .map(|thread| {
-            let marker = if snapshot.selected == Some(uscope::ExecutionContext::Thread(thread.id)) {
-                renderer.paint(Role::Current, "*").to_string()
-            } else {
-                " ".to_owned()
-            };
+            let marker =
+                if snapshot.selected == Some(microscope::ExecutionContext::Thread(thread.id)) {
+                    renderer.paint(Role::Current, "*").to_string()
+                } else {
+                    " ".to_owned()
+                };
 
             let state = match &thread.state {
                 ThreadState::Running => "running".to_owned(),
@@ -1195,7 +1196,7 @@ pub fn task_function(task: &TaskSnapshot, trace: &Backtrace) -> Option<String> {
 /// are unknown.
 pub fn task_place(
     task: &TaskSnapshot,
-    trace: &uscope::Result<Backtrace>,
+    trace: &microscope::Result<Backtrace>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     renderer: Renderer,
 ) -> String {
@@ -1401,8 +1402,8 @@ pub struct ModuleRow {
     pub path: Arc<PathBuf>,
 
     /// Where it is loaded, once it is.
-    pub load_bias: Option<uscope::LoadBias>,
-    pub image: Option<Arc<uscope::ModuleImage>>,
+    pub load_bias: Option<microscope::LoadBias>,
+    pub image: Option<Arc<microscope::ModuleImage>>,
 }
 
 /// The modules, one per line with the range each occupies and what
@@ -1441,12 +1442,12 @@ pub fn modules(modules: &[ModuleRow], renderer: Renderer) -> String {
             .as_ref()
             .and_then(|image| image.separate_debug_file())
         {
-            Some(uscope::DebugFile::Used(path)) => lines.push(format!(
+            Some(microscope::DebugFile::Used(path)) => lines.push(format!(
                 "  {} {}",
                 renderer.paint(Role::Muted, "debug information from"),
                 renderer.path(path)
             )),
-            Some(uscope::DebugFile::Unusable { path, reason }) => lines.push(format!(
+            Some(microscope::DebugFile::Unusable { path, reason }) => lines.push(format!(
                 "  {} {}: {reason}",
                 renderer.paint(Role::Warning, "cannot use the debug file"),
                 renderer.path(path)
@@ -1603,7 +1604,7 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
 
 /// Renders the calls of a line that a step can go into, by address, with
 /// what each calls.
-pub fn step_targets(targets: &[uscope::StepTarget], renderer: Renderer) -> String {
+pub fn step_targets(targets: &[microscope::StepTarget], renderer: Renderer) -> String {
     if targets.is_empty() {
         return "no calls on this line".to_owned();
     }
@@ -2379,7 +2380,7 @@ pub fn stack_frame(
     });
 
     // A function that left by a tail call is no activation of its own.
-    let tail = if frame.kind == uscope::FrameKind::TailCall {
+    let tail = if frame.kind == microscope::FrameKind::TailCall {
         format!(" {}", renderer.paint(Role::Metadata, "[tail call]"))
     } else {
         String::new()
@@ -2391,8 +2392,8 @@ pub fn stack_frame(
         .instruction
         .map_or_else(|| " ".repeat(18), |address| format!("{address:#018x}"));
     let what = match frame.kind {
-        uscope::FrameKind::Awaited { .. } => "",
-        uscope::FrameKind::Async { .. } => " in async",
+        microscope::FrameKind::Awaited { .. } => "",
+        microscope::FrameKind::Async { .. } => " in async",
         _ => " in",
     };
 
@@ -2430,11 +2431,10 @@ pub fn stack_frame(
                 // A Rust function's or future's arguments can run to
                 // hundreds of characters; a backtrace keeps its path and its
                 // name.
-                let rust = matches!(frame.kind, uscope::FrameKind::Awaited { .. })
-                    || frame
-                        .function
-                        .as_ref()
-                        .is_some_and(|function| function.language == uscope::SourceLanguage::Rust);
+                let rust = matches!(frame.kind, microscope::FrameKind::Awaited { .. })
+                    || frame.function.as_ref().is_some_and(|function| {
+                        function.language == microscope::SourceLanguage::Rust
+                    });
                 if raw || !rust {
                     name
                 } else {
@@ -2499,7 +2499,7 @@ pub fn elide_arguments(name: &str) -> String {
 /// for the future a suspended task awaits, `awaiting` and that future's
 /// type.
 pub fn frame_code(frame: &StackFrame, images: &BTreeMap<ModuleId, Arc<ModuleImage>>) -> String {
-    if let uscope::FrameKind::Awaited { ty, .. } = frame.kind {
+    if let microscope::FrameKind::Awaited { ty, .. } = frame.kind {
         let image = images.values().find(|image| image.id() == ty.image);
         return awaited(image.map(AsRef::as_ref), ty);
     }
@@ -2509,11 +2509,14 @@ pub fn frame_code(frame: &StackFrame, images: &BTreeMap<ModuleId, Arc<ModuleImag
 
 /// The future of type `ty` a suspended task awaits, as its frame is named:
 /// `awaiting tokio::time::sleep::Sleep`.
-pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String {
+pub fn awaited(image: Option<&ModuleImage>, ty: microscope::TypeReference) -> String {
     let name = image
         .filter(|image| image.id() == ty.image)
         .and_then(|image| image.type_info(ty))
-        .map_or_else(|| "a future".to_owned(), uscope::TypeInfo::qualified_name);
+        .map_or_else(
+            || "a future".to_owned(),
+            microscope::TypeInfo::qualified_name,
+        );
     format!("awaiting {name}")
 }
 
@@ -2521,7 +2524,7 @@ pub fn awaited(image: Option<&ModuleImage>, ty: uscope::TypeReference) -> String
 /// waits for where a client shows no place beside the name:
 /// `awaiting tokio::time::sleep::Sleep — sleeping until +1s`.
 pub fn awaited_frame(image: Option<&ModuleImage>, frame: &StackFrame) -> Option<String> {
-    let uscope::FrameKind::Awaited { ty, .. } = frame.kind else {
+    let microscope::FrameKind::Awaited { ty, .. } = frame.kind else {
         return None;
     };
 
@@ -2551,9 +2554,9 @@ pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
         .iter()
         .map(|entry| {
             let type_name = match &entry.variable.type_info {
-                uscope::GlobalVariableType::Resolved(type_info) => type_info.name.as_ref(),
-                uscope::GlobalVariableType::Unsupported(_) => "<unsupported type>",
-                uscope::GlobalVariableType::Malformed(_) => "<malformed type>",
+                microscope::GlobalVariableType::Resolved(type_info) => type_info.name.as_ref(),
+                microscope::GlobalVariableType::Unsupported(_) => "<unsupported type>",
+                microscope::GlobalVariableType::Malformed(_) => "<malformed type>",
                 _ => "<unknown type>",
             };
 
@@ -2589,7 +2592,7 @@ pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
 }
 
 /// Renders signal policies as a table, one signal per line.
-pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Renderer) -> String {
+pub fn signal_policies(policies: &[(u64, microscope::SignalPolicy)], renderer: Renderer) -> String {
     let yes_no = |value: bool| if value { "yes" } else { "no" };
     std::iter::once(
         renderer
@@ -2603,7 +2606,7 @@ pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Rende
                 Role::Name,
                 format_args!(
                     "{:<8}",
-                    uscope::signal_name(*code).unwrap_or_else(|| code.to_string())
+                    microscope::signal_name(*code).unwrap_or_else(|| code.to_string())
                 )
             ),
             yes_no(policy.stop),
@@ -2619,7 +2622,7 @@ pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Rende
 /// not bind.
 pub fn view_explanation(
     expression: &str,
-    explanation: &uscope::ViewExplanation,
+    explanation: &microscope::ViewExplanation,
     renderer: Renderer,
 ) -> String {
     let type_name = explanation
@@ -2631,7 +2634,7 @@ pub fn view_explanation(
         renderer.paint(Role::Type, type_name)
     )];
     match &explanation.presentation {
-        Some(presentation) if presentation.shape == uscope::PresentedShape::Raw => {
+        Some(presentation) if presentation.shape == microscope::PresentedShape::Raw => {
             lines.push(format!(
                 "{} binds, but shows the value as stored: {}",
                 presentation.view,
@@ -2670,7 +2673,7 @@ pub fn view_explanation(
 
 /// The drawings a type's view offers, which only the web page draws, and
 /// why each that does not bind does not.
-fn drawing_lines(drawings: &[uscope::VisualizerBinding], indent: &str) -> Vec<String> {
+fn drawing_lines(drawings: &[microscope::VisualizerBinding], indent: &str) -> Vec<String> {
     if drawings.is_empty() {
         return Vec::new();
     }
@@ -2706,7 +2709,7 @@ fn drawing_lines(drawings: &[uscope::VisualizerBinding], indent: &str) -> Vec<St
 /// Each view a type was matched against, and why it did not bind or that
 /// it did.
 fn candidate_lines<'a>(
-    candidates: &'a [uscope::ViewCandidate],
+    candidates: &'a [microscope::ViewCandidate],
     indent: &'a str,
 ) -> impl Iterator<Item = String> + 'a {
     candidates.iter().map(move |candidate| {
@@ -2719,7 +2722,7 @@ fn candidate_lines<'a>(
 }
 
 /// How each type a name means is presented, as `views explain` says.
-pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -> String {
+pub fn type_views(name: &str, types: &[microscope::TypeViews], renderer: Renderer) -> String {
     if types.is_empty() {
         return format!("no type is named `{name}`");
     }
@@ -2755,7 +2758,7 @@ pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -
 
 /// What `views check` finds, and whether any view loaded for the session
 /// or carried by a module presents no type or binds no type it names.
-pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, bool) {
+pub fn view_check(check: &microscope::ViewCheck, renderer: Renderer) -> (String, bool) {
     let mut lines = Vec::new();
     let mut failed = false;
     let presented = check
@@ -2804,7 +2807,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
             failed |= views
                 .candidates
                 .iter()
-                .any(|candidate| !uscope::is_built_in_view(&candidate.view));
+                .any(|candidate| !microscope::is_built_in_view(&candidate.view));
         }
     }
 
@@ -2855,7 +2858,7 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
 
 /// Adds the drawings that do not bind, each once however many types its
 /// view names, and returns whether any is not built in.
-fn unbound_drawings(check: &uscope::ViewCheck, lines: &mut Vec<String>) -> bool {
+fn unbound_drawings(check: &microscope::ViewCheck, lines: &mut Vec<String>) -> bool {
     let mut unbound = check
         .types
         .iter()
@@ -2882,27 +2885,27 @@ fn unbound_drawings(check: &uscope::ViewCheck, lines: &mut Vec<String>) -> bool 
     }));
     unbound
         .iter()
-        .any(|(view, ..)| !uscope::is_built_in_view(view))
+        .any(|(view, ..)| !microscope::is_built_in_view(view))
 }
 
 /// Renders a logged message with the values it shows.
-pub fn log_message(parts: &[uscope::LogPart]) -> String {
+pub fn log_message(parts: &[microscope::LogPart]) -> String {
     parts
         .iter()
         .map(|part| match part {
-            uscope::LogPart::Text(text) => text.to_string(),
-            uscope::LogPart::Value {
+            microscope::LogPart::Text(text) => text.to_string(),
+            microscope::LogPart::Value {
                 type_info, state, ..
             } => value::summary(type_info.as_ref(), state),
-            uscope::LogPart::Error { expression, error } => format!("<{expression}: {error}>"),
+            microscope::LogPart::Error { expression, error } => format!("<{expression}: {error}>"),
         })
         .collect()
 }
 
 /// Reports a signal that did not stop the inferior.
 pub fn signal_received(
-    thread: uscope::ThreadId,
-    info: &uscope::ExceptionInfo,
+    thread: microscope::ThreadId,
+    info: &microscope::ExceptionInfo,
     renderer: Renderer,
 ) -> String {
     format!(
@@ -2940,7 +2943,7 @@ mod tests {
     }
 
     use super::*;
-    use uscope::PointerWidth;
+    use microscope::PointerWidth;
 
     fn memory_read(
         address: u64,
@@ -2951,20 +2954,20 @@ mod tests {
         let next_address = address + bytes.len() as u64;
         MemoryRead {
             revision: 4,
-            stop_id: uscope::StopId::new(3),
-            target: uscope::TargetDescription {
-                architecture: uscope::Architecture::X86_64,
+            stop_id: microscope::StopId::new(3),
+            target: microscope::TargetDescription {
+                architecture: microscope::Architecture::X86_64,
                 byte_order: ByteOrder::Little,
                 pointer_width: width,
             },
-            address: uscope::VirtualAddress::new(address),
+            address: microscope::VirtualAddress::new(address),
             requested,
             completion: if bytes.len() as u64 == requested {
                 MemoryReadCompletion::Complete
             } else {
                 MemoryReadCompletion::Incomplete {
-                    next_address: uscope::VirtualAddress::new(next_address),
-                    reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+                    next_address: microscope::VirtualAddress::new(next_address),
+                    reason: microscope::MemoryReadUnavailableReason::Inaccessible,
                 }
             },
             bytes: bytes.into(),

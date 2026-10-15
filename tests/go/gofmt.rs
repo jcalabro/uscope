@@ -6,7 +6,7 @@
 
 use std::process::{Command, Stdio};
 
-use uscope::{
+use microscope::{
     Evaluation, Expression, LaunchOptions, PresentedCount, StepKind, StopReason, ValueChildQuery,
     ValueChildRelationship, ValueChildren, VariableState, VariableValue,
 };
@@ -81,11 +81,11 @@ fn written(state: &VariableState) -> String {
     match state {
         VariableState::Available {
             text: Some(text), ..
-        } => uscope::quoted_text(text),
+        } => microscope::quoted_text(text),
         VariableState::Available {
             value: VariableValue::Enumeration { value, matches },
             ..
-        } => uscope::symbol_text(*value, matches).unwrap_or_else(|| format!("{value:?}")),
+        } => microscope::symbol_text(*value, matches).unwrap_or_else(|| format!("{value:?}")),
         VariableState::Available {
             presentation: Some(presentation),
             ..
@@ -324,7 +324,7 @@ async fn gofmt_formats_under_the_debugger_as_it_does_alone() {
         scenario.remove_breakpoint(parser.id).await;
         assert_eq!(
             scenario.resume_to_stop().await,
-            StopReason::Exited(uscope::ExitStatus::Code(0)),
+            StopReason::Exited(microscope::ExitStatus::Code(0)),
             "{fixture}"
         );
         scenario.shutdown().await;

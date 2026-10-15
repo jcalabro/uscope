@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # The GNU C library's types. Verified against glibc 2.42 with gcc 15.2 and
 # clang 21.1.8, by tests/fixtures/cpp/containers.cpp and

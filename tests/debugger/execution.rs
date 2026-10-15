@@ -96,13 +96,13 @@ async fn breakpoint_edits_publish_one_revision_or_change_nothing() {
     assert!(matches!(
         scenario
             .handle()
-            .remove_breakpoint(uscope::BreakpointId::new(999))
+            .remove_breakpoint(microscope::BreakpointId::new(999))
             .await,
         Err(Error::BreakpointNotFound(999))
     ));
     let source = |path: &str, line| BreakpointSpec::Source {
         path: path.into(),
-        line: uscope::LineNumber::new(line).unwrap(),
+        line: microscope::LineNumber::new(line).unwrap(),
     };
 
     assert!(matches!(
@@ -240,15 +240,15 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
 
     let value_address = scenario
         .operation(
-            "resolve uscope_value",
-            scenario.handle().runtime_address("uscope_value"),
+            "resolve microscope_value",
+            scenario.handle().runtime_address("microscope_value"),
         )
         .await;
 
     assert_eq!(
         scenario
             .operation(
-                "read uscope_value",
+                "read microscope_value",
                 scenario.handle().read_word(value_address)
             )
             .await,
@@ -258,7 +258,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     // Reads are bounded, belong to the stop, and hide breakpoint traps.
     let value_bytes = scenario
         .operation(
-            "read uscope_value bytes",
+            "read microscope_value bytes",
             scenario.handle().read_memory(value_address, 8),
         )
         .await;
@@ -268,7 +268,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     );
     assert_eq!(
         value_bytes.completion,
-        uscope::MemoryReadCompletion::Complete
+        microscope::MemoryReadCompletion::Complete
     );
     assert_eq!(value_bytes.revision, scenario.last_revision());
     assert_eq!(Some(value_bytes.stop_id), snapshot.stop_id);
@@ -284,7 +284,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         .await;
     assert_eq!(
         breakpoint_bytes.completion,
-        uscope::MemoryReadCompletion::Complete
+        microscope::MemoryReadCompletion::Complete
     );
     assert_ne!(breakpoint_bytes.bytes.as_ref(), [0xcc]);
     let empty = scenario
@@ -294,7 +294,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         )
         .await;
     assert!(empty.bytes.is_empty());
-    assert_eq!(empty.completion, uscope::MemoryReadCompletion::Complete);
+    assert_eq!(empty.completion, microscope::MemoryReadCompletion::Complete);
     assert!(matches!(
         scenario.handle().read_memory(value_address, 65_537).await,
         Err(Error::MemoryReadTooLarge {
@@ -377,7 +377,7 @@ async fn stops_in_a_shared_library_show_that_librarys_own_source() {
     let function = image.function_named("dso_apply").expect("dso_apply");
     let entry = image
         .instances_for_function(function.id())
-        .find_map(uscope::CodeInstance::breakpoint_entry)
+        .find_map(microscope::CodeInstance::breakpoint_entry)
         .expect("dso_apply entry");
     let address = library
         .module
@@ -436,7 +436,7 @@ async fn inline_function_breakpoints_resolve_every_concrete_instance() {
 
             image
                 .instances_for_function(function.id())
-                .map(uscope::CodeInstance::id)
+                .map(microscope::CodeInstance::id)
                 .collect::<BTreeSet<_>>()
         };
 
@@ -496,7 +496,7 @@ async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
                 )
                 .await;
             let snapshot = scenario.snapshot().await;
-            let uscope::PresentedFrame::Inline(selected) = snapshot
+            let microscope::PresentedFrame::Inline(selected) = snapshot
                 .presentation
                 .as_ref()
                 .expect("stopped presentation")
@@ -663,7 +663,7 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
         .await;
 
     // Unknown and unrepresentable thread IDs fail without disturbing the stop.
-    for unknown in [0, 1 << 40, u64::MAX].map(uscope::ThreadId::new) {
+    for unknown in [0, 1 << 40, u64::MAX].map(microscope::ThreadId::new) {
         assert!(matches!(
             scenario.handle().select_context(unknown).await,
             Err(Error::UnknownThread(thread)) if thread == unknown
@@ -673,8 +673,8 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
                 .handle()
                 .continue_execution(
                     stop_id,
-                    uscope::ResumeScope::Thread(unknown),
-                    uscope::ExceptionDisposition::Pass,
+                    microscope::ResumeScope::Thread(unknown),
+                    microscope::ExceptionDisposition::Pass,
                 )
                 .await,
             Err(Error::UnknownThread(thread)) if thread == unknown
@@ -690,12 +690,12 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
 /// Resumes the `threads` fixture until it exits, after which each of its two
 /// workers has hit `breakpoint` once. The second hit stops on its own unless it was
 /// reported with the first.
-async fn finish_worker_hits(scenario: &mut Scenario, breakpoint: uscope::BreakpointId) {
+async fn finish_worker_hits(scenario: &mut Scenario, breakpoint: microscope::BreakpointId) {
     let mut reason = scenario.resume_to_stop().await;
     if let StopReason::Breakpoint { hits, .. } = &reason {
         assert_eq!(
             **hits,
-            [uscope::BreakpointHit {
+            [microscope::BreakpointHit {
                 breakpoint,
                 hit_count: 2
             }]
@@ -774,14 +774,14 @@ async fn a_thread_scoped_continue_stops_cleanly_when_its_thread_exits() {
             "continue one worker",
             scenario.handle().continue_execution(
                 stop,
-                uscope::ResumeScope::Thread(thread),
-                uscope::ExceptionDisposition::Pass,
+                microscope::ResumeScope::Thread(thread),
+                microscope::ExceptionDisposition::Pass,
             ),
         )
         .await;
     let reason = timeout(Duration::from_secs(2), async {
         loop {
-            if let uscope::DebuggerEvent::InferiorStopped {
+            if let microscope::DebuggerEvent::InferiorStopped {
                 execution_id: Some(event_execution),
                 reason,
                 ..
@@ -843,7 +843,7 @@ async fn signal_delivery_is_preserved_and_user_sigtrap_is_not_a_breakpoint() {
     ));
     assert!(matches!(
         suppressed
-            .resume_with_exception(uscope::ExceptionDisposition::Suppress)
+            .resume_with_exception(microscope::ExceptionDisposition::Suppress)
             .await,
         StopReason::Exception(exception) if exception.code == 5
     ));
@@ -973,8 +973,8 @@ async fn nonleader_exec_rewrites_the_thread_registry_and_invalidates_the_image()
     ));
     assert!(matches!(
         scenario.snapshot().await.presentation,
-        Some(uscope::FramePresentation {
-            frame: uscope::PresentedFrame::Physical,
+        Some(microscope::FramePresentation {
+            frame: microscope::PresentedFrame::Physical,
             ..
         })
     ));
@@ -1003,13 +1003,13 @@ async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
     let (first, second) = tokio::join!(
         first.continue_execution(
             stop,
-            uscope::ResumeScope::Process(process),
-            uscope::ExceptionDisposition::Pass,
+            microscope::ResumeScope::Process(process),
+            microscope::ExceptionDisposition::Pass,
         ),
         second.continue_execution(
             stop,
-            uscope::ResumeScope::Process(process),
-            uscope::ExceptionDisposition::Pass,
+            microscope::ResumeScope::Process(process),
+            microscope::ExceptionDisposition::Pass,
         ),
     );
 
@@ -1044,9 +1044,12 @@ async fn launch_options_start_the_program_with_its_arguments_environment_directo
         .run_with_to_stop(LaunchOptions {
             arguments: vec!["first".into(), "second word".into()],
             environment: vec![
-                ("USCOPE_FIXTURE_VALUE".into(), Some("from launch".into())),
-                ("USCOPE_FIXTURE_REMOVED".into(), Some("set".into())),
-                ("USCOPE_FIXTURE_REMOVED".into(), None),
+                (
+                    "MICROSCOPE_FIXTURE_VALUE".into(),
+                    Some("from launch".into()),
+                ),
+                ("MICROSCOPE_FIXTURE_REMOVED".into(), Some("set".into())),
+                ("MICROSCOPE_FIXTURE_REMOVED".into(), None),
             ],
             working_directory: Some(directory.path().to_owned()),
             stdin: Some(Stdio::from(stdin_reader)),
@@ -1263,10 +1266,10 @@ async fn pause_cancels_an_active_source_execution_plan() {
             scenario.handle().start_step(
                 stop,
                 thread,
-                uscope::StackFrameId::INNERMOST,
+                microscope::StackFrameId::INNERMOST,
                 StepKind::Out,
-                uscope::ResumeScope::Process(process),
-                uscope::ExceptionDisposition::Pass,
+                microscope::ResumeScope::Process(process),
+                microscope::ExceptionDisposition::Pass,
             ),
         )
         .await;
@@ -1309,9 +1312,9 @@ async fn pause_cancels_an_active_source_execution_plan() {
 
 #[tokio::test]
 async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
+    use microscope::{Error, SourcePathMap};
     use std::path::{Path, PathBuf};
     use support::ScratchDir;
-    use uscope::{Error, SourcePathMap};
 
     let mut scenario = Scenario::launch("basic-relocated");
     scenario.add_source_breakpoint("basic.c", 11).await;
@@ -1319,7 +1322,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    let recorded = PathBuf::from("/nonexistent/uscope/tests/fixtures/c/basic.c");
+    let recorded = PathBuf::from("/nonexistent/microscope/tests/fixtures/c/basic.c");
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map = |rules: &[(&Path, &Path)]| {
         let mut map = SourcePathMap::new();
@@ -1353,12 +1356,12 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     let absent = copy.path().join("absent");
     let handle = map(&[
         (
-            Path::new("/nonexistent/uscope/tests/fixtures/c/basic.c/x"),
+            Path::new("/nonexistent/microscope/tests/fixtures/c/basic.c/x"),
             &absent,
         ),
-        (Path::new("/nonexistent/uscope"), &absent),
+        (Path::new("/nonexistent/microscope"), &absent),
         (
-            Path::new("/nonexistent/uscope/tests"),
+            Path::new("/nonexistent/microscope/tests"),
             &copy.path().join("tests"),
         ),
         (Path::new("/nonexistent"), repository.parent().unwrap()),
@@ -1378,7 +1381,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     // every place it was looked for.
     let handle = map(&[
         (Path::new("/nonexist"), repository),
-        (Path::new("/nonexistent/uscope"), &absent),
+        (Path::new("/nonexistent/microscope"), &absent),
     ]);
     assert!(matches!(
         handle.source_context(0).await,
@@ -1390,8 +1393,8 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     let unreadable = copy.path().join("unreadable");
     fs::create_dir_all(unreadable.join("tests/fixtures/c/basic.c")).unwrap();
     let handle = map(&[
-        (Path::new("/nonexistent/uscope"), &unreadable),
-        (Path::new("/nonexistent/uscope"), repository),
+        (Path::new("/nonexistent/microscope"), &unreadable),
+        (Path::new("/nonexistent/microscope"), repository),
     ]);
     assert!(matches!(
         handle.source_context(0).await,
@@ -1399,7 +1402,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     ));
 
     // Each handle keeps its own map.
-    let mapped = map(&[(Path::new("/nonexistent/uscope"), repository)]);
+    let mapped = map(&[(Path::new("/nonexistent/microscope"), repository)]);
     assert_eq!(
         *scenario
             .operation("repository source", mapped.source_context(0))
@@ -1410,7 +1413,7 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     assert!(scenario.handle().source_context(0).await.is_err());
     assert_eq!(
         scenario.resume_to_stop().await,
-        StopReason::Exited(uscope::ExitStatus::Code(0))
+        StopReason::Exited(microscope::ExitStatus::Code(0))
     );
     scenario.shutdown().await;
 }
@@ -1472,9 +1475,9 @@ async fn function_breakpoints_stop_at_every_function_with_the_name() {
 #[tokio::test]
 async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() {
     let path = "tests/fixtures/c/line-sliding.c";
-    let line = |needle| uscope::LineNumber::new(source_line(path, needle)).expect("line");
+    let line = |needle| microscope::LineNumber::new(source_line(path, needle)).expect("line");
     let comment = line("a comment inside the function");
-    let blank = uscope::LineNumber::new(comment.get() + 1).expect("line");
+    let blank = microscope::LineNumber::new(comment.get() + 1).expect("line");
     let code = line("the next code after the comment");
     let between = line("a comment between the functions");
 
@@ -1491,9 +1494,9 @@ async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() 
     }
 
     assert_eq!(image.breakpoint_line(file, between), None);
-    let last = uscope::LineNumber::new(u64::MAX).expect("line");
+    let last = microscope::LineNumber::new(u64::MAX).expect("line");
     let lines = image
-        .breakpoint_lines(file, uscope::LineNumber::new(1).expect("line")..=last)
+        .breakpoint_lines(file, microscope::LineNumber::new(1).expect("line")..=last)
         .collect::<Vec<_>>();
     assert!(lines.contains(&code) && lines.contains(&line("int doubled")));
     assert!(!lines.contains(&comment) && !lines.contains(&blank) && !lines.contains(&between));
@@ -1558,7 +1561,7 @@ async fn killing_ends_the_inferior_but_keeps_the_session() {
     ));
     let exits = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
-            uscope::DebuggerEvent::InferiorExited {
+            microscope::DebuggerEvent::InferiorExited {
                 process_id, status, ..
             } => Some((process_id, status)),
             _ => None,
@@ -1606,7 +1609,7 @@ async fn killing_a_running_or_attached_process_ends_it() {
     assert!(
         std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
             event,
-            uscope::DebuggerEvent::InferiorExited {
+            microscope::DebuggerEvent::InferiorExited {
                 process_id,
                 status: ExitStatus::Terminated(info),
                 ..
@@ -1621,7 +1624,7 @@ async fn killing_a_running_or_attached_process_ends_it() {
 
 #[tokio::test]
 async fn terminating_asks_the_program_to_end_without_stopping_it() {
-    let sigterm = uscope::signal_named("SIGTERM").expect("SIGTERM");
+    let sigterm = microscope::signal_named("SIGTERM").expect("SIGTERM");
     let mut scenario = Scenario::launch("terminate");
     assert!(
         scenario
@@ -1668,11 +1671,11 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
             .expect("no exit")
             .expect("events")
         {
-            uscope::DebuggerEvent::InferiorExited { status, .. } => {
+            microscope::DebuggerEvent::InferiorExited { status, .. } => {
                 assert_eq!(status, ExitStatus::Code(7));
                 break;
             }
-            uscope::DebuggerEvent::InferiorStopped { reason, .. } => {
+            microscope::DebuggerEvent::InferiorStopped { reason, .. } => {
                 panic!("terminating stopped the program: {reason:?}")
             }
             _ => {}
@@ -1694,7 +1697,7 @@ async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statemen
     let file = image
         .source_file_matching("reexec.c".as_ref())
         .expect("source");
-    let line = uscope::LineNumber::new(header).expect("line");
+    let line = microscope::LineNumber::new(header).expect("line");
     assert!(image.statement_addresses(file.id, line).count() > 1);
     let loop_start = scenario.add_source_breakpoint("reexec.c", header).await;
     assert_eq!(loop_start.locations.len(), 1);
@@ -1732,7 +1735,7 @@ fn assert_basic_source_context(
     assert_eq!(&context.file, source_file);
     assert_eq!(&context.location, source);
     assert_eq!(context.location.line.get(), 6);
-    assert_eq!(current.text.as_ref(), "    return uscope_value;");
+    assert_eq!(current.text.as_ref(), "    return microscope_value;");
     assert_eq!(
         context
             .lines
@@ -1749,8 +1752,8 @@ fn assert_basic_source_context(
 }
 
 fn assert_register_snapshot(
-    registers: &uscope::RegisterSnapshot,
-    state: &uscope::StateSnapshot,
+    registers: &microscope::RegisterSnapshot,
+    state: &microscope::StateSnapshot,
     instruction: VirtualAddress,
 ) {
     assert_eq!(registers.revision, state.revision);

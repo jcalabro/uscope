@@ -76,7 +76,7 @@ impl Add<usize> for Log {
 }
 
 /// A walk's own panic, which ends only the worker it panics on, as a
-/// worker's thread ends when a walk panics in uscope.
+/// worker's thread ends when a walk panics in microscope.
 struct WalkPanicked;
 
 struct Run {

@@ -10,7 +10,7 @@
     "types": [],
     "moduleDetection": "force"
   },
-  "files": ["uscope-visualizer.d.ts"],
+  "files": ["microscope-visualizer.d.ts"],
   "include": [
     "../../views/visualizers/*.js",
     "../../tests/fixtures/**/*.js",

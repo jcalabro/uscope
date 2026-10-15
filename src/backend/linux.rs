@@ -201,8 +201,8 @@ pub fn watchpoint_capabilities() -> WatchpointCapabilities {
     }
 }
 
-const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
-const WAITER_THREAD_NAME: &str = "uscope-waitpid";
+const CONTROLLER_THREAD_NAME: &str = "microscope-controller";
+const WAITER_THREAD_NAME: &str = "microscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
 const TRAP_HARDWARE_BREAKPOINT: i32 = 4;
@@ -1466,7 +1466,7 @@ enum Start {
 /// In development builds, the variable that names a request after which
 /// the controller panics, by the start of its description.
 #[cfg(debug_assertions)]
-const PANIC_AFTER: &str = "USCOPE_TEST_PANIC_AFTER";
+const PANIC_AFTER: &str = "MICROSCOPE_TEST_PANIC_AFTER";
 
 pub fn spawn_controller(
     executable: Executable,

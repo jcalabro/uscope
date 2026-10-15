@@ -12,7 +12,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use uscope::{
+use microscope::{
     Backtrace, CodeRole, DebuggerHandle, ExecutionContext, FrameKind, InferiorState, ModuleId,
     StackFrameId, StackSegment, StopContext, StopId, ThreadActivity, UnwindTermination,
 };
@@ -35,7 +35,7 @@ pub fn check_go_stop(
 }
 
 async fn check(handle: &DebuggerHandle) -> Result<(), String> {
-    let failed = |what: &str, error: uscope::Error| format!("{what}: {error}");
+    let failed = |what: &str, error: microscope::Error| format!("{what}: {error}");
     let snapshot = handle
         .snapshot()
         .await

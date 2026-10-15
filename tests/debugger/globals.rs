@@ -77,7 +77,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
         }
 
         for global in image.globals() {
-            if let uscope::GlobalVariableType::Resolved(type_info) = &global.type_info {
+            if let microscope::GlobalVariableType::Resolved(type_info) = &global.type_info {
                 assert_eq!(
                     image.type_info(type_info.reference),
                     Some(type_info),
@@ -90,7 +90,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
         // Listing is filtered, paged, and ordered by name.
         if fixture == "globals-go-o0" {
             let page = |offset, limit| {
-                handle.globals(uscope::GlobalVariableQuery {
+                handle.globals(microscope::GlobalVariableQuery {
                     filter: Some("main.package".to_owned()),
                     offset,
                     limit,
@@ -131,7 +131,7 @@ async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_
             .unwrap_or_else(|| panic!("{fixture} missing optimized global"));
         assert!(matches!(
             global.type_info,
-            uscope::GlobalVariableType::Resolved(_)
+            microscope::GlobalVariableType::Resolved(_)
         ));
         debugger
             .shutdown()
@@ -184,7 +184,7 @@ async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization(
             .await;
         let reference = match pointer.state {
             VariableState::Available {
-                dereference: uscope::DereferenceState::Available(reference),
+                dereference: microscope::DereferenceState::Available(reference),
                 ..
             } => reference,
             state => panic!("{fixture} global pointer was unavailable: {state:?}"),
@@ -323,8 +323,8 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
     assert!(matches!(
         root.state,
         VariableState::Unavailable(
-            uscope::VariableUnavailableReason::OptimizedOut(_)
-                | uscope::VariableUnavailableReason::UnavailableAtInstruction,
+            microscope::VariableUnavailableReason::OptimizedOut(_)
+                | microscope::VariableUnavailableReason::UnavailableAtInstruction,
         )
     ));
     assert_signed(
@@ -383,8 +383,8 @@ async fn go_package_globals_are_printable_without_source_stepping() {
     assert!(matches!(
         nil.state,
         VariableState::Available {
-            dereference: uscope::DereferenceState::Unavailable {
-                reason: uscope::DereferenceUnavailableReason::Null,
+            dereference: microscope::DereferenceState::Unavailable {
+                reason: microscope::DereferenceUnavailableReason::Null,
                 ..
             },
             ..
@@ -402,8 +402,8 @@ async fn go_package_globals_are_printable_without_source_stepping() {
     let pointer = catalog_global(handle.module_image(), "main.packagePointer");
     assert!(matches!(
         &pointer.type_info,
-        uscope::GlobalVariableType::Resolved(uscope::TypeInfo {
-            kind: uscope::TypeKind::Pointer { .. },
+        microscope::GlobalVariableType::Resolved(microscope::TypeInfo {
+            kind: microscope::TypeKind::Pointer { .. },
             ..
         })
     ));
@@ -468,7 +468,7 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
     assert!(
         matches!(
             constant.state,
-            VariableState::Unavailable(uscope::VariableUnavailableReason::OptimizedOut(_))
+            VariableState::Unavailable(microscope::VariableUnavailableReason::OptimizedOut(_))
         ),
         "{constant:?}"
     );
@@ -481,7 +481,7 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
     assert!(
         matches!(
             pointer.state,
-            VariableState::Unavailable(uscope::VariableUnavailableReason::OptimizedOut(_))
+            VariableState::Unavailable(microscope::VariableUnavailableReason::OptimizedOut(_))
         ),
         "{pointer:?}"
     );
@@ -525,9 +525,9 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     let loaded = scenario
         .operation(
             "list loaded DSO globals",
-            scenario.handle().globals(uscope::GlobalVariableQuery {
+            scenario.handle().globals(microscope::GlobalVariableQuery {
                 filter: Some("dso_".to_owned()),
-                ..uscope::GlobalVariableQuery::default()
+                ..microscope::GlobalVariableQuery::default()
             }),
         )
         .await;
@@ -537,7 +537,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         .find(|entry| entry.variable.name.as_ref() == "dso_external")
         .expect("DSO external global");
     let first_module = external.module.expect("DSO is loaded");
-    let first_reference = uscope::GlobalVariableReference {
+    let first_reference = microscope::GlobalVariableReference {
         module: first_module.id,
         image: external.image,
         variable: external.variable.id,
@@ -560,7 +560,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         .await;
     let cross_module_reference = match cross_module_pointer.state {
         VariableState::Available {
-            dereference: uscope::DereferenceState::Available(reference),
+            dereference: microscope::DereferenceState::Available(reference),
             ..
         } => reference,
         state => panic!("cross-module pointer was unavailable: {state:?}"),
@@ -584,7 +584,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
             "inspect DSO pointer global",
             scenario
                 .handle()
-                .loaded_global(uscope::GlobalVariableReference {
+                .loaded_global(microscope::GlobalVariableReference {
                     module: dso_pointer_module.id,
                     image: dso_pointer.image,
                     variable: dso_pointer.variable.id,
@@ -593,7 +593,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         .await;
     let reference = match dso_pointer.state {
         VariableState::Available {
-            dereference: uscope::DereferenceState::Available(reference),
+            dereference: microscope::DereferenceState::Available(reference),
             ..
         } => reference,
         state => panic!("DSO pointer global was unavailable: {state:?}"),
@@ -617,7 +617,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
             "inspect dynamically loaded TLS global",
             scenario
                 .handle()
-                .loaded_global(uscope::GlobalVariableReference {
+                .loaded_global(microscope::GlobalVariableReference {
                     module: dso_tls_module.id,
                     image: dso_tls.image,
                     variable: dso_tls.variable.id,
@@ -633,7 +633,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     while let Ok(event) = events.try_recv() {
         saw_load |= matches!(
             event,
-            uscope::DebuggerEvent::ModuleLoaded { module, .. }
+            microscope::DebuggerEvent::ModuleLoaded { module, .. }
                 if module.path.ends_with("libglobals.so")
         );
     }
@@ -652,7 +652,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     while let Ok(event) = events.try_recv() {
         saw_unload |= matches!(
             event,
-            uscope::DebuggerEvent::ModuleUnloaded { module, .. }
+            microscope::DebuggerEvent::ModuleUnloaded { module, .. }
                 if module.module.id == first_module.id
         );
     }
@@ -666,9 +666,9 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
     let reloaded = scenario
         .operation(
             "list reloaded DSO globals",
-            scenario.handle().globals(uscope::GlobalVariableQuery {
+            scenario.handle().globals(microscope::GlobalVariableQuery {
                 filter: Some("dso_external".to_owned()),
-                ..uscope::GlobalVariableQuery::default()
+                ..microscope::GlobalVariableQuery::default()
             }),
         )
         .await;
@@ -681,7 +681,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
             "inspect reloaded DSO global",
             scenario
                 .handle()
-                .loaded_global(uscope::GlobalVariableReference {
+                .loaded_global(microscope::GlobalVariableReference {
                     module: reloaded_module.id,
                     image: reloaded.image,
                     variable: reloaded.variable.id,
@@ -763,7 +763,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                     scenario.handle().main_global(global),
                 )
                 .await;
-            let uscope::VariableValue::Scalar(ScalarValue::Signed(value)) =
+            let microscope::VariableValue::Scalar(ScalarValue::Signed(value)) =
                 available_value(&variable.state)
             else {
                 panic!("{fixture}: unavailable TLS variable {variable:?}");
@@ -781,14 +781,14 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                     scenario.handle().main_global(pointer),
                 )
                 .await;
-            let uscope::VariableValue::Address(stored) = available_value(&pointer.state) else {
+            let microscope::VariableValue::Address(stored) = available_value(&pointer.state) else {
                 panic!("{fixture}: TLS pointer is not an address: {pointer:?}");
             };
 
             assert_eq!(stored.address.get(), address, "{fixture}");
             let reference = match pointer.state {
                 VariableState::Available {
-                    dereference: uscope::DereferenceState::Available(reference),
+                    dereference: microscope::DereferenceState::Available(reference),
                     ..
                 } => reference,
                 state => panic!("{fixture}: unavailable TLS pointer {state:?}"),
@@ -888,7 +888,7 @@ async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
             assert_eq!(
                 early.state,
                 VariableState::Unavailable(VariableUnavailableReason::TlsUnavailable(
-                    uscope::TlsUnavailableReason::LookupFailed(
+                    microscope::TlsUnavailableReason::LookupFailed(
                         "the thread has not allocated the module's TLS block".into()
                     )
                 )),
@@ -950,7 +950,7 @@ async fn a_library_with_no_code_is_a_module_with_its_globals_and_tls() {
 }
 
 /// glibc before 2.34 describes its thread structures only in libpthread, so
-/// the TLS of a program that never loads it cannot be found, which uscope
+/// the TLS of a program that never loads it cannot be found, which microscope
 /// says rather than guessing at the C library's layout.
 #[tokio::test]
 async fn tls_on_glibc_before_2_34_without_libpthread_is_unavailable_with_its_reason() {
@@ -968,7 +968,7 @@ async fn tls_on_glibc_before_2_34_without_libpthread_is_unavailable_with_its_rea
         assert_eq!(
             variable.state,
             VariableState::Unavailable(VariableUnavailableReason::TlsUnavailable(
-                uscope::TlsUnavailableReason::LookupFailed(
+                microscope::TlsUnavailableReason::LookupFailed(
                     "no loaded module defines _thread_db_link_map_l_tls_modid, which glibc \
                      before 2.34 defines only in libpthread"
                         .into()
@@ -986,11 +986,11 @@ async fn tls_on_glibc_before_2_34_without_libpthread_is_unavailable_with_its_rea
 }
 
 /// The address and value of a TLS variable in the selected thread.
-fn tls_location(variable: &uscope::Variable) -> (u64, i128) {
+fn tls_location(variable: &microscope::Variable) -> (u64, i128) {
     match &variable.state {
         VariableState::Available {
-            value: uscope::VariableValue::Scalar(ScalarValue::Signed(value)),
-            source: uscope::VariableValueSource::Memory(address),
+            value: microscope::VariableValue::Scalar(ScalarValue::Signed(value)),
+            source: microscope::VariableValueSource::Memory(address),
             ..
         } => (address.get(), *value),
         state => panic!("{} was not available in memory: {state:?}", variable.name),
@@ -1006,7 +1006,7 @@ pub async fn tls_location_by_name(scenario: &Scenario, name: &str) -> (u64, i128
     )
 }
 
-fn catalog_global(image: &ModuleImage, qualified_name: &str) -> uscope::GlobalVariableInfo {
+fn catalog_global(image: &ModuleImage, qualified_name: &str) -> microscope::GlobalVariableInfo {
     image
         .globals()
         .find(|global| global.qualified_name.as_ref() == qualified_name)

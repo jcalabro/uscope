@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     BreakpointId, BreakpointOptions, BreakpointSpec, Condition, Evaluation, ExecutionContext,
     Expression, InferiorState, LaunchOptions, ScalarValue, StackFrameId, StepKind, StopContext,
     StopReason, ThreadId, ThreadState, VariableState, VariableValue,
@@ -49,7 +49,7 @@ async fn integer_in(scenario: &Scenario, thread: ThreadId, text: &str) -> i128 {
     match scenario.operation(text, at.evaluate(&expression)).await {
         Evaluation::Value {
             value:
-                uscope::InspectedValue {
+                microscope::InspectedValue {
                     state:
                         VariableState::Available {
                             value: VariableValue::Scalar(ScalarValue::Signed(value)),
@@ -134,7 +134,7 @@ async fn steps_under_load_stay_with_their_goroutines_and_lose_no_hit() {
             stops += 1;
             assert!(stops < MOST_STOPS, "{fixture}: too many stops");
             if let StopReason::Exited(status) = reason {
-                assert_eq!(status, uscope::ExitStatus::Code(0), "{fixture}");
+                assert_eq!(status, microscope::ExitStatus::Code(0), "{fixture}");
                 break;
             }
 

@@ -9,12 +9,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { card, drawAt } from "./drawings";
-import { expect, fixture, join, root, test, type Uscope } from "./server";
+import { expect, fixture, join, type Microscope, root, test } from "./server";
 
 const views = path.join(root, "tests/fixtures/cpp/mesh/mesh.views");
 
-async function open(page: Page, uscope: Uscope, file = views): Promise<void> {
-  const server = await uscope.start(["--views", file, fixture("mesh")]);
+async function open(page: Page, microscope: Microscope, file = views): Promise<void> {
+  const server = await microscope.start(["--views", file, fixture("mesh")]);
   await join(page, server.link);
   await drawAt(page, "mesh.cpp:124");
 }
@@ -97,9 +97,9 @@ test.describe("the built-in mesh viewer", () => {
 
   test("turns a torus under the pointer and keeps its camera across a step", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await open(page, uscope);
+    await open(page, microscope);
     const board = card(page, "mesh");
     const canvas = canvasOf(board);
     await expect(board.locator(".drawing-caption")).toHaveText("1,920 vertices · 3,840 triangles");
@@ -148,8 +148,8 @@ test.describe("the built-in mesh viewer", () => {
     await expect(canvas).not.toBeFocused();
   });
 
-  test("names what is wrong with a mesh and draws none of it", async ({ page, uscope }) => {
-    await open(page, uscope);
+  test("names what is wrong with a mesh and draws none of it", async ({ page, microscope }) => {
+    await open(page, microscope);
     for (const [path, problem] of [
       ["flown", "vertex 2 is at (NaN, 1, 0)"],
       ["stray", "index 4 is 7, past the last vertex, 3"],
@@ -164,8 +164,8 @@ test.describe("the built-in mesh viewer", () => {
     }
   });
 
-  test("starts afresh when its card comes back on screen", async ({ page, uscope }) => {
-    await open(page, uscope);
+  test("starts afresh when its card comes back on screen", async ({ page, microscope }) => {
+    await open(page, microscope);
     const board = card(page, "mesh");
     const canvas = canvasOf(board);
     await expect(canvas).toHaveAttribute("data-stop", "2");
@@ -183,9 +183,9 @@ test.describe("the built-in mesh viewer", () => {
   });
 });
 
-test("says WebGL is unavailable where it is", async ({ page, uscope, browserName }) => {
+test("says WebGL is unavailable where it is", async ({ page, microscope, browserName }) => {
   test.skip(browserName !== "firefox", "only headless Firefox lacks WebGL");
-  await open(page, uscope);
+  await open(page, microscope);
   const board = card(page, "mesh");
   await expect(board.getByRole("alert")).toContainText(
     /^mesh\.js:\d+:\d+: Error: WebGL is unavailable in this browser Restart$/,
@@ -195,9 +195,9 @@ test("says WebGL is unavailable where it is", async ({ page, uscope, browserName
 
 test("a live 2-D renderer draws a skeleton, names its joints, and opens a bone", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await open(page, uscope);
+  await open(page, microscope);
   const board = card(page, "skeleton");
   await shown(board);
   const canvas = canvasOf(board);
@@ -229,18 +229,21 @@ test("a live 2-D renderer draws a skeleton, names its joints, and opens a bone",
   await expect(canvas).toHaveAttribute("data-session", session as string);
 });
 
-test("a live renderer that stops answering is ended, and restarts", async ({ page, uscope }) => {
+test("a live renderer that stops answering is ended, and restarts", async ({
+  page,
+  microscope,
+}) => {
   const directory = test.info().outputPath("views");
   await mkdir(directory, { recursive: true });
   const file = path.join(directory, "endless.views");
   await writeFile(
     file,
-    'uscope-views 1\nextend c++ engine::Skeleton {\n    visualize "endless" { count = count }\n}\n',
+    'microscope-views 1\nextend c++ engine::Skeleton {\n    visualize "endless" { count = count }\n}\n',
   );
   // It draws, until a key sends it into a loop it never leaves.
   await writeFile(
     path.join(directory, "endless.js"),
-    `uscope.live((canvas) => {
+    `microscope.live((canvas) => {
   const draw = canvas.getContext("2d");
   return {
     frame() {
@@ -254,7 +257,7 @@ test("a live renderer that stops answering is ended, and restarts", async ({ pag
 });
 `,
   );
-  await open(page, uscope, file);
+  await open(page, microscope, file);
   const board = card(page, "skeleton");
   await shown(board);
   const canvas = canvasOf(board);

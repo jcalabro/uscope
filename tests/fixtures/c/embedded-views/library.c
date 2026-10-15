@@ -1,8 +1,8 @@
 // A library that carries a view for its own `struct point`.
 
-#include "uscope_views.h"
+#include "microscope_views.h"
 
-USCOPE_VIEWS_FILE("tests/fixtures/c/embedded-views/library.views");
+MICROSCOPE_VIEWS_FILE("tests/fixtures/c/embedded-views/library.views");
 
 struct point {
     int x;

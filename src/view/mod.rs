@@ -34,7 +34,7 @@ use crate::{TypeInfo, TypeReference, ViewName};
 use bind::{BoundView, Rejection};
 use syntax::View;
 
-/// The view files built into uscope, in the order they are tried.
+/// The view files built into microscope, in the order they are tried.
 const BUILT_IN: [(&str, &str); 16] = [
     (
         "libstdc++.views",
@@ -72,7 +72,7 @@ const BUILT_IN: [(&str, &str); 16] = [
     ("glibc.views", include_str!("../../views/glibc.views")),
 ];
 
-/// The kernels built into uscope: each one's name, the source it is built
+/// The kernels built into microscope: each one's name, the source it is built
 /// from, and its module, which `just build-test-programs` checks is what
 /// that source builds.
 const BUILT_IN_KERNELS: [(&str, &str, &[u8]); 1] = [(
@@ -81,7 +81,7 @@ const BUILT_IN_KERNELS: [(&str, &str, &[u8]); 1] = [(
     include_bytes!("../../views/kernels/rust-btree.wasm"),
 )];
 
-/// The renderers built into uscope, which any `visualize` may call: each
+/// The renderers built into microscope, which any `visualize` may call: each
 /// one's name and its JavaScript (`docs/visualizers.md`). They use only
 /// the API every renderer has.
 const BUILT_IN_RENDERERS: [(&str, &str); 11] = [

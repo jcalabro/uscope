@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use uscope::syscalls::blobs;
-use uscope::syscalls::fds::{Description, FdTable, Kind as FdKind};
-use uscope::syscalls::{
+use microscope::syscalls::blobs;
+use microscope::syscalls::fds::{Description, FdTable, Kind as FdKind};
+use microscope::syscalls::{
     Abi, Capture, CaptureState, EventFlags, Outcome, Pid, ReadAt, SyscallEvent, SyscallId, Tid,
 };
 

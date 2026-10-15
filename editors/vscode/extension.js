@@ -1,5 +1,5 @@
 // @ts-check
-// Starts `uscope dap` for uscope debug sessions, opens a launch.json when
+// Starts `microscope dap` for microscope debug sessions, opens a launch.json when
 // there is no configuration to debug, offers the workspace's programs to
 // launch, picks processes to attach to, and shows values in the editor:
 // whole expressions on hover, and each variable's value on the lines where
@@ -14,26 +14,26 @@ const vscode = require('vscode');
 
 const LANGUAGES = ['c', 'cpp', 'rust', 'go', 'zig'];
 
-/** The uscope sessions running now. */
+/** The microscope sessions running now. */
 const sessions = new Set();
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
     const languages = LANGUAGES.map((language) => ({ language }));
     context.subscriptions.push(
-        vscode.debug.registerDebugAdapterDescriptorFactory('uscope', { createDebugAdapterDescriptor }),
-        vscode.debug.registerDebugConfigurationProvider('uscope', { resolveDebugConfiguration }),
+        vscode.debug.registerDebugAdapterDescriptorFactory('microscope', { createDebugAdapterDescriptor }),
+        vscode.debug.registerDebugConfigurationProvider('microscope', { resolveDebugConfiguration }),
         vscode.debug.registerDebugConfigurationProvider(
-            'uscope',
+            'microscope',
             { provideDebugConfigurations },
             vscode.DebugConfigurationProviderTriggerKind.Dynamic,
         ),
-        vscode.commands.registerCommand('uscope.pickProcess', pickProcess),
-        vscode.commands.registerCommand('uscope.toggleHexadecimal', toggleHexadecimal),
+        vscode.commands.registerCommand('microscope.pickProcess', pickProcess),
+        vscode.commands.registerCommand('microscope.toggleHexadecimal', toggleHexadecimal),
         vscode.languages.registerEvaluatableExpressionProvider(languages, { provideEvaluatableExpression }),
         vscode.languages.registerInlineValuesProvider(languages, { provideInlineValues }),
         vscode.debug.onDidStartDebugSession((session) => {
-            if (session.type === 'uscope') {
+            if (session.type === 'microscope') {
                 sessions.add(session);
                 if (hexadecimal()) {
                     sendValueFormat(session);
@@ -42,7 +42,7 @@ function activate(context) {
         }),
         vscode.debug.onDidTerminateDebugSession((session) => sessions.delete(session)),
         vscode.workspace.onDidChangeConfiguration((event) => {
-            if (event.affectsConfiguration('uscope.hexadecimal')) {
+            if (event.affectsConfiguration('microscope.hexadecimal')) {
                 updateHexadecimal();
             }
         }),
@@ -53,11 +53,11 @@ function activate(context) {
 /** @param {vscode.DebugSession} session */
 function createDebugAdapterDescriptor(session) {
     const folder = session.workspaceFolder;
-    const settings = vscode.workspace.getConfiguration('uscope', folder);
-    const setting = settings.get('path', 'uscope');
+    const settings = vscode.workspace.getConfiguration('microscope', folder);
+    const setting = settings.get('path', 'microscope');
     const command = findExecutable(setting, folder?.uri.fsPath);
     if (command === undefined) {
-        throw new Error(`Cannot find uscope at "${setting}". Install uscope on PATH or set uscope.path.`);
+        throw new Error(`Cannot find microscope at "${setting}". Install microscope on PATH or set microscope.path.`);
     }
     const args = ['dap'];
     const log = settings.get('logFile', '');
@@ -82,7 +82,7 @@ function expandPath(setting, workspaceFolder) {
 }
 
 /**
- * Resolves the uscope.path setting to an executable file: a name searched
+ * Resolves the microscope.path setting to an executable file: a name searched
  * for on PATH, or a path that may start with ${workspaceFolder} or ${userHome}.
  * Relative paths start at the workspace folder.
  *
@@ -122,7 +122,7 @@ function resolveDebugConfiguration(folder, configuration) {
         return configuration;
     }
     if (folder === undefined) {
-        vscode.window.showErrorMessage('Open a folder to create a launch.json for uscope.');
+        vscode.window.showErrorMessage('Open a folder to create a launch.json for microscope.');
         return undefined;
     }
     return null;
@@ -146,9 +146,9 @@ function provideDebugConfigurations(folder) {
     return programs(folder.uri.fsPath).map((program) => {
         const relative = path.relative(folder.uri.fsPath, program);
         return {
-            type: 'uscope',
+            type: 'microscope',
             request: 'launch',
-            name: `uscope: ${relative}`,
+            name: `microscope: ${relative}`,
             program: `\${workspaceFolder}/${relative}`,
             cwd: '${workspaceFolder}',
         };
@@ -329,17 +329,17 @@ function processes() {
     return found.sort((first, second) => second.started - first.started || second.pid - first.pid);
 }
 
-const hexadecimal = () => vscode.workspace.getConfiguration('uscope').get('hexadecimal', false);
+const hexadecimal = () => vscode.workspace.getConfiguration('microscope').get('hexadecimal', false);
 
-/** Flips the uscope.hexadecimal setting, which every uscope session follows. */
+/** Flips the microscope.hexadecimal setting, which every microscope session follows. */
 async function toggleHexadecimal() {
-    await vscode.workspace.getConfiguration('uscope')
+    await vscode.workspace.getConfiguration('microscope')
         .update('hexadecimal', !hexadecimal(), vscode.ConfigurationTarget.Global);
 }
 
 /** Shows the setting's state to menus and tells running sessions. */
 function updateHexadecimal() {
-    vscode.commands.executeCommand('setContext', 'uscope.hexadecimal', hexadecimal());
+    vscode.commands.executeCommand('setContext', 'microscope.hexadecimal', hexadecimal());
     for (const session of sessions) {
         sendValueFormat(session);
     }
@@ -347,7 +347,7 @@ function updateHexadecimal() {
 
 /** @param {vscode.DebugSession} session */
 function sendValueFormat(session) {
-    session.customRequest('uscope/setValueFormat', { hex: hexadecimal() }).then(undefined, () => {
+    session.customRequest('microscope/setValueFormat', { hex: hexadecimal() }).then(undefined, () => {
         // The session ended, or has not started a program yet; a new one is
         // told when it starts.
     });
@@ -363,7 +363,7 @@ function sendValueFormat(session) {
  * @param {vscode.Position} position
  */
 function provideEvaluatableExpression(document, position) {
-    if (vscode.debug.activeDebugSession?.type !== 'uscope') {
+    if (vscode.debug.activeDebugSession?.type !== 'microscope') {
         return undefined;
     }
     const found = expressionAt(document.lineAt(position.line).text, position.character);
@@ -485,7 +485,7 @@ function opening(text, close) {
  */
 async function provideInlineValues(document, viewPort, context) {
     const session = vscode.debug.activeDebugSession;
-    if (session?.type !== 'uscope') {
+    if (session?.type !== 'microscope') {
         return undefined;
     }
     try {

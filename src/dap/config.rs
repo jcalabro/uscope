@@ -9,12 +9,12 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
+use microscope::{
+    AssemblySyntax, CoreDumpOptions, DebugFileOptions, ProcessId, SignalPolicy, SourcePathMap,
+};
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
-use uscope::{
-    AssemblySyntax, CoreDumpOptions, DebugFileOptions, ProcessId, SignalPolicy, SourcePathMap,
-};
 
 /// How the session obtains its target.
 #[derive(Debug)]
@@ -71,7 +71,7 @@ pub struct Configuration {
     pub signals: Vec<(u64, Vec<String>)>,
 
     /// View files to present values with, ahead of the project's and the
-    /// user's, and where the project's are: in `.uscope/views` under it.
+    /// user's, and where the project's are: in `.microscope/views` under it.
     pub view_files: Vec<PathBuf>,
     pub working_directory: Option<PathBuf>,
 
@@ -346,7 +346,7 @@ fn common(
 
     let mut signals = Vec::new();
     for (name, actions) in parsed.signals {
-        let code = uscope::signal_named(&name)
+        let code = microscope::signal_named(&name)
             .ok_or_else(|| format!("invalid {what} at signals.{name}: unknown signal"))?;
         let actions = match actions {
             Actions::One(action) => vec![action],
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn launch_configurations_read_every_field_and_keep_rule_order() {
         let configuration = launch(json!({
-            "type": "uscope", "request": "launch", "name": "x", "__sessionId": "y",
+            "type": "microscope", "request": "launch", "name": "x", "__sessionId": "y",
             "program": "/bin/true", "args": ["a", "b c"], "cwd": "/tmp",
             "env": {"KEEP": "1", "DROP": null},
             "stopOnEntry": true,
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn a_child_session_carries_over_what_presents_and_handles_the_program() {
         let shared = json!({
-            "type": "uscope", "followForks": true, "sourceMap": [["/a", "/b"]], "viewFiles": ["v.toml"],
+            "type": "microscope", "followForks": true, "sourceMap": [["/a", "/b"]], "viewFiles": ["v.toml"],
             "disassemblySyntax": "att", "signals": {"SIGUSR1": "nostop"}, "cwd": "/w",
         });
         let mut parent = shared.clone();

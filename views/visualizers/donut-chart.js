@@ -15,8 +15,8 @@ const HEIGHT = 260;
 const MOST = 7;
 const GAP = 2;
 
-uscope.draw((input, { previous, width, paths }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, paths }) => {
+  const theme = microscope.theme;
   const slices = slicesOf(input, paths);
   const shares = new Map();
   if (previous !== null) {
@@ -60,9 +60,9 @@ uscope.draw((input, { previous, width, paths }) => {
     const fill = isOther ? theme.ink3 : theme.series[names.indexOf(slice.label)];
     const title = `${slice.label}: ${slice.text} · ${percent(share)}${change}`;
     if (sorted.length === 1) {
-      shapes.push(uscope.path({ d: ring(cx, cy, outer, inner), fill, title, select: slice.select }));
+      shapes.push(microscope.path({ d: ring(cx, cy, outer, inner), fill, title, select: slice.select }));
     } else {
-      shapes.push(uscope.path({ d: wedge(cx, cy, outer, inner, start + pad, end - pad, start + padIn, end - padIn), fill, title, select: slice.select }));
+      shapes.push(microscope.path({ d: wedge(cx, cy, outer, inner, start + pad, end - pad, start + padIn, end - padIn), fill, title, select: slice.select }));
     }
     if (share >= 0.04) labels.push({ slice, share, middle: (start + end) / 2 });
   }
@@ -75,21 +75,21 @@ uscope.draw((input, { previous, width, paths }) => {
       const x = cx + (outer + 14) * Math.cos(item.middle);
       const anchor = side > 0 ? "start" : "end";
       shapes.push(
-        uscope.line({ x1: cx + (outer + 2) * Math.cos(item.middle), y1: cy + (outer + 2) * Math.sin(item.middle), x2: x - side * 3, y2: item.y, stroke: theme.ink3 }),
-        uscope.text({ x, y: item.y - 2, text: truncate(item.slice.label, W / 2 - outer - 30), size: 11, anchor, fill: theme.ink2, title: item.slice.label }),
-        uscope.text({ x, y: item.y + 11, text: `${item.slice.text} · ${percent(item.share)}`, size: 11, family: "mono", anchor, fill: theme.ink }),
+        microscope.line({ x1: cx + (outer + 2) * Math.cos(item.middle), y1: cy + (outer + 2) * Math.sin(item.middle), x2: x - side * 3, y2: item.y, stroke: theme.ink3 }),
+        microscope.text({ x, y: item.y - 2, text: truncate(item.slice.label, W / 2 - outer - 30), size: 11, anchor, fill: theme.ink2, title: item.slice.label }),
+        microscope.text({ x, y: item.y + 11, text: `${item.slice.text} · ${percent(item.share)}`, size: 11, family: "mono", anchor, fill: theme.ink }),
       );
     }
   }
   shapes.push(
-    uscope.text({ x: cx, y: cy - 2, text: exactSum(slices), size: 15, family: "mono", anchor: "middle", fill: theme.ink, title: `total ${exactSum(slices)}` }),
-    uscope.text({ x: cx, y: cy + 14, text: "total", size: 11, anchor: "middle", fill: theme.ink3 }),
+    microscope.text({ x: cx, y: cy - 2, text: exactSum(slices), size: 15, family: "mono", anchor: "middle", fill: theme.ink, title: `total ${exactSum(slices)}` }),
+    microscope.text({ x: cx, y: cy + 14, text: "total", size: 11, anchor: "middle", fill: theme.ink3 }),
   );
   const caption = [`${slices.length} ${slices.length === 1 ? "slice" : "slices"}`, `total ${exactSum(slices)}`];
   if (rest.length > 0) caption.push(`${drawn.length} largest + Other (${rest.length}, ${percent(rest.reduce((sum, slice) => sum + slice.value, 0) / (total || 1))})`);
   if (labels.length < all.filter((slice) => slice.value > 0).length) caption.push("slices under 4%: hover or the Table");
   if (shares.size > 0) caption.push("titles give each share's change");
-  return uscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
 });
 
 /** The slices: each value with its label and exact text. */

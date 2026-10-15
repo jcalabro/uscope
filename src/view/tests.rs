@@ -66,7 +66,7 @@ fn add_containers(world: &mut World) {
     world.variable("cut", text, &bytes(&[0x7_fffd, 300]));
 }
 
-const VIEWS: &str = "uscope-views 1
+const VIEWS: &str = "microscope-views 1
 view c intvec {
     check n <= cap
     show sequence(n) for i in range(n) => data[i]
@@ -207,13 +207,13 @@ fn text_reads_its_length_or_to_its_terminator_and_says_how_it_ended() {
     );
     assert_eq!(cut.summary, "\"abc\"... <unreadable at 0x80000>");
 
-    let terminated = set("uscope-views 1\nview c str_t { show text(p) }\n");
+    let terminated = set("microscope-views 1\nview c str_t { show text(p) }\n");
     assert_eq!(summary(&mut world, &terminated, "s"), "\"hello\"");
 }
 
 #[test]
 fn an_alternative_that_does_not_bind_falls_through_and_says_why() {
-    let views = set("uscope-views 1
+    let views = set("microscope-views 1
 view c intvec {
     let size = length
     show sequence(size) for i in range(size) => data[i]
@@ -267,7 +267,7 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
         let views = ViewSet::new([(
             "test.views",
             format!(
-                "uscope-views 1\nview {header} {{\n    show sequence({count}) for i in range({count}) => *((T*)&items[0] + i)\n}}\n"
+                "microscope-views 1\nview {header} {{\n    show sequence({count}) for i in range({count}) => *((T*)&items[0] + i)\n}}\n"
             )
             .as_str(),
         )]);
@@ -300,7 +300,7 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
     );
     let views = ViewSet::new([(
         "test.views",
-        "uscope-views 1\nview c++ app::detail::Pair<T> {\n    show empty(\"one\")\n}\nview c++ app::detail::Pair {\n    show empty(\"any\")\n}\n",
+        "microscope-views 1\nview c++ app::detail::Pair<T> {\n    show empty(\"one\")\n}\nview c++ app::detail::Pair {\n    show empty(\"any\")\n}\n",
     )]);
     assert_eq!(summary(&mut world, &views, "p"), "any");
 
@@ -316,7 +316,7 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
     world.variable("f", closure, &ints([7]));
     let views = ViewSet::new([(
         "test.views",
-        "uscope-views 1\nview rust app::**::`{async_fn#0}`::`{closure_env#0}` {\n    show value(x)\n}\n",
+        "microscope-views 1\nview rust app::**::`{async_fn#0}`::`{closure_env#0}` {\n    show value(x)\n}\n",
     )]);
     assert!(views.errors().is_empty(), "{:?}", views.errors());
     assert_eq!(summary(&mut world, &views, "f"), "7");
@@ -341,15 +341,15 @@ fn errors(text: &str) -> Vec<String> {
 fn view_file_errors_point_at_their_line_and_column_and_skip_one_view() {
     assert_eq!(
         errors("view c x { show empty(\"\") }"),
-        ["bad.views:1:1: a view file begins with `uscope-views 1`"]
+        ["bad.views:1:1: a view file begins with `microscope-views 1`"]
     );
     assert_eq!(
-        errors("uscope-views 2\n"),
-        ["bad.views:1:1: this uscope reads views of version 1"]
+        errors("microscope-views 2\n"),
+        ["bad.views:1:1: this microscope reads views of version 1"]
     );
     let file = syntax::parse(
         "bad.views",
-        "uscope-views 1
+        "microscope-views 1
 view c first {
     let x = n +
     show empty(\"\")
@@ -423,7 +423,7 @@ view kotlin seventh {
 fn recovery_from_an_error_steps_over_whole_characters() {
     let file = syntax::parse(
         "bad.views",
-        "uscope-views 1\n\u{2603}é view c x {\nview c second {\n    show empty(\"ok\")\n}\n",
+        "microscope-views 1\n\u{2603}é view c x {\nview c second {\n    show empty(\"ok\")\n}\n",
     );
     assert_eq!(file.views.len(), 1, "{:?}", file.errors);
     assert_eq!(file.views[0].pattern.base, "second");
@@ -433,7 +433,7 @@ fn recovery_from_an_error_steps_over_whole_characters() {
 fn expressions_end_where_their_statement_or_shape_does() {
     let file = syntax::parse(
         "ok.views",
-        "uscope-views 1 # the version
+        "microscope-views 1 # the version
 view c++ app::Thing<T, _> {   # a comment
     let begin = first
         or `or`.second       # an alternative on the next line
@@ -517,7 +517,7 @@ fn bound_views_reject_what_does_not_type_check() {
         ("show value(self.missing)", "has no member"),
     ] {
         let views = set(&format!(
-            "uscope-views 1\nview c intvec {{\n    {body}\n}}\n"
+            "microscope-views 1\nview c intvec {{\n    {body}\n}}\n"
         ));
         let choice = choose(&views, world.type_of("v"), &world);
         match (&choice.bound, reason) {
@@ -866,7 +866,7 @@ fn every_example_in_the_views_reference_holds() {
     let mut rows = 0;
     let mut lines = REFERENCE.lines().enumerate();
     while let Some((_, line)) = lines.next() {
-        if line.trim() != "```uscope-view-example" {
+        if line.trim() != "```microscope-view-example" {
             continue;
         }
 
@@ -1090,7 +1090,7 @@ fn add_linked(world: &mut World) {
     world.variable("buckets", chained, &bytes(&[array, 3, 3]));
 }
 
-const LINKED_VIEWS: &str = "uscope-views 1
+const LINKED_VIEWS: &str = "microscope-views 1
 view c list {
     show sequence(count) for x in list(head, n => n->next) => x->value
 }
@@ -1139,7 +1139,7 @@ fn paged(world: &mut World, views: &ViewSet, name: &str, size: u64) -> Vec<Strin
 #[test]
 fn a_list_without_a_count_is_counted_as_far_as_the_budget_allows() {
     let mut world = world();
-    let views = set("uscope-views 1
+    let views = set("microscope-views 1
 view c list {
     show sequence(_) for x in list(head, n => n->next) => x->value
 }
@@ -1282,7 +1282,7 @@ fn types_are_constructed_from_arguments_and_layouts_named() {
     let views = |body: &str| {
         ViewSet::new([(
             "test.views",
-            format!("uscope-views 1\nview c++ lib::holder<T> {{\n{body}\n}}\n").as_str(),
+            format!("microscope-views 1\nview c++ lib::holder<T> {{\n{body}\n}}\n").as_str(),
         )])
     };
 
@@ -1379,7 +1379,7 @@ fn types_are_constructed_from_the_arguments_of_a_function_at_run_time() {
         let views = ViewSet::new([(
             "test.views",
             format!(
-                "uscope-views 1\nview c++ lib::holder<T> {{\n    show dynamic(&first, lib::node_of<T> of {code})\n}}\n"
+                "microscope-views 1\nview c++ lib::holder<T> {{\n    show dynamic(&first, lib::node_of<T> of {code})\n}}\n"
             )
             .as_str(),
         )]);
@@ -1416,7 +1416,7 @@ fn types_are_constructed_from_the_arguments_of_a_function_at_run_time() {
 fn generators_and_maps_parse_with_their_errors_where_they_are() {
     let file = syntax::parse(
         "ok.views",
-        "uscope-views 1
+        "microscope-views 1
 view c a {
     show map(n)
         for x in inorder(root, n => n->left, n => n->right)
@@ -1466,7 +1466,9 @@ view c a {
             "expected the node's name",
         ),
     ] {
-        let messages = errors(&format!("uscope-views 1\nview c a {{\n    {body}\n}}\n"));
+        let messages = errors(&format!(
+            "microscope-views 1\nview c a {{\n    {body}\n}}\n"
+        ));
         assert!(
             messages.iter().any(|message| message.contains(error)),
             "`{body}`: {messages:?}"

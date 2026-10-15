@@ -34,7 +34,7 @@ fn symbolize_writes_in_symbols_a_recording_left_for_later() {
     )
     .expect("copy the program");
     let profile = scratch.path().join("basic.usprof");
-    let recorded = uscope_command()
+    let recorded = microscope_command()
         .args([
             "record",
             "--symbols",
@@ -48,12 +48,12 @@ fn symbolize_writes_in_symbols_a_recording_left_for_later() {
         .arg(&program)
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope record");
+        .expect("run microscope record");
     assert!(recorded.status.success(), "{recorded:?}");
     std::fs::remove_file(&program).expect("delete the program");
     let profile = profile.to_string_lossy().into_owned();
 
-    let unnamed = assert_success(uscope(&["report", &profile]));
+    let unnamed = assert_success(microscope(&["report", &profile]));
     assert!(
         unnamed.contains(
             "basic keeps its addresses: its file is gone, and no debug directory or server has \
@@ -64,7 +64,7 @@ fn symbolize_writes_in_symbols_a_recording_left_for_later() {
     assert!(!unnamed.contains("breakpoint_target"), "{unnamed}");
 
     let root = fixture("build/test-programs/split/debug-root");
-    let symbolized = uscope(&[
+    let symbolized = microscope(&[
         "symbolize",
         &profile,
         "--debug-dir",
@@ -73,7 +73,7 @@ fn symbolize_writes_in_symbols_a_recording_left_for_later() {
     assert!(symbolized.status.success(), "{symbolized:?}");
     let said = String::from_utf8_lossy(&symbolized.stderr);
     assert!(said.contains("basic: 4 frames from "), "{said}");
-    let named = assert_success(uscope(&["report", &profile]));
+    let named = assert_success(microscope(&["report", &profile]));
     assert!(!named.contains("keeps its addresses"), "{named}");
     assert_in_order(&named, &["breakpoint_target", "main"]);
 }
@@ -82,19 +82,19 @@ fn symbolize_writes_in_symbols_a_recording_left_for_later() {
 fn convert_writes_what_go_and_flame_graph_tools_read() {
     let scratch = support::ScratchDir::new("cli-convert");
     let profile = scratch.path().join("leaf.usprof");
-    let recorded = uscope_command()
+    let recorded = microscope_command()
         .args(["record", "--function", "leaf", "-o"])
         .arg(&profile)
         .arg("--")
         .arg(fixture("build/test-programs/profile-stacks-gcc-o0"))
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope record");
+        .expect("run microscope record");
     assert!(recorded.status.success());
     let profile = profile.to_string_lossy().into_owned();
 
     let pprof = scratch.path().join("leaf.pb.gz");
-    let converted = uscope(&["convert", &profile, &pprof.to_string_lossy()]);
+    let converted = microscope(&["convert", &profile, &pprof.to_string_lossy()]);
     assert!(converted.status.success());
     assert!(String::from_utf8_lossy(&converted.stderr).contains("without times, threads"));
     let raw = Command::new(fixture("build/test-programs/pprof"))
@@ -112,7 +112,7 @@ fn convert_writes_what_go_and_flame_graph_tools_read() {
         .sum();
     assert_eq!(samples, 6, "{raw}");
     assert!(raw.contains(" leaf "), "{raw}");
-    let back = assert_success(uscope(&["report", &pprof.to_string_lossy()]));
+    let back = assert_success(microscope(&["report", &pprof.to_string_lossy()]));
     assert_in_order(
         &back,
         &[
@@ -123,7 +123,11 @@ fn convert_writes_what_go_and_flame_graph_tools_read() {
     );
 
     let folded = scratch.path().join("leaf.folded");
-    assert_success(uscope(&["convert", &profile, &folded.to_string_lossy()]));
+    assert_success(microscope(&[
+        "convert",
+        &profile,
+        &folded.to_string_lossy(),
+    ]));
     let folded = std::fs::read_to_string(&folded).expect("the folded stacks");
     let mut weight = 0;
     for line in folded.lines() {
@@ -134,7 +138,7 @@ fn convert_writes_what_go_and_flame_graph_tools_read() {
 
     assert_eq!(weight, 6, "{folded}");
 
-    let refused = uscope(&["convert", &profile, "out.bin"]);
+    let refused = microscope(&["convert", &profile, "out.bin"]);
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("choose one with --to"));
 }
@@ -144,7 +148,7 @@ fn convert_writes_what_go_and_flame_graph_tools_read() {
 fn convert_writes_instrumentation_as_a_chrome_trace() {
     let scratch = support::ScratchDir::new("cli-chrome");
     let profile = scratch.path().join("zones.usprof");
-    let recorded = uscope_command()
+    let recorded = microscope_command()
         .args(["record", "-o"])
         .arg(&profile)
         .arg("--")
@@ -152,11 +156,11 @@ fn convert_writes_instrumentation_as_a_chrome_trace() {
         .arg("zones")
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope record");
+        .expect("run microscope record");
     assert!(recorded.status.success());
     let trace = scratch.path().join("zones.json");
     assert!(
-        uscope(&[
+        microscope(&[
             "convert",
             &profile.to_string_lossy(),
             &trace.to_string_lossy()
@@ -188,26 +192,26 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
-/// A uscope command that reads the tests' settings file rather than the
+/// A microscope command that reads the tests' settings file rather than the
 /// developer's, so that neither theirs nor their locale can change a test's
 /// outcome.
-fn uscope_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+fn microscope_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
     command.env(
-        "USCOPE_CONFIG",
+        "MICROSCOPE_CONFIG",
         fixture("tests/support/settings/ascii.toml"),
     );
     command
 }
 
-/// Runs uscope in the repository with no standard input.
-fn uscope(arguments: &[&str]) -> Output {
-    uscope_command()
+/// Runs microscope in the repository with no standard input.
+fn microscope(arguments: &[&str]) -> Output {
+    microscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope")
+        .expect("run microscope")
 }
 
 /// Runs `commands` in batch mode after the other `arguments`.
@@ -218,7 +222,7 @@ fn batch_output(arguments: &[&str], commands: &[&str]) -> Output {
     }
 
     all.extend_from_slice(arguments);
-    uscope(&all)
+    microscope(&all)
 }
 
 /// Runs `commands` in batch mode and returns the output of the session,
@@ -227,24 +231,24 @@ fn batch(arguments: &[&str], commands: &[&str]) -> String {
     assert_success(batch_output(arguments, commands))
 }
 
-/// Runs `commands` through uscope's standard input, which reports each
+/// Runs `commands` through microscope's standard input, which reports each
 /// failed command and carries on, and returns stdout and stderr.
 fn piped(arguments: &[&str], commands: &[&str]) -> (String, String) {
-    let mut child = uscope_command()
+    let mut child = microscope_command()
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start uscope");
-    let mut stdin = child.stdin.take().expect("uscope's stdin");
+        .expect("start microscope");
+    let mut stdin = child.stdin.take().expect("microscope's stdin");
     for command in commands {
         writeln!(stdin, "{command}").expect("write a command");
     }
 
     drop(stdin);
-    let output = child.wait_with_output().expect("wait for uscope");
+    let output = child.wait_with_output().expect("wait for microscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     (assert_success(output), stderr)
 }
@@ -252,7 +256,7 @@ fn piped(arguments: &[&str], commands: &[&str]) -> (String, String) {
 fn assert_success(output: Output) -> String {
     assert!(
         output.status.success(),
-        "uscope failed:\nstdout:\n{}\nstderr:\n{}",
+        "microscope failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -332,25 +336,25 @@ fn process_state(pid: u32) -> Option<char> {
 /// program, such as a tokio fixture, takes seconds on a loaded machine.
 const DEADLINE: Duration = Duration::from_secs(30);
 
-/// A uscope process whose output a test reads as it arrives. It is killed if
-/// the test ends first, which also kills an inferior it launched or attached
-/// to, since uscope traces with `PTRACE_O_EXITKILL`.
-struct Uscope {
+/// A microscope process whose output a test reads as it arrives. It is killed
+/// if the test ends first, which also kills an inferior it launched or attached
+/// to, since microscope traces with `PTRACE_O_EXITKILL`.
+struct Microscope {
     child: Child,
     stdout: mpsc::Receiver<String>,
     transcript: String,
     stderr: Option<thread::JoinHandle<String>>,
 }
 
-impl Uscope {
-    /// Starts uscope with piped standard streams.
+impl Microscope {
+    /// Starts microscope with piped standard streams.
     fn spawn(command: &mut Command) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("run uscope");
+            .expect("run microscope");
         let stdout = child.stdout.take().expect("stdout pipe");
         let mut stderr = child.stderr.take().expect("stderr pipe");
         let (sender, receiver) = mpsc::channel();
@@ -383,9 +387,9 @@ impl Uscope {
         self.child
             .stdin
             .as_mut()
-            .expect("uscope stdin")
+            .expect("microscope stdin")
             .write_all(text.as_bytes())
-            .expect("write to uscope");
+            .expect("write to microscope");
     }
 
     fn close_stdin(&mut self) {
@@ -401,7 +405,7 @@ impl Uscope {
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(|error| {
                     panic!(
-                        "uscope never printed {what} ({error}):\n{}",
+                        "microscope never printed {what} ({error}):\n{}",
                         self.transcript
                     )
                 });
@@ -413,11 +417,11 @@ impl Uscope {
         }
     }
 
-    /// Waits for uscope to exit and returns everything it printed.
+    /// Waits for microscope to exit and returns everything it printed.
     fn finish(mut self) -> std::process::Output {
         let mut status = None;
-        support::wait_until("uscope exits", || {
-            status = self.child.try_wait().expect("poll uscope");
+        support::wait_until("microscope exits", || {
+            status = self.child.try_wait().expect("poll microscope");
             status.is_some()
         });
         let deadline = Instant::now() + DEADLINE;
@@ -432,7 +436,7 @@ impl Uscope {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("uscope's output never closed:\n{}", self.transcript)
+                    panic!("microscope's output never closed:\n{}", self.transcript)
                 }
             }
         }
@@ -442,7 +446,7 @@ impl Uscope {
             .take()
             .expect("stderr reader")
             .join()
-            .expect("read uscope stderr");
+            .expect("read microscope stderr");
         std::process::Output {
             status: status.expect("exit status"),
             stdout: std::mem::take(&mut self.transcript).into_bytes(),
@@ -451,7 +455,7 @@ impl Uscope {
     }
 }
 
-impl Drop for Uscope {
+impl Drop for Microscope {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -460,7 +464,7 @@ impl Drop for Uscope {
 
 #[test]
 fn help_is_task_oriented_and_progressive() {
-    let short = assert_success(uscope(&["-h"]));
+    let short = assert_success(microscope(&["-h"]));
     assert_in_order(
         &short,
         &[
@@ -473,10 +477,10 @@ fn help_is_task_oriented_and_progressive() {
         ],
     );
     for invocation in [
-        "uscope EXECUTABLE [-- ARGS...]",
-        "uscope --attach PID|NAME [EXECUTABLE]",
-        "uscope --core CORE [EXECUTABLE]",
-        "uscope --launch NAME",
+        "microscope EXECUTABLE [-- ARGS...]",
+        "microscope --attach PID|NAME [EXECUTABLE]",
+        "microscope --core CORE [EXECUTABLE]",
+        "microscope --launch NAME",
     ] {
         assert!(short.contains(invocation), "{short}");
     }
@@ -485,7 +489,7 @@ fn help_is_task_oriented_and_progressive() {
         assert!(!short.contains(advanced), "{short}");
     }
 
-    let long = assert_success(uscope(&["--help"]));
+    let long = assert_success(microscope(&["--help"]));
     assert_in_order(
         &long,
         &[
@@ -502,19 +506,19 @@ fn help_is_task_oriented_and_progressive() {
         assert!(long.contains(advanced), "{long}");
     }
 
-    assert!(!long.contains("uscope dap ["), "{long}");
+    assert!(!long.contains("microscope dap ["), "{long}");
 
     for subcommand in ["dap", "views", "config"] {
         assert!(short.contains(subcommand), "{short}");
-        let own = assert_success(uscope(&[subcommand, "--help"]));
-        assert!(own.contains(&format!("uscope {subcommand}")), "{own}");
+        let own = assert_success(microscope(&[subcommand, "--help"]));
+        assert!(own.contains(&format!("microscope {subcommand}")), "{own}");
     }
 }
 
 #[test]
 fn an_empty_command_prints_short_help() {
-    let empty = uscope(&[]);
-    let short_help = uscope(&["-h"]);
+    let empty = microscope(&[]);
+    let short_help = microscope(&["-h"]);
 
     assert!(
         empty.status.success(),
@@ -584,7 +588,7 @@ fn command_line_errors_explain_themselves() {
             "does not match the image recorded in the core dump: the build-id note differs; allow module mismatches",
         ),
     ] {
-        assert_failure(&uscope(arguments), expected);
+        assert_failure(&microscope(arguments), expected);
     }
 }
 
@@ -606,8 +610,8 @@ fn a_controller_panic_releases_an_attached_process_unharmed() {
     for (after, command) in [("backtrace", "backtrace"), ("continue", "continue")] {
         let mut target = support::ExternalProcess::spawn(&fixture("build/test-programs/attach"));
         let process = target.process_id().get().to_string();
-        let output = uscope_command()
-            .env("USCOPE_TEST_PANIC_AFTER", after)
+        let output = microscope_command()
+            .env("MICROSCOPE_TEST_PANIC_AFTER", after)
             .args(["--batch", "--attach", &process])
             .args(["--eval", "break attach_breakpoint"])
             .args(["--eval", "awatch attach_value"])
@@ -615,7 +619,7 @@ fn a_controller_panic_releases_an_attached_process_unharmed() {
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope");
+            .expect("run microscope");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{after}: {stderr}");
         assert!(stderr.contains("a panic injected"), "{after}: {stderr}");
@@ -657,21 +661,21 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     // Redirected output is plain unless color is forced, and `never` wins
     // over the environment.
     assert_no_sgr(&batch(&[BASIC], &["help"]));
-    let colored_help = assert_success(uscope(&["--color", "always", "-h"]));
+    let colored_help = assert_success(microscope(&["--color", "always", "-h"]));
     assert!(colored_help.contains("\x1b["), "{colored_help:?}");
-    let plain_help = uscope_command()
+    let plain_help = microscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--color", "never", "-h"])
         .output()
-        .expect("run uscope help with color disabled");
+        .expect("run microscope help with color disabled");
     assert_no_sgr(&assert_success(plain_help));
 
-    let never = uscope_command()
+    let never = microscope_command()
         .env("CLICOLOR_FORCE", "1")
         .args(["--batch", "--color", "never", "--eval", "help"])
         .arg(fixture(BASIC))
         .output()
-        .expect("run uscope with color disabled");
+        .expect("run microscope with color disabled");
     assert_no_sgr(&assert_success(never));
 
     let forced = batch_output(
@@ -718,10 +722,10 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
 
 #[test]
 fn batch_mode_executes_a_command_file() {
-    let stdout = assert_success(uscope(&[
+    let stdout = assert_success(microscope(&[
         "--batch",
         "-c",
-        "tests/fixtures/basic.uscope",
+        "tests/fixtures/basic.microscope",
         BASIC,
     ]));
     assert_eq!(stdout.matches("stopped at breakpoint").count(), 2);
@@ -1168,22 +1172,22 @@ fn a_runtimes_frames_fold_into_a_line() {
 #[test]
 fn a_thread_blocked_on_a_future_shows_its_awaits() {
     let backtrace = |program: &str, mode: &str| {
-        let mut uscope = Uscope::spawn(
-            uscope_command()
+        let mut microscope = Microscope::spawn(
+            microscope_command()
                 .args([fixture(program).as_os_str(), "--".as_ref(), mode.as_ref()])
                 .current_dir(env!("CARGO_MANIFEST_DIR")),
         );
-        uscope.send("break truth_reached\nrun\n");
-        let driver = uscope.line("the driving thread", |line| {
+        microscope.send("break truth_reached\nrun\n");
+        let driver = microscope.line("the driving thread", |line| {
             line.starts_with("TRUTH\tdriver\t")
         });
         let driver = driver.rsplit('\t').next().expect("a thread id").to_owned();
-        uscope.line("the checkpoint", |line| {
+        microscope.line("the checkpoint", |line| {
             line.starts_with("stopped at breakpoint 1")
         });
-        uscope.send(&format!("thread {driver}\nbt\nquit\n"));
-        uscope.close_stdin();
-        let stdout = assert_success(uscope.finish());
+        microscope.send(&format!("thread {driver}\nbt\nquit\n"));
+        microscope.close_stdin();
+        let stdout = assert_success(microscope.finish());
         let (_, trace) = stdout
             .split_once(&format!("selected thread {driver}"))
             .unwrap_or_else(|| panic!("the driver's backtrace: {stdout}"));
@@ -1336,13 +1340,13 @@ fn batch_with_settings(settings: &str, arguments: &[&str], commands: &[&str]) ->
 
     all.extend_from_slice(arguments);
     assert_success(
-        uscope_command()
-            .env("USCOPE_CONFIG", &path)
+        microscope_command()
+            .env("MICROSCOPE_CONFIG", &path)
             .args(all)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope"),
+            .expect("run microscope"),
     )
 }
 
@@ -1462,7 +1466,7 @@ fn function_types_read_as_gdb_reads_them() {
                 .and_then(|value| value.rsplit_once(" <"))
                 .map_or("", |(_, function)| function);
 
-            // gdb names a pointer to data by its symbol too; uscope names
+            // gdb names a pointer to data by its symbol too; microscope names
             // only the functions pointers to code enter.
             let expected = if name == "unary_pointer" {
                 ""
@@ -1944,22 +1948,22 @@ fn unique_prefixes_run_their_command_and_aliases_win() {
     let directory = support::ScratchDir::new("cli-prefixes");
     let path = directory.path().join("config.toml");
     std::fs::write(&path, "[aliases]\nfini = \"info breakpoints\"\n").expect("write the settings");
-    let mut child = uscope_command()
-        .env("USCOPE_CONFIG", &path)
+    let mut child = microscope_command()
+        .env("MICROSCOPE_CONFIG", &path)
         .arg(BASIC)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start uscope");
-    let mut stdin = child.stdin.take().expect("uscope's stdin");
+        .expect("start microscope");
+    let mut stdin = child.stdin.take().expect("microscope's stdin");
     for command in ["break main", "fini", "watchp", "dis", "undisp all"] {
         writeln!(stdin, "{command}").expect("write a command");
     }
 
     drop(stdin);
-    let output = child.wait_with_output().expect("wait for uscope");
+    let output = child.wait_with_output().expect("wait for microscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let stdout = assert_success(output);
     assert_in_order(
@@ -2001,7 +2005,7 @@ fn edit_opens_the_editor_at_the_selected_line() {
 #[test]
 fn saved_breakpoint_commands_recreate_the_breakpoints() {
     let directory = support::ScratchDir::new("cli-save-breakpoints");
-    let file = directory.path().join("breakpoints.uscope");
+    let file = directory.path().join("breakpoints.microscope");
     let file_name = file.to_str().expect("a UTF-8 path");
     let stdout = batch(
         &["build/test-programs/hit-counts-gcc-o0"],
@@ -2525,14 +2529,14 @@ fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
             "views are off, so it shows as stored; `set views on` turns them on\n",
             "values show as their views present them\n",
             "(integer) ints[1] + len(ints) = 5\n",
-            "(PathBuf) path = \"/tmp/uscope\"\n",
+            "(PathBuf) path = \"/tmp/microscope\"\n",
             "(VecDeque<i32, alloc::alloc::Global>) ring = len=4 [1, 2, 3, 4]\n",
         ],
     );
 }
 
 /// Values are presented with the session's view files first, then the
-/// project's in `.uscope/views` where the program runs and the user's, then
+/// project's in `.microscope/views` where the program runs and the user's, then
 /// the program's own;
 /// `views clear` forgets the session's, and a file with an error is
 /// reported without ending the session.
@@ -2544,7 +2548,7 @@ fn view_files_loaded_together_stack_as_on_the_command_line() {
     let first = directory.path().join("first.views");
     let second = directory.path().join("second.views");
     for path in [&first, &second] {
-        fs::write(path, "uscope-views 1\n").expect("write a view file");
+        fs::write(path, "microscope-views 1\n").expect("write a view file");
     }
 
     let (first, second) = (first.display().to_string(), second.display().to_string());
@@ -2569,7 +2573,7 @@ fn view_files_loaded_together_stack_as_on_the_command_line() {
     assert_eq!(listings[0], listings[1], "{output}");
 }
 
-/// The project root is the nearest directory with `.uscope/` or `.git`, so
+/// The project root is the nearest directory with `.microscope/` or `.git`, so
 /// a repository inside another project, as a git worktree often is, is a
 /// project of its own and never reads the outer one's settings or state.
 #[test]
@@ -2578,18 +2582,18 @@ fn a_repository_inside_a_project_is_its_own_project() {
     let outer = directory.path().join("outer");
     let inner = outer.join("worktrees/inner");
     let subdirectory = inner.join("src");
-    fs::create_dir_all(outer.join(".uscope/state")).expect("make the outer project");
+    fs::create_dir_all(outer.join(".microscope/state")).expect("make the outer project");
     fs::create_dir_all(&subdirectory).expect("make the inner repository");
 
     // A worktree's `.git` is a file.
     fs::write(inner.join(".git"), "gitdir: elsewhere\n").expect("mark the repository");
     let root = |start: &std::path::Path| {
-        let output = uscope_command()
+        let output = microscope_command()
             .current_dir(start)
             .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .args(["config", "path"])
             .output()
-            .expect("run uscope");
+            .expect("run microscope");
         assert!(output.status.success(), "{output:?}");
         String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -2613,39 +2617,39 @@ fn a_repository_inside_a_project_is_its_own_project() {
 #[test]
 fn view_files_come_from_the_session_the_project_and_the_user() {
     let directory = support::ScratchDir::new("cli-view-files");
-    let project = directory.path().join(".uscope/views");
-    let user = directory.path().join("config/uscope/views");
+    let project = directory.path().join(".microscope/views");
+    let user = directory.path().join("config/microscope/views");
     fs::create_dir_all(&project).expect("make the project's view directory");
     fs::create_dir_all(&user).expect("make the user's view directory");
     fs::write(
         project.join("points.views"),
-        "uscope-views 1\nview c point {\n    format y as hex\n}\n",
+        "microscope-views 1\nview c point {\n    format y as hex\n}\n",
     )
     .expect("write the project's views");
     fs::write(
         user.join("mine.views"),
-        "uscope-views 1\nview c point {\n    show empty(\"the user's\")\n}\nview c intvec {\n    show empty(\"the user's vector\")\n}\n",
+        "microscope-views 1\nview c point {\n    show empty(\"the user's\")\n}\nview c intvec {\n    show empty(\"the user's vector\")\n}\n",
     )
     .expect("write the user's views");
     let session = directory.path().join("session.views");
     fs::write(
         &session,
-        "uscope-views 1\nview c point {\n    show empty(\"the session's\")\n}\n",
+        "microscope-views 1\nview c point {\n    show empty(\"the session's\")\n}\n",
     )
     .expect("write the session's views");
     let broken = directory.path().join("broken.views");
     fs::write(
         &broken,
-        "uscope-views 1\nview c point {\n    show nothing\n}\n",
+        "microscope-views 1\nview c point {\n    show nothing\n}\n",
     )
     .expect("write a broken view file");
     let load_broken = format!("views load {}", broken.display());
 
-    // The project is the one uscope runs in, from any of its directories,
+    // The project is the one microscope runs in, from any of its directories,
     // wherever the program runs.
     let subdirectory = directory.path().join("src");
     fs::create_dir_all(&subdirectory).expect("make a project subdirectory");
-    let output = uscope_command()
+    let output = microscope_command()
         .current_dir(&subdirectory)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
@@ -2669,7 +2673,7 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
         ))
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let stdout = assert_success(output);
     assert_in_order(
@@ -2690,7 +2694,7 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
     );
 }
 
-/// `uscope views check` says which view presents each of a program's types
+/// `microscope views check` says which view presents each of a program's types
 /// that a pattern names, with no process, and fails when a view it was
 /// given presents nothing or binds nothing it names; `views explain` says
 /// why for one type.
@@ -2700,7 +2704,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
     let views = directory.path().join("app.views");
     fs::write(
         &views,
-        "uscope-views 1\nview c point {\n    show value(z)\n}\nview c widget {\n    show empty(\"w\")\n}\n",
+        "microscope-views 1\nview c point {\n    show value(z)\n}\nview c widget {\n    show empty(\"w\")\n}\n",
     )
     .expect("write the views to check");
     let program = concat!(
@@ -2708,14 +2712,14 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
         "/build/test-programs/embedded-views"
     );
     let run = |arguments: &[&std::ffi::OsStr]| {
-        uscope_command()
+        microscope_command()
             .current_dir(directory.path())
             .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .arg("views")
             .args(arguments)
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope views")
+            .expect("run microscope views")
     };
 
     let clean = run(&["check".as_ref(), program.as_ref()]);
@@ -2749,7 +2753,7 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
     let broken = directory.path().join("broken.views");
     fs::write(
         &broken,
-        "uscope-views 1\nview c intvec {\n    show nothing\n}\n",
+        "microscope-views 1\nview c intvec {\n    show nothing\n}\n",
     )
     .expect("write a broken view file");
     let refused = run(&[
@@ -2781,24 +2785,24 @@ fn views_check_and_explain_show_drawings_and_their_renderers() {
     let views = directory.path().join("plots.views");
     fs::write(
         &views,
-        "uscope-views 1\nextend rust chess::Board {\n    visualize \"plot\" { values = nothing }\n    visualize \"line-plot\" { values = colors }\n}\n",
+        "microscope-views 1\nextend rust chess::Board {\n    visualize \"plot\" { values = nothing }\n    visualize \"line-plot\" { values = colors }\n}\n",
     )
     .expect("write the views");
     fs::write(
         directory.path().join("plot.js"),
-        "uscope.draw(() => null);\n",
+        "microscope.draw(() => null);\n",
     )
     .expect("write the renderer");
     let program = concat!(env!("CARGO_MANIFEST_DIR"), "/build/test-programs/chess");
     let run = |arguments: &[&std::ffi::OsStr]| {
-        uscope_command()
+        microscope_command()
             .current_dir(directory.path())
             .env("XDG_CONFIG_HOME", directory.path().join("config"))
             .arg("views")
             .args(arguments)
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope views")
+            .expect("run microscope views")
     };
 
     // The program carries its views and the renderer they name.
@@ -2843,7 +2847,7 @@ fn views_check_and_explain_show_drawings_and_their_renderers() {
             "renderers, which only the web page runs:",
             "plot (",
             "plot.js):",
-            "    uscope.draw(() => null);",
+            "    microscope.draw(() => null);",
             "chess-board (chess.views[1]):",
         ],
     );
@@ -2859,7 +2863,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
     let views = directory.path().join("forest.views");
     fs::write(
         &views,
-        "uscope-views 1\nview c tree {\n    show sequence(count) for at in kernel(\"preorder\", root, offsetof(node, child), offsetof(node, sibling))\n        => ((node *)at)->value * 10\n}\n",
+        "microscope-views 1\nview c tree {\n    show sequence(count) for at in kernel(\"preorder\", root, offsetof(node, child), offsetof(node, sibling))\n        => ((node *)at)->value * 10\n}\n",
     )
     .expect("write the views");
     fs::copy(
@@ -2870,7 +2874,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
     let junk = directory.path().join("junk.views");
     fs::write(
         &junk,
-        "uscope-views 1\nview c intvec {\n    show sequence(n) for at in kernel(\"junk\") => at\n}\n",
+        "microscope-views 1\nview c intvec {\n    show sequence(n) for at in kernel(\"junk\") => at\n}\n",
     )
     .expect("write views that call a broken kernel");
     fs::write(directory.path().join("junk.wasm"), b"\0asm junk").expect("write a broken kernel");
@@ -2878,7 +2882,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
     let record = format!("views record {} family", runs.display());
     let load_junk = format!("views load {}", junk.display());
     let program = format!("{root}/build/test-programs/tutorial");
-    let output = uscope_command()
+    let output = microscope_command()
         .current_dir(root)
         .env("XDG_CONFIG_HOME", directory.path().join("config"))
         .arg("--batch")
@@ -2897,7 +2901,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
         .arg(&program)
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let stdout = assert_success(output);
     assert_in_order(
@@ -2914,12 +2918,12 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
         "{stderr}"
     );
     let replay = |arguments: &[&std::ffi::OsStr]| {
-        uscope_command()
+        microscope_command()
             .args(["views".as_ref(), "replay".as_ref(), runs.as_os_str()])
             .args(arguments)
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope views replay")
+            .expect("run microscope views replay")
     };
 
     let kernel = directory.path().join("preorder.wasm");
@@ -2947,7 +2951,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
         String::from_utf8_lossy(&other.stdout).contains("differs"),
         "{other:?}"
     );
-    let check = uscope(&["views", "check", "build/test-programs/tutorial"]);
+    let check = microscope(&["views", "check", "build/test-programs/tutorial"]);
     assert_in_order(
         &assert_success(check),
         &[
@@ -2959,7 +2963,7 @@ fn kernels_beside_view_files_present_values_and_their_runs_replay() {
 }
 
 /// A program built with line tables only describes no variables or types,
-/// so nothing is presented, and uscope says so rather than guessing.
+/// so nothing is presented, and microscope says so rather than guessing.
 #[test]
 fn a_program_without_variable_information_presents_nothing() {
     let output = batch_output(
@@ -2972,7 +2976,7 @@ fn a_program_without_variable_information_presents_nothing() {
         stderr.contains("no variable is named `text` here"),
         "{stderr}"
     );
-    let check = uscope(&[
+    let check = microscope(&[
         "views",
         "check",
         "build/test-programs/containers-rust-limited",
@@ -3792,7 +3796,7 @@ fn backtraces_mark_the_iterators_of_a_loop_whose_body_runs() {
 
 #[test]
 fn stops_and_list_show_source_from_any_working_directory() {
-    let output = uscope_command()
+    let output = microscope_command()
         .current_dir("/")
         .args([
             "--batch",
@@ -3805,7 +3809,7 @@ fn stops_and_list_show_source_from_any_working_directory() {
         ])
         .arg(fixture(BASIC))
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     let stdout = assert_success(output);
     let line = format!("{}:6", fixture("tests/fixtures/c/basic.c").display());
 
@@ -3813,7 +3817,9 @@ fn stops_and_list_show_source_from_any_working_directory() {
     // path, so they stay absolute.
     assert_eq!(stdout.matches(&line).count(), 3, "{stdout}");
     assert_eq!(
-        stdout.matches("=> 6 |     return uscope_value;").count(),
+        stdout
+            .matches("=> 6 |     return microscope_value;")
+            .count(),
         2,
         "{stdout}"
     );
@@ -3826,7 +3832,7 @@ fn source_maps_read_sources_recorded_under_another_directory() {
     let unmapped = batch(&["build/test-programs/basic-relocated"], &commands[..2]);
     assert!(
         unmapped.contains(
-            "source unavailable: source file /nonexistent/uscope/tests/fixtures/c/basic.c does not exist"
+            "source unavailable: source file /nonexistent/microscope/tests/fixtures/c/basic.c does not exist"
         ),
         "{unmapped}"
     );
@@ -3835,7 +3841,7 @@ fn source_maps_read_sources_recorded_under_another_directory() {
     let stdout = batch(
         &[
             "--source-map",
-            "/nonexistent/uscope",
+            "/nonexistent/microscope",
             repository,
             "build/test-programs/basic-relocated",
         ],
@@ -3848,19 +3854,20 @@ fn source_maps_read_sources_recorded_under_another_directory() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("=> 6 |     return uscope_value;"),
+        stdout.contains("=> 6 |     return microscope_value;"),
         "{stdout}"
     );
 }
 
 #[test]
 fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
-    let mut uscope = Uscope::spawn(uscope_command().arg(fixture("build/test-programs/spin")));
-    uscope.send("break main\nrun\nthreads\n");
-    uscope.line("the breakpoint stop", |line| {
+    let mut microscope =
+        Microscope::spawn(microscope_command().arg(fixture("build/test-programs/spin")));
+    microscope.send("break main\nrun\nthreads\n");
+    microscope.line("the breakpoint stop", |line| {
         line.starts_with("stopped at breakpoint 1")
     });
-    let thread = uscope.line("the stopped thread", |line| line.starts_with("* "));
+    let thread = microscope.line("the stopped thread", |line| line.starts_with("* "));
     let inferior: u32 = thread
         .split_whitespace()
         .nth(1)
@@ -3870,23 +3877,23 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
     // main's loop is a jump to itself, so the breakpoint must go before the
     // inferior can run it. Only the continue can make the stopped inferior
     // runnable again, so once it is, Ctrl-C interrupts the loop.
-    uscope.send("delete 1\ncontinue\n");
+    microscope.send("delete 1\ncontinue\n");
     support::wait_until("the inferior runs main's loop", || {
         process_state(inferior) == Some('R')
     });
     kill(
-        Pid::from_raw(i32::try_from(uscope.id()).expect("debugger PID fits i32")),
+        Pid::from_raw(i32::try_from(microscope.id()).expect("debugger PID fits i32")),
         Signal::SIGINT,
     )
-    .expect("pause uscope");
-    uscope.line("the pause", |line| {
+    .expect("pause microscope");
+    microscope.line("the pause", |line| {
         line.starts_with("inferior paused in main at ")
     });
 
     // End of input shuts the session down, killing and reaping the inferior.
-    uscope.send("where\n");
-    uscope.close_stdin();
-    let stdout = assert_success(uscope.finish());
+    microscope.send("where\n");
+    microscope.close_stdin();
+    let stdout = assert_success(microscope.finish());
     assert!(
         stdout
             .lines()
@@ -3902,8 +3909,8 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
 
 #[test]
 fn continuing_past_a_sigint_stop_discards_the_interrupt() {
-    // A terminal Ctrl-C signals the inferior as well as uscope. Like gdb, the
-    // CLI must not deliver that SIGINT, which would terminate the inferior.
+    // A terminal Ctrl-C signals the inferior as well as microscope. Like gdb,
+    // the CLI must not deliver that SIGINT, which would terminate the inferior.
     let stdout = batch(&["build/test-programs/interrupt"], &["run", "continue"]);
     assert!(stdout.contains("stopped by SIGINT"), "{stdout}");
     assert!(stdout.contains("inferior exited with status 0"), "{stdout}");
@@ -3975,7 +3982,7 @@ fn core_dumps_are_inspected_in_batch_mode_without_executing() {
 
 #[test]
 fn core_banner_reports_the_signal_and_every_unproven_module() {
-    let stdout = assert_success(uscope(&["--core", SEGV_CORE]));
+    let stdout = assert_success(microscope(&["--core", SEGV_CORE]));
     let mut lines = stdout.lines();
     let banner = lines.next().unwrap_or_default();
     assert!(
@@ -3989,7 +3996,7 @@ fn core_banner_reports_the_signal_and_every_unproven_module() {
     assert!(!stdout.contains("warning"), "{stdout}");
 
     // Warnings go to stderr, keeping stdout clean.
-    let missing = uscope(&[
+    let missing = microscope(&[
         "--core",
         "build/test-programs/core-missing-library/crash.core",
     ]);
@@ -3999,7 +4006,7 @@ fn core_banner_reports_the_signal_and_every_unproven_module() {
         "{stderr}"
     );
     assert!(!assert_success(missing).contains("warning"));
-    let batch = uscope(&[
+    let batch = microscope(&[
         "--core",
         "build/test-programs/core-missing-library/crash.core",
         "--batch",
@@ -4313,10 +4320,10 @@ fn where_reports_instructions_outside_every_module_by_address() {
 
 #[test]
 fn watch_script_reports_values_lists_and_deletes_watchpoints() {
-    let stdout = assert_success(uscope(&[
+    let stdout = assert_success(microscope(&[
         "--batch",
         "-c",
-        "tests/fixtures/watch.uscope",
+        "tests/fixtures/watch.microscope",
         "build/test-programs/watch-gcc-o0",
     ]));
     assert_no_sgr(&stdout);
@@ -4738,7 +4745,7 @@ fn run_starts_the_program_with_the_command_line_arguments_directory_and_environm
             "--cwd",
             directory_argument,
             "--env",
-            "USCOPE_FIXTURE_VALUE=a=b",
+            "MICROSCOPE_FIXTURE_VALUE=a=b",
             "build/test-programs/process-environment",
             "--",
             "--not-an-option",
@@ -4840,7 +4847,7 @@ fn info_signals_lists_every_signals_policy() {
 fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
     let directory = support::ScratchDir::new("cli-launcher");
     let socket = directory.path().join("launcher");
-    let output = uscope(&[
+    let output = microscope(&[
         "dap-launcher",
         "--connect",
         socket.to_str().expect("path"),
@@ -4850,13 +4857,13 @@ fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
     assert_eq!(output.status.code(), Some(127));
     assert_failure(
         &output,
-        "uscope: cannot run /bin/true: No such file or directory",
+        "microscope: cannot run /bin/true: No such file or directory",
     );
 
     // The adapter went away before it traced the launcher.
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
     let adapter = thread::spawn(move || drop(listener.accept().expect("accept")));
-    let output = uscope(&[
+    let output = microscope(&[
         "dap-launcher",
         "--connect",
         socket.to_str().expect("path"),
@@ -4867,7 +4874,7 @@ fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
     assert_eq!(output.status.code(), Some(127));
     assert_failure(
         &output,
-        "uscope: cannot run /bin/true: the debugger stopped before it could debug it",
+        "microscope: cannot run /bin/true: the debugger stopped before it could debug it",
     );
 }
 
@@ -4880,10 +4887,10 @@ fn a_killed_session_leaves_its_flight_recording() {
     let scratch = support::ScratchDir::new("flight-recording");
     let recording = scratch.path().join("recording.log");
 
-    // uscope keeps reading its open standard input after the script.
-    let uscope = Uscope::spawn(
-        uscope_command()
-            .env("USCOPE_FLIGHT_RECORDING", &recording)
+    // microscope keeps reading its open standard input after the script.
+    let microscope = Microscope::spawn(
+        microscope_command()
+            .env("MICROSCOPE_FLIGHT_RECORDING", &recording)
             .args(["--eval", "break main", "--eval", "run"])
             .arg(fixture("build/test-programs/basic")),
     );
@@ -4894,8 +4901,8 @@ fn a_killed_session_leaves_its_flight_recording() {
         contents.contains("event InferiorStopped")
     });
 
-    // Dropping kills uscope and reaps it.
-    drop(uscope);
+    // Dropping kills microscope and reaps it.
+    drop(microscope);
 
     let position = |needle: &str| {
         contents
@@ -4922,8 +4929,8 @@ fn a_killed_session_leaves_its_flight_recording() {
         .find_map(|line| line.split_once("spawned ")?.1.parse::<u32>().ok())
         .expect("the recording names the inferior");
 
-    // Once uscope is gone, init reaps the inferior, if it ever does.
-    support::wait_until(&format!("inferior {inferior} dies with uscope"), || {
+    // Once microscope is gone, init reaps the inferior, if it ever does.
+    support::wait_until(&format!("inferior {inferior} dies with microscope"), || {
         matches!(process_state(inferior), None | Some('Z'))
     });
 }
@@ -5100,7 +5107,7 @@ fn info_modules_names_separate_debug_files_and_why_one_is_unusable() {
             "symbols",
             "basic-build-id",
             "\n  cannot use the debug file ",
-            ": its dwz supplementary file ../../.dwz/uscope-fixture (build-id 01020304) \
+            ": its dwz supplementary file ../../.dwz/microscope-fixture (build-id 01020304) \
              was not found",
         ],
     );
@@ -5350,7 +5357,7 @@ fn backtraces_show_the_functions_that_left_by_tail_calls() {
     assert!(errors.is_empty(), "{errors}");
 }
 
-/// A session reads and writes the image cache `USCOPE_CACHE_DIR` names,
+/// A session reads and writes the image cache `MICROSCOPE_CACHE_DIR` names,
 /// unless `--no-cache` says not to; a cache it cannot use leaves it
 /// uncached, with a warning.
 #[test]
@@ -5375,13 +5382,13 @@ fn sessions_cache_images_unless_told_not_to() {
         let mut all = vec!["--batch", "--eval", "break main"];
         all.extend_from_slice(arguments);
         all.push(BASIC);
-        uscope_command()
-            .env("USCOPE_CACHE_DIR", cache)
+        microscope_command()
+            .env("MICROSCOPE_CACHE_DIR", cache)
             .args(&all)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope")
+            .expect("run microscope")
     };
 
     let off = directory.path().join("off");
@@ -5415,7 +5422,7 @@ fn timings_report_each_stop_and_request() {
     let directory = support::ScratchDir::new("cli-timings");
     let report = directory.path().join("timings.json");
     let report_arg = report.display().to_string();
-    assert_success(uscope(&[
+    assert_success(microscope(&[
         "--batch",
         "--timings",
         &report_arg,
@@ -5427,7 +5434,7 @@ fn timings_report_each_stop_and_request() {
         "backtrace",
         BASIC,
     ]));
-    let report: uscope::timings::Report =
+    let report: microscope::timings::Report =
         serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
     let phases = report
         .phases
@@ -5474,7 +5481,7 @@ fn a_session_profiles_its_program_while_it_runs() {
         .and_then(|count| count.parse::<u64>().ok())
         .expect("a count of samples");
     assert!(profiled > 0, "{stdout}");
-    let report = assert_success(uscope(&["report", &ran.to_string_lossy()]));
+    let report = assert_success(microscope(&["report", &ran.to_string_lossy()]));
     assert!(report.contains("leaf"), "{report}");
 }
 
@@ -5482,7 +5489,7 @@ fn a_session_profiles_its_program_while_it_runs() {
 fn a_signal_saves_a_recordings_window_as_it_goes_on() {
     let scratch = support::ScratchDir::new("cli-window");
     let profile = scratch.path().join("phases.usprof");
-    let mut recording = uscope_command()
+    let mut recording = microscope_command()
         .args(["record", "--window", "0.1", "-o"])
         .arg(&profile)
         .arg("--")
@@ -5491,7 +5498,7 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run uscope record");
+        .expect("run microscope record");
     let mut lines = BufReader::new(recording.stderr.take().expect("stderr")).lines();
     let mut line = || lines.next().expect("a line").expect("read a line");
     assert!(line().contains("saves it"));
@@ -5523,7 +5530,7 @@ fn a_signal_saves_a_recordings_window_as_it_goes_on() {
 /// functions, which unsymbolized vDSO addresses, a row each, can fill.
 fn every_function(profile: &Path) -> String {
     let profile = profile.to_string_lossy();
-    assert_success(uscope(&[
+    assert_success(microscope(&[
         "report",
         "--tree",
         "--min-percent",
@@ -5539,7 +5546,7 @@ fn every_function(profile: &Path) -> String {
 fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
     let scratch = support::ScratchDir::new("cli-continuous");
     let directory = scratch.path().join("segments");
-    let mut recording = uscope_command()
+    let mut recording = microscope_command()
         .args([
             "record",
             "--segment",
@@ -5555,7 +5562,7 @@ fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run uscope record");
+        .expect("run microscope record");
     let mut lines = BufReader::new(recording.stderr.take().expect("stderr")).lines();
     let line = lines.next().expect("a line").expect("read a line");
     assert!(line.contains("writing a segment every 3600 s"), "{line}");
@@ -5589,7 +5596,11 @@ fn a_continuous_recording_writes_segments_that_report_reads_as_one() {
 
     // The second phase's time is mostly in the clock it reads, so it is a
     // caller in the call tree rather than a function of its own.
-    let report = assert_success(uscope(&["report", "--tree", &directory.to_string_lossy()]));
+    let report = assert_success(microscope(&[
+        "report",
+        "--tree",
+        &directory.to_string_lossy(),
+    ]));
     assert!(report.contains("second"), "{report}");
 }
 
@@ -5602,19 +5613,19 @@ fn instrumentation_switches_itself_off_once_its_recorder_dies() {
         Command::new(fixture("build/test-programs/probes")).arg("quiet"),
     );
     let pid = program.process_id().get().to_string();
-    let mut recorder = uscope_command()
+    let mut recorder = microscope_command()
         .args(["record", "--pid", &pid, "--probe-timeout", "0.2", "-o"])
         .arg(scratch.path().join("quiet.usprof"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("run uscope record");
+        .expect("run microscope record");
     let mut lines = BufReader::new(program.take_stdout()).lines();
     let mut line = || lines.next().and_then(Result::ok);
     assert_eq!(line().as_deref(), Some("listening"));
-    recorder.kill().expect("kill uscope");
-    recorder.wait().expect("reap uscope");
+    recorder.kill().expect("kill microscope");
+    recorder.wait().expect("reap microscope");
     assert_eq!(line().as_deref(), Some("quiet"));
     assert!(program.wait().success());
 }
@@ -5624,14 +5635,14 @@ fn record_writes_a_profile_that_report_summarizes() {
     let scratch = support::ScratchDir::new("cli-record");
     let profile = scratch.path().join("leaf.usprof");
     let program = fixture("build/test-programs/profile-stacks-gcc-o0");
-    let recorded = uscope_command()
+    let recorded = microscope_command()
         .args(["record", "--function", "leaf", "-o"])
         .arg(&profile)
         .arg("--")
         .arg(&program)
         .stdin(Stdio::null())
         .output()
-        .expect("run uscope record");
+        .expect("run microscope record");
     assert!(
         recorded.status.success(),
         "{}",
@@ -5639,7 +5650,7 @@ fn record_writes_a_profile_that_report_summarizes() {
     );
     assert!(String::from_utf8_lossy(&recorded.stderr).contains("recorded 6 samples"));
 
-    let top = assert_success(uscope(&["report", &profile.to_string_lossy()]));
+    let top = assert_success(microscope(&["report", &profile.to_string_lossy()]));
     assert_in_order(
         &top,
         &[
@@ -5650,7 +5661,11 @@ fn record_writes_a_profile_that_report_summarizes() {
             "  0.00% 100.00%  outer",
         ],
     );
-    let tree = assert_success(uscope(&["report", "--tree", &profile.to_string_lossy()]));
+    let tree = assert_success(microscope(&[
+        "report",
+        "--tree",
+        &profile.to_string_lossy(),
+    ]));
     for line in [
         " 50.00%   0.00%  _start",
         " 50.00%   0.00%                  descend",

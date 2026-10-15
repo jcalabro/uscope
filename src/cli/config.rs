@@ -1,13 +1,13 @@
 //! The CLI's settings: TOML files layered over the defaults.
 //!
 //! The user's file applies to every project; a project's
-//! `.uscope/config.toml`, usually committed, and `.uscope/config.local.toml`,
-//! one person's, override it there. Each file is checked strictly on its
-//! own, so an error names its file, line, and column, and the valid files
-//! are then merged key by key. Startup commands accumulate instead, and
-//! launch configurations merge by name. A project's startup commands,
-//! aliases, and launch configurations act, so they apply only once the
-//! user trusts them; see [`TrustStore`].
+//! `.microscope/config.toml`, usually committed, and
+//! `.microscope/config.local.toml`, one person's, override it there. Each file
+//! is checked strictly on its own, so an error names its file, line, and
+//! column, and the valid files are then merged key by key. Startup commands
+//! accumulate instead, and launch configurations merge by name. A project's
+//! startup commands, aliases, and launch configurations act, so they apply only
+//! once the user trusts them; see [`TrustStore`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -22,7 +22,7 @@ use super::DisassemblySyntax;
 use super::suggest;
 use super::terminal::{ColorChoice, PathStyle, ThemeName, ThemeOverrides};
 
-/// The defaults, as the file `uscope config init` writes commented out.
+/// The defaults, as the file `microscope config init` writes commented out.
 pub const DEFAULTS: &str = include_str!("default-config.toml");
 
 /// The largest settings or state file read.
@@ -94,7 +94,7 @@ impl Default for Ui {
             paths: PathStyle::Relative,
             pager: "auto".to_owned(),
             editor: String::new(),
-            prompt: "(uscope) ".to_owned(),
+            prompt: "(microscope) ".to_owned(),
             confirm_quit: true,
         }
     }
@@ -273,7 +273,7 @@ pub struct DebugInfo {
     /// Download debug files no directory holds from debuginfod servers.
     pub debuginfod: bool,
 
-    /// How many threads load debug information, unless `USCOPE_JOBS` says;
+    /// How many threads load debug information, unless `MICROSCOPE_JOBS` says;
     /// by default, one per CPU up to 16.
     pub jobs: Option<std::num::NonZeroUsize>,
 }
@@ -304,7 +304,7 @@ impl SignalActions {
 impl<'de> Deserialize<'de> for SignalActions {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        let mut policy = uscope::SignalPolicy {
+        let mut policy = microscope::SignalPolicy {
             stop: true,
             print: true,
             pass: true,
@@ -883,12 +883,12 @@ pub enum UserFile {
     /// The standard one, if it exists.
     Standard,
 
-    /// A file named by `--config` or `USCOPE_CONFIG`, which must exist.
+    /// A file named by `--config` or `MICROSCOPE_CONFIG`, which must exist.
     Named(PathBuf),
 }
 
 impl UserFile {
-    /// `--no-config` and `--config`, then `USCOPE_CONFIG`, which is empty
+    /// `--no-config` and `--config`, then `MICROSCOPE_CONFIG`, which is empty
     /// to read no files.
     pub fn choose(no_config: bool, config: Option<&Path>) -> Self {
         if no_config {
@@ -907,56 +907,56 @@ impl UserFile {
     }
 }
 
-/// `USCOPE_CONFIG`, as the process started with it.
+/// `MICROSCOPE_CONFIG`, as the process started with it.
 static ENVIRONMENT: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
 
-/// Takes `USCOPE_CONFIG` out of the environment, keeping its value for
+/// Takes `MICROSCOPE_CONFIG` out of the environment, keeping its value for
 /// [`UserFile::choose`], so that programs the debugger launches see the
 /// same environment, and so the same stack layout, whatever it was set to.
 ///
 /// # Safety
 ///
 /// No other thread may read or write the environment meanwhile. `main`
-/// calls this before uscope starts any other thread.
+/// calls this before microscope starts any other thread.
 #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
 pub unsafe fn take_environment() {
-    const VARIABLE: &str = "USCOPE_CONFIG";
+    const VARIABLE: &str = "MICROSCOPE_CONFIG";
     let _ = ENVIRONMENT.set(std::env::var_os(VARIABLE));
 
     // SAFETY: the caller guarantees no other thread uses the environment.
     unsafe { std::env::remove_var(VARIABLE) };
 }
 
-/// The user's configuration directory, `$XDG_CONFIG_HOME/uscope` or
-/// `~/.config/uscope`.
+/// The user's configuration directory, `$XDG_CONFIG_HOME/microscope` or
+/// `~/.config/microscope`.
 pub fn user_directory() -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config.join("uscope"))
+    Some(config.join("microscope"))
 }
 
-/// The user's state directory, `$XDG_STATE_HOME/uscope` or
-/// `~/.local/state/uscope`. A relative `XDG_STATE_HOME` is ignored, as the
+/// The user's state directory, `$XDG_STATE_HOME/microscope` or
+/// `~/.local/state/microscope`. A relative `XDG_STATE_HOME` is ignored, as the
 /// XDG specification says.
 pub fn state_directory() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .map(|state| state.join("uscope"))
+        .map(|state| state.join("microscope"))
 }
 
 /// The project a directory belongs to: the nearest directory, from `start`
-/// upwards, holding `.uscope/` or `.git`, else `start` itself. A
+/// upwards, holding `.microscope/` or `.git`, else `start` itself. A
 /// repository's root ends the search, so a repository inside another
 /// project, as a git worktree often is, never takes the outer one's
 /// settings or saved state.
 pub fn project_root(start: &Path) -> PathBuf {
     start
         .ancestors()
-        .find(|directory| directory.join(".uscope").is_dir() || directory.join(".git").exists())
+        .find(|directory| directory.join(".microscope").is_dir() || directory.join(".git").exists())
         .unwrap_or(start)
         .to_path_buf()
 }
@@ -989,8 +989,8 @@ impl Files {
     pub fn read(start: &Path, user: &UserFile) -> Result<Self, ConfigError> {
         let root = project_root(start);
         let mut files = Self {
-            project: root.join(".uscope/config.toml"),
-            local: root.join(".uscope/config.local.toml"),
+            project: root.join(".microscope/config.toml"),
+            local: root.join(".microscope/config.local.toml"),
             root,
             user: match user {
                 UserFile::Disabled => None,
@@ -1293,9 +1293,9 @@ impl File {
         }
 
         for name in config.signals.keys() {
-            if uscope::signal_named(name).is_none() {
-                let names = uscope::signal_codes()
-                    .filter_map(uscope::signal_name)
+            if microscope::signal_named(name).is_none() {
+                let names = microscope::signal_codes()
+                    .filter_map(microscope::signal_name)
                     .collect::<Vec<_>>();
                 let suggestion = suggest::did_you_mean(name, names.iter().map(String::as_str))
                     .map(|suggestion| format!("; {suggestion}"))
@@ -1457,7 +1457,7 @@ impl Settings {
     }
 
     /// Every setting in effect, one per line, with where it came from, as
-    /// `uscope config show` prints it.
+    /// `microscope config show` prints it.
     pub fn show(&self) -> String {
         let mut table = match toml::Value::try_from(&self.config) {
             Ok(toml::Value::Table(table)) => table,
@@ -1528,7 +1528,7 @@ fn flatten(value: &toml::Value, path: &str, lines: &mut Vec<(String, String, Opt
 }
 
 /// The projects whose acting settings the user trusts, kept in
-/// `$XDG_STATE_HOME/uscope/trust.toml`. Each holds the settings it trusted,
+/// `$XDG_STATE_HOME/microscope/trust.toml`. Each holds the settings it trusted,
 /// not a hash, so the file can be read to see what was allowed, and a
 /// change to them asks again.
 #[derive(Clone, Debug, Default)]
@@ -1616,7 +1616,7 @@ impl TrustStore {
             .ok_or("no state directory: set XDG_STATE_HOME or HOME")?;
         let text = format!(
             "# Projects whose startup commands, aliases, and launch configurations\n\
-             # uscope runs, with the settings trusted. `uscope config untrust` forgets one.\n\n{}",
+             # microscope runs, with the settings trusted. `microscope config untrust` forgets one.\n\n{}",
             toml::to_string(&self.record).map_err(|error| error.to_string())?
         );
         write_atomically(path, &text)
@@ -1690,7 +1690,7 @@ pub fn ask_trust(
 }
 
 /// The user's file with every setting commented out at its default, as
-/// `uscope config init` writes it.
+/// `microscope config init` writes it.
 pub fn commented_defaults() -> String {
     DEFAULTS
         .lines()
@@ -1788,8 +1788,8 @@ mod tests {
         Files {
             root: PathBuf::from("/p"),
             user: None,
-            project: PathBuf::from("/p/.uscope/config.toml"),
-            local: PathBuf::from("/p/.uscope/config.local.toml"),
+            project: PathBuf::from("/p/.microscope/config.toml"),
+            local: PathBuf::from("/p/.microscope/config.local.toml"),
             enabled: true,
             read,
         }

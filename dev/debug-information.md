@@ -33,7 +33,7 @@ allows one image to serve several mappings and makes the cache safe to share.
 
 The cache in `src/cache.rs` keys an entry by the bytes that affect its result
 and by revisions of the loader sources. Tests use only a cache path they create
-or one explicitly named with `USCOPE_CACHE_DIR`.
+or one explicitly named with `MICROSCOPE_CACHE_DIR`.
 
 ## Providers
 
@@ -114,13 +114,13 @@ identify content. The same bytes at another path should reuse an image; new
 bytes at the same path must not.
 
 A cache hit still validates the image. Cache files are not trusted merely
-because uscope wrote them. Failed or interrupted writes must not leave an
+because microscope wrote them. Failed or interrupted writes must not leave an
 entry that later appears complete.
 
 Tests run with the user cache disabled unless a recipe explicitly supplies
-`USCOPE_CACHE_DIR`. Cache tests create their own scratch directory. `just test`
-warms and uses `target/image-cache`; `just stress` loads afresh to exercise the
-loader repeatedly.
+`MICROSCOPE_CACHE_DIR`. Cache tests create their own scratch directory. `just
+test` warms and uses `target/image-cache`; `just stress` loads afresh to
+exercise the loader repeatedly.
 
 ## Module discovery and identity
 
@@ -193,7 +193,7 @@ ABI, and glibc's through the `_thread_db_*` descriptors glibc exports for
 debuggers, following glibc's own lookup. glibc defines the descriptors in
 libc since 2.34 and in libpthread before. The TLS fixtures run on Ubuntu's
 glibc 2.27, 2.31, and 2.35, which the dev shell provides in
-`USCOPE_UBUNTU_GLIBC`, as well as on the toolchain's glibc and musl.
+`MICROSCOPE_UBUNTU_GLIBC`, as well as on the toolchain's glibc and musl.
 
 ## Types and layout
 

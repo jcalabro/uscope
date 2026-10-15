@@ -1,10 +1,10 @@
 //! Memory and disassembly requests.
 
-use serde_json::{Map, Value, json};
-use uscope::{
+use microscope::{
     DisassemblyQuery, DisassemblyRange, InstructionContent, MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE,
     MemoryReadCompletion, StopContext, VirtualAddress,
 };
+use serde_json::{Map, Value, json};
 
 use super::protocol::{
     self, DisassembleArguments, ErrorBody, ReadMemoryArguments, WriteMemoryArguments,
@@ -140,10 +140,10 @@ impl Session {
     /// file differs from the previous row's.
     async fn instruction_row(
         &mut self,
-        instruction: &uscope::DisassembledInstruction,
+        instruction: &microscope::DisassembledInstruction,
         program_counter: Option<VirtualAddress>,
-        modules: &uscope::LoadedModuleSnapshot,
-        previous_file: &mut Option<(uscope::ModuleId, uscope::SourceFileId)>,
+        modules: &microscope::LoadedModuleSnapshot,
+        previous_file: &mut Option<(microscope::ModuleId, microscope::SourceFileId)>,
     ) -> Value {
         let module = instruction
             .location
@@ -257,7 +257,7 @@ impl Session {
             ))
             .await
             .map_err(error)?;
-        let uscope::DisassemblyView::Window { block, .. } = disassembly.view else {
+        let microscope::DisassemblyView::Window { block, .. } = disassembly.view else {
             return Err(ErrorBody::new(
                 "internal: a window query returned no window",
             ));
@@ -285,7 +285,7 @@ impl Session {
                 ))
                 .await
                 .map_err(error)?;
-            let uscope::DisassemblyView::Window { block, .. } = more.view else {
+            let microscope::DisassemblyView::Window { block, .. } = more.view else {
                 return Err(ErrorBody::new(
                     "internal: a window query returned no window",
                 ));
@@ -310,7 +310,7 @@ impl Session {
                 .disassemble(window(first.address.get(), wanted, 0))
                 .await
                 .map_err(error)?;
-            let uscope::DisassemblyView::Window { block, .. } = more.view else {
+            let microscope::DisassemblyView::Window { block, .. } = more.view else {
                 return Err(ErrorBody::new(
                     "internal: a window query returned no window",
                 ));
@@ -344,7 +344,7 @@ impl Session {
 struct Decoded {
     /// The anchor address.
     address: u64,
-    instructions: Vec<uscope::DisassembledInstruction>,
+    instructions: Vec<microscope::DisassembledInstruction>,
 
     /// The index of the first instruction at or after the anchor.
     anchor: usize,
@@ -363,7 +363,7 @@ struct Plan {
 }
 
 enum Row<'a> {
-    Instruction(&'a uscope::DisassembledInstruction),
+    Instruction(&'a microscope::DisassembledInstruction),
 
     /// No proven instruction is known here; the address keeps rows in
     /// order, one byte beyond the nearest known edge.
@@ -414,7 +414,7 @@ fn window_size(count: usize, max: u32) -> u32 {
 }
 
 fn padding_address(
-    instructions: &[uscope::DisassembledInstruction],
+    instructions: &[microscope::DisassembledInstruction],
     index: i64,
     length: i64,
     anchor: u64,

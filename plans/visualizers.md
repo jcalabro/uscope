@@ -1,7 +1,7 @@
 # Visualizers in every language: gap analysis and plan
 
 TODO.md asks for excellent visualizer support in every supported language.
-This records what uscope showed for each language's everyday types on
+This records what microscope showed for each language's everyday types on
 2026-10-07 (probe programs built with the pinned toolchains: GCC 15.2,
 clang 21.1.8 with libstdc++ and libc++, rustc nightly 2026-07-10, Go 1.27.1,
 Zig 0.16.0), what this work adds, and what it leaves out on purpose.
@@ -63,7 +63,7 @@ Views missing for common types:
 
 ## Out of scope, and why
 
-- Types whose meaning lives in code uscope never runs: C++ `any`'s and
+- Types whose meaning lives in code microscope never runs: C++ `any`'s and
   `function`'s held types beyond what a symbol names, Go `sync.Map` (a
   concurrent hash trie whose walk needs a kernel; later), `MultiArrayList`
   (a view cannot build a record of an arbitrary element type), Zig's

@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 
-use uscope::syscalls::blobs;
-use uscope::syscalls::{CaptureState, Outcome, SyscallEvent};
+use microscope::syscalls::blobs;
+use microscope::syscalls::{CaptureState, Outcome, SyscallEvent};
 
 /// Which way data moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,7 @@ pub fn dump(event: &SyscallEvent) -> Vec<String> {
 
     match (shape, capture.state) {
         (Shape::Message, _) => {
-            lines.push(" * not dumped: uscope captures no message's buffers".to_owned());
+            lines.push(" * not dumped: microscope captures no message's buffers".to_owned());
         }
         (_, CaptureState::Unreadable) => {
             lines.push(format!(" * not dumped: {moved} bytes were unreadable"));

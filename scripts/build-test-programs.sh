@@ -41,7 +41,7 @@ read_dash_version() {
     dash_version=${dash_version_by_tool["$tool"]}
 }
 
-# Compiles run at once, as many as there are CPUs (USCOPE_FIXTURE_JOBS sets
+# Compiles run at once, as many as there are CPUs (MICROSCOPE_FIXTURE_JOBS sets
 # how many; 1 builds one at a time). A step that reads what earlier steps
 # built waits for them first: one that reads only outputs it names waits for
 # the jobs making those (wait_for), as checks and compiles that link a
@@ -51,7 +51,7 @@ read_dash_version() {
 # the background; one a derivation or check makes runs in the foreground.
 # Cores and oracles run in the background too, and whatever reads a core
 # waits for it.
-readonly max_jobs="${USCOPE_FIXTURE_JOBS:-$(nproc)}"
+readonly max_jobs="${MICROSCOPE_FIXTURE_JOBS:-$(nproc)}"
 readonly background_builders=" build_program build_fixture build_c_fixture_directory \
 build_cpp_fixture_directory build_cpp_fixture build_shared_fixture build_symbols_library \
 build_disassembly_fixture build_tls_modules_fixture build_ubuntu_tls_fixture build_rust_fixture build_go_fixture \
@@ -394,7 +394,7 @@ build_ubuntu_tls_fixture() {
     local output="$3"
     shift 3
     local root
-    root=$(realpath "$USCOPE_UBUNTU_GLIBC/$version")
+    root=$(realpath "$MICROSCOPE_UBUNTU_GLIBC/$version")
     # shellcheck disable=SC2016
     local script='
         set -euo pipefail
@@ -1013,7 +1013,7 @@ require_ubuntu_glibc() {
     local pthread="$3"
     local stamp="${output}.validation-ubuntu-glibc"
     local libraries
-    libraries=$(realpath "$USCOPE_UBUNTU_GLIBC/$version/lib")
+    libraries=$(realpath "$MICROSCOPE_UBUNTU_GLIBC/$version/lib")
     local signature="validator=ubuntu-glibc-v1"$'\n'"libraries=${libraries}"$'\n'"pthread=${pthread}"
     if validation_is_cached "$output" "$stamp" "$signature"; then
         return
@@ -1154,11 +1154,11 @@ make_core() {
         -ex 'set pagination off' \
         -ex 'set confirm off' \
         -ex 'run' \
-        -ex 'printf "uscope-signal=%d\n", $_siginfo.si_signo' \
+        -ex 'printf "microscope-signal=%d\n", $_siginfo.si_signo' \
         -ex "gcore ${temporary}" \
         -ex 'kill' \
         --args "$@" 2>&1) || true
-    if ! grep -Fx "uscope-signal=${signal}" <<<"$log" >/dev/null; then
+    if ! grep -Fx "microscope-signal=${signal}" <<<"$log" >/dev/null; then
         printf 'error: %s did not stop with signal %s for a core dump:\n%s\n' \
             "$1" "$signal" "$log" >&2
         rm -f "$temporary"
@@ -1197,8 +1197,8 @@ suite_signature() {
         fi
     done
     # Statically linked glibc fixtures link from a store path of their own.
-    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\nUSCOPE_FIXTURE_CRATES=%s\n' \
-        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES" "${USCOPE_FIXTURE_CRATES-}"
+    printf 'suite-v1\nGOOS=%s GOARCH=%s\nGLIBC_STATIC_LIBRARIES=%s\nMICROSCOPE_FIXTURE_CRATES=%s\n' \
+        "${GOOS-}" "${GOARCH-}" "$GLIBC_STATIC_LIBRARIES" "${MICROSCOPE_FIXTURE_CRATES-}"
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
@@ -1266,7 +1266,7 @@ compile_tokio_variant() {
         NIX_HARDENING_ENABLE= cargo build --quiet --offline --locked \
         --manifest-path "$tokio_fixtures_dir/Cargo.toml" --profile "$profile" \
         --config "source.crates-io.replace-with='vendored'" \
-        --config "source.vendored.directory='${USCOPE_FIXTURE_CRATES}'" "${packages[@]}"
+        --config "source.vendored.directory='${MICROSCOPE_FIXTURE_CRATES}'" "${packages[@]}"
 }
 
 # Copies each of PACKAGES that VARIANT's PROFILE build rewrote to
@@ -1296,7 +1296,7 @@ copy_tokio_variant() {
 }
 
 # readelf's description of each coroutine a program has, which a test
-# compares uscope's reading of them with. scripts/coroutine-oracle reduces
+# compares microscope's reading of them with. scripts/coroutine-oracle reduces
 # its dump to the coroutines.
 readonly coroutine_reducer="$output_dir/coroutine-oracle"
 generate_coroutine_oracle() {
@@ -1330,8 +1330,8 @@ reduce_coroutines() {
 # it made in tokio_outputs. It runs in a shell of its own, which must start
 # before this one starts any job.
 build_tokio_fixtures() {
-    if [[ -z "${USCOPE_FIXTURE_CRATES-}" ]]; then
-        printf 'error: USCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
+    if [[ -z "${MICROSCOPE_FIXTURE_CRATES-}" ]]; then
+        printf 'error: MICROSCOPE_FIXTURE_CRATES is unset; build inside the Nix shell\n' >&2
         exit 1
     fi
     build_go_fixture scripts/coroutine-oracle "$coroutine_reducer"
@@ -1366,7 +1366,7 @@ build_tokio_fixtures() {
     variant lines lines "" "" workers
     variant stripped stripped "" "" workers
     variant remapped dev \
-        "--remap-path-prefix=${USCOPE_FIXTURE_CRATES}/tokio-1.53.2=/vendor/tokio" "" workers
+        "--remap-path-prefix=${MICROSCOPE_FIXTURE_CRATES}/tokio-1.53.2=/vendor/tokio" "" workers
     # tokio's unstable features, which record where each task was spawned and
     # give each task's vtable one more offset.
     variant unstable dev "--cfg tokio_unstable" "" workers
@@ -1442,7 +1442,7 @@ build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
 # Built as if elsewhere: its debug information names sources under a
 # directory that does not exist here.
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic-relocated" \
-    -O0 -g3 -fPIE -pie "-ffile-prefix-map=${PWD}=/nonexistent/uscope"
+    -O0 -g3 -fPIE -pie "-ffile-prefix-map=${PWD}=/nonexistent/microscope"
 # Its compile unit's debug information is in a split DWARF file, which the
 # debugger does not read.
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic-split-dwarf" \
@@ -1581,7 +1581,7 @@ build_shared_fixture gcc "$c_fixtures_dir/shared/library.c" "$output_dir/libglob
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/shared/main.c" "$output_dir/globals-shared" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -ldl
-# A program and a library that carry views in .debug_uscope_views, which
+# A program and a library that carry views in .debug_microscope_views, which
 # the assembler reads from the fixture's directory, so the cache watches the
 # directory whole.
 embedded_views_dir="$c_fixtures_dir/embedded-views"
@@ -1596,11 +1596,11 @@ run_cached_build "$embedded_views_dir" "$output_dir/embedded-views" \
     gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
     "$embedded_views_dir/main.c" -o "$output_dir/embedded-views" \
     "-L$output_dir" -lembedded-views '-Wl,-rpath,$ORIGIN'
-# The kernels uscope carries must be what their sources build, so that each
+# The kernels microscope carries must be what their sources build, so that each
 # is reviewed as its source; zig caches the build.
 zig build-exe -target wasm32-freestanding -O ReleaseSmall -fno-entry -rdynamic \
-    --stack 16384 --dep uscope_kernel -Mroot=views/kernels/rust-btree.zig \
-    -Muscope_kernel=sdk/zig/uscope_kernel.zig -femit-bin="$output_dir/rust-btree.wasm"
+    --stack 16384 --dep microscope_kernel -Mroot=views/kernels/rust-btree.zig \
+    -Mmicroscope_kernel=sdk/zig/microscope_kernel.zig -femit-bin="$output_dir/rust-btree.wasm"
 if ! cmp -s "$output_dir/rust-btree.wasm" views/kernels/rust-btree.wasm; then
     printf 'views/kernels/rust-btree.wasm is not what its source builds: copy %s there\n' \
         "$output_dir/rust-btree.wasm" >&2
@@ -1645,7 +1645,7 @@ derive_split_debug "$output_dir/split/basic-build-id.full" "$output_dir/split/ba
     build-id "$output_dir/split/debug-root"
 # The same debug file under another debug directory, naming a dwz
 # supplementary file as distributions' debug files do, beside it in that
-# directory's .dwz, where none is: uscope refuses it with its reason rather
+# directory's .dwz, where none is: microscope refuses it with its reason rather
 # than misread it.
 altlinked_script='
     set -euo pipefail
@@ -1653,7 +1653,7 @@ altlinked_script='
     rm -rf "$output"
     cp -r "$root" "$output"
     debug=$(find "$output/.build-id" -name "*.debug")
-    printf "../../.dwz/uscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
+    printf "../../.dwz/microscope-fixture\0\x01\x02\x03\x04" >"$output/altlink"
     objcopy --add-section ".gnu_debugaltlink=$output/altlink" "$debug"
     rm "$output/altlink"
     # The build cache counts only an executable output as built.
@@ -1927,9 +1927,9 @@ build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o
 # whose directory the cache watches whole for the same reason as the C one.
 read_dash_version rustc
 rust_sdk_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=rustc"
-run_cached_build sdk/rust "$output_dir/libuscope_views.rlib" "$rust_sdk_metadata" \
-    rustc --edition=2024 -D warnings --crate-type rlib --crate-name uscope_views \
-    sdk/rust/src/lib.rs -o "$output_dir/libuscope_views.rlib"
+run_cached_build sdk/rust "$output_dir/libmicroscope_views.rlib" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings --crate-type rlib --crate-name microscope_views \
+    sdk/rust/src/lib.rs -o "$output_dir/libmicroscope_views.rlib"
 # A kernel written with the Rust SDK, which the next program carries; its
 # target's core is built here, so it needs no other toolchain.
 env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= CARGO_TARGET_DIR=build/kernels \
@@ -1941,25 +1941,25 @@ cp build/kernels/wasm32-unknown-unknown/release/tree.wasm \
 rebuilt_outputs["$output_dir/embedded-views-rust-tree.wasm"]=true
 run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views-rust" \
     "$rust_sdk_metadata" \
-    env "USCOPE_TREE_KERNEL=$output_dir/embedded-views-rust-tree.wasm" \
+    env "MICROSCOPE_TREE_KERNEL=$output_dir/embedded-views-rust-tree.wasm" \
     rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
     --crate-name embedded_views \
-    --extern "uscope_views=$output_dir/libuscope_views.rlib" \
+    --extern "microscope_views=$output_dir/libmicroscope_views.rlib" \
     "$rust_fixtures_dir/embedded-views/main.rs" -o "$output_dir/embedded-views-rust"
 # The probes SDK, switched on, and a program instrumented with it.
-run_cached_build sdk/rust-probes "$output_dir/libuscope_probes.rlib" "$rust_sdk_metadata" \
-    rustc --edition=2024 -D warnings -C opt-level=2 --crate-type rlib --crate-name uscope_probes \
-    --cfg 'feature="enabled"' sdk/rust-probes/src/lib.rs -o "$output_dir/libuscope_probes.rlib"
+run_cached_build sdk/rust-probes "$output_dir/libmicroscope_probes.rlib" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings -C opt-level=2 --crate-type rlib --crate-name microscope_probes \
+    --cfg 'feature="enabled"' sdk/rust-probes/src/lib.rs -o "$output_dir/libmicroscope_probes.rlib"
 run_cached_build "$rust_fixtures_dir/probes" "$output_dir/probes" "$rust_sdk_metadata" \
     rustc --edition=2024 -D warnings -C debuginfo=2 -C opt-level=2 --crate-name probes \
-    --extern "uscope_probes=$output_dir/libuscope_probes.rlib" \
+    --extern "microscope_probes=$output_dir/libmicroscope_probes.rlib" \
     "$rust_fixtures_dir/probes/main.rs" -o "$output_dir/probes"
 # A chess position that carries its views and the renderer that draws it.
 run_cached_build "$rust_fixtures_dir/chess" "$output_dir/chess" \
     "$rust_sdk_metadata" \
     rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
     --crate-name chess \
-    --extern "uscope_views=$output_dir/libuscope_views.rlib" \
+    --extern "microscope_views=$output_dir/libmicroscope_views.rlib" \
     "$rust_fixtures_dir/chess/main.rs" -o "$output_dir/chess"
 # Unlike the other Rust fixtures, the containers use std.
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o0" \
@@ -2423,8 +2423,8 @@ build_go_fixture "$go_fixtures_dir/scale" "$output_dir/scale-go"
 # A large real program, many packages of the standard library's.
 build_go_command cmd/gofmt "$output_dir/gofmt-go-o0" -buildmode=pie "-gcflags=all=-N -l"
 build_go_command cmd/gofmt "$output_dir/gofmt-go-o2"
-# Go's own pprof, which reads the profiles uscope writes, and a program
-# that writes profiles of its own for uscope to read.
+# Go's own pprof, which reads the profiles microscope writes, and a program
+# that writes profiles of its own for microscope to read.
 build_go_command cmd/pprof "$output_dir/pprof"
 build_go_fixture "$go_fixtures_dir/pprof-files" "$output_dir/pprof-files"
 build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o0" \
@@ -2624,7 +2624,7 @@ for variant in "${vdso_variants[@]}"; do
 done
 
 # Independent readings of the ELF symbol fixture by binutils and gdb, which
-# differential tests compare against uscope's symbol tables and backtraces.
+# differential tests compare against microscope's symbol tables and backtraces.
 readonly symbol_oracle_dir="$output_dir/symbol-oracles"
 mkdir -p "$symbol_oracle_dir"
 
@@ -2641,7 +2641,7 @@ generate_symbol_oracle() {
     # Nix store files all date from 1970, so the modification time alone never
     # notices a toolchain update. The resolved path names the store entry.
     local header
-    header="uscope-symbol-oracle-v4 $(readlink -f "$elf")"
+    header="microscope-symbol-oracle-v4 $(readlink -f "$elf")"
     # Registered so that deleting an oracle invalidates the cached suite.
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
@@ -2722,7 +2722,7 @@ make_frame_oracle() {
     local core="$2"
     local oracle="$3"
     local log
-    if ! log=$(USCOPE_FRAME_ORACLE="${oracle}.tmp" gdb -nx -batch -q \
+    if ! log=$(MICROSCOPE_FRAME_ORACLE="${oracle}.tmp" gdb -nx -batch -q \
         -iex 'set auto-load off' \
         -iex 'set debuginfod enabled off' \
         -x "$frame_oracle_script" \
@@ -2815,7 +2815,7 @@ for compiler in gcc clang; do
 done
 
 # Go's own reading of the function tables of images the Go linker linked,
-# which a test compares uscope's reader with.
+# which a test compares microscope's reader with.
 readonly gosym_oracle="$output_dir/gosym-oracle"
 build_go_fixture scripts/gosym-oracle "$gosym_oracle"
 generate_gosym_oracle() {
@@ -2860,8 +2860,8 @@ build_ada_fixture "$ada_fixtures_dir/values.adb" "$output_dir/values-ada-o0" -O0
 build_ada_fixture "$ada_fixtures_dir/values.adb" "$output_dir/values-ada-o2" -O2
 
 # GNU objdump's decoding of every executable section, which differential tests
-# compare against uscope's disassembly. -z keeps the zero-filled runs objdump
-# otherwise elides.
+# compare against microscope's disassembly. -z keeps the zero-filled runs
+# objdump otherwise elides.
 readonly disassembly_oracle_dir="$output_dir/disassembly-oracles"
 mkdir -p "$disassembly_oracle_dir"
 
@@ -2870,7 +2870,7 @@ generate_disassembly_oracle() {
     local elf="$1"
     local oracle="$disassembly_oracle_dir/${elf##*/}.objdump"
     local header
-    header="uscope-disassembly-oracle-v1 $(readlink -f "$elf")"
+    header="microscope-disassembly-oracle-v1 $(readlink -f "$elf")"
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
         printf '[cached] %s\n' "$oracle"

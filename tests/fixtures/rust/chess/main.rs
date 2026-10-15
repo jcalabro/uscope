@@ -1,12 +1,12 @@
 //! A chess position, kept as bitboards and as a 64-square mailbox, that
 //! plays a short scripted game through `make_move`. It carries its views
-//! and the renderer that draws a board in its `.debug_uscope_views`
+//! and the renderer that draws a board in its `.debug_microscope_views`
 //! section, through the SDK's macros.
 
 use std::hint::black_box;
 
-uscope_views::uscope_views_file!("tests/fixtures/rust/chess/chess.views");
-uscope_views::uscope_visualizer!("chess-board", "tests/fixtures/rust/chess/chess-board.js");
+microscope_views::microscope_views_file!("tests/fixtures/rust/chess/chess.views");
+microscope_views::microscope_visualizer!("chess-board", "tests/fixtures/rust/chess/chess-board.js");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Color {

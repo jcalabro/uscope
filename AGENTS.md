@@ -1,6 +1,6 @@
-# uscope development guide
+# microscope development guide
 
-uscope is a Linux x86-64 native debugger written in Rust. Keep the
+microscope is a Linux x86-64 native debugger written in Rust. Keep the
 implementation small and exact. Unsupported states and partial results must be
 visible; never guess when the result could look correct.
 

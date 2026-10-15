@@ -17,7 +17,7 @@ const TOP = 26;
 const BOTTOM = 24;
 const LEFT = 56;
 
-uscope.draw((input, { previous, width, paths }) => {
+microscope.draw((input, { previous, width, paths }) => {
   const series = seriesOf(input);
   const ghosts = previous === null ? [] : safeSeries(previous);
   const x = input.x === undefined || input.x === null ? null : numbers(input.x, "x");
@@ -26,7 +26,7 @@ uscope.draw((input, { previous, width, paths }) => {
     throw new RangeError(`\`x\` holds ${x.length} numbers, but the values number ${count}`);
   }
   const log = input.log === true;
-  const theme = uscope.theme;
+  const theme = microscope.theme;
   const W = Math.round(Math.min(Math.max(width, 320), 1600));
   const right = W - (series.length > 1 ? 74 : 64);
   const bottom = HEIGHT - BOTTOM;
@@ -111,13 +111,13 @@ uscope.draw((input, { previous, width, paths }) => {
   for (const tick of axis.ticks) {
     const y = toY(tick);
     shapes.push(
-      uscope.line({ x1: LEFT, y1: y, x2: right, y2: y, stroke: tick === 0 ? theme.ink3 : theme.line }),
-      uscope.text({ x: LEFT - 6, y, text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
+      microscope.line({ x1: LEFT, y1: y, x2: right, y2: y, stroke: tick === 0 ? theme.ink3 : theme.line }),
+      microscope.text({ x: LEFT - 6, y, text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
     );
   }
   for (const tick of xAxis.ticks) {
     const px = LEFT + ((tick - xAxis.lo) / (xAxis.hi - xAxis.lo || 1)) * (right - LEFT);
-    shapes.push(uscope.text({ x: px, y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }));
+    shapes.push(microscope.text({ x: px, y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }));
   }
 
   // The stop before, as a faint line beneath.
@@ -127,7 +127,7 @@ uscope.draw((input, { previous, width, paths }) => {
     if (now === undefined || ghost.values.length !== now.values.length) continue;
     ghosted = true;
     for (const points of trace(ghost.values, toX, toY, decimated ? spans : null, columnX, log).lines) {
-      shapes.push(uscope.polyline({ points, stroke: theme.ink3, strokeWidth: 1, opacity: 0.6 }));
+      shapes.push(microscope.polyline({ points, stroke: theme.ink3, strokeWidth: 1, opacity: 0.6 }));
     }
   }
 
@@ -143,18 +143,18 @@ uscope.draw((input, { previous, width, paths }) => {
     const color = theme.series[line.hue];
     if (decimated) {
       for (const band of drawn.bands) {
-        shapes.push(uscope.polygon({ points: band, fill: color, opacity: 0.18 }));
+        shapes.push(microscope.polygon({ points: band, fill: color, opacity: 0.18 }));
       }
     }
     for (const points of drawn.lines) {
-      shapes.push(uscope.polyline({ points, stroke: color, strokeWidth: 2 }));
+      shapes.push(microscope.polyline({ points, stroke: color, strokeWidth: 2 }));
     }
     // Markers, when points stand at least 6 px apart.
     if (!decimated && count > 1 && (right - LEFT) / (count - 1) >= 6) {
       for (let i = 0; i < line.values.length; i++) {
         const v = line.values[i];
         if (Number.isFinite(v) && !(log && v <= 0)) {
-          shapes.push(uscope.circle({ x: toX(i), y: toY(v), r: 3, fill: color, stroke: theme.surface, strokeWidth: 1.5 }));
+          shapes.push(microscope.circle({ x: toX(i), y: toY(v), r: 3, fill: color, stroke: theme.surface, strokeWidth: 1.5 }));
         }
       }
     }
@@ -162,7 +162,7 @@ uscope.draw((input, { previous, width, paths }) => {
       const px = toX(i);
       const y = up ? TOP : bottom;
       const d = up ? 5 : -5;
-      shapes.push(uscope.polygon({ points: [px - 4, y + d, px + 4, y + d, px, y], fill: color, title: `[${i}] ${line.name}: ${up ? "+" : "-"}∞` }));
+      shapes.push(microscope.polygon({ points: [px - 4, y + d, px + 4, y + d, px, y], fill: color, title: `[${i}] ${line.name}: ${up ? "+" : "-"}∞` }));
     }
   }
 
@@ -189,7 +189,7 @@ uscope.draw((input, { previous, width, paths }) => {
       }
     }
     shapes.push(
-      uscope.rect({
+      microscope.rect({
         x: left, y: TOP, width: Math.max(0.5, end - left), height: bottom - TOP, fill: "transparent",
         title: lines.join("\n"),
         select: single && first === last ? `${paths.values}[${first}]` : undefined,
@@ -205,8 +205,8 @@ uscope.draw((input, { previous, width, paths }) => {
     let lx = LEFT;
     for (const key of keys) {
       shapes.push(
-        uscope.line({ x1: lx, y1: 10, x2: lx + 12, y2: 10, stroke: key.stroke, strokeWidth: 2 }),
-        uscope.text({ x: lx + 16, y: 10, text: key.name, size: 11, baseline: "middle", fill: theme.ink2 }),
+        microscope.line({ x1: lx, y1: 10, x2: lx + 12, y2: 10, stroke: key.stroke, strokeWidth: 2 }),
+        microscope.text({ x: lx + 16, y: 10, text: key.name, size: 11, baseline: "middle", fill: theme.ink2 }),
       );
       lx += 28 + key.name.length * 6.5;
     }
@@ -223,8 +223,8 @@ uscope.draw((input, { previous, width, paths }) => {
   }
   for (const { line, i, y } of ends) {
     shapes.push(
-      uscope.line({ x1: right + 4, y1: y, x2: right + 12, y2: y, stroke: theme.series[line.hue], strokeWidth: 2 }),
-      uscope.text({ x: right + 15, y, text: label(line.values[i]), size: 11, baseline: "middle", family: "mono", fill: theme.ink }),
+      microscope.line({ x1: right + 4, y1: y, x2: right + 12, y2: y, stroke: theme.series[line.hue], strokeWidth: 2 }),
+      microscope.text({ x: right + 15, y, text: label(line.values[i]), size: 11, baseline: "middle", family: "mono", fill: theme.ink }),
     );
   }
 
@@ -263,7 +263,7 @@ uscope.draw((input, { previous, width, paths }) => {
     caption.push(`${seriesCount(input.series) - series.length} more series not drawn; the Table has them`);
   }
   if (log) caption.push("log scale");
-  return uscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
 });
 
 /** The series to draw: their names, numbers, and hues, which follow names. */

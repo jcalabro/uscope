@@ -1,5 +1,5 @@
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-compile_error!("uscope currently supports only Linux x86-64");
+compile_error!("microscope currently supports only Linux x86-64");
 
 mod linux;
 

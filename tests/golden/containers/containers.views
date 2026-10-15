@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # The views the containers program's types are presented with, which the
 # simulator's views oracle judges against memory.

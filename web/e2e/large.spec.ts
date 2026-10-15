@@ -8,7 +8,7 @@ import { expect, fixture, join, root, test } from "./server";
 
 test("a million samples arrive at once and draw as a line that keeps their extremes", async ({
   page,
-  uscope,
+  microscope,
 }) => {
   const frames: number[] = [];
   page.on("websocket", (socket) =>
@@ -18,7 +18,7 @@ test("a million samples arrive at once and draw as a line that keeps their extre
       }
     }),
   );
-  const server = await uscope.start([
+  const server = await microscope.start([
     "--views",
     path.join(root, "tests/fixtures/c/metrics/metrics.views"),
     fixture("metrics"),

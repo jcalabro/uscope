@@ -1,8 +1,8 @@
-//! The Debug Adapter Protocol server, `uscope dap`.
+//! The Debug Adapter Protocol server, `microscope dap`.
 //!
 //! Editors such as VS Code, Neovim, Zed, Helix, and Emacs talk to it over
 //! stdin and stdout, or over TCP with `--port`. Like the CLI, it is one
-//! client of [`uscope::DebuggerHandle`].
+//! client of [`microscope::DebuggerHandle`].
 
 mod breakpoints;
 mod config;
@@ -144,7 +144,7 @@ async fn listen(address: SocketAddr, log: Log) -> Result<()> {
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to listen on {address}"))?;
-    eprintln!("uscope dap listening on {}", listener.local_addr()?);
+    eprintln!("microscope dap listening on {}", listener.local_addr()?);
     let stop = termination();
     tokio::pin!(stop);
     loop {
@@ -302,7 +302,7 @@ async fn read_frames<R: AsyncBufRead + Unpin>(
                     }
                 } else {
                     let _ = client
-                        .important(format!("uscope ignored a malformed message: {error}"))
+                        .important(format!("microscope ignored a malformed message: {error}"))
                         .await;
                     continue;
                 }

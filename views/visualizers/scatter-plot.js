@@ -20,8 +20,8 @@ const TOP = 22;
 const MOST_DOTS = 10_000;
 const MOST_TRAILS = 2_000;
 
-uscope.draw((input, { previous, width, paths }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, paths }) => {
+  const theme = microscope.theme;
   const points = pointsOf(input);
   const n = points.x.length;
   const groups = groupsOf(input.group, n);
@@ -62,14 +62,14 @@ uscope.draw((input, { previous, width, paths }) => {
   const shapes = [];
   for (const tick of yAxis.ticks) {
     shapes.push(
-      uscope.line({ x1: LEFT, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
-      uscope.text({ x: LEFT - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
+      microscope.line({ x1: LEFT, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
+      microscope.text({ x: LEFT - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
     );
   }
   for (const tick of xAxis.ticks) {
     shapes.push(
-      uscope.line({ x1: toX(tick), y1: TOP, x2: toX(tick), y2: bottom, stroke: tick === 0 ? theme.ink3 : theme.line }),
-      uscope.text({ x: toX(tick), y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }),
+      microscope.line({ x1: toX(tick), y1: TOP, x2: toX(tick), y2: bottom, stroke: tick === 0 ? theme.ink3 : theme.line }),
+      microscope.text({ x: toX(tick), y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }),
     );
   }
   const hue = (g) => (g < 0 ? theme.ink3 : theme.series[g]);
@@ -97,7 +97,7 @@ uscope.draw((input, { previous, width, paths }) => {
       if (counts[at] === 0) continue;
       pixels.set([red, green, blue, Math.round(60 + 195 * (Math.log1p(counts[at]) / scale))], at * 4);
     }
-    shapes.push(uscope.image({ x: LEFT, y: TOP, width: right - LEFT, height: bottom - TOP, pixels, columns, rows, title: "points" }));
+    shapes.push(microscope.image({ x: LEFT, y: TOP, width: right - LEFT, height: bottom - TOP, pixels, columns, rows, title: "points" }));
   } else {
     // Trails from where moved points were at the stop before.
     if (previous !== null && n <= MOST_TRAILS) {
@@ -110,7 +110,7 @@ uscope.draw((input, { previous, width, paths }) => {
             const x1 = points.x[i];
             const y1 = points.y[i];
             if ([x0, y0, x1, y1].every(Number.isFinite) && (x0 !== x1 || y0 !== y1)) {
-              shapes.push(uscope.line({ x1: toX(x0), y1: toY(y0), x2: toX(x1), y2: toY(y1), stroke: theme.ink3, strokeWidth: 1, opacity: 0.7 }));
+              shapes.push(microscope.line({ x1: toX(x0), y1: toY(y0), x2: toX(x1), y2: toY(y1), stroke: theme.ink3, strokeWidth: 1, opacity: 0.7 }));
             }
           }
         }
@@ -124,7 +124,7 @@ uscope.draw((input, { previous, width, paths }) => {
       const y = points.y[i];
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       const name = labels === null ? "" : ` ${nameOf(labels[i])}`;
-      shapes.push(uscope.circle({
+      shapes.push(microscope.circle({
         x: toX(x), y: toY(y), r: 4, fill: hue(groups.of[i]), stroke: theme.surface, strokeWidth: 1.5,
         title: `[${i}]${name}: x ${exact(points.x, points.rawX, i)}, y ${exact(points.y, points.rawY, i)}${groups.names.length > 0 ? ` (${groups.label(i)})` : ""}`,
         select: select === null ? undefined : points.form === "values" ? `${select}[${i}]` : undefined,
@@ -139,8 +139,8 @@ uscope.draw((input, { previous, width, paths }) => {
     if (groups.other > 0) keys.push({ name: "other", fill: theme.ink3 });
     for (const key of keys) {
       shapes.push(
-        uscope.circle({ x: lx + 4, y: 10, r: 4, fill: key.fill }),
-        uscope.text({ x: lx + 12, y: 10, text: key.name, size: 11, baseline: "middle", fill: theme.ink2 }),
+        microscope.circle({ x: lx + 4, y: 10, r: 4, fill: key.fill }),
+        microscope.text({ x: lx + 12, y: 10, text: key.name, size: 11, baseline: "middle", fill: theme.ink2 }),
       );
       lx += 26 + key.name.length * 6.5;
     }
@@ -158,7 +158,7 @@ uscope.draw((input, { previous, width, paths }) => {
   }
   if (usable < n) caption.push(`${n - usable} with NaN or ±∞, not drawn`);
   if (n > MOST_DOTS) caption.push("one image: darker pixels hold more points");
-  return uscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
 
   function pointsOf(from) {
     if (from.x !== undefined && from.y !== undefined) {

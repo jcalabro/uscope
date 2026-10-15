@@ -58,7 +58,7 @@ describe("validate", () => {
 
   // Each is refused, with where and why.
   const refused: [string, unknown, RegExp][] = [
-    ["not a picture", { type: "rect" }, /did not return uscope\.picture/],
+    ["not a picture", { type: "rect" }, /did not return microscope\.picture/],
     ["an unknown property", picture([], { onload: "x" }), /`onload` is not one of its properties/],
     [
       "a url( color",

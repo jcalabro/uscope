@@ -471,7 +471,7 @@ async fn steps_from_marked_epilogues_complete_in_the_caller() {
                 .await
                 .frames
                 .iter()
-                .filter(|frame| frame.kind != uscope::FrameKind::Inline)
+                .filter(|frame| frame.kind != microscope::FrameKind::Inline)
                 .nth(1)
                 .expect("the return line's caller")
                 .instruction
@@ -625,8 +625,8 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
                     assert!(
                         matches!(
                             &index.state,
-                            uscope::VariableState::Available {
-                                value: uscope::VariableValue::Scalar(ScalarValue::Signed(3)),
+                            microscope::VariableState::Available {
+                                value: microscope::VariableValue::Scalar(ScalarValue::Signed(3)),
                                 ..
                             }
                         ),
@@ -741,7 +741,7 @@ async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
             scenario.handle().set_breakpoint_hit_condition(
                 breakpoint.id,
                 Some(
-                    uscope::HitCondition::new(uscope::HitComparison::GreaterOrEqual, 3)
+                    microscope::HitCondition::new(microscope::HitComparison::GreaterOrEqual, 3)
                         .expect("a valid hit condition"),
                 ),
             ),
@@ -809,7 +809,7 @@ async fn an_explicit_user_breakpoint_at_an_epilogue_marker_remains_visible() {
         .await;
     let marker = relocate_image_address(marker, &entry);
     scenario
-        .add_breakpoint_spec(uscope::BreakpointSpec::Address(marker))
+        .add_breakpoint_spec(microscope::BreakpointSpec::Address(marker))
         .await;
 
     assert_eq!(
@@ -1263,7 +1263,7 @@ async fn inline_next_is_owned_by_the_selected_thread() {
         let before = scenario.snapshot().await;
         let selected = before
             .selected
-            .and_then(uscope::ExecutionContext::as_thread)
+            .and_then(microscope::ExecutionContext::as_thread)
             .expect("selected worker thread");
 
         assert_eq!(
@@ -1282,7 +1282,9 @@ async fn inline_next_is_owned_by_the_selected_thread() {
             .await;
 
         assert_eq!(
-            after.selected.and_then(uscope::ExecutionContext::as_thread),
+            after
+                .selected
+                .and_then(microscope::ExecutionContext::as_thread),
             Some(selected),
             "{fixture}"
         );
@@ -1374,13 +1376,13 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
     let disassembly = scenario
         .operation(
             "disassemble breakpoint_target",
-            scenario.handle().disassemble(uscope::DisassemblyQuery {
-                range: uscope::DisassemblyRange::Function(address),
-                syntax: uscope::AssemblySyntax::Intel,
+            scenario.handle().disassemble(microscope::DisassemblyQuery {
+                range: microscope::DisassemblyRange::Function(address),
+                syntax: microscope::AssemblySyntax::Intel,
             }),
         )
         .await;
-    let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
+    let microscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("a function query returned a window");
     };
 
@@ -1433,7 +1435,7 @@ async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
             "add breakpoint at return address",
             scenario
                 .handle()
-                .add_breakpoint(uscope::BreakpointSpec::Address(return_address)),
+                .add_breakpoint(microscope::BreakpointSpec::Address(return_address)),
         )
         .await;
     assert_eq!(breakpoint.locations.len(), 1);
@@ -1646,15 +1648,15 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
     let disassembly = scenario
         .operation(
             "disassemble getpid",
-            scenario.handle().disassemble(uscope::DisassemblyQuery {
-                range: uscope::DisassemblyRange::Function(VirtualAddress::new(
+            scenario.handle().disassemble(microscope::DisassemblyQuery {
+                range: microscope::DisassemblyRange::Function(VirtualAddress::new(
                     libc.module.load_bias.get() + getpid.address().get(),
                 )),
-                syntax: uscope::AssemblySyntax::Intel,
+                syntax: microscope::AssemblySyntax::Intel,
             }),
         )
         .await;
-    let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
+    let microscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
         panic!("a function query returned a window");
     };
 
@@ -1664,7 +1666,7 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
         .find(|instruction| {
             matches!(
                 &instruction.content,
-                uscope::InstructionContent::Decoded(decoded)
+                microscope::InstructionContent::Decoded(decoded)
                     if decoded.mnemonic() == Some("syscall")
             )
         })
@@ -1745,7 +1747,7 @@ async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() 
         StopReason::Breakpoint { .. }
     ));
     scenario.remove_all_breakpoints().await;
-    let pc = |registers: &uscope::RegisterSnapshot| {
+    let pc = |registers: &microscope::RegisterSnapshot| {
         register_u64(registers, RegisterRole::ProgramCounter)
     };
 
@@ -1986,7 +1988,7 @@ async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
         .presentation
         .expect("a presentation");
     assert!(
-        matches!(presentation.frame, uscope::PresentedFrame::Inline(_)),
+        matches!(presentation.frame, microscope::PresentedFrame::Inline(_)),
         "{presentation:?}"
     );
     let backtrace = scenario
@@ -2016,7 +2018,7 @@ async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
 async fn launch_boundary_scenario(
     name: String,
     fixture: &str,
-) -> (Scenario, uscope::ExecutionLocation) {
+) -> (Scenario, microscope::ExecutionLocation) {
     let mut scenario = Scenario::new(name, Scenario::fixture(fixture));
     scenario.add_breakpoint("main").await;
     assert!(matches!(
@@ -2033,7 +2035,7 @@ async fn boundary_source_step(
     scenario: &mut Scenario,
     kind: StepKind,
     operation: &str,
-) -> uscope::ExecutionLocation {
+) -> microscope::ExecutionLocation {
     assert_eq!(
         scenario.step_to_stop(kind).await,
         StopReason::Step { kind },
@@ -2046,7 +2048,7 @@ async fn boundary_source_step(
 
 fn fixture_symbol_address(
     scenario: &Scenario,
-    location: &uscope::ExecutionLocation,
+    location: &microscope::ExecutionLocation,
     symbol: &str,
 ) -> VirtualAddress {
     let address = scenario
@@ -2069,7 +2071,7 @@ async fn advance_boundary_to_line(
     scenario: &mut Scenario,
     fixture: &str,
     target: u64,
-) -> uscope::ExecutionLocation {
+) -> microscope::ExecutionLocation {
     for _ in 0..4 {
         let location = scenario
             .operation(
@@ -2096,7 +2098,7 @@ async fn advance_boundary_to_line(
 async fn finish_boundary_physical_call(
     scenario: &mut Scenario,
     fixture: &str,
-    main_physical: Option<uscope::CodeInstanceId>,
+    main_physical: Option<microscope::CodeInstanceId>,
     sink: VirtualAddress,
     case: (u64, &str, u64, u64),
 ) {
@@ -2147,7 +2149,7 @@ async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &s
 async fn advance_to_boundary_inline_call(
     scenario: &mut Scenario,
     fixture: &str,
-) -> uscope::ExecutionLocation {
+) -> microscope::ExecutionLocation {
     for _ in 0..2 {
         let location = scenario
             .operation("boundary inline call", scenario.handle().current_location())
@@ -2178,7 +2180,7 @@ async fn advance_to_boundary_inline_call(
     panic!("{fixture} did not reach the inline_adjust call in main");
 }
 
-fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::ImageAddress> {
+fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<microscope::ImageAddress> {
     let image = scenario.handle().module_image();
     let function = image.function_named(function).expect("marked function");
     let instance = image
@@ -2194,7 +2196,7 @@ fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::Ima
 
 fn assert_inline_location(
     fixture: &str,
-    location: &uscope::ExecutionLocation,
+    location: &microscope::ExecutionLocation,
     function: &str,
     line: u64,
     address: VirtualAddress,
@@ -2206,16 +2208,16 @@ fn assert_inline_location(
 
 fn assert_no_continued_event(
     fixture: &str,
-    events: &mut tokio::sync::broadcast::Receiver<uscope::DebuggerEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<microscope::DebuggerEvent>,
 ) {
     assert!(
         std::iter::from_fn(|| events.try_recv().ok())
-            .all(|event| !matches!(event, uscope::DebuggerEvent::InferiorContinued { .. })),
+            .all(|event| !matches!(event, microscope::DebuggerEvent::InferiorContinued { .. })),
         "{fixture} virtual step emitted InferiorContinued"
     );
 }
 
-fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
+fn assert_inline_backtrace(fixture: &str, trace: &microscope::Backtrace) {
     let frames: Vec<_> = trace
         .frames
         .iter()
@@ -2237,9 +2239,9 @@ fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
         "unexpected {fixture} frames: {trace:?}"
     );
     assert!(frames[..2].iter().all(|(frame, _)| {
-        frame.kind == uscope::FrameKind::Inline && frame.code_instance.is_some()
+        frame.kind == microscope::FrameKind::Inline && frame.code_instance.is_some()
     }));
-    assert_eq!(frames[2].0.kind, uscope::FrameKind::Physical);
+    assert_eq!(frames[2].0.kind, microscope::FrameKind::Physical);
     assert_eq!(
         frames[..3]
             .iter()
@@ -2417,7 +2419,7 @@ async fn d_steps_into_a_function_and_back_to_its_caller() {
             trace.frames.iter().any(|frame| frame
                 .symbol
                 .as_ref()
-                .and_then(uscope::SymbolLocation::demangled_name)
+                .and_then(microscope::SymbolLocation::demangled_name)
                 .as_deref()
                 == Some("rt.dmain2._d_run_main2.runAll")),
             "{fixture}: {trace:?}"

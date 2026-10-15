@@ -4,7 +4,7 @@
 //! and published event is appended to a bounded in-memory ring as one line,
 //! stamped with the time since the first record and the thread that made it.
 //! The test harness writes the ring to a file when a test fails, and the
-//! `uscope` binary streams every line to a file as it is recorded, so the
+//! `microscope` binary streams every line to a file as it is recorded, so the
 //! recording survives a killed process. Release builds compile none of this.
 
 use std::cell::{Cell, RefCell};
@@ -98,7 +98,7 @@ pub(crate) fn record(message: fmt::Arguments<'_>) {
 
     let current = thread::current();
     let thread = current.name().map_or("unnamed", |name| {
-        name.strip_prefix("uscope-").unwrap_or(name)
+        name.strip_prefix("microscope-").unwrap_or(name)
     });
     with_recorder(|recorder| recorder.push(thread, &body));
 }
@@ -174,7 +174,7 @@ impl Recorder {
 
     fn contents(&self, path: &Path, restarts: u64) -> String {
         let mut text = format!(
-            "# uscope flight recording {}\n# process {}, written at unix time {}\n",
+            "# microscope flight recording {}\n# process {}, written at unix time {}\n",
             path.display(),
             std::process::id(),
             unix_seconds(),
@@ -374,8 +374,10 @@ mod tests {
     /// the newest lines, and a long line stops formatting at the limit.
     #[test]
     fn a_full_stream_keeps_the_newest_lines() {
-        let path =
-            std::env::temp_dir().join(format!("uscope-flight-recorder-{}.log", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "microscope-flight-recorder-{}.log",
+            std::process::id()
+        ));
         stream_to(&path).expect("stream");
         let long = "x".repeat(4 * MAX_LINE);
         let lines = MAX_STREAM_BYTES / MAX_LINE as u64 + CAPACITY as u64;

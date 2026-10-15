@@ -2,7 +2,7 @@
 //!
 //! A release build embeds `build/web`, which `just web` builds. A
 //! development build reads the directory at run time instead, so rebuilding
-//! the page never rebuilds uscope.
+//! the page never rebuilds microscope.
 
 use std::borrow::Cow;
 
@@ -16,7 +16,7 @@ const DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/build/web");
 
 /// Shown when the page has not been built. It has a `<head>` so that
 /// `rooted` names the base in it as in the built page.
-const UNBUILT: &str = "<!doctype html><head><meta charset=utf-8><title>uscope web</title></head>\
+const UNBUILT: &str = "<!doctype html><head><meta charset=utf-8><title>microscope web</title></head>\
 <body style=\"font:15px system-ui;padding:2em\"><h1>The page is not built</h1>\
 <p>Run <code>just web</code>, then reload.</p>";
 
@@ -62,14 +62,14 @@ pub fn find(path: &str) -> Option<Asset> {
 /// The page as served under `base`: the build names its files relative to
 /// the page (`./assets/…`), which a deeper route such as `/s/k7q2/stop/1`
 /// would resolve wrongly, so they are rooted at `base`, and the script finds
-/// `base` in a `uscope-base` meta tag.
+/// `base` in a `microscope-base` meta tag.
 pub fn rooted(page: &[u8], base: &str) -> Vec<u8> {
     let page = String::from_utf8_lossy(page)
         .replace("src=\"./", &format!("src=\"{base}"))
         .replace("href=\"./", &format!("href=\"{base}"));
     page.replacen(
         "<head>",
-        &format!("<head>\n    <meta name=\"uscope-base\" content=\"{base}\" />"),
+        &format!("<head>\n    <meta name=\"microscope-base\" content=\"{base}\" />"),
         1,
     )
     .into_bytes()
@@ -124,7 +124,7 @@ mod tests {
         let page = rooted(UNBUILT.as_bytes(), "/debug/7/");
         let page = String::from_utf8(page).expect("the page is UTF-8");
         assert!(
-            page.contains("<meta name=\"uscope-base\" content=\"/debug/7/\" />"),
+            page.contains("<meta name=\"microscope-base\" content=\"/debug/7/\" />"),
             "{page}"
         );
     }

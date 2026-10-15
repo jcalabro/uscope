@@ -1,16 +1,16 @@
-// How long the metrics fixture's drawings take with a million samples, from
-// a stop to its picture on screen: `just web-bench [ROUNDS]`. It reports the
+// How long the metrics fixture's drawings take with a million samples, from a
+// stop to its picture on screen: `just web-bench [ROUNDS]`. It reports the
 // median and the slowest of ROUNDS stops for each drawing, with the binary
-// USCOPE_WEB_BINARY names (the recipe builds a release one). Not a test: the
-// times depend on the machine.
+// MICROSCOPE_WEB_BINARY names (the recipe builds a release one). Not a test:
+// the times depend on the machine.
 
 import * as path from "node:path";
 import { chromium } from "@playwright/test";
-import { fixture, root, startUscope } from "./server.ts";
+import { fixture, root, startMicroscope } from "./server.ts";
 
 const rounds = Number(process.argv[2] ?? 5);
 const views = path.join(root, "tests/fixtures/c/metrics/metrics.views");
-const server = await startUscope(["--views", views, fixture("metrics"), "--", "--large"], "");
+const server = await startMicroscope(["--views", views, fixture("metrics"), "--", "--large"], "");
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });

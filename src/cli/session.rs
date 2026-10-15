@@ -7,7 +7,7 @@ use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use uscope::{CoreDumpOptions, ProcessId, SourcePathMap};
+use microscope::{CoreDumpOptions, ProcessId, SourcePathMap};
 
 use super::LaunchSettings;
 use super::config::{
@@ -48,7 +48,7 @@ pub struct Session {
     pub source_paths: SourcePathMap,
 
     /// Where modules' separate debug files are found.
-    pub debug_files: uscope::DebugFileOptions,
+    pub debug_files: microscope::DebugFileOptions,
 }
 
 impl Session {
@@ -145,7 +145,7 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
     }
 
     let debug_info = &settings.config.debug_info;
-    let debug_files = uscope::DebugFileOptions {
+    let debug_files = microscope::DebugFileOptions {
         directories: args
             .debug_directories
             .iter()
@@ -158,10 +158,10 @@ pub fn prepare(args: &Args, warnings: Renderer) -> Result<Session> {
             )
             .collect(),
         debuginfod: args.debuginfod || debug_info.debuginfod,
-        ..uscope::DebugFileOptions::default()
+        ..microscope::DebugFileOptions::default()
     };
 
-    uscope::pool::configure(None, debug_info.jobs).context("cannot load debug information")?;
+    microscope::pool::configure(None, debug_info.jobs).context("cannot load debug information")?;
     Ok(Session {
         debug_files,
         settings,
@@ -195,7 +195,7 @@ fn chosen_launch<'a>(
     settings.launch(name).map_err(|message| {
         if !trusted && files.acting().is_some_and(|acting| acting.contains("launch")) {
             anyhow!(
-                "the launch configurations of the project at {} are not trusted; run `uscope config trust` to trust them",
+                "the launch configurations of the project at {} are not trusted; run `microscope config trust` to trust them",
                 files.root.display()
             )
         } else {
@@ -271,7 +271,7 @@ fn launch_target(
                         .map(|path| root.join(path))
                         .collect(),
                     allow_module_mismatch: chosen.allow_module_mismatch,
-                    debug_files: uscope::DebugFileOptions::default(),
+                    debug_files: microscope::DebugFileOptions::default(),
                 }),
                 LaunchTarget::Program(_) => bail!("a launched program was matched above"),
             }
@@ -288,7 +288,7 @@ fn explicit_target(args: &Args) -> Result<Target> {
             sysroot: args.sysroot.clone(),
             module_paths: args.module_paths.clone(),
             allow_module_mismatch: args.allow_module_mismatch,
-            debug_files: uscope::DebugFileOptions::default(),
+            debug_files: microscope::DebugFileOptions::default(),
         }));
     }
 
@@ -316,7 +316,7 @@ fn attach_process(target: &AttachTarget) -> Result<ProcessId> {
         AttachTarget::Name(name) => name,
     };
 
-    let found = uscope::processes_named(name)?;
+    let found = microscope::processes_named(name)?;
     match found.as_slice() {
         [] => bail!("no process is named '{name}'"),
         [process] => Ok(*process),
@@ -372,7 +372,7 @@ fn decide_trust(files: &Files, flag: bool, interactive: bool, renderer: Renderer
 
     if !interactive {
         bail!(
-            "the project at {} has startup commands, aliases, or launch configurations that have not been trusted:\n\n{}\nPass --trust-project to use them in this session, or run `uscope config trust` to trust them until they change.",
+            "the project at {} has startup commands, aliases, or launch configurations that have not been trusted:\n\n{}\nPass --trust-project to use them in this session, or run `microscope config trust` to trust them until they change.",
             root.display(),
             indent(&acting)
         );

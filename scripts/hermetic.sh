@@ -4,7 +4,7 @@
 # tools or settings: the justfile runs every recipe through this.
 set -euo pipefail
 
-if [[ "${USCOPE_HERMETIC:-}" == 1 ]]; then
+if [[ "${MICROSCOPE_HERMETIC:-}" == 1 ]]; then
     exec "$@"
 fi
 exec "$(dirname "${BASH_SOURCE[0]}")/dev.sh" --command "$@"

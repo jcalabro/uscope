@@ -695,7 +695,7 @@ impl<M: Machine> Interpreter<'_, M> {
                     return Err(Self::error(
                         span,
                         ErrorKind::Unsupported,
-                        format!("a {width}-bit address is not a width uscope computes with"),
+                        format!("a {width}-bit address is not a width microscope computes with"),
                     ));
                 };
 

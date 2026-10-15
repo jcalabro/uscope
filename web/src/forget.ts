@@ -74,7 +74,7 @@ export function forget(before: Marks, after: Marks, answers: Cache, values: Reca
 }
 
 /** Where a tab keeps a session's open files, which outlive a reload. */
-const keptFiles = (session: string) => `uscope-files-${session}`;
+const keptFiles = (session: string) => `microscope-files-${session}`;
 
 /**
  * Forgets as `store`'s model changes, until the returned function is called,

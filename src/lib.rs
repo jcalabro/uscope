@@ -23,9 +23,9 @@ macro_rules! record {
 }
 
 // The library's own tests share support code with the integration tests,
-// which name the library `uscope`.
+// which name the library `microscope`.
 #[cfg(test)]
-extern crate self as uscope;
+extern crate self as microscope;
 
 mod analysis;
 mod backend;
@@ -72,7 +72,7 @@ pub use backend::syscall_engines;
 mod test_memory;
 pub mod timings;
 
-/// What the tests of uscope's unsafe code reach it through. They are a
+/// What the tests of microscope's unsafe code reach it through. They are a
 /// test target of their own, `tests/miri.rs`, so that Miri checks only
 /// them, not the whole crate, each time it runs them.
 #[doc(hidden)]
@@ -179,7 +179,7 @@ pub use view::summary::{
 
 pub use view::syntax::Error as ViewFileError;
 
-/// The views built into uscope, in the order they are tried.
+/// The views built into microscope, in the order they are tried.
 #[must_use]
 pub fn built_in_views() -> Vec<Arc<ViewName>> {
     view::ViewSet::built_in()
@@ -232,7 +232,7 @@ pub fn replay_kernel_runs(
     Ok(replayed)
 }
 
-/// Whether a view is one uscope builds in, rather than one loaded for the
+/// Whether a view is one microscope builds in, rather than one loaded for the
 /// session or carried by a module.
 #[must_use]
 pub fn is_built_in_view(name: &ViewName) -> bool {
@@ -318,7 +318,7 @@ pub fn fuzz_capture(data: &[u8]) {
     }
 }
 
-/// Reads a profile in any format uscope imports, and writes one it accepts
+/// Reads a profile in any format microscope imports, and writes one it accepts
 /// in every format, for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -408,9 +408,9 @@ const EVENT_CAPACITY: usize = 256;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The number of events a subscriber may fall behind by before it misses
-/// some. `USCOPE_EVENT_CAPACITY` lowers it so tests can make clients lag.
+/// some. `MICROSCOPE_EVENT_CAPACITY` lowers it so tests can make clients lag.
 fn event_capacity() -> usize {
-    std::env::var("USCOPE_EVENT_CAPACITY")
+    std::env::var("MICROSCOPE_EVENT_CAPACITY")
         .ok()
         .and_then(|capacity| capacity.parse().ok())
         .filter(|capacity| *capacity != 0)
@@ -1767,7 +1767,7 @@ impl DebuggerHandle {
 
     /// Presents an expression's value in the selected frame, and its first
     /// page of children, and returns a recording of each kernel run that
-    /// took, as text that `uscope views replay` replays without a program.
+    /// took, as text that `microscope views replay` replays without a program.
     pub async fn record_kernels(&self, expression: &Expression) -> Result<Vec<String>> {
         self.selected().await?.record_kernels(expression).await
     }

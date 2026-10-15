@@ -122,7 +122,7 @@ fn request(random: &mut Random, thread: Option<i64>, started: bool) -> (&'static
         28 => ("cancel", json!({"requestId": random.number()})),
         29 => ("locations", json!({"locationReference": random.number()})),
         30 => (
-            "uscope/setValueFormat",
+            "microscope/setValueFormat",
             json!({"hex": random.pick(&[json!(true), json!(false), json!("yes")])}),
         ),
         31 => (

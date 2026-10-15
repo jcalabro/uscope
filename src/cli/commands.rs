@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     Backtrace, BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly,
     DisassemblyQuery, DisassemblyRange, ExecutionContext, HitComparison, HitCondition, LineNumber,
     MAX_WINDOW_AFTER, ModuleId, ModuleImage, RegisterRole, SignalPolicy, StackFrame, StackFrameId,
@@ -566,7 +566,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "help [command]",
         "Show command help"
     ),
-    command!(Quit, "quit", ["q"], "quit", "Exit uscope"),
+    command!(Quit, "quit", ["q"], "quit", "Exit microscope"),
 ];
 
 pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
@@ -579,7 +579,7 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
 /// the commands about tasks: `goroutines` for `tasks` in Go. A runtime that
 /// calls its tasks tasks adds none.
 pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
-    let nouns = uscope::TASK_NOUNS.iter();
+    let nouns = microscope::TASK_NOUNS.iter();
     let runtime = match command.command {
         Command::Tasks => nouns.map(|(_, plural)| *plural).collect(),
         Command::Task => nouns.map(|(singular, _)| *singular).collect(),
@@ -597,7 +597,7 @@ pub fn aliases(command: &CommandSpec) -> impl Iterator<Item = &'static str> {
 /// such as Go's `goroutine`.
 fn names_a_task(word: &str) -> bool {
     word == "task"
-        || uscope::TASK_NOUNS
+        || microscope::TASK_NOUNS
             .iter()
             .any(|(singular, _)| *singular == word)
 }
@@ -833,7 +833,7 @@ impl Cli {
         let loaded = match self.debugger.loaded_modules().await {
             Ok(loaded) => loaded,
             // Before the program runs, only its own image is known.
-            Err(uscope::Error::NotRunning) => {
+            Err(microscope::Error::NotRunning) => {
                 let image = std::sync::Arc::clone(self.debugger.module_image());
                 return Ok(format::modules(
                     &[format::ModuleRow {
@@ -1007,17 +1007,20 @@ impl Cli {
             None => self.frame_source(FrameLine::Offset(0)).await?,
         };
 
-        let options = uscope::BreakpointOptions {
+        let options = microscope::BreakpointOptions {
             hit_condition: parsed.hits.map(str::parse).transpose()?,
-            condition: parsed.condition.map(uscope::Condition::parse).transpose()?,
+            condition: parsed
+                .condition
+                .map(microscope::Condition::parse)
+                .transpose()?,
             log_message: parsed
                 .log
                 .as_deref()
-                .map(uscope::LogMessage::parse)
+                .map(microscope::LogMessage::parse)
                 .transpose()?,
             enabled: !parsed.disabled,
             temporary,
-            ..uscope::BreakpointOptions::default()
+            ..microscope::BreakpointOptions::default()
         };
 
         let address = matches!(location, BreakpointSpec::Address(_));
@@ -1063,7 +1066,7 @@ impl Cli {
                 let shown = symbol
                     .demangled_name()
                     .unwrap_or_else(|| symbol.name().to_string());
-                if symbol.kind() == uscope::SymbolKind::Function
+                if symbol.kind() == microscope::SymbolKind::Function
                     && symbol.extent().is_some()
                     && image.locate(symbol.address()).function.is_none()
                     && regex.is_match(&shown)
@@ -1113,7 +1116,7 @@ impl Cli {
     }
 
     /// The images of the loaded modules, or the program's before it runs.
-    pub(super) async fn loaded_images(&self) -> Vec<std::sync::Arc<uscope::ModuleImage>> {
+    pub(super) async fn loaded_images(&self) -> Vec<std::sync::Arc<microscope::ModuleImage>> {
         let Ok(loaded) = self.debugger.loaded_modules().await else {
             return vec![std::sync::Arc::clone(self.debugger.module_image())];
         };
@@ -1134,21 +1137,21 @@ impl Cli {
 
     /// A breakpoint's failure, with the nearest names when it names a
     /// function or source file that no loaded module has.
-    async fn suggest(&self, error: uscope::Error) -> anyhow::Error {
+    async fn suggest(&self, error: microscope::Error) -> anyhow::Error {
         let hint = match &error {
-            uscope::Error::FunctionNotFound(name) => {
+            microscope::Error::FunctionNotFound(name) => {
                 let images = self.loaded_images().await;
                 let names = images.iter().flat_map(|image| {
-                    image.functions().map(uscope::Function::name).chain(
+                    image.functions().map(microscope::Function::name).chain(
                         image
                             .symbols()
-                            .filter(|symbol| symbol.kind() == uscope::SymbolKind::Function)
-                            .map(uscope::Symbol::name),
+                            .filter(|symbol| symbol.kind() == microscope::SymbolKind::Function)
+                            .map(microscope::Symbol::name),
                     )
                 });
                 super::suggest::did_you_mean(name, names)
             }
-            uscope::Error::SourceFileNotFound(path) => {
+            microscope::Error::SourceFileNotFound(path) => {
                 let images = self.loaded_images().await;
                 let written = path.to_string_lossy();
                 let names = images
@@ -1201,7 +1204,7 @@ impl Cli {
 
     /// Where each of a breakpoint's locations is, as far as its module
     /// tells.
-    pub(super) async fn placed(&self, breakpoint: &uscope::Breakpoint) -> Vec<format::Placed> {
+    pub(super) async fn placed(&self, breakpoint: &microscope::Breakpoint) -> Vec<format::Placed> {
         // The program's own module, whose image addresses a running process
         // shows at their runtime addresses.
         let main = self
@@ -1226,8 +1229,8 @@ impl Cli {
 
     async fn place(
         &self,
-        location: uscope::BreakpointLocation,
-        main: Option<uscope::LoadedModule>,
+        location: microscope::BreakpointLocation,
+        main: Option<microscope::LoadedModule>,
     ) -> format::Placed {
         let mut placed = format::Placed {
             location,
@@ -1237,9 +1240,9 @@ impl Cli {
         };
 
         let (image, address) = match location {
-            uscope::BreakpointLocation::Image(address) => {
+            microscope::BreakpointLocation::Image(address) => {
                 if let Some(runtime) = main.and_then(|main| main.virtual_address(address).ok()) {
-                    placed.location = uscope::BreakpointLocation::Virtual(runtime);
+                    placed.location = microscope::BreakpointLocation::Virtual(runtime);
                 }
 
                 (
@@ -1247,7 +1250,7 @@ impl Cli {
                     address,
                 )
             }
-            uscope::BreakpointLocation::Virtual(address) => {
+            microscope::BreakpointLocation::Virtual(address) => {
                 let Ok(description) = self.debugger.describe_address(address).await else {
                     return placed;
                 };
@@ -1273,7 +1276,7 @@ impl Cli {
 
         let located = image.locate(address);
         let inline = match &located.inline_frames {
-            uscope::InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
+            microscope::InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
             _ => None,
         };
 
@@ -1380,7 +1383,7 @@ impl Cli {
         let condition = if words.is_empty() {
             None
         } else {
-            Some(uscope::Condition::parse(&words.join(" "))?)
+            Some(microscope::Condition::parse(&words.join(" "))?)
         };
 
         let renderer = self.renderers.stdout;
@@ -1736,7 +1739,8 @@ impl Cli {
         // An awaited future is named by its type, which its image holds.
         let modules = frames
             .filter(|frame| {
-                frame.source.is_some() || matches!(frame.kind, uscope::FrameKind::Awaited { .. })
+                frame.source.is_some()
+                    || matches!(frame.kind, microscope::FrameKind::Awaited { .. })
             })
             .filter_map(|frame| frame.module)
             .collect::<std::collections::BTreeSet<_>>();
@@ -1803,7 +1807,7 @@ impl Cli {
     /// that failed, and loaded library view that cannot be used.
     async fn execute_until_stop(
         &self,
-        execution: impl std::future::Future<Output = uscope::Result<StopReason>>,
+        execution: impl std::future::Future<Output = microscope::Result<StopReason>>,
     ) -> Result<String> {
         let mut events = self.debugger.subscribe();
         let started = std::time::Instant::now();
@@ -1905,7 +1909,7 @@ impl Cli {
             [target] => (*target, None),
             [target, "if", condition @ ..] if !condition.is_empty() => (
                 *target,
-                Some(uscope::Condition::parse(&condition.join(" "))?),
+                Some(microscope::Condition::parse(&condition.join(" "))?),
             ),
             _ => return Err(spec.usage_error()),
         };
@@ -1916,12 +1920,12 @@ impl Cli {
             .access
             .contains(&access)
         {
-            return Err(uscope::Error::UnsupportedWatchAccess(access).into());
+            return Err(microscope::Error::UnsupportedWatchAccess(access).into());
         }
 
-        let options = uscope::WatchpointOptions {
+        let options = microscope::WatchpointOptions {
             condition,
-            ..uscope::WatchpointOptions::default()
+            ..microscope::WatchpointOptions::default()
         };
 
         let watchpoint = if let Some(location) = parse_watch_location(argument, spec)? {
@@ -1999,7 +2003,7 @@ impl Cli {
                         type_info,
                         &variable.name,
                         &variable.state,
-                        uscope::InspectionLimits::default(),
+                        microscope::InspectionLimits::default(),
                         layout,
                         renderer,
                     )
@@ -2031,8 +2035,8 @@ impl Cli {
             .await
             .map_err(|error| expression_error(text, error))?;
         let (inspected, cause) = match evaluation {
-            uscope::Evaluation::Range(page) => return Ok(value::range(text, &page, renderer)),
-            uscope::Evaluation::Value { value, cause } => (value, cause),
+            microscope::Evaluation::Range(page) => return Ok(value::range(text, &page, renderer)),
+            microscope::Evaluation::Value { value, cause } => (value, cause),
             _ => bail!("the evaluation produced an unknown kind of result"),
         };
 
@@ -2043,7 +2047,7 @@ impl Cli {
                     type_info,
                     text,
                     &inspected.state,
-                    uscope::InspectionLimits::default().remaining_after(inspected.usage),
+                    microscope::InspectionLimits::default().remaining_after(inspected.usage),
                     layout,
                     renderer,
                 )
@@ -2101,9 +2105,9 @@ impl Cli {
 
     /// Shows a type's definition: of a type named, or of an expression's.
     async fn ptype(&self, text: &str) -> Result<String> {
-        let as_expression = match uscope::Expression::parse(text) {
+        let as_expression = match microscope::Expression::parse(text) {
             Ok(expression) => self.debugger.expression_type(&expression).await,
-            Err(error) => Err(uscope::Error::Expression(error)),
+            Err(error) => Err(microscope::Error::Expression(error)),
         };
 
         let type_info = match as_expression {
@@ -2111,7 +2115,7 @@ impl Cli {
             Err(expression_failure) => {
                 // A type is measured through a pointer to it, which reads
                 // nothing.
-                let through = uscope::Expression::parse(&format!("*({text}*)null"));
+                let through = microscope::Expression::parse(&format!("*({text}*)null"));
                 let found = match through {
                     Ok(expression) => self.debugger.expression_type(&expression).await.ok(),
                     Err(_) => None,
@@ -2129,7 +2133,7 @@ impl Cli {
         ))
     }
 
-    async fn module_images(&self) -> Result<Vec<std::sync::Arc<uscope::ModuleImage>>> {
+    async fn module_images(&self) -> Result<Vec<std::sync::Arc<microscope::ModuleImage>>> {
         let modules = self.debugger.loaded_modules().await?;
         let mut images = Vec::new();
         for module in modules.modules.iter() {
@@ -2172,12 +2176,12 @@ impl Cli {
             .debugger
             .evaluate_with(
                 &expression,
-                uscope::EvaluationMode::Assign,
-                uscope::InspectionLimits::default(),
+                microscope::EvaluationMode::Assign,
+                microscope::InspectionLimits::default(),
             )
             .await
             .map_err(|error| expression_error(text, error))?;
-        let uscope::Evaluation::Value {
+        let microscope::Evaluation::Value {
             value: assigned, ..
         } = evaluation
         else {
@@ -2230,7 +2234,7 @@ impl Cli {
             ["load", paths @ ..] if !paths.is_empty() => {
                 let files = paths
                     .iter()
-                    .map(|path| uscope::view_files::read(std::path::Path::new(path)))
+                    .map(|path| microscope::view_files::read(std::path::Path::new(path)))
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|error| anyhow!(error))?;
                 {
@@ -2299,9 +2303,9 @@ impl Cli {
     async fn globals(&self, filter: Option<&str>) -> Result<String> {
         let page = self
             .debugger
-            .globals(uscope::GlobalVariableQuery {
+            .globals(microscope::GlobalVariableQuery {
                 filter: filter.map(str::to_owned),
-                ..uscope::GlobalVariableQuery::default()
+                ..microscope::GlobalVariableQuery::default()
             })
             .await?;
         Ok(format::globals(&page, self.renderers.stdout))
@@ -2338,7 +2342,7 @@ impl Cli {
         let disassembly = match self.disassemble_query(range).await {
             // Code outside every function, such as the vDSO's unexported
             // helpers, is shown around the frame's instruction instead.
-            Err(uscope::Error::NoFunctionContainsAddress(_)) if target.is_none() => {
+            Err(microscope::Error::NoFunctionContainsAddress(_)) if target.is_none() => {
                 self.disassemble_query(DisassemblyRange::Window {
                     address: marked,
                     before: DISASSEMBLY_CONTEXT_BEFORE,
@@ -2346,7 +2350,7 @@ impl Cli {
                 })
                 .await?
             }
-            Err(uscope::Error::NoFunctionContainsAddress(address)) => {
+            Err(microscope::Error::NoFunctionContainsAddress(address)) => {
                 bail!(
                     "no function or code symbol contains {address}; give an instruction count to disassemble from it"
                 )
@@ -2382,7 +2386,7 @@ impl Cli {
     pub(super) async fn disassemble_query(
         &self,
         range: DisassemblyRange,
-    ) -> uscope::Result<Disassembly> {
+    ) -> microscope::Result<Disassembly> {
         self.debugger
             .disassemble(DisassemblyQuery {
                 range,
@@ -2405,7 +2409,7 @@ impl Cli {
 
         let location = match self.debugger.current_location().await {
             Ok(location) => location,
-            Err(uscope::Error::AddressOutsideModule) => {
+            Err(microscope::Error::AddressOutsideModule) => {
                 let instruction = self.selected_instruction().await?;
                 return Ok((instruction, instruction));
             }
@@ -2417,7 +2421,7 @@ impl Cli {
             .modules
             .iter()
             .find(|record| record.module.id == location.module)
-            .ok_or(uscope::Error::ModuleNotLoaded(location.module))?;
+            .ok_or(microscope::Error::ModuleNotLoaded(location.module))?;
         Ok((
             module.module.virtual_address(location.image.address)?,
             location.address,
@@ -2451,7 +2455,7 @@ impl Cli {
                     ByteOrder::Big => u64::from_be_bytes(bytes),
                 })
             })
-            .ok_or_else(|| uscope::Error::LocationUnavailable.into())
+            .ok_or_else(|| microscope::Error::LocationUnavailable.into())
     }
 
     async fn selected_level(&self) -> Result<u32> {
@@ -2539,7 +2543,7 @@ impl Cli {
             Ok(location) => location,
             // No loaded module describes the frame's code, such as a stop in
             // JIT-compiled code.
-            Err(uscope::Error::AddressOutsideModule) => {
+            Err(microscope::Error::AddressOutsideModule) => {
                 return Ok(format!(
                     "{} at {} outside every loaded module",
                     renderer.paint(Role::Name, "<unknown>"),
@@ -2558,7 +2562,7 @@ impl Cli {
     /// Where a location is: its function, then its line or address.
     pub(super) async fn describe(
         &self,
-        location: &uscope::ExecutionLocation,
+        location: &microscope::ExecutionLocation,
         with_address: bool,
     ) -> Result<String> {
         let renderer = self.renderers.stdout;
@@ -2608,7 +2612,7 @@ impl Cli {
 
     /// The selected frame's source, with as many lines around its line as
     /// `[source] context` asks for.
-    pub(super) async fn source_context(&self) -> uscope::Result<uscope::SourceContext> {
+    pub(super) async fn source_context(&self) -> microscope::Result<microscope::SourceContext> {
         let [before, after] = self.settings.config.source.context;
         let mut context = self.debugger.source_context(before.max(after)).await?;
         let line = context.location.line.get();
@@ -2697,8 +2701,8 @@ impl Cli {
     /// missing from `snapshot` were temporaries.
     pub(super) fn deleted_temporaries(
         &self,
-        hits: &[uscope::BreakpointHit],
-        snapshot: &uscope::StateSnapshot,
+        hits: &[microscope::BreakpointHit],
+        snapshot: &microscope::StateSnapshot,
     ) -> Option<String> {
         let deleted = hits
             .iter()
@@ -2724,7 +2728,7 @@ impl Cli {
     /// with the lines breakpoints are at marked.
     pub(super) async fn source_listing(
         &self,
-        context: &uscope::SourceContext,
+        context: &microscope::SourceContext,
         located: bool,
     ) -> String {
         let mut marks = BTreeMap::new();
@@ -2747,7 +2751,7 @@ impl Cli {
             .then(|| self.lexed(&context.path))
             .flatten();
         let tab_width = usize::from(source.tab_width);
-        let text = |line: &uscope::SourceLine| {
+        let text = |line: &microscope::SourceLine| {
             let spans = lexed
                 .as_ref()
                 .and_then(|lexed| {
@@ -3227,7 +3231,7 @@ fn join_lines(first: &str, second: &str) -> String {
 impl Cli {
     async fn list_signals(&self) -> Result<String> {
         let mut policies = Vec::new();
-        for code in uscope::signal_codes() {
+        for code in microscope::signal_codes() {
             policies.push((code, self.debugger.signal_policy(code).await?));
         }
 
@@ -3238,7 +3242,8 @@ impl Cli {
     /// implies `print`, and `noprint` implies `nostop`.
     async fn handle_signal(&self, arguments: &[&str]) -> Result<String> {
         let name = arguments[0];
-        let code = uscope::signal_named(name).ok_or_else(|| anyhow!("unknown signal '{name}'"))?;
+        let code =
+            microscope::signal_named(name).ok_or_else(|| anyhow!("unknown signal '{name}'"))?;
         let mut policy = self.debugger.signal_policy(code).await?;
         for action in &arguments[1..] {
             apply_signal_action(&mut policy, action)?;
@@ -3270,25 +3275,25 @@ impl Cli {
 
         let mut words = words.split_whitespace().peekable();
         let phase = match words.peek().copied() {
-            Some("entry") => uscope::CatchPhase::Entry,
-            Some("exit") => uscope::CatchPhase::Exit,
-            _ => uscope::CatchPhase::Both,
+            Some("entry") => microscope::CatchPhase::Entry,
+            Some("exit") => microscope::CatchPhase::Exit,
+            _ => microscope::CatchPhase::Both,
         };
 
-        if phase != uscope::CatchPhase::Both {
+        if phase != microscope::CatchPhase::Both {
             words.next();
         }
 
         let mut calls = Vec::new();
         for word in words {
-            let named = uscope::syscalls::Abi::ALL
+            let named = microscope::syscalls::Abi::ALL
                 .into_iter()
                 .filter_map(|abi| {
                     word.parse::<u32>().map_or_else(
-                        |_| uscope::syscalls::SyscallId::named(abi, word),
+                        |_| microscope::syscalls::SyscallId::named(abi, word),
                         |number| {
-                            (abi == uscope::syscalls::Abi::X86_64)
-                                .then(|| uscope::syscalls::SyscallId::new(abi, number))
+                            (abi == microscope::syscalls::Abi::X86_64)
+                                .then(|| microscope::syscalls::SyscallId::new(abi, number))
                         },
                     )
                 })
@@ -3302,7 +3307,7 @@ impl Cli {
 
         let condition = condition
             .filter(|condition| !condition.is_empty())
-            .map(uscope::Condition::parse)
+            .map(microscope::Condition::parse)
             .transpose()
             .map_err(|error| anyhow!("{error}"))?;
         if rest.trim() == "if" {
@@ -3330,7 +3335,7 @@ impl Cli {
         for word in catchpoints {
             let id = word[1..]
                 .parse()
-                .map(uscope::CatchpointId::new)
+                .map(microscope::CatchpointId::new)
                 .map_err(|_| spec.usage_error())?;
             self.debugger.remove_catchpoint(id).await?;
             deleted.push(format!(
@@ -3353,7 +3358,7 @@ impl Cli {
             .exceptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let filters = uscope::ExceptionStops::filters();
+        let filters = microscope::ExceptionStops::filters();
         let (shown, stops) = match arguments {
             [] => (filters.iter().collect::<Vec<_>>(), current),
             [name, choice @ ..] => {
@@ -3432,8 +3437,9 @@ pub fn apply_signal_action(policy: &mut SignalPolicy, action: &str) -> Result<()
     Ok(())
 }
 
-fn parse_expression(text: &str) -> Result<uscope::Expression> {
-    uscope::Expression::parse(text).map_err(|error| anyhow!(format::expression_error(text, &error)))
+fn parse_expression(text: &str) -> Result<microscope::Expression> {
+    microscope::Expression::parse(text)
+        .map_err(|error| anyhow!(format::expression_error(text, &error)))
 }
 
 /// Splits a command line into its command, the format written after it as
@@ -3469,7 +3475,7 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
 /// Every task at a stop, with what names their places.
 struct TaskTraces {
     selected: Option<ExecutionContext>,
-    tasks: Vec<(TaskSnapshot, uscope::Result<Backtrace>)>,
+    tasks: Vec<(TaskSnapshot, microscope::Result<Backtrace>)>,
 
     /// Why some tasks could not be read.
     gaps: Vec<Arc<str>>,
@@ -3512,9 +3518,9 @@ const fn inspects(command: Command) -> bool {
 
 /// An evaluation's failure, pointing into the expression when it is the
 /// expression's.
-fn expression_error(text: &str, error: uscope::Error) -> anyhow::Error {
+fn expression_error(text: &str, error: microscope::Error) -> anyhow::Error {
     match error {
-        uscope::Error::Expression(error) => anyhow!(format::expression_error(text, &error)),
+        microscope::Error::Expression(error) => anyhow!(format::expression_error(text, &error)),
         error => error.into(),
     }
 }

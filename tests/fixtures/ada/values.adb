@@ -7,7 +7,7 @@
 --  Reached's caller. A path names a variable as GNAT does, in lower case,
 --  and then its components and elements, an element by its indices in
 --  parentheses. Floats are their bits in hexadecimal; kind `summary` is how
---  uscope writes the value.
+--  microscope writes the value.
 
 with Ada.Characters.Latin_1;
 with Ada.Command_Line;

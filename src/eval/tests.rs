@@ -25,7 +25,7 @@ fn rows() -> Vec<Row<'static>> {
     let mut world = None;
     for (index, line) in REFERENCE.lines().enumerate() {
         match line.trim() {
-            "```uscope-example" => {
+            "```microscope-example" => {
                 in_block = true;
                 world = None;
             }

@@ -13,7 +13,7 @@ use std::sync::{Once, OnceLock};
 
 use crate::abi;
 
-/// The control block uscope finds in the program's file and writes.
+/// The control block microscope finds in the program's file and writes.
 #[repr(C, align(64))]
 pub struct Control {
     magic: [u8; 8],
@@ -32,7 +32,7 @@ pub struct Control {
     registry: [AtomicPtr<Header>; abi::MOST_RINGS],
 }
 
-#[unsafe(link_section = "uscope_probe_control")]
+#[unsafe(link_section = "microscope_probe_control")]
 #[used]
 static CONTROL: Control = Control {
     magic: abi::MAGIC,
@@ -82,7 +82,7 @@ pub struct Header {
 const _: () = assert!(core::mem::size_of::<Header>() == abi::RING_HEADER);
 const _: () = assert!(core::mem::offset_of!(Header, head) == 64);
 
-/// A record, written as two words, which uscope reads as its 16 bytes.
+/// A record, written as two words, which microscope reads as its 16 bytes.
 #[repr(C)]
 struct Record([AtomicU64; 2]);
 
@@ -126,7 +126,7 @@ impl Drop for Retire {
 }
 
 /// Every ring this process made, so that a thread can take one another
-/// left: the ABI's registry holds their addresses for uscope, and this
+/// left: the ABI's registry holds their addresses for microscope, and this
 /// the rings themselves.
 static MADE: [OnceLock<&'static Ring>; abi::MOST_RINGS] =
     [const { OnceLock::new() }; abi::MOST_RINGS];
@@ -135,7 +135,7 @@ static MADE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// The forks the process has made, by [`Header::generation`].
 static FORKS: AtomicU32 = AtomicU32::new(0);
 
-/// Whether uscope is recording the program's instrumentation: every site
+/// Whether microscope is recording the program's instrumentation: every site
 /// it chose is on.
 #[must_use]
 pub fn listening() -> bool {
@@ -309,7 +309,7 @@ fn write(state: &'static AtomicU8, kind: u8, argument: u32, more: &[u8]) -> bool
     compiler_fence(Ordering::SeqCst);
     header.writing.store(0, Ordering::Relaxed);
 
-    // Every so often, the thread asks whether uscope is still there.
+    // Every so often, the thread asks whether microscope is still there.
     if (head ^ position) >> 10 != 0 {
         check_heartbeat();
     }
@@ -407,7 +407,7 @@ fn monotonic() -> u64 {
         .wrapping_add(time.nanoseconds.cast_unsigned())
 }
 
-/// Switches every site off once uscope has gone quiet.
+/// Switches every site off once microscope has gone quiet.
 #[cold]
 fn check_heartbeat() {
     let heartbeat = CONTROL.heartbeat.load(Ordering::Relaxed);
@@ -425,12 +425,12 @@ fn check_heartbeat() {
 
 #[cfg(not(miri))]
 unsafe extern "C" {
-    static __start_uscope_sites: [u8; 0];
-    static __stop_uscope_sites: [u8; 0];
+    static __start_microscope_sites: [u8; 0];
+    static __stop_microscope_sites: [u8; 0];
 }
 
 // The SDK's own site, so that the section is always there.
-static SITE: &AtomicU8 = crate::__site!(crate::abi::SITE_NONE, "uscope_probes");
+static SITE: &AtomicU8 = crate::__site!(crate::abi::SITE_NONE, "microscope_probes");
 
 /// Switches every site off.
 fn disable() {
@@ -445,8 +445,8 @@ fn switch_sites_off() {}
 
 #[cfg(not(miri))]
 fn switch_sites_off() {
-    let start = (&raw const __start_uscope_sites).cast::<u8>();
-    let stop = (&raw const __stop_uscope_sites).cast::<u8>();
+    let start = (&raw const __start_microscope_sites).cast::<u8>();
+    let stop = (&raw const __stop_microscope_sites).cast::<u8>();
     let mut site = start;
     while site < stop {
         // SAFETY: the section is a table of sites, each of whose state
@@ -463,7 +463,7 @@ fn switch_sites_off() {
 
 static ATFORK: Once = Once::new();
 
-/// A child of `fork` records nothing until uscope says so, and never into
+/// A child of `fork` records nothing until microscope says so, and never into
 /// its parent's rings.
 extern "C" fn forked() {
     disable();
@@ -476,8 +476,8 @@ extern "C" fn forked() {
     let _ = RING.try_with(|slot| slot.set(Slot::Unset));
 }
 
-/// A program that exits while uscope reads it waits a moment for uscope to
-/// read what its threads wrote last.
+/// A program that exits while microscope reads it waits a moment for microscope
+/// to read what its threads wrote last.
 extern "C" fn exiting() {
     let fresh = |now: u64| {
         now.saturating_sub(CONTROL.heartbeat.load(Ordering::Relaxed)) < abi::FRESH_NANOSECONDS
@@ -538,7 +538,7 @@ fn acquire() -> Slot {
     slot
 }
 
-/// A ring of this process that a thread that exited left, which uscope
+/// A ring of this process that a thread that exited left, which microscope
 /// has read.
 fn reuse() -> Option<&'static Ring> {
     let generation = FORKS.load(Ordering::Relaxed);
@@ -562,7 +562,7 @@ fn reuse() -> Option<&'static Ring> {
         })
 }
 
-/// A new ring of the size uscope chose, in both registries, or none.
+/// A new ring of the size microscope chose, in both registries, or none.
 fn allocate() -> Option<&'static Ring> {
     let mut index = CONTROL.rings.load(Ordering::Relaxed);
     loop {

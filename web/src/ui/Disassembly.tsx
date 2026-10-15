@@ -20,13 +20,17 @@ import { useFocus } from "./Workspace";
 /** The syntax this browser reads, Intel unless AT&T was chosen. */
 function useSyntax(): [Syntax, (syntax: Syntax) => void] {
   const [syntax, setSyntax] = useState<Syntax>(() =>
-    read("uscope-syntax", "intel", (value): value is Syntax => isString(value) && value === "att"),
+    read(
+      "microscope-syntax",
+      "intel",
+      (value): value is Syntax => isString(value) && value === "att",
+    ),
   );
   return [
     syntax,
     (chosen) => {
       setSyntax(chosen);
-      write("uscope-syntax", chosen);
+      write("microscope-syntax", chosen);
     },
   ];
 }

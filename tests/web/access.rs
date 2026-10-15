@@ -15,7 +15,7 @@ async fn only_a_join_links_token_from_the_servers_own_page_logs_in() {
     assert_eq!(status, 204);
     let cookie = cookie.expect("a cookie");
     assert!(
-        cookie.starts_with(&format!("uscope-{}=", web.address.port())),
+        cookie.starts_with(&format!("microscope-{}=", web.address.port())),
         "{cookie}"
     );
 
@@ -45,7 +45,7 @@ async fn the_socket_refuses_other_pages_names_and_cookies() {
     let attempts = [
         (None, Some(origin.as_str()), None),
         (
-            Some(format!("uscope-{port}=c-0000")),
+            Some(format!("microscope-{port}=c-0000")),
             Some(origin.as_str()),
             None,
         ),
@@ -174,7 +174,7 @@ async fn the_page_can_ask_whether_its_cookie_is_good() {
 
     let cookie = web.cookie(&web.control_token.clone());
     assert_eq!(check(&cookie).as_deref(), Some("204"));
-    assert_eq!(check("uscope-1=c-0").as_deref(), Some("403"));
+    assert_eq!(check("microscope-1=c-0").as_deref(), Some("403"));
 }
 
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn a_public_url_serves_everything_under_its_path_to_its_proxy_and_nothing_
     for root in ["/debug/7/", "/debug/7"] {
         let page = get(root, "proxy.example");
         assert!(
-            page.starts_with("HTTP/1.1 200") && page.contains("uscope-base"),
+            page.starts_with("HTTP/1.1 200") && page.contains("microscope-base"),
             "{root}: {page}"
         );
     }

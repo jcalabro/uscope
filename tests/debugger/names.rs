@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     BreakpointHit, BreakpointId, BreakpointSpec, Error, ExecutionContext, ExitStatus,
     InferiorState, LineNumber, StackFrameId, StopContext, StopReason, ThreadId, ThreadState,
 };

@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     Architecture, BreakpointLocation, BreakpointSpec, ByteOrder, CodeInstanceKind, Debugger,
     EntryProvenance, Error, ExitStatus, InferiorState, InlineFrameLookup, LaunchOptions,
     ModuleImage, PointerWidth, ProcessId, RegisterRole, ScalarValue, SourceContext, SourceFile,
@@ -45,17 +45,17 @@ use nix::unistd::Pid;
 use support::{Scenario, frame_modules, position_of, register_u64, source_line};
 use tokio::time::{Duration, timeout};
 
-fn available_value(state: &VariableState) -> &uscope::VariableValue {
+fn available_value(state: &VariableState) -> &microscope::VariableValue {
     match state {
         VariableState::Available { value, .. } => value,
         state => panic!("value was not available: {state:?}"),
     }
 }
 
-fn available_children(state: &VariableState) -> &Arc<uscope::ValueChildrenReference> {
+fn available_children(state: &VariableState) -> &Arc<microscope::ValueChildrenReference> {
     match state {
         VariableState::Available {
-            children: uscope::ValueChildren::Available(reference),
+            children: microscope::ValueChildren::Available(reference),
             ..
         } => reference,
         state => panic!("value had no available children: {state:?}"),
@@ -67,7 +67,7 @@ async fn child_page(
     state: &VariableState,
     offset: u64,
     limit: u32,
-) -> uscope::ValueChildPage {
+) -> microscope::ValueChildPage {
     scenario
         .operation(
             &format!(
@@ -76,19 +76,19 @@ async fn child_page(
             ),
             scenario.handle().value_children(
                 available_children(state).clone(),
-                uscope::ValueChildQuery { offset, limit },
+                microscope::ValueChildQuery { offset, limit },
             ),
         )
         .await
 }
 
-fn named_child<'a>(page: &'a uscope::ValueChildPage, name: &str) -> &'a uscope::ValueChild {
+fn named_child<'a>(page: &'a microscope::ValueChildPage, name: &str) -> &'a microscope::ValueChild {
     page.children
         .iter()
         .find(|child| {
             matches!(
                 &child.relationship,
-                uscope::ValueChildRelationship::Member(member)
+                microscope::ValueChildRelationship::Member(member)
                     if member.name.as_deref() == Some(name)
             )
         })
@@ -99,7 +99,7 @@ fn assert_signed(state: &VariableState, expected: i128, context: &str) {
     assert!(
         matches!(
             available_value(state),
-            uscope::VariableValue::Scalar(ScalarValue::Signed(value)) if *value == expected
+            microscope::VariableValue::Scalar(ScalarValue::Signed(value)) if *value == expected
         ),
         "{context}: {state:?}"
     );
@@ -110,13 +110,13 @@ async fn record_page(
     state: &VariableState,
     minimum_children: usize,
     context: &str,
-) -> uscope::ValueChildPage {
+) -> microscope::ValueChildPage {
     assert!(
         matches!(
             available_value(state),
-            uscope::VariableValue::Record
-                | uscope::VariableValue::Union
-                | uscope::VariableValue::Variant { .. }
+            microscope::VariableValue::Record
+                | microscope::VariableValue::Union
+                | microscope::VariableValue::Variant { .. }
         ),
         "{context}: value was not an aggregate: {state:?}"
     );
@@ -127,29 +127,29 @@ async fn record_page(
     );
     let limit = u32::try_from(reference.total().min(256)).expect("bounded page fits u32");
     if limit == 0 {
-        return uscope::ValueChildPage {
+        return microscope::ValueChildPage {
             stop_id: reference.stop_id(),
             offset: 0,
             total: 0,
             children: Arc::from([]),
-            completion: uscope::InspectionCompletion::Complete,
-            usage: uscope::InspectionUsage::default(),
+            completion: microscope::InspectionCompletion::Complete,
+            usage: microscope::InspectionUsage::default(),
         };
     }
 
     child_page(scenario, state, 0, limit).await
 }
 
-fn value_expression(components: &[&str]) -> uscope::Expression {
+fn value_expression(components: &[&str]) -> microscope::Expression {
     let (first, rest) = components.split_first().expect("a name");
     rest.iter().fold(
-        uscope::Expression::name(first).expect("a name"),
+        microscope::Expression::name(first).expect("a name"),
         |expression, member| expression.member(member).expect("a member"),
     )
 }
 
-fn parsed_value_expression(expression: &str) -> uscope::Expression {
-    uscope::Expression::parse(expression)
+fn parsed_value_expression(expression: &str) -> microscope::Expression {
+    microscope::Expression::parse(expression)
         .unwrap_or_else(|error| panic!("parse test expression {expression:?}: {error}"))
 }
 
@@ -164,7 +164,9 @@ async fn load_fixture_image(fixture: &str) -> Arc<ModuleImage> {
     image
 }
 
-fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::ImageAddress {
+fn single_image_breakpoint_address(
+    breakpoint: &microscope::Breakpoint,
+) -> microscope::ImageAddress {
     assert_eq!(breakpoint.locations.len(), 1);
     match breakpoint.locations[0].location {
         BreakpointLocation::Image(address) => address,
@@ -176,7 +178,7 @@ async fn dereference_named(
     scenario: &Scenario,
     name: &str,
     depth: usize,
-) -> uscope::DereferencedValue {
+) -> microscope::DereferencedValue {
     let variable = scenario
         .operation("inspect pointer", scenario.handle().variable(name))
         .await;
@@ -185,7 +187,7 @@ async fn dereference_named(
     for _ in 0..depth {
         let reference = match state {
             VariableState::Available {
-                dereference: uscope::DereferenceState::Available(reference),
+                dereference: microscope::DereferenceState::Available(reference),
                 ..
             } => reference,
             other => panic!("{name} is not dereferenceable: {other:?}"),
@@ -206,12 +208,12 @@ async fn dereference_named(
 
 async fn assert_slice_values(
     scenario: &Scenario,
-    variable: &uscope::Variable,
+    variable: &microscope::Variable,
     capacity: Option<u64>,
     expected: &[i128],
     fixture: &str,
 ) {
-    let uscope::VariableValue::Slice {
+    let microscope::VariableValue::Slice {
         length,
         capacity: actual_capacity,
     } = available_value(&variable.state)
@@ -240,14 +242,14 @@ async fn assert_slice_values(
         .map_or(&[][..], |page| page.children.as_ref())
         .iter()
         .map(|child| match available_value(&child.state) {
-            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            microscope::VariableValue::Scalar(microscope::ScalarValue::Signed(value)) => *value,
             other => panic!("{fixture}: expected scalar slice element, got {other:?}"),
         })
         .collect();
     assert_eq!(values, expected, "{fixture}");
 }
 
-fn location_function(location: &uscope::ExecutionLocation) -> Option<&str> {
+fn location_function(location: &microscope::ExecutionLocation) -> Option<&str> {
     location
         .image
         .function
@@ -255,7 +257,7 @@ fn location_function(location: &uscope::ExecutionLocation) -> Option<&str> {
         .map(|function| function.name.as_ref())
 }
 
-fn location_line(location: &uscope::ExecutionLocation) -> Option<u64> {
+fn location_line(location: &microscope::ExecutionLocation) -> Option<u64> {
     location
         .image
         .source
@@ -336,7 +338,10 @@ const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
     ]
 }
 
-fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> uscope::ImageAddress {
+fn expected_physical_entry(
+    scenario: &Scenario,
+    case: &EntryBoundaryCase,
+) -> microscope::ImageAddress {
     let image = scenario.handle().module_image();
     let function = image
         .function_named(case.function)
@@ -380,7 +385,7 @@ fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> usc
 async fn assert_entry_stop(
     scenario: &Scenario,
     case: &EntryBoundaryCase,
-    expected: uscope::ImageAddress,
+    expected: microscope::ImageAddress,
 ) {
     let location = scenario
         .operation(
@@ -408,8 +413,8 @@ async fn assert_entry_stop(
 }
 
 const fn relocate_image_address(
-    address: uscope::ImageAddress,
-    location: &uscope::ExecutionLocation,
+    address: microscope::ImageAddress,
+    location: &microscope::ExecutionLocation,
 ) -> VirtualAddress {
     let load_bias = location
         .address
@@ -455,15 +460,15 @@ async fn resume_go_to_exit(scenario: &mut Scenario, fixture: &str) {
     panic!("{fixture} did not exit after 32 breakpoint stops");
 }
 
-fn assert_variable_value(variable: &uscope::Variable, expected: impl Into<ScalarValue>) {
+fn assert_variable_value(variable: &microscope::Variable, expected: impl Into<ScalarValue>) {
     assert_eq!(
         available_value(&variable.state),
-        &uscope::VariableValue::Scalar(expected.into())
+        &microscope::VariableValue::Scalar(expected.into())
     );
 }
 
 /// The text summary of a variable, or `None` when it has none.
-fn text_of(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSummary> {
+fn text_of(variables: &[microscope::Variable], name: &str) -> Option<microscope::TextSummary> {
     let variable = variables
         .iter()
         .find(|variable| &*variable.name == name)

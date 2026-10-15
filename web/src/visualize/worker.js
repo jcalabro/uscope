@@ -1,7 +1,7 @@
 // The worker a renderer runs in, started by the sandboxed frame. It takes
 // what it needs from the global scope, deletes every global that is not on
 // its list, and only then evaluates the renderer's source, which so reaches
-// nothing but the language, drawing, and `uscope`. Pictures go back to the
+// nothing but the language, drawing, and `microscope`. Pictures go back to the
 // frame as plain data; the page checks every shape before showing one. A
 // live renderer draws into a canvas of its own instead, and each frame goes
 // back as only its pixels, an ImageBitmap.
@@ -125,7 +125,7 @@
     "WebGLTransformFeedback",
     "WebGLUniformLocation",
     "WebGLVertexArrayObject",
-    "uscope",
+    "microscope",
   ]);
 
   /** Deletes every name not kept from the global object and the objects it
@@ -181,7 +181,7 @@
     return { message, ...place(error, file) };
   }
 
-  // The renderer API, `uscope`.
+  // The renderer API, `microscope`.
   let drawer = null;
   let starter = null;
   let theme = freeze({});
@@ -225,7 +225,7 @@
   function oklab(color) {
     const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color)?.[1];
     if (hex === undefined) {
-      throw new TypeError(`uscope.color.scale takes #rgb or #rrggbb colors, not ${color}`);
+      throw new TypeError(`microscope.color.scale takes #rgb or #rrggbb colors, not ${color}`);
     }
     const full = hex.length === 3 ? [...hex].map((digit) => digit + digit).join("") : hex;
     const [r, g, b] = [0, 2, 4].map((at) => {
@@ -279,7 +279,7 @@
       return { ...rest, type: "image" };
     }
     if (!(canvas instanceof OffscreenCanvas)) {
-      throw new TypeError("uscope.image's canvas must be an OffscreenCanvas");
+      throw new TypeError("microscope.image's canvas must be an OffscreenCanvas");
     }
     return { ...rest, type: "image", rendered: canvas.transferToImageBitmap() };
   }
@@ -288,22 +288,22 @@
   const MOST_TEXT = 4096;
   const text = (value) => String(value).slice(0, MOST_TEXT);
 
-  const uscope = freeze({
+  const microscope = freeze({
     draw(render) {
       if (typeof render !== "function") {
-        throw new TypeError("uscope.draw takes a function");
+        throw new TypeError("microscope.draw takes a function");
       }
       if (drawer !== null || starter !== null) {
-        throw new Error("a renderer calls uscope.draw or uscope.live once");
+        throw new Error("a renderer calls microscope.draw or microscope.live once");
       }
       drawer = render;
     },
     live(start) {
       if (typeof start !== "function") {
-        throw new TypeError("uscope.live takes a function");
+        throw new TypeError("microscope.live takes a function");
       }
       if (drawer !== null || starter !== null) {
-        throw new Error("a renderer calls uscope.draw or uscope.live once");
+        throw new Error("a renderer calls microscope.draw or microscope.live once");
       }
       starter = start;
     },
@@ -350,7 +350,7 @@
     }
     if (drawer === null && starter === null) {
       return {
-        message: "the renderer never calls uscope.draw or uscope.live",
+        message: "the renderer never calls microscope.draw or microscope.live",
         file,
         line: null,
         column: null,
@@ -359,7 +359,7 @@
     return null;
   }
 
-  /** Sets `uscope.theme` and returns what the renderer's function gets. */
+  /** Sets `microscope.theme` and returns what the renderer's function gets. */
   function given(context) {
     theme = freeze({ ...context.palette, series: freeze([...context.palette.series]) });
     const { palette: _, ...rest } = context;
@@ -479,7 +479,7 @@
     }
   });
 
-  defineProperty(globalThis, "uscope", { value: uscope, enumerable: true });
+  defineProperty(globalThis, "microscope", { value: microscope, enumerable: true });
   try {
     lockDown();
   } catch (error) {

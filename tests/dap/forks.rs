@@ -90,7 +90,7 @@ fn a_child_no_session_takes_runs_on_and_the_user_is_told() {
 /// nvim-dap answers once it starts one, runs on once the wait for it ends.
 #[test]
 fn a_child_whose_session_never_attaches_runs_on() {
-    let mut dap = Dap::start_in("abandoned fork", &[("USCOPE_ADOPTION_TIMEOUT", "200")]);
+    let mut dap = Dap::start_in("abandoned fork", &[("MICROSCOPE_ADOPTION_TIMEOUT", "200")]);
     dap.abandon_children();
     let started = dap.launch(
         Profile::VsCode,

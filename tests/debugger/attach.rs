@@ -36,7 +36,7 @@ async fn attach_discovers_the_executable_and_detaches_without_harming_the_proces
     );
 
     handle
-        .add_breakpoint(uscope::BreakpointSpec::Function(
+        .add_breakpoint(microscope::BreakpointSpec::Function(
             "attach_breakpoint".to_owned(),
         ))
         .await
@@ -79,7 +79,7 @@ async fn a_process_in_another_process_group_is_attached_and_stops() {
         .expect("the attach timed out");
     let handle = debugger.handle();
     handle
-        .add_breakpoint(uscope::BreakpointSpec::Function(
+        .add_breakpoint(microscope::BreakpointSpec::Function(
             "attach_breakpoint".to_owned(),
         ))
         .await

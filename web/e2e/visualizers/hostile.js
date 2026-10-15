@@ -67,7 +67,7 @@ const probes = {
   caches: () => attempt(recovered("caches"), () => settle(recovered("caches").open("x"))),
   broadcast: () =>
     attempt(recovered("BroadcastChannel"), () =>
-      new (recovered("BroadcastChannel"))("uscope").postMessage("x"),
+      new (recovered("BroadcastChannel"))("microscope").postMessage("x"),
     ),
   webrtc: () =>
     attempt(recovered("RTCPeerConnection"), () => {
@@ -101,7 +101,7 @@ async function outcomes() {
 
 const mode = String("MODE");
 if (mode === "live") {
-  uscope.live(async (canvas) => {
+  microscope.live(async (canvas) => {
     // A context drawing with the GPU while the probes run.
     const gl = canvas.getContext("webgl2");
     const kind = gl === null ? "2d" : "webgl2";
@@ -124,18 +124,18 @@ if (mode === "live") {
     } else {
       canvas.getContext("2d")?.fillRect(0, 0, 1, 1);
     }
-    uscope.caption([kind, ...(await outcomes()), "probes done"].join(" · "));
+    microscope.caption([kind, ...(await outcomes()), "probes done"].join(" · "));
     return { frame() {} };
   });
 } else {
-  uscope.draw(async () => {
+  microscope.draw(async () => {
     const shapes = [];
     let y = 12;
     for (const outcome of await outcomes()) {
       const name = outcome.split(":")[0];
-      shapes.push(uscope.text({ x: 4, y, text: outcome, title: name, family: "mono" }));
+      shapes.push(microscope.text({ x: 4, y, text: outcome, title: name, family: "mono" }));
       y += 14;
     }
-    return uscope.picture({ width: 260, height: y, shapes, caption: "probes done" });
+    return microscope.picture({ width: 260, height: y, shapes, caption: "probes done" });
   });
 }

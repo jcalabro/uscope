@@ -18,8 +18,8 @@
 const MOST = 4_096;
 const CELL = 14;
 
-uscope.draw((input, { previous, width, paths }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, paths }) => {
+  const theme = microscope.theme;
   const { words, bits, raw } = wordsOf(input.values, input.width);
   if (words.length > MOST) throw new RangeError(`bits draws up to ${MOST} integers, and \`values\` holds ${words.length}`);
   const columns = input.columns === undefined || input.columns === null ? Math.min(8, bits) : Number(input.columns);
@@ -62,20 +62,20 @@ uscope.draw((input, { previous, width, paths }) => {
       const x = column * CELL;
       const y = (origin === "bottom-left" ? rows - 1 - row : row) * CELL;
       const set = (word >> BigInt(bit)) & 1n;
-      cells.push(uscope.rect({ x, y, width: CELL - 2, height: CELL - 2, radius: 2, fill: set ? theme.series[0] : theme.line, title: `${name} bit ${bit}: ${set}` }));
+      cells.push(microscope.rect({ x, y, width: CELL - 2, height: CELL - 2, radius: 2, fill: set ? theme.series[0] : theme.line, title: `${name} bit ${bit}: ${set}` }));
       if (before !== null && ((before[k] >> BigInt(bit)) & 1n) !== set) {
         changes += 1;
-        cells.push(uscope.rect({ x: x - 0.75, y: y - 0.75, width: CELL - 0.5, height: CELL - 0.5, radius: 2.5, fill: "none", stroke: theme.ink, strokeWidth: 1.5 }));
+        cells.push(microscope.rect({ x: x - 0.75, y: y - 0.75, width: CELL - 0.5, height: CELL - 0.5, radius: 2.5, fill: "none", stroke: theme.ink, strokeWidth: 1.5 }));
       }
     }
     const hex = `0x${word.toString(16).padStart(Math.ceil(bits / 4), "0")}`;
     shapes.push(
-      uscope.group({
+      microscope.group({
         x: ox, y: oy, shapes: cells,
         select: paths.values === null || paths.values === undefined ? undefined : single ? (paths.values === "" ? undefined : paths.values) : `${paths.values}[${k}]`,
       }),
-      uscope.text({ x: ox, y: oy + gridHeight + 12, text: name, size: 11, fill: theme.ink2 }),
-      uscope.text({ x: ox, y: oy + gridHeight + 26, text: hex, size: 11, family: "mono", fill: theme.ink, title: `${name} = ${raw(k)} = ${hex}` }),
+      microscope.text({ x: ox, y: oy + gridHeight + 12, text: name, size: 11, fill: theme.ink2 }),
+      microscope.text({ x: ox, y: oy + gridHeight + 26, text: hex, size: 11, family: "mono", fill: theme.ink, title: `${name} = ${raw(k)} = ${hex}` }),
     );
   });
   const caption = [`${words.length} × ${bits}-bit`, `origin ${origin}`, `${columns} bits a row`];
@@ -84,7 +84,7 @@ uscope.draw((input, { previous, width, paths }) => {
     caption.push(changes === 0 ? "unchanged since the stop before" : `${changes} ${changes === 1 ? "bit" : "bits"} changed since the stop before, outlined`);
   }
   const lines = Math.ceil(words.length / across);
-  return uscope.picture({ width: W, height: 6 + lines * blockHeight, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: 6 + lines * blockHeight, shapes, caption: caption.join(" · ") });
 });
 
 /** The integers as unsigned bigints, their width, and their exact text. */

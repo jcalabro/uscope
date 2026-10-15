@@ -185,7 +185,7 @@ fn hit_conditions_choose_which_hits_stop_and_reject_ambiguous_counts() {
 #[test]
 fn breakpoints_sharing_an_address_are_reported_by_one_stop() {
     let path = source("c/basic.c");
-    let line = line_of(&path, "return uscope_value;");
+    let line = line_of(&path, "return microscope_value;");
     let mut dap = Dap::start("shared address");
     let started = dap.launch(
         Profile::VsCode,

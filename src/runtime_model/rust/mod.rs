@@ -197,7 +197,7 @@ impl Payload<'_> {
                     value: None,
                 })
             }
-            _ => Err(format!("its payload is a `{ty}`, which uscope does not read").into()),
+            _ => Err(format!("its payload is a `{ty}`, which microscope does not read").into()),
         }
     }
 }

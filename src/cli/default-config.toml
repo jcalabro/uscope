@@ -1,8 +1,8 @@
-# uscope's settings, each at its default. Uncomment a setting to change it.
+# microscope's settings, each at its default. Uncomment a setting to change it.
 #
 # This file is the user's, for every project. A project's
-# .uscope/config.toml, usually committed, and .uscope/config.local.toml,
-# for one person, override it there; `uscope config show` says where each
+# .microscope/config.toml, usually committed, and .microscope/config.local.toml,
+# for one person, override it there; `microscope config show` says where each
 # setting in effect comes from. Keys are kebab-case, and an unknown key is
 # an error rather than ignored.
 
@@ -14,7 +14,7 @@ hyperlinks = "auto"       # auto | always | never: make file:line a link (OSC 8)
 paths = "relative"        # relative (to the project root) | absolute | name
 pager = "auto"            # auto ($PAGER, or less -FRX) | never | a command
 editor = ""               # for `edit`, as "code -g {path}:{line}"; empty uses $VISUAL or $EDITOR
-prompt = "(uscope) "
+prompt = "(microscope) "
 confirm-quit = true       # ask before `quit` kills a launched program
 
 [theme]                   # one role's style, over the theme's: a color (red, bright-red,
@@ -54,16 +54,16 @@ runtime = "skip"          # skip | enter: stop in a language runtime's own code,
                           # Go's or tokio's, or pass over it to the program's code it calls
 
 [breakpoints]
-save = true               # keep breakpoints and displays in the project's .uscope/state
+save = true               # keep breakpoints and displays in the project's .microscope/state
 
 [debug-info]
 directories = []          # searched for separate debug files before the system's
 debuginfod = false        # download missing debug files from DEBUGINFOD_URLS
 # jobs = 16               # threads loading debug information: by default one per CPU,
-                          # up to 16; USCOPE_JOBS wins
+                          # up to 16; MICROSCOPE_JOBS wins
 
 [history]
-size = 10000              # lines kept in $XDG_STATE_HOME/uscope/history
+size = 10000              # lines kept in $XDG_STATE_HOME/microscope/history
 
 # [signals]               # as `handle` takes them
 # SIGUSR1 = "nostop noprint pass"
@@ -82,7 +82,7 @@ commands = []             # run at startup, after the user's, the project's, and
 trust = "ask"             # ask | always | never: run a project's startup commands,
                           # aliases, and launch configurations
 
-# [[launch]]              # how a project's program is debugged: `uscope --launch server`
+# [[launch]]              # how a project's program is debugged: `microscope --launch server`
 # name = "server"
 # program = "build/server" # relative to the project root, as every path here is
 # args = ["--port", "8080"]

@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::{Value, json};
-use uscope::{
+use microscope::{
     VirtualAddress, WatchAccess, WatchScope, WatchpointHit, WatchpointId, WatchpointOptions,
     WatchpointSpec,
 };
+use serde_json::{Value, json};
 
 use super::protocol::{self, DataBreakpointInfoArguments, ErrorBody, SetDataBreakpointsArguments};
 use super::session::{Closed, Session, error, parse};
@@ -52,13 +52,13 @@ impl Conditions {
     }
 
     /// The debugger's options for them, or why they have none.
-    fn options(&self) -> uscope::Result<WatchpointOptions> {
+    fn options(&self) -> microscope::Result<WatchpointOptions> {
         Ok(WatchpointOptions {
             hit_condition: self.hit_condition.as_deref().map(str::parse).transpose()?,
             condition: self
                 .condition
                 .as_deref()
-                .map(uscope::Condition::parse)
+                .map(microscope::Condition::parse)
                 .transpose()?,
             ..WatchpointOptions::default()
         })
@@ -213,7 +213,7 @@ impl Session {
                     None => stop.innermost(),
                 };
 
-                match uscope::Expression::parse(arguments.name.trim()) {
+                match microscope::Expression::parse(arguments.name.trim()) {
                     Ok(expression) => (context, expression),
                     Err(error) => return Ok(unwatchable(&error.to_string())),
                 }
@@ -301,7 +301,7 @@ impl Session {
 
             if let Some(handle) = &handle {
                 match handle.remove_watchpoint(watchpoint).await {
-                    Ok(_) | Err(uscope::Error::WatchpointNotFound(_)) => {}
+                    Ok(_) | Err(microscope::Error::WatchpointNotFound(_)) => {}
                     Err(error) => {
                         // Keep every entry that may still be armed, so a
                         // later request can release it.
@@ -480,7 +480,7 @@ impl Session {
     /// Reports data breakpoints whose watched storage ended.
     pub(super) async fn data_invalidated(
         &mut self,
-        invalidated: &[uscope::InvalidatedWatchpoint],
+        invalidated: &[microscope::InvalidatedWatchpoint],
     ) -> Result<(), Closed> {
         for entry in invalidated {
             for id in self.data.forget(&[entry.watchpoint.id]) {

@@ -1,9 +1,9 @@
 {
-  "name": "uscope",
-  "displayName": "uscope",
-  "description": "Debug native Linux programs written in C, C++, Rust, Go, and Zig with uscope",
+  "name": "microscope",
+  "displayName": "microscope",
+  "description": "Debug native Linux programs written in C, C++, Rust, Go, and Zig with microscope",
   "version": "0.1.0",
-  "publisher": "uscope",
+  "publisher": "microscope",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
@@ -13,52 +13,52 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onDebugResolve:uscope",
-    "onDebugDynamicConfigurations:uscope"
+    "onDebugResolve:microscope",
+    "onDebugDynamicConfigurations:microscope"
   ],
   "contributes": {
     "configuration": {
-      "title": "uscope",
+      "title": "microscope",
       "properties": {
-        "uscope.path": {
+        "microscope.path": {
           "type": "string",
-          "default": "uscope",
+          "default": "microscope",
           "scope": "machine-overridable",
-          "markdownDescription": "The `uscope` executable: a name searched for on `PATH`, or a path, which may start with `${workspaceFolder}` or `${userHome}`. Relative paths start at the workspace folder."
+          "markdownDescription": "The `microscope` executable: a name searched for on `PATH`, or a path, which may start with `${workspaceFolder}` or `${userHome}`. Relative paths start at the workspace folder."
         },
-        "uscope.hexadecimal": {
+        "microscope.hexadecimal": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Show integers in hexadecimal in the Variables and Watch views, hovers, and the results of expressions in the debug console; commands such as `print/x` choose their own. *Toggle Hexadecimal Display* in the Variables and Watch views' context menus flips it."
         },
-        "uscope.logFile": {
+        "microscope.logFile": {
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "markdownDescription": "A file the adapter appends every protocol message to, for reporting problems: `uscope dap --log`. It may start with `${workspaceFolder}` or `${userHome}`. Empty logs nothing."
+          "markdownDescription": "A file the adapter appends every protocol message to, for reporting problems: `microscope dap --log`. It may start with `${workspaceFolder}` or `${userHome}`. Empty logs nothing."
         }
       }
     },
     "commands": [
       {
-        "command": "uscope.toggleHexadecimal",
+        "command": "microscope.toggleHexadecimal",
         "title": "Toggle Hexadecimal Display",
-        "category": "uscope"
+        "category": "microscope"
       }
     ],
     "menus": {
       "debug/variables/context": [
         {
-          "command": "uscope.toggleHexadecimal",
-          "when": "debugType == 'uscope'",
-          "group": "z_uscope"
+          "command": "microscope.toggleHexadecimal",
+          "when": "debugType == 'microscope'",
+          "group": "z_microscope"
         }
       ],
       "debug/watch/context": [
         {
-          "command": "uscope.toggleHexadecimal",
-          "when": "debugType == 'uscope'",
-          "group": "z_uscope"
+          "command": "microscope.toggleHexadecimal",
+          "when": "debugType == 'microscope'",
+          "group": "z_microscope"
         }
       ]
     },
@@ -77,11 +77,11 @@
     ],
     "debuggers": [
       {
-        "type": "uscope",
-        "label": "uscope",
+        "type": "microscope",
+        "label": "microscope",
         "languages": ["c", "cpp", "rust", "go", "zig", "odin", "FortranFreeForm", "FortranFixedForm", "d", "nim", "ada"],
         "variables": {
-          "pickProcess": "uscope.pickProcess"
+          "pickProcess": "microscope.pickProcess"
         },
         "configurationAttributes": {
           "launch": {
@@ -137,7 +137,7 @@
                 "type": "array",
                 "items": { "type": "string" },
                 "default": [],
-                "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
+                "description": "View files that present values, ahead of the project's .microscope/views, the user's, the program's own, and the built-in views. Later files come first."
               },
               "debugDirectories": {
                 "type": "array",
@@ -238,7 +238,7 @@
                 "type": "array",
                 "items": { "type": "string" },
                 "default": [],
-                "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
+                "description": "View files that present values, ahead of the project's .microscope/views, the user's, the program's own, and the built-in views. Later files come first."
               },
               "debugDirectories": {
                 "type": "array",
@@ -289,7 +289,7 @@
         },
         "initialConfigurations": [
           {
-            "type": "uscope",
+            "type": "microscope",
             "request": "launch",
             "name": "Launch",
             "program": "${workspaceFolder}/a.out",
@@ -299,10 +299,10 @@
         ],
         "configurationSnippets": [
           {
-            "label": "uscope: Launch",
-            "description": "Launch a program under uscope.",
+            "label": "microscope: Launch",
+            "description": "Launch a program under microscope.",
             "body": {
-              "type": "uscope",
+              "type": "microscope",
               "request": "launch",
               "name": "Launch",
               "program": "^\"\\${workspaceFolder}/${1:a.out}\"",
@@ -311,10 +311,10 @@
             }
           },
           {
-            "label": "uscope: Launch in the integrated terminal",
+            "label": "microscope: Launch in the integrated terminal",
             "description": "Launch a program whose input and output belong to a terminal.",
             "body": {
-              "type": "uscope",
+              "type": "microscope",
               "request": "launch",
               "name": "Launch in terminal",
               "program": "^\"\\${workspaceFolder}/${1:a.out}\"",
@@ -322,20 +322,20 @@
             }
           },
           {
-            "label": "uscope: Attach to a process",
+            "label": "microscope: Attach to a process",
             "description": "Attach to a running process.",
             "body": {
-              "type": "uscope",
+              "type": "microscope",
               "request": "attach",
               "name": "Attach",
               "pid": "^\"\\${command:pickProcess}\""
             }
           },
           {
-            "label": "uscope: Open a core dump",
+            "label": "microscope: Open a core dump",
             "description": "Inspect a core dump.",
             "body": {
-              "type": "uscope",
+              "type": "microscope",
               "request": "attach",
               "name": "Core dump",
               "coreFile": "^\"\\${workspaceFolder}/${1:core}\""

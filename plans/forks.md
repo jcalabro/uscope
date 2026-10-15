@@ -67,7 +67,7 @@ A job-control stop is visible to the child's parent only through
 `waitpid(WUNTRACED)` and the two `SIGCHLD`s, both of which a stop and
 continue from a shell would produce too. Alternatives were worse: parking
 the child in a loop of its own code burns a CPU, corrupts its code for any
-debugger but uscope, and leaves it spinning forever if no session comes.
+debugger but microscope, and leaves it spinning forever if no session comes.
 
 The child's identity is its process id and start time, which a session
 checks before it seizes and again after, as attach already does: a child
@@ -87,8 +87,8 @@ that died and whose id was reused is refused, never continued.
 - `Debugger::attach_held(held)` and `attach_held_with_executable` attach as
   `attach` does, check the identity, and end the job-control stop as in
   section 2. `Request::Attach` carries whether the target is held.
-- `uscope::release_held(&held)` lets a held child run when no session will
-  take it, and `uscope::still_held(&held)` says whether one still waits:
+- `microscope::release_held(&held)` lets a held child run when no session will
+  take it, and `microscope::still_held(&held)` says whether one still waits:
   untraced, and stopped or about to take its SIGSTOP. Both check the
   identity first, and release signals through a pidfd opened before the
   check, so a process that ended in between is never signalled.
@@ -134,7 +134,7 @@ detaches ends the stop the session published.
   connection closed meanwhile, the session started may still be attaching,
   so the follow task waits up to 60 seconds more while `still_held` says
   the child waits, then releases it and says so, which leaves a child a
-  session took alone. `USCOPE_ADOPTION_TIMEOUT`, in milliseconds,
+  session took alone. `MICROSCOPE_ADOPTION_TIMEOUT`, in milliseconds,
   shortens that wait for tests.
 - A child session attaches with `Debugger::attach_held`. If that fails, it
   releases the child before answering, so a child no session took never

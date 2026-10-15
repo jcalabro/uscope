@@ -16,8 +16,8 @@
 const ROW = 18;
 const MOST_DEPTH = 48;
 
-uscope.draw((input, { previous, width, paths }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, paths }) => {
+  const theme = microscope.theme;
   const tree = treeOf(input, paths);
   const before = new Map();
   if (previous !== null) {
@@ -57,7 +57,7 @@ uscope.draw((input, { previous, width, paths }) => {
     const was = before.get(key);
     const moved = was !== undefined && was !== total;
     if (moved) changed += 1;
-    shapes.push(uscope.rect({
+    shapes.push(microscope.rect({
       x: x + 0.5, y, width: Math.max(0.5, span - 1), height: ROW - 2, radius: 2,
       fill: tint(name, theme),
       stroke: moved ? theme.ink : undefined, strokeWidth: moved ? 1.5 : undefined,
@@ -66,7 +66,7 @@ uscope.draw((input, { previous, width, paths }) => {
     }));
     const fits = Math.floor((span - 8) / 6.2);
     if (fits >= 3) {
-      shapes.push(uscope.text({ x: x + 4, y: y + ROW / 2 - 1, text: name.length > fits ? `${name.slice(0, fits - 1)}…` : name, size: 11, baseline: "middle", fill: theme.ink }));
+      shapes.push(microscope.text({ x: x + 4, y: y + ROW / 2 - 1, text: name.length > fits ? `${name.slice(0, fits - 1)}…` : name, size: 11, baseline: "middle", fill: theme.ink }));
     }
     let at = x;
     for (const child of tree.children[node]) {
@@ -80,7 +80,7 @@ uscope.draw((input, { previous, width, paths }) => {
   if (hidden > 0) caption.push(`${hidden} frames under 1 px, counted not drawn`);
   if (cut > 0) caption.push(`${cut} frames deeper than ${MOST_DEPTH}, not drawn`);
   if (before.size > 0) caption.push(`${changed} outlined: total changed since the stop before`);
-  return uscope.picture({ width: W, height: 8 + (deepest + 1) * ROW, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: 8 + (deepest + 1) * ROW, shapes, caption: caption.join(" · ") });
 });
 
 /** The call tree: names, own values, totals, children, and a root. */
@@ -217,5 +217,5 @@ function tint(name, theme) {
     hash = Math.imul(hash, 16777619);
   }
   const hue = theme.series[(hash >>> 0) % theme.series.length];
-  return uscope.color.scale(0.55, theme.surface, hue);
+  return microscope.color.scale(0.55, theme.surface, hue);
 }

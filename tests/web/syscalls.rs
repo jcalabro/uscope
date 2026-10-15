@@ -14,7 +14,7 @@ use crate::web::{Client, Web};
 /// stacks, written in `directory`, where the program runs.
 fn trace(directory: &Path, mode: &str) -> PathBuf {
     let path = directory.join(format!("{mode}.usprof"));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
     command
         .args(["syscalls", "--engine", "ptrace", "-f", "-k", "-o"])
         .arg(&path)
@@ -27,7 +27,7 @@ fn trace(directory: &Path, mode: &str) -> PathBuf {
 
     // A failing test keeps the tracer's recording beside the server's.
     let recording = flight_recordings::watch_adapter(&mut command);
-    let status = command.status().expect("run uscope syscalls");
+    let status = command.status().expect("run microscope syscalls");
     if let Some(recording) = &recording {
         flight_recordings::adapter_finished(recording);
     }

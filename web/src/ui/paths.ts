@@ -3,7 +3,7 @@ export function fileName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** A path relative to where uscope runs, when it is inside it. */
+/** A path relative to where microscope runs, when it is inside it. */
 export function shortPath(path: string, cwd: string | undefined): string {
   if (cwd && path.startsWith(`${cwd}/`)) {
     return `./${path.slice(cwd.length + 1)}`;

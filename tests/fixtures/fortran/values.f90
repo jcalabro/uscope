@@ -7,7 +7,7 @@
 ! and then calls reached(checkpoint); the tests read the values in
 ! reached's caller. A path names a variable and then its components and
 ! elements, an element by its indices in parentheses. Floats are their bits
-! in hexadecimal; kind `summary` is how uscope writes the value.
+! in hexadecimal; kind `summary` is how microscope writes the value.
 module values
   use, intrinsic :: iso_fortran_env, only: output_unit, int8, int16, int32, int64, real32, real64
   use, intrinsic :: iso_c_binding, only: c_intptr_t, c_loc

@@ -85,7 +85,7 @@ impl Preset {
         !matches!(self, Self::Production)
     }
 
-    /// The CPU time uscope may spend recording: in production, one
+    /// The CPU time microscope may spend recording: in production, one
     /// percent of a CPU; elsewhere, whatever it takes.
     #[must_use]
     pub const fn budget(self) -> Option<budget::Budget> {
@@ -176,7 +176,7 @@ pub struct RecordOptions {
     /// Whether to record each interval a thread spends off its CPU.
     pub off_cpu: bool,
 
-    /// The CPU time uscope may spend recording, which it holds to by
+    /// The CPU time microscope may spend recording, which it holds to by
     /// sampling less of each period: none bounds it.
     pub budget: Option<budget::Budget>,
 
@@ -199,11 +199,11 @@ pub struct RecordOptions {
     pub live_snapshots: bool,
 
     /// The instrumentation sites to switch on in a program built with
-    /// uscope's probes SDK.
+    /// microscope's probes SDK.
     pub probes: ProbeSelection,
 
-    /// How long a program goes on writing its instrumentation once uscope
-    /// stops reading it, as when uscope is killed, before it switches
+    /// How long a program goes on writing its instrumentation once microscope
+    /// stops reading it, as when microscope is killed, before it switches
     /// every site off.
     pub probe_timeout: std::time::Duration,
 
@@ -718,7 +718,7 @@ impl Profile {
             .collect()
     }
 
-    /// Nanoseconds of CPU time uscope spent recording, and the part of it
+    /// Nanoseconds of CPU time microscope spent recording, and the part of it
     /// spent reading programs' debug information.
     #[must_use]
     pub fn recorder_cpu(&self) -> (u64, u64) {

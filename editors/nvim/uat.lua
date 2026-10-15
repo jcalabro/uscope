@@ -1,4 +1,4 @@
--- User acceptance test: nvim-dap drives `uscope dap` from a headless
+-- User acceptance test: nvim-dap drives `microscope dap` from a headless
 -- Neovim, as a user would, and the adapter records each session's traffic.
 --
 -- nvim --headless --clean -l editors/nvim/uat.lua NVIM_DAP ROOT RECORDING_DIRECTORY
@@ -93,22 +93,22 @@ local function breakpoint(file, marker)
 end
 
 local function adapter(name)
-  dap.adapters.uscope = {
+  dap.adapters.microscope = {
     type = 'executable',
-    command = 'uscope',
+    command = 'microscope',
     args = { 'dap', '--log', record .. '/' .. name .. '.log' },
   }
 end
 
 -- Breakpoints, stepping, evaluation, and the program's exit.
 adapter('nvim-launch')
-breakpoint(source('basic.c'), 'return uscope_value;')
-dap.run({ type = 'uscope', request = 'launch', name = 'nvim-launch', program = fixture('basic'), cwd = root })
+breakpoint(source('basic.c'), 'return microscope_value;')
+dap.run({ type = 'microscope', request = 'launch', name = 'nvim-launch', program = fixture('basic'), cwd = root })
 expect(event('stopped').reason == 'breakpoint', 'stopped at the breakpoint')
 local top = frame()
 expect(top.name == 'breakpoint_target', 'stopped in breakpoint_target, not ' .. top.name)
-expect(top.line == line_of(source('basic.c'), 'return uscope_value;'), 'stopped at the line')
-local value = request('evaluate', { expression = 'uscope_value', frameId = top.id, context = 'hover' })
+expect(top.line == line_of(source('basic.c'), 'return microscope_value;'), 'stopped at the line')
+local value = request('evaluate', { expression = 'microscope_value', frameId = top.id, context = 'hover' })
 expect(value.result == '1234605616436508552', 'evaluated ' .. vim.inspect(value))
 dap.step_out()
 expect(event('stopped').reason == 'step', 'stepped out')
@@ -125,7 +125,7 @@ event('terminated')
 adapter('nvim-terminal')
 breakpoint(source('process-environment.c'), 'if (fgets(line')
 dap.run({
-  type = 'uscope', request = 'launch', name = 'nvim-terminal', program = fixture('process-environment'),
+  type = 'microscope', request = 'launch', name = 'nvim-terminal', program = fixture('process-environment'),
   args = { 'one' }, console = 'integratedTerminal', cwd = root,
 })
 expect(event('process').startMethod == 'launch', 'launched')
@@ -146,13 +146,13 @@ expect(lines:find('argument 1: one', 1, true) ~= nil, 'the terminal shows the ou
 -- With followForks, nvim-dap starts a child session for a forked process at
 -- the adapter's request. The child stops at the breakpoint after its fork,
 -- having run nothing untraced, and each session ends as its process does.
-dap.adapters.uscope = function(callback, config, parent)
+dap.adapters.microscope = function(callback, config, parent)
   local name = parent and (parent.config.name .. '.child') or config.name
-  callback({ type = 'executable', command = 'uscope', args = { 'dap', '--log', record .. '/' .. name .. '.log' } })
+  callback({ type = 'executable', command = 'microscope', args = { 'dap', '--log', record .. '/' .. name .. '.log' } })
 end
 breakpoint(source('fork.c'), 'work_done += 1;')
 dap.run({
-  type = 'uscope', request = 'launch', name = 'nvim-fork', program = fixture('fork'), cwd = root,
+  type = 'microscope', request = 'launch', name = 'nvim-fork', program = fixture('fork'), cwd = root,
   followForks = true,
 })
 local stops = {}

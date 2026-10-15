@@ -6,7 +6,7 @@
 
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     Error, ExecutionContext, ExitStatus, InferiorState, LaunchOptions, StackFrameId, StopContext,
     StopReason, UnwindTermination,
 };

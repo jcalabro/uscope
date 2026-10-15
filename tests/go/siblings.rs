@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::process::Stdio;
 
-use uscope::{ExecutionContext, LaunchOptions, LineNumber, StepKind, StopReason};
+use microscope::{ExecutionContext, LaunchOptions, LineNumber, StepKind, StopReason};
 
 use crate::stops::{address, integer, place};
 use crate::support::{self, Scenario};
@@ -32,7 +32,7 @@ const STEPS: usize = 60;
 async fn in_the_loop(fixture: &str, processors: &str) -> Scenario {
     let mut scenario = crate::invariants::checked(fixture);
     let breakpoint = scenario
-        .add_breakpoint_spec(uscope::BreakpointSpec::Source {
+        .add_breakpoint_spec(microscope::BreakpointSpec::Source {
             path: "siblings/main.go".into(),
             line: LineNumber::new(support::source_line(SOURCE, ROUND[0])).expect("one-based"),
         })
@@ -137,10 +137,12 @@ async fn finish_returns_to_its_caller_after_the_stack_moves() {
             .operation(
                 "conditional breakpoint",
                 scenario.handle().add_breakpoint_with(
-                    uscope::BreakpointSpec::Function("main.deep".into()),
-                    uscope::BreakpointOptions {
-                        condition: Some(uscope::Condition::parse("depth == 16").expect("parses")),
-                        ..uscope::BreakpointOptions::default()
+                    microscope::BreakpointSpec::Function("main.deep".into()),
+                    microscope::BreakpointOptions {
+                        condition: Some(
+                            microscope::Condition::parse("depth == 16").expect("parses"),
+                        ),
+                        ..microscope::BreakpointOptions::default()
                     },
                 ),
             )

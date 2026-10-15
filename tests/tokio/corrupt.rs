@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::process::Stdio;
 
-use uscope::{ExecutionContext, LaunchOptions, StackFrameId, StopContext, StopReason};
+use microscope::{ExecutionContext, LaunchOptions, StackFrameId, StopContext, StopReason};
 
 use crate::support::{Scenario, ScratchDir};
 use crate::workers::tasks;

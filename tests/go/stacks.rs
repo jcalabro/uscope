@@ -1,7 +1,7 @@
 //! Stacks that continue from a thread's system stack onto a goroutine's
 //! own, across each of the runtime's stack switches.
 
-use uscope::{
+use microscope::{
     Backtrace, BreakpointSpec, CodeRole, Evaluation, ExecutionContext, Expression, FrameKind,
     InferiorState, ScalarValue, StackFrameId, StackSegment, StopContext, StopId, StopReason,
     ThreadActivity, ThreadId, ThreadState, UnwindTermination, VariableState,

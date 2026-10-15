@@ -2,7 +2,7 @@
 //! call sites, or points at without an address (`locations/main.c`). Every stage
 //! of the program is on the stack when it stops in `locations_stop`.
 
-use uscope::{
+use microscope::{
     EntryValueUnavailableReason, Evaluation, Expression, FloatValue, InspectedValue,
     OptimizedOutReason, VariableValue, VariableValueSource,
 };
@@ -107,7 +107,9 @@ async fn address(scenario: &Scenario, text: &str) -> Result<u64, String> {
             } => Ok(address.address.get()),
             state => panic!("{text} is {state:?}"),
         },
-        Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::NotAnLvalue => {
+        Err(Error::Expression(error))
+            if error.kind == microscope::ExpressionErrorKind::NotAnLvalue =>
+        {
             Err(error.message)
         }
         other => panic!("{text}: {other:?}"),
@@ -432,23 +434,23 @@ async fn a_call_through_a_kept_pointer_says_where_it_went() {
 }
 
 /// Assigns `value` to `target` in the selected frame.
-async fn assign(scenario: &Scenario, target: &str, value: &str) -> uscope::Result<Evaluation> {
+async fn assign(scenario: &Scenario, target: &str, value: &str) -> microscope::Result<Evaluation> {
     scenario
         .handle()
         .evaluate_with(
             &Expression::parse(&format!("{target} = {value}")).expect("expression"),
-            uscope::EvaluationMode::Assign,
-            uscope::InspectionLimits::default(),
+            microscope::EvaluationMode::Assign,
+            microscope::InspectionLimits::default(),
         )
         .await
 }
 
-async fn watch(scenario: &Scenario, text: &str) -> uscope::Result<uscope::Watchpoint> {
+async fn watch(scenario: &Scenario, text: &str) -> microscope::Result<microscope::Watchpoint> {
     scenario
         .handle()
         .watch(
             &Expression::parse(text).expect("expression"),
-            uscope::WatchAccess::Write,
+            microscope::WatchAccess::Write,
         )
         .await
 }

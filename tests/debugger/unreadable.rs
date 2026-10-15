@@ -7,7 +7,7 @@ use crate::support::{ScratchDir, corrupt_section};
 
 fn unusable_reason(image: &ModuleImage) -> Arc<str> {
     match image.debug_information() {
-        uscope::DebugInformation::Unusable { reason } => reason,
+        microscope::DebugInformation::Unusable { reason } => reason,
         other => panic!("{other:?}"),
     }
 }
@@ -131,7 +131,7 @@ async fn a_library_with_malformed_dwarf_is_described_by_its_symbols() {
     // The program's own DWARF is whole.
     assert_eq!(
         scenario.handle().module_image().debug_information(),
-        uscope::DebugInformation::Loaded
+        microscope::DebugInformation::Loaded
     );
     scenario.shutdown().await;
 }
@@ -142,7 +142,7 @@ async fn a_library_with_malformed_dwarf_is_described_by_its_symbols() {
 async fn split_dwarf_is_reported_as_incomplete() {
     let mut scenario = Scenario::launch("basic-split-dwarf");
     let image = Arc::clone(scenario.handle().module_image());
-    let uscope::DebugInformation::Incomplete { reason } = image.debug_information() else {
+    let microscope::DebugInformation::Incomplete { reason } = image.debug_information() else {
         panic!("{:?}", image.debug_information());
     };
 

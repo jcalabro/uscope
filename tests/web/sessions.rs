@@ -355,9 +355,9 @@ async fn restart_runs_the_program_again() {
 /// Copies each module the foreign core recorded, as its machine had it, to
 /// where it lies under `root`.
 fn foreign_sysroot(core: &std::path::Path, root: &std::path::Path) {
-    let debugger = uscope::Debugger::open_core(&uscope::CoreDumpOptions {
+    let debugger = microscope::Debugger::open_core(&microscope::CoreDumpOptions {
         allow_module_mismatch: true,
-        ..uscope::CoreDumpOptions::new(core.to_owned())
+        ..microscope::CoreDumpOptions::new(core.to_owned())
     })
     .expect("open the foreign core");
     let info = debugger

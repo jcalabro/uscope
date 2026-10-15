@@ -38,7 +38,7 @@ threads out of `src/eval`. Preserve that property when adding an operation.
 
 ## One language
 
-uscope does not parse C expressions for C and Rust expressions for Rust. One
+microscope does not parse C expressions for C and Rust expressions for Rust. One
 language works in every frame. Source-language providers decide which names
 and type facts exist, not expression grammar or arithmetic.
 
@@ -144,8 +144,8 @@ the state changes.
 
 ## View files
 
-`src/view/syntax.rs` parses `uscope-views 1` files without a program. A view has
-a source-language selector, type pattern, checks, local bindings, a shape,
+`src/view/syntax.rs` parses `microscope-views 1` files without a program. A view
+has a source-language selector, type pattern, checks, local bindings, a shape,
 fields, summaries, and optional visualizers. An `extend` adds fields or
 visualizers without replacing the presenting shape.
 
@@ -193,7 +193,7 @@ carry kernels through the SDK.
 
 Execution has fuel, memory, read, and result bounds. A kernel cannot access a
 program except through validated host calls. Its recorded runs can be replayed
-without a process using `uscope views replay`.
+without a process using `microscope views replay`.
 
 When adding a host operation, define its deterministic input, output, failure,
 and charge. Update recording and replay together so a run still names every

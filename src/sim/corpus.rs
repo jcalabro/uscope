@@ -33,7 +33,7 @@ pub fn built() -> PathBuf {
 
 /// Where a golden program's sources and binaries are in simulated paths,
 /// which match the directory its debug information names.
-const SIMULATED_ROOT: &str = "/uscope/tests/golden";
+const SIMULATED_ROOT: &str = "/microscope/tests/golden";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CorpusError {

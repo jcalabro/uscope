@@ -24,7 +24,7 @@ export interface ConsoleState {
 /** The most entries kept on screen and lines kept in history. */
 const ENTRIES = 200;
 const HISTORY = 100;
-const KEY = "uscope-console-history";
+const KEY = "microscope-console-history";
 
 const isLines = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((line) => typeof line === "string");

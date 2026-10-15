@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Draw meshes in 3-D with the built-in viewer.
 extend c++ engine::Mesh {

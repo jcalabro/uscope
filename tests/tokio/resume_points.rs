@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     AddressRange, BreakpointSpec, CodeInstanceKind, CoroutineStateKind, EvaluationMode, Expression,
     ImageAddress, InspectionLimits, LaunchOptions, ModuleImage, StepKind, StopReason,
     VirtualAddress,

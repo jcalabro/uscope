@@ -3,24 +3,24 @@
 	"configurations": [
 	
 		{
-			"name": "Debug uscope",
+			"name": "Debug microscope",
 			"type": "lldb",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"cargo": {
 				"args": [
 					"run",
-					"--bin=uscope"
+					"--bin=microscope"
 				]
 			},
 			"args": [
 				"./build/test-programs/step"
 			]
 		},
-		// Test programs to debug with the uscope extension (editors/vscode).
+		// Test programs to debug with the microscope extension (editors/vscode).
 		{
 			"name": "C: segfault with worker threads",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"program": "${workspaceFolder}/build/test-programs/crash-gcc-o0",
@@ -29,7 +29,7 @@
 		},
 		{
 			"name": "C: core dump of that segfault",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "attach",
 			"preLaunchTask": "build in Nix dev shell",
 			"coreFile": "${workspaceFolder}/build/test-programs/crash-gcc-o0-segv.core",
@@ -37,7 +37,7 @@
 		},
 		{
 			"name": "Go: nil pointer dereference",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"program": "${workspaceFolder}/build/test-programs/crash-go-o0",
@@ -45,7 +45,7 @@
 		},
 		{
 			"name": "Rust: write to an unmapped address",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"program": "${workspaceFolder}/build/test-programs/crash-rust-o0",
@@ -55,7 +55,7 @@
 			// Runs to its exit unless stopped: break in tests/fixtures/rust/variables.rs
 			// at line 33 for scalars, or line 80 for pointers, structs, and slices.
 			"name": "Rust: variables",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"program": "${workspaceFolder}/build/test-programs/variables-rust-o0",
@@ -63,12 +63,12 @@
 		},
 		{
 			"name": "C: arguments, environment, and terminal input",
-			"type": "uscope",
+			"type": "microscope",
 			"request": "launch",
 			"preLaunchTask": "build in Nix dev shell",
 			"program": "${workspaceFolder}/build/test-programs/process-environment",
 			"args": ["hello", "world"],
-			"env": { "USCOPE_FIXTURE_VALUE": "from launch.json" },
+			"env": { "MICROSCOPE_FIXTURE_VALUE": "from launch.json" },
 			"cwd": "${workspaceFolder}",
 			"console": "integratedTerminal"
 		}

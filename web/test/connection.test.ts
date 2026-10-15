@@ -163,7 +163,7 @@ describe("a page the browser keeps to come back to", () => {
     page.dispatchEvent(transition("pagehide", false));
     const asked = connection.request("pause");
     page.dispatchEvent(transition("pagehide", true));
-    await expect(asked).rejects.toThrow("the connection to uscope closed");
+    await expect(asked).rejects.toThrow("the connection to microscope closed");
     await vi.advanceTimersByTimeAsync(5000);
     expect(attempts).toHaveLength(1);
 

@@ -1,8 +1,8 @@
-# uscope for VS Code
+# microscope for VS Code
 
 Debug native Linux programs written in C, C++, Rust, Go, and Zig with
-uscope. The extension contributes the `uscope` debugger type and runs
-`uscope dap`; [the editor guide](../../docs/editors.md#vs-code) covers installing
+microscope. The extension contributes the `microscope` debugger type and runs
+`microscope dap`; [the editor guide](../../docs/editors.md#vs-code) covers installing
 it, its settings and configurations, and what the adapter supports.
 
 `extension.js` is the whole extension, plain JavaScript that VS Code loads

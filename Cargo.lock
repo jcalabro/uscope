@@ -941,6 +941,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a86d3146ed3995b5913c414f6664344b9617457320782e64f0bb44afd49d74"
 
 [[package]]
+name = "microscope"
+version = "0.1.0"
+dependencies = [
+ "anstyle",
+ "anstyle-query",
+ "anyhow",
+ "axum",
+ "aya",
+ "aya-obj",
+ "clap",
+ "cpp_demangle",
+ "crc32fast",
+ "expectrl",
+ "flate2",
+ "foldhash 0.2.0",
+ "futures-util",
+ "gimli",
+ "iced-x86",
+ "jsonschema",
+ "lzma-rs",
+ "memchr",
+ "microscope-probes",
+ "mimalloc",
+ "nix 0.31.3",
+ "object",
+ "perf-event",
+ "proptest",
+ "rayon",
+ "regex",
+ "rustc-demangle",
+ "rustc_apfloat",
+ "rustix",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "ts-rs",
+ "twox-hash",
+ "ureq",
+ "wasmi",
+ "zerocopy",
+]
+
+[[package]]
+name = "microscope-probes"
+version = "0.1.0"
+
+[[package]]
 name = "mimalloc"
 version = "0.1.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1960,58 +2012,6 @@ dependencies = [
  "httparse",
  "log",
 ]
-
-[[package]]
-name = "uscope"
-version = "0.1.0"
-dependencies = [
- "anstyle",
- "anstyle-query",
- "anyhow",
- "axum",
- "aya",
- "aya-obj",
- "clap",
- "cpp_demangle",
- "crc32fast",
- "expectrl",
- "flate2",
- "foldhash 0.2.0",
- "futures-util",
- "gimli",
- "iced-x86",
- "jsonschema",
- "lzma-rs",
- "memchr",
- "mimalloc",
- "nix 0.31.3",
- "object",
- "perf-event",
- "proptest",
- "rayon",
- "regex",
- "rustc-demangle",
- "rustc_apfloat",
- "rustix",
- "rustyline",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "ts-rs",
- "twox-hash",
- "ureq",
- "uscope-probes",
- "wasmi",
- "zerocopy",
-]
-
-[[package]]
-name = "uscope-probes"
-version = "0.1.0"
 
 [[package]]
 name = "utf8-zero"

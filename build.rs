@@ -1,9 +1,9 @@
-//! Embeds the web UI's built files in release builds of uscope, names the
+//! Embeds the web UI's built files in release builds of microscope, names the
 //! sources the loader was built from, and compiles the syscall tracer's BPF
 //! programs with the flake's clang.
 //!
 //! Development builds read `build/web` at run time instead, so rebuilding
-//! the page never rebuilds the crate. Node is never needed to build uscope:
+//! the page never rebuilds the crate. Node is never needed to build microscope:
 //! a missing `build/web` embeds nothing, and the page says to run
 //! `just web`.
 
@@ -79,7 +79,7 @@ fn sources_digest(manifest: &Path) {
     }
 
     println!(
-        "cargo::rustc-env=USCOPE_SOURCES_DIGEST={:016x}",
+        "cargo::rustc-env=MICROSCOPE_SOURCES_DIGEST={:016x}",
         digest.finish()
     );
 }
@@ -95,14 +95,14 @@ fn bpf_programs(manifest: &Path, out: &Path) {
         println!("cargo::rerun-if-env-changed={name}");
         std::env::var_os(name).unwrap_or_else(|| {
             panic!(
-                "{name} is not set: build uscope inside its dev shell (`just dev`), \
+                "{name} is not set: build microscope inside its dev shell (`just dev`), \
                  which names the clang and headers the BPF programs are built with"
             )
         })
     };
 
-    let clang = variable("USCOPE_BPF_CLANG");
-    let include = variable("USCOPE_BPF_INCLUDE");
+    let clang = variable("MICROSCOPE_BPF_CLANG");
+    let include = variable("MICROSCOPE_BPF_INCLUDE");
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&directory)
         .expect("read the BPF sources")
         .flatten()

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     BaseTypeEncoding, DebuggerHandle, Evaluation, EvaluationMode, Expression, FloatValue,
     InspectionLimits, Presentation, PresentedCount, PresentedShape, ScalarValue, TextCompletion,
     TypeInfo, TypeKind, ValueChildQuery, ValueChildRelationship, ValueChildren,
@@ -39,7 +39,7 @@ const PAGE: u32 = 256;
 /// What reading a drawing's inputs takes: the most any request may, as a
 /// drawing shows more than a row.
 const fn input_limits() -> InspectionLimits {
-    uscope::MAX_INSPECTION_LIMITS
+    microscope::MAX_INSPECTION_LIMITS
 }
 
 /// A drawing and the bytes its inputs' numbers and bytes lie in.
@@ -147,10 +147,10 @@ pub async fn draw(handle: &DebuggerHandle, request: &protocol::Draw) -> Result<D
 /// the target's drawings; any other value is drawn as it is.
 async fn pointee_with_drawings(
     handle: &DebuggerHandle,
-    context: uscope::StopContext,
+    context: microscope::StopContext,
     path: &str,
-    value: uscope::InspectedValue,
-) -> uscope::InspectedValue {
+    value: microscope::InspectedValue,
+) -> microscope::InspectedValue {
     if let VariableState::Available {
         value: VariableValue::Address(_),
         ..
@@ -172,7 +172,7 @@ async fn pointee_with_drawings(
     }
 }
 
-fn info(renderer: &uscope::Renderer) -> RendererInfo {
+fn info(renderer: &microscope::Renderer) -> RendererInfo {
     RendererInfo {
         name: renderer.name.to_string(),
         origin: renderer.origin.to_string(),
@@ -260,20 +260,20 @@ impl Walk<'_> {
     /// the drawn value it is.
     async fn inputs(
         &mut self,
-        inputs: &uscope::VisualizerInputs,
+        inputs: &microscope::VisualizerInputs,
     ) -> Vec<(String, Walked, Option<String>)> {
         let mut read = Vec::new();
         for input in inputs.inputs.iter() {
             let datum = match &input.value {
-                uscope::VisualizerValue::Value(value) => {
+                microscope::VisualizerValue::Value(value) => {
                     self.value(value.type_info.as_ref(), &value.state, &input.name, 0)
                         .await
                 }
-                uscope::VisualizerValue::Bytes(bytes) => Ok(self.bytes(bytes)),
-                uscope::VisualizerValue::Text(text) => Ok(Datum::Text {
+                microscope::VisualizerValue::Bytes(bytes) => Ok(self.bytes(bytes)),
+                microscope::VisualizerValue::Text(text) => Ok(Datum::Text {
                     s: text.to_string(),
                 }),
-                uscope::VisualizerValue::Problem(problem) => {
+                microscope::VisualizerValue::Problem(problem) => {
                     Err(format!("`{}`: {problem}", input.name))
                 }
             };
@@ -323,7 +323,7 @@ impl Walk<'_> {
                     TextCompletion::Truncated { .. } | TextCompletion::Limited { .. } => {
                         Err(format!(
                             "`{path}`: its text is longer than a drawing reads, {} bytes",
-                            uscope::TextSummary::MAX_BYTES
+                            microscope::TextSummary::MAX_BYTES
                         ))
                     }
                     TextCompletion::Unreadable { address } => {
@@ -386,7 +386,7 @@ impl Walk<'_> {
                 }
                 VariableValue::Function { code, .. } => {
                     return Ok(Datum::Big {
-                        big: code.map_or(0, uscope::VirtualAddress::get).to_string(),
+                        big: code.map_or(0, microscope::VirtualAddress::get).to_string(),
                     });
                 }
                 _ => {}
@@ -452,7 +452,7 @@ impl Walk<'_> {
     /// record of several, or nothing.
     async fn sum(
         &mut self,
-        active: Option<&uscope::Variant>,
+        active: Option<&microscope::Variant>,
         children: &ValueChildren,
         path: &str,
         depth: usize,
@@ -609,7 +609,7 @@ impl Walk<'_> {
             };
         };
 
-        let room = uscope::MAX_DRAWING_BYTES.saturating_sub(self.bytes.len() as u64);
+        let room = microscope::MAX_DRAWING_BYTES.saturating_sub(self.bytes.len() as u64);
         let numbers = self
             .handle
             .numbers(Arc::clone(reference), room)
@@ -675,7 +675,7 @@ impl Walk<'_> {
         &self,
         children: &ValueChildren,
         path: &str,
-    ) -> Result<Vec<uscope::ValueChild>, String> {
+    ) -> Result<Vec<microscope::ValueChild>, String> {
         match children {
             ValueChildren::NotApplicable => Ok(Vec::new()),
             ValueChildren::Unavailable(reason) => Err(format!("`{path}`: {reason}")),
@@ -693,7 +693,7 @@ impl Walk<'_> {
         start: u64,
         count: u64,
         path: &str,
-    ) -> Result<Vec<uscope::ValueChild>, String> {
+    ) -> Result<Vec<microscope::ValueChild>, String> {
         let mut children = Vec::new();
         let end = start.saturating_add(count);
         let mut next = start;
@@ -739,7 +739,7 @@ fn exact(count: Option<PresentedCount>, path: &str) -> Result<u64, String> {
 }
 
 /// A child's name in a record: a member's or field's, or a base's type.
-fn child_name(child: &uscope::ValueChild) -> Option<String> {
+fn child_name(child: &microscope::ValueChild) -> Option<String> {
     match &child.relationship {
         ValueChildRelationship::Member(member) => member.name.as_deref().map(str::to_owned),
         ValueChildRelationship::Field { name } => Some(name.to_string()),
@@ -750,10 +750,10 @@ fn child_name(child: &uscope::ValueChild) -> Option<String> {
 
 /// An integer: a number when its type is at most 32 bits wide, otherwise
 /// a bigint.
-fn integer_datum(value: uscope::IntegerValue, size: u64) -> Datum {
+fn integer_datum(value: microscope::IntegerValue, size: u64) -> Datum {
     let (wide, text) = match value {
-        uscope::IntegerValue::Signed(value) => (i64::try_from(value).ok(), value.to_string()),
-        uscope::IntegerValue::Unsigned(value) => (i64::try_from(value).ok(), value.to_string()),
+        microscope::IntegerValue::Signed(value) => (i64::try_from(value).ok(), value.to_string()),
+        microscope::IntegerValue::Unsigned(value) => (i64::try_from(value).ok(), value.to_string()),
         _ => (None, String::new()),
     };
 
@@ -816,18 +816,18 @@ fn nest(items: Vec<Datum>, dimensions: &[u64]) -> Datum {
     }
 }
 
-const fn kind(kind: uscope::NumberKind) -> NumberKind {
+const fn kind(kind: microscope::NumberKind) -> NumberKind {
     match kind {
-        uscope::NumberKind::I8 => NumberKind::I8,
-        uscope::NumberKind::U8 => NumberKind::U8,
-        uscope::NumberKind::I16 => NumberKind::I16,
-        uscope::NumberKind::U16 => NumberKind::U16,
-        uscope::NumberKind::I32 => NumberKind::I32,
-        uscope::NumberKind::U32 => NumberKind::U32,
-        uscope::NumberKind::I64 => NumberKind::I64,
-        uscope::NumberKind::U64 => NumberKind::U64,
-        uscope::NumberKind::F32 => NumberKind::F32,
-        uscope::NumberKind::F64 => NumberKind::F64,
+        microscope::NumberKind::I8 => NumberKind::I8,
+        microscope::NumberKind::U8 => NumberKind::U8,
+        microscope::NumberKind::I16 => NumberKind::I16,
+        microscope::NumberKind::U16 => NumberKind::U16,
+        microscope::NumberKind::I32 => NumberKind::I32,
+        microscope::NumberKind::U32 => NumberKind::U32,
+        microscope::NumberKind::I64 => NumberKind::I64,
+        microscope::NumberKind::U64 => NumberKind::U64,
+        microscope::NumberKind::F32 => NumberKind::F32,
+        microscope::NumberKind::F64 => NumberKind::F64,
     }
 }
 
@@ -968,7 +968,10 @@ fn float(value: FloatValue) -> String {
         _ => None,
     };
 
-    let text = double.map_or_else(|| uscope::float_text(value), |double| double.to_string());
+    let text = double.map_or_else(
+        || microscope::float_text(value),
+        |double| double.to_string(),
+    );
     match text.as_str() {
         "inf" => "Infinity".to_owned(),
         "-inf" => "-Infinity".to_owned(),

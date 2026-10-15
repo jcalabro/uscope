@@ -3,12 +3,12 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     BreakpointSpec, DebuggerEvent, Error, ExitStatus, InferiorState, RegisterRole, StepKind,
     StopReason, ThreadId, ThreadState, VirtualAddress, WatchAccess, WatchScope, Watchpoint,
     WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions, WatchpointSpec,
 };
+use support::Scenario;
 
 /// The single-threaded fixture across the compiler, optimization, and PIE
 /// matrix, for what the compiler decides: where variables live and how
@@ -19,8 +19,8 @@ const MATRIX: [&str; 3] = ["watch-gcc-o0", "watch-clang-o2", "watch-gcc-o2-nopie
 /// for the debugger's own bookkeeping.
 const FIXTURE: &str = MATRIX[0];
 
-fn expression(text: &str) -> uscope::Expression {
-    uscope::Expression::parse(text).expect("valid test expression")
+fn expression(text: &str) -> microscope::Expression {
+    microscope::Expression::parse(text).expect("valid test expression")
 }
 
 async fn watch(scenario: &Scenario, text: &str, access: WatchAccess) -> Watchpoint {
@@ -109,7 +109,7 @@ async fn selected_thread(scenario: &mut Scenario) -> ThreadId {
         .snapshot()
         .await
         .selected
-        .and_then(uscope::ExecutionContext::as_thread)
+        .and_then(microscope::ExecutionContext::as_thread)
         .expect("a stopped inferior has a selected thread")
 }
 
@@ -1549,7 +1549,7 @@ impl AttachTarget {
 async fn attaching_clears_watchpoints_a_dead_tracer_left_armed() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    // Control: without uscope the orphaned watchpoint kills the target, so
+    // Control: without microscope the orphaned watchpoint kills the target, so
     // the scenario below cannot pass vacuously.
     let mut unattended = AttachTarget::spawn();
     unattended.orphan_watchpoint();
@@ -1615,7 +1615,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
         // debug register left armed, or a hit's SIGTRAP left queued, would
         // kill it after detaching.
         let mut events = handle.subscribe();
-        let uscope::InferiorState::Stopped {
+        let microscope::InferiorState::Stopped {
             process_id,
             stop_id,
             ..
@@ -1627,8 +1627,8 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
         handle
             .continue_execution(
                 stop_id,
-                uscope::ResumeScope::Process(process_id),
-                uscope::ExceptionDisposition::Pass,
+                microscope::ResumeScope::Process(process_id),
+                microscope::ExceptionDisposition::Pass,
             )
             .await
             .expect("continue attached target");
@@ -1838,7 +1838,7 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
             .handle()
             .watch(&expression("no_such_global"), WatchAccess::Write)
             .await,
-        Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::UnknownName
+        Err(Error::Expression(error)) if error.kind == microscope::ExpressionErrorKind::UnknownName
     ));
     assert!(scenario.snapshot().await.watchpoints.is_empty());
     assert!(
@@ -1962,7 +1962,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
 #[tokio::test]
 async fn post_mortem_targets_refuse_watchpoints() {
     let core = Scenario::fixture("crash-gcc-o0-segv.core");
-    let scenario = Scenario::open_core("core watch", &uscope::CoreDumpOptions::new(core));
+    let scenario = Scenario::open_core("core watch", &microscope::CoreDumpOptions::new(core));
     assert!(matches!(
         scenario
             .handle()
@@ -2077,7 +2077,7 @@ async fn attached_processes_arm_threads_they_create_later() {
         .await
         .expect("snapshot")
         .selected
-        .and_then(uscope::ExecutionContext::as_thread)
+        .and_then(microscope::ExecutionContext::as_thread)
         .expect("selected thread");
     let watchpoint = handle
         .watch(&expression("attach_watched"), WatchAccess::Write)
@@ -2187,13 +2187,13 @@ fn gdb_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
 
 /// Runs a fixture to its end with a change watchpoint on each expression
 /// and collects what they reported.
-async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
+async fn microscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Change> {
     let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "main").await;
     let mut watched = BTreeMap::new();
     for (expression, condition) in expressions {
         let options = WatchpointOptions {
-            condition: condition.map(|text| uscope::Condition::parse(text).expect("condition")),
+            condition: condition.map(|text| microscope::Condition::parse(text).expect("condition")),
             ..WatchpointOptions::default()
         };
 
@@ -2201,7 +2201,7 @@ async fn uscope_changes(fixture: &str, expressions: &[Watched<'_>]) -> Vec<Chang
             .operation(
                 &format!("watch {expression}"),
                 scenario.handle().watch_with(
-                    &uscope::Expression::parse(expression).expect("expression"),
+                    &microscope::Expression::parse(expression).expect("expression"),
                     WatchAccess::Change,
                     options,
                 ),
@@ -2258,7 +2258,7 @@ async fn change_watchpoints_report_the_changes_gdb_watch_reports() {
             let expected = gdb_changes(fixture, &expressions);
             assert!(expected.len() >= 5, "{fixture}: {expected:?}");
             assert_eq!(
-                uscope_changes(fixture, &expressions).await,
+                microscope_changes(fixture, &expressions).await,
                 expected,
                 "{fixture}: changes differ from gdb's"
             );
@@ -2288,7 +2288,7 @@ async fn conditional_change_watchpoints_report_the_changes_gdb_reports() {
             "{fixture}: {expected:?}"
         );
         assert_eq!(
-            uscope_changes(fixture, &expressions).await,
+            microscope_changes(fixture, &expressions).await,
             expected,
             "{fixture}: changes differ from gdb's"
         );
@@ -2400,7 +2400,9 @@ async fn steps_cross_stores_that_change_nothing_or_are_declined_as_if_unwatched(
         // Unless its condition or hit condition declines every store.
         for options in [
             WatchpointOptions {
-                condition: Some(uscope::Condition::parse("watch_steady != 7").expect("condition")),
+                condition: Some(
+                    microscope::Condition::parse("watch_steady != 7").expect("condition"),
+                ),
                 ..WatchpointOptions::default()
             },
             WatchpointOptions {
@@ -2543,7 +2545,7 @@ async fn stores_that_change_nothing_never_stop_threads_receiving_signals() {
         assert_eq!(exception.code, nix::sys::signal::Signal::SIGUSR1 as u64);
         signals += 1;
         reason = scenario
-            .resume_with_exception(uscope::ExceptionDisposition::Pass)
+            .resume_with_exception(microscope::ExceptionDisposition::Pass)
             .await;
     }
 

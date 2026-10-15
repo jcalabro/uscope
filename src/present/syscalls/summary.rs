@@ -1,9 +1,9 @@
-//! strace's `-c` table, with uscope's columns beside its own.
+//! strace's `-c` table, with microscope's columns beside its own.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use uscope::syscalls::{Abi, SyscallId, SyscallStats};
+use microscope::syscalls::{Abi, SyscallId, SyscallStats};
 
 /// A column of the table, by its `-U` name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,7 +287,7 @@ pub fn table(
 
 #[cfg(test)]
 mod tests {
-    use uscope::syscalls::Outcome;
+    use microscope::syscalls::Outcome;
 
     use super::*;
 

@@ -2,9 +2,9 @@ import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
-// `just web-dev` runs `uscope web` on this port and lets it accept pages
+// `just web-dev` runs `microscope web` on this port and lets it accept pages
 // from the development server, which proxies the API to it.
-const server = `127.0.0.1:${process.env.USCOPE_WEB_PORT ?? "7342"}`;
+const server = `127.0.0.1:${process.env.MICROSCOPE_WEB_PORT ?? "7342"}`;
 
 export default defineConfig({
   plugins: [react()],

@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Tags, as the names they hold.
 view rust embedded_views::Tags {

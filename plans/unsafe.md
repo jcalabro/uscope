@@ -1,6 +1,6 @@
 # Less Unsafe Code, Checked by Miri
 
-uscope denies unsafe code, but about seventeen files opt out. Most of
+microscope denies unsafe code, but about seventeen files opt out. Most of
 them do so to make a system call that a safe wrapper could make, and the
 rest have no test that would notice undefined behavior. This plan does
 two things:
@@ -11,7 +11,7 @@ two things:
 2. Run what remains under Miri, through `just miri`, in a loop that
    takes seconds to a minute.
 
-Work happens on the `unsafe` branch, in the `../uscope-unsafe` worktree.
+Work happens on the `unsafe` branch, in the `../microscope-unsafe` worktree.
 
 ## 1. Rules
 
@@ -44,7 +44,7 @@ Counts are lines that open an unsafe block, impl, fn, or allow.
 | `src/backend/linux/native_tracee.rs` | 9 | `pre_exec`, waitid, `perf_event_open` | rustix waitid (step 2), shared `pre_exec` (step 3), `perf::sys::open` (step 2). |
 | `sdk/rust/src/lib.rs` | 5 | WASM host imports | Keep. |
 | `src/main.rs` | 4 | `remove_var` for the flight recorder, global allocator | `env_remove` at spawn (step 4). |
-| `src/cli/config.rs` | 3 | `remove_var` for `USCOPE_CONFIG` | `env_remove` at spawn (step 4). |
+| `src/cli/config.rs` | 3 | `remove_var` for `MICROSCOPE_CONFIG` | `env_remove` at spawn (step 4). |
 | `src/cli/syscalls.rs` | 2 | `localtime_r` | Keep. The alternatives are worse. |
 | `tests/support/mod.rs` | 2 | tgkill | Keep. Neither nix nor rustix wraps it. |
 | `src/backend/linux/syscalls/ptrace.rs` | 2 | `PTRACE_GETSIGINFO` as bytes, SIGURG handler | Move the request (step 3). Keep the handler (section 5). |
@@ -52,7 +52,7 @@ Counts are lines that open an unsafe block, impl, fn, or allow.
 | `src/backend/linux/syscalls/info.rs` | 1 | `PTRACE_GET_SYSCALL_INFO` as bytes | Move the request (step 3). |
 | `src/backend/linux/perf/mod.rs` | 1 | `pre_exec` | Shared `pre_exec` (step 3). |
 
-Afterwards, the unsafe code in uscope itself lives in:
+Afterwards, the unsafe code in microscope itself lives in:
 
 - `linux/sys.rs` (new): the one `pre_exec`, tgkill, and the raw ptrace
   requests nix cannot make (real-time signals, signal masks, siginfo and
@@ -70,13 +70,13 @@ Plus the probe SDK, the WASM view SDK, and test support.
 - Add `"miri"` to the toolchain's extensions in `flake.nix`. The nightly
   is already pinned.
 - `just miri` runs an allowlist, never the suite: most tests launch
-  processes, and Miri runs 50–100× slower. The recipe names the uscope
+  processes, and Miri runs 50–100× slower. The recipe names the microscope
   test paths it runs, then the probe SDK's tests with `enabled`.
 - Concurrency tests get `-Zmiri-many-seeds`. Others run with one seed.
 - Miri's sysroot builds under `target/`, inside the hermetic shell, not
   in the home directory.
 - Measure the cold and warm cost of each half. The SDK should take
-  seconds. If the uscope half takes minutes, `just miri` stays out of
+  seconds. If the microscope half takes minutes, `just miri` stays out of
   `just` and runs before merging changes to the files above, as
   `just stress` does.
 - Miri tests are small: one unsafe operation each (a wrap, a retire and
@@ -104,7 +104,7 @@ Each step lists how we know it worked.
   launch, attach, profiling launch, and syscall-trace launch tests pass,
   and `just stress` passes.
 - [-] **4. Environment.** Not done; see section 5. First a test: the debuggee sees neither
-  `USCOPE_CONFIG` nor `USCOPE_FLIGHT_RECORDING`, under each way of
+  `MICROSCOPE_CONFIG` nor `MICROSCOPE_FLIGHT_RECORDING`, under each way of
   launching (debugger, profiler, syscall tracer). Then remove the
   `remove_var` calls, and `env_remove` at each spawn. *Done when* that
   test passes, and the flight recorder's stack-layout reason still holds
@@ -144,12 +144,12 @@ Each step lists how we know it worked.
 - **Fuzz corpora under Miri.** Slow, and the parsers' crates run Miri
   upstream.
 - **Debuggee fixtures.** Their unsafe code is what they test.
-- **Step 4, the environment.** Every program uscope starts goes without
+- **Step 4, the environment.** Every program microscope starts goes without
   its two variables, not only debuggees: the pager, the editor, and the
   web terminal's helper, which would otherwise write to its parent's
   flight recording. `env_remove` would be needed at about ten spawns,
   and a lint to keep new ones from forgetting. The two `remove_var`
-  calls run before uscope starts any other thread, which their comments
+  calls run before microscope starts any other thread, which their comments
   now say, so they stay.
 
 ## 6. Log
@@ -244,7 +244,7 @@ Decisions, measurements, and surprises, newest last.
   - The strace comparison replaced pipe inodes with `N` but kept the
     padding strace computed from their real width, so two runs whose
     inodes had different digit counts differed by a space.
-  - A recording-window test read `uscope report`'s top 20 functions,
+  - A recording-window test read `microscope report`'s top 20 functions,
     which unsymbolized vDSO addresses, a row each, can fill, leaving the
     phase it looked for out. It now reads the whole tree. Of 40
     recordings, the top 20 left the phase out of 21.
@@ -261,7 +261,7 @@ Decisions, measurements, and surprises, newest last.
     processor test pins that. The test copies small stacks, so a ring
     holds its whole run unread, and requires that nothing was lost.
   - The same strace comparison kept the padding after `-f`'s pid,
-    which strace and uscope left-justify to five columns, so a 4-digit
+    which strace and microscope left-justify to five columns, so a 4-digit
     pid in one run and a 5-digit pid in the other differed by a space.
   - A browser test hovered the middle of a live canvas by its measured
     box. The canvas is taller than its pane shows, and scrolling it into
@@ -279,7 +279,7 @@ Decisions, measurements, and surprises, newest last.
 - 2026-10-13, step 5: `just miri` took 15 s warm because `cargo miri
   test --lib` runs Miri's driver over the whole crate each time. Its tests
   now live in `tests/miri.rs`, which reaches the unsafe code through the
-  hidden `uscope::unsafe_parts`, so Miri checks only that file: about
+  hidden `microscope::unsafe_parts`, so Miri checks only that file: about
   1 s, then 1 s more for the concurrent test under 8 seeds. Past about 8
   seeds the runs stop overlapping (32 took 10 s), so 8 is the default and
   `miri_seeds` the knob. The allocator tests moved there from step 1.
@@ -309,7 +309,7 @@ Decisions, measurements, and surprises, newest last.
   cleared. The unsafe left is making a ring, the section walk, and
   `_rdtsc`; the externs are `safe fn`. Under Miri, `atexit`,
   `pthread_atfork`, and the section walk are stubs.
-- The SDK's tests play uscope: they read active rings as threads write
+- The SDK's tests play microscope: they read active rings as threads write
   them, and free retired ones as threads come and go. Five mutations each
   fail: retiring with relaxed ordering and claiming without a CAS (both
   around seed 50, so above the default 8), publishing the head before

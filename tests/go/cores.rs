@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     CoreDumpOptions, ExecutionContext, InferiorState, LanguageExceptionKind, LaunchOptions,
     StackFrameId, StopContext, StopReason, TaskSnapshot, TaskState, UnwindTermination,
 };

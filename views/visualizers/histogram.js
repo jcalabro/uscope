@@ -18,8 +18,8 @@ const LEFT = 56;
 const TOP = 44;
 const MOST_BINS = 200;
 
-uscope.draw((input, { previous, width }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width }) => {
+  const theme = microscope.theme;
   const W = Math.round(Math.min(Math.max(width, 320), 1600));
   const right = W - 16;
   const bottom = HEIGHT - 26;
@@ -132,12 +132,12 @@ uscope.draw((input, { previous, width }) => {
   const shapes = [];
   for (const tick of yAxis.ticks) {
     shapes.push(
-      uscope.line({ x1: LEFT, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
-      uscope.text({ x: LEFT - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
+      microscope.line({ x1: LEFT, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
+      microscope.text({ x: LEFT - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
     );
   }
   for (const tick of nice(xlo, xhi).ticks.filter((t) => t >= xlo && t <= xhi)) {
-    shapes.push(uscope.text({ x: toX(tick), y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }));
+    shapes.push(microscope.text({ x: toX(tick), y: bottom + 16, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }));
   }
   let running = 0;
   counts.forEach((count, k) => {
@@ -145,7 +145,7 @@ uscope.draw((input, { previous, width }) => {
     const x0 = toX(edges[k]);
     const x1 = toX(edges[k + 1]);
     const share = n > 0 ? (100 * running) / n : 0;
-    shapes.push(uscope.rect({
+    shapes.push(microscope.rect({
       x: x0 + 0.5, y: toY(count), width: Math.max(0.5, x1 - x0 - 1), height: Math.max(0, bottom - toY(count)),
       fill: theme.series[0],
       title: `[${exact(edges[k])}, ${exact(edges[k + 1])}${k === counts.length - 1 ? "]" : ")"}: ${count} · ${short(share)}% up to here`,
@@ -157,7 +157,7 @@ uscope.draw((input, { previous, width }) => {
       outline.push(toX(edges[k]), toY(count), toX(edges[k + 1]), toY(count));
     });
     outline.push(right, bottom);
-    shapes.push(uscope.polyline({ points: outline, stroke: theme.ink, strokeWidth: 1, opacity: 0.7, title: "the stop before" }));
+    shapes.push(microscope.polyline({ points: outline, stroke: theme.ink, strokeWidth: 1, opacity: 0.7, title: "the stop before" }));
   }
   // Each quantile's line, and its label above the plot; labels that would
   // overlap stack instead.
@@ -170,8 +170,8 @@ uscope.draw((input, { previous, width }) => {
     lastX = x;
     const end = x > right - 60;
     shapes.push(
-      uscope.line({ x1: x, y1: TOP - 6, x2: x, y2: bottom, stroke: theme.ink, strokeWidth: 1, dash: [3, 2], title: `${name} ${exact(at)}` }),
-      uscope.text({ x: end ? x - 3 : x + 3, y: TOP - 8 - row * 12, text: `${name} ${short(at)}`, size: 11, anchor: end ? "end" : "start", fill: theme.ink, title: `${name} ${exact(at)}` }),
+      microscope.line({ x1: x, y1: TOP - 6, x2: x, y2: bottom, stroke: theme.ink, strokeWidth: 1, dash: [3, 2], title: `${name} ${exact(at)}` }),
+      microscope.text({ x: end ? x - 3 : x + 3, y: TOP - 8 - row * 12, text: `${name} ${short(at)}`, size: 11, anchor: end ? "end" : "start", fill: theme.ink, title: `${name} ${exact(at)}` }),
     );
   }
 
@@ -180,7 +180,7 @@ uscope.draw((input, { previous, width }) => {
   if (input.counts !== undefined) caption.push("quantiles interpolate within bins");
   if (before !== null) caption.push("outline = the stop before");
   if (log) caption.push("log counts");
-  return uscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: HEIGHT, shapes, caption: caption.join(" · ") });
 });
 
 /** The p-quantile of `values`, interpolating linearly between the order

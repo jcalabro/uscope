@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use uscope::StopReason;
+use microscope::StopReason;
 
 use crate::invariants::check_go_stop;
 use crate::stops::place;

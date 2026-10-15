@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
+use microscope::HeldChild;
 use serde_json::{Map, Value, json};
-use uscope::HeldChild;
 
 use super::session::Client;
 
@@ -24,10 +24,10 @@ const ADOPTION_TIMEOUT: Duration = Duration::from_mins(1);
 /// How often a child a session may still attach to is checked.
 const ADOPTION_POLL: Duration = Duration::from_millis(50);
 
-/// `USCOPE_ADOPTION_TIMEOUT`, in milliseconds, lowers [`ADOPTION_TIMEOUT`]
+/// `MICROSCOPE_ADOPTION_TIMEOUT`, in milliseconds, lowers [`ADOPTION_TIMEOUT`]
 /// so tests can see a child no session takes.
 fn adoption_timeout() -> Duration {
-    std::env::var("USCOPE_ADOPTION_TIMEOUT")
+    std::env::var("MICROSCOPE_ADOPTION_TIMEOUT")
         .ok()
         .and_then(|timeout| timeout.parse().ok())
         .map(Duration::from_millis)
@@ -84,7 +84,7 @@ pub(super) async fn follow(client: Client, arguments: Value, child: HeldChild) {
 async fn await_adoption(child: &HeldChild) {
     let held = child.process();
     let deadline = tokio::time::Instant::now() + adoption_timeout();
-    while tokio::time::Instant::now() < deadline && uscope::still_held(&held).unwrap_or(false) {
+    while tokio::time::Instant::now() < deadline && microscope::still_held(&held).unwrap_or(false) {
         tokio::time::sleep(ADOPTION_POLL).await;
     }
 }

@@ -15,10 +15,10 @@ const context: DrawContext = { previous: null, paths: {}, width: 400, theme: "li
 
 /** A renderer that draws one text: the JSON of what `body` returns. */
 const reporting = (body: string) => `
-uscope.draw((input, context) => {
+microscope.draw((input, context) => {
   const report = (() => { ${body} })();
-  return uscope.picture({ width: 1, height: 1, shapes: [
-    uscope.text({ x: 0, y: 0, text: JSON.stringify(report, (_, v) => typeof v === "bigint" ? v + "n" : v) }),
+  return microscope.picture({ width: 1, height: 1, shapes: [
+    microscope.text({ x: 0, y: 0, text: JSON.stringify(report, (_, v) => typeof v === "bigint" ? v + "n" : v) }),
   ] });
 });`;
 
@@ -159,7 +159,7 @@ describe("the worker", () => {
         return {
           samples: [input.samples.constructor.name, input.samples.length, input.samples[1]],
           big: typeof input.big,
-          context: [context.width, context.theme, context.previous, uscope.theme.changed, uscope.theme.series.length],
+          context: [context.width, context.theme, context.previous, microscope.theme.changed, microscope.theme.series.length],
         };
       `),
     );
@@ -174,7 +174,7 @@ describe("the worker", () => {
   });
 
   it("says where a renderer failed, by its file and line", async () => {
-    const throwing = new Probe("uscope.draw(() => {\n  return null.x;\n});", "board");
+    const throwing = new Probe("microscope.draw(() => {\n  return null.x;\n});", "board");
     await throwing.next();
     const answer = await throwing.draw({});
     expect(answer).toMatchObject({
@@ -185,7 +185,7 @@ describe("the worker", () => {
     expect((answer.error as { message: string }).message).toMatch(/^TypeError: /);
 
     const rejecting = new Probe(
-      "uscope.draw(async () => {\n\n  throw new RangeError('no squares');\n});",
+      "microscope.draw(async () => {\n\n  throw new RangeError('no squares');\n});",
       "board",
     );
     await rejecting.next();
@@ -196,7 +196,7 @@ describe("the worker", () => {
   });
 
   it("fails to load a renderer that does not parse or never draws", async () => {
-    const broken = new Probe("uscope.draw(() => {", "broken");
+    const broken = new Probe("microscope.draw(() => {", "broken");
     expect(await broken.next()).toMatchObject({
       type: "loaded",
       error: { message: expect.stringMatching(/^SyntaxError: /), file: "broken.js" },
@@ -204,13 +204,16 @@ describe("the worker", () => {
     const idle = new Probe("const x = 1;", "idle");
     expect(await idle.next()).toMatchObject({
       type: "loaded",
-      error: { message: "the renderer never calls uscope.draw or uscope.live", file: "idle.js" },
+      error: {
+        message: "the renderer never calls microscope.draw or microscope.live",
+        file: "idle.js",
+      },
     });
   });
 
   it("reports an error a renderer leaves uncaught in a timer", async () => {
     const probe = new Probe(
-      "uscope.draw(() => { setTimeout(() => { throw new Error('later'); }); return new Promise(() => {}); });",
+      "microscope.draw(() => { setTimeout(() => { throw new Error('later'); }); return new Promise(() => {}); });",
       "late",
     );
     await probe.next();
@@ -224,7 +227,7 @@ describe("the worker", () => {
   it("compares inputs deeply and blends colors", async () => {
     const probe = new Probe(
       reporting(`
-        const same = uscope.same;
+        const same = microscope.same;
         return {
           same: [
             same({ a: [1, { b: 2n }] }, { a: [1, { b: 2n }] }),
@@ -235,9 +238,9 @@ describe("the worker", () => {
             same({ variant: "None" }, { variant: "Some", value: 1 }),
           ],
           scale: [
-            uscope.color.scale(0, "#000", "#fff"),
-            uscope.color.scale(1, "#000", "#fff"),
-            uscope.color.scale(0.5, "#2a78d6", "#2a78d6"),
+            microscope.color.scale(0, "#000", "#fff"),
+            microscope.color.scale(1, "#000", "#fff"),
+            microscope.color.scale(0.5, "#2a78d6", "#2a78d6"),
           ],
         };
       `),
@@ -251,13 +254,13 @@ describe("the worker", () => {
 
   it("sends a canvas the renderer drew as only its pixels", async () => {
     const probe = new Probe(`
-      uscope.draw(() => {
+      microscope.draw(() => {
         const canvas = new OffscreenCanvas(2, 1);
         const context = canvas.getContext("2d");
         context.fillStyle = "#ff0000";
         context.fillRect(1, 0, 1, 1);
-        return uscope.picture({ width: 2, height: 1, shapes: [
-          uscope.image({ x: 0, y: 0, width: 2, height: 1, canvas }),
+        return microscope.picture({ width: 2, height: 1, shapes: [
+          microscope.image({ x: 0, y: 0, width: 2, height: 1, canvas }),
         ] });
       });`);
     await probe.next();
@@ -273,8 +276,8 @@ describe("the worker", () => {
 const counting = renderer(
   "count",
   `let draws = 0;
-   uscope.draw((input) => uscope.picture({ width: 1, height: 1, shapes: [
-     uscope.text({ x: 0, y: 0, text: input.label + " " + ++draws }),
+   microscope.draw((input) => microscope.picture({ width: 1, height: 1, shapes: [
+     microscope.text({ x: 0, y: 0, text: input.label + " " + ++draws }),
    ] }));`,
 );
 const textOf = (outcome: Outcome) => {
@@ -298,7 +301,7 @@ describe("the sandbox", () => {
     const box = sandbox();
     const looping = renderer(
       "loop",
-      "uscope.draw((input) => { while (input.forever) {} return uscope.picture({ width: 1, height: 1, shapes: [] }); });",
+      "microscope.draw((input) => { while (input.forever) {} return microscope.picture({ width: 1, height: 1, shapes: [] }); });",
     );
     const started = performance.now();
     const outcomes = await Promise.all([
@@ -316,7 +319,7 @@ describe("the sandbox", () => {
     const box = sandbox();
     const slow = renderer(
       "slow",
-      "uscope.draw((input) => new Promise((resolve) => setTimeout(() => resolve(uscope.picture({ width: 1, height: 1, shapes: [] })), 300)));",
+      "microscope.draw((input) => new Promise((resolve) => setTimeout(() => resolve(microscope.picture({ width: 1, height: 1, shapes: [] })), 300)));",
     );
     const started = performance.now();
     await Promise.all(["1", "2", "3", "4", "5"].map((card) => box.draw(card, slow, {}, context)));
@@ -326,7 +329,7 @@ describe("the sandbox", () => {
 
   it("fails draws running and waiting when the page closes it", async () => {
     const box = sandbox();
-    const never = renderer("never", "uscope.draw(() => new Promise(() => {}));");
+    const never = renderer("never", "microscope.draw(() => new Promise(() => {}));");
     const draws = ["1", "2", "3", "4", "5", "6"].map((card) => box.draw(card, never, {}, context));
     box.dispose();
     for (const outcome of await Promise.all(draws)) {
@@ -339,7 +342,7 @@ describe("the sandbox", () => {
 
   it("fails every draw of a renderer that cannot load", async () => {
     const box = sandbox();
-    const outcome = await box.draw("x", renderer("broken", "uscope.draw("), {}, context);
+    const outcome = await box.draw("x", renderer("broken", "microscope.draw("), {}, context);
     expect(outcome).toMatchObject({
       kind: "failed",
       failure: { message: expect.stringMatching(/^SyntaxError/), file: "broken.js" },

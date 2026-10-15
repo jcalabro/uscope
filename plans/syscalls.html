@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>uscope syscalls plan</title>
+<title>microscope syscalls plan</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -452,9 +452,9 @@ details[open] summary { margin-bottom: 10px; }
           <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
         </div>
       </div>
-      <div class="eyebrow">uscope plan</div>
+      <div class="eyebrow">microscope plan</div>
       <h1>Every system call, at a price production can pay</h1>
-      <p class="lede">strace answers "what is this program asking the kernel to do?" by stopping the program twice for every call, which costs 28 to 155 times its runtime on syscall-heavy work (measured below). This plan gives uscope two engines behind one event model. An eBPF engine, with small C programs that uscope loads through Rust's aya, watches any process for a few tens of nanoseconds per call and never stops it. A ptrace engine, which uscope already has the controller for, is exact and synchronous: it catches, stops on, and tampers with calls in programs uscope debugs. The CLI speaks strace's language. The web UI turns the stream into tables, heat maps, and timeline lanes beside the profiler's samples.</p>
+      <p class="lede">strace answers "what is this program asking the kernel to do?" by stopping the program twice for every call, which costs 28 to 155 times its runtime on syscall-heavy work (measured below). This plan gives microscope two engines behind one event model. An eBPF engine, with small C programs that microscope loads through Rust's aya, watches any process for a few tens of nanoseconds per call and never stops it. A ptrace engine, which microscope already has the controller for, is exact and synchronous: it catches, stops on, and tampers with calls in programs microscope debugs. The CLI speaks strace's language. The web UI turns the stream into tables, heat maps, and timeline lanes beside the profiler's samples.</p>
     </header>
 
     <!-- ================================================================ -->
@@ -467,7 +467,7 @@ details[open] summary { margin-bottom: 10px; }
         <div class="tile"><div class="v">0 of 3,000,043</div><div class="l">events lost streaming a 3 M call/s burst through a 16 MiB ring of 88-byte records. A first design that copied 400-byte records lost 54% of them; the record size and drain rate are the design.</div></div>
         <div class="tile"><div class="v bad">+33 ns</div><div class="l">paid by <em>every other process on the machine</em> per call while a syscall tracepoint is attached. fentry on only the chosen syscalls avoids this, measured within noise for calls not chosen.</div></div>
         <div class="tile"><div class="v bad">1000 / 1000</div><div class="l">path reads failed at <span class="mono">sys_enter</span> when the string sat on a page not yet faulted in. At <span class="mono">sys_exit</span>, 2002 of 2002 succeeded. Pointer arguments are read at exit.</div></div>
-        <div class="tile"><div class="v">≈1.0×</div><div class="l">cost of uncaught calls under ptrace with a seccomp filter (<span class="mono">--seccomp-bpf</span>): stops happen only on the calls asked for. That makes the ptrace engine fine for catchpoints in programs uscope launches.</div></div>
+        <div class="tile"><div class="v">≈1.0×</div><div class="l">cost of uncaught calls under ptrace with a seccomp filter (<span class="mono">--seccomp-bpf</span>): stops happen only on the calls asked for. That makes the ptrace engine fine for catchpoints in programs microscope launches.</div></div>
       </div>
       <div class="prose">
         <p>The work ships in seven phases (<a href="#plan">Phases</a>). The ptrace engine comes first because the controller already sees syscall stops and currently rejects them (<span class="mono">src/backend/linux.rs:2169</span>). The BPF engine follows: counting first, then streaming, then production attach. The CLI and web UI grow with each engine rather than at the end.</p>
@@ -482,14 +482,14 @@ details[open] summary { margin-bottom: 10px; }
         <article class="card"><header><span class="id">G0</span><h3>Safe by default; never breaks production</h3></header>
           <p>Every default favors the traced system over the trace:</p>
           <ul>
-            <li>When BPF cannot load, uscope fails with a clear explanation. It never quietly falls back to an engine that stops the target.</li>
+            <li>When BPF cannot load, microscope fails with a clear explanation. It never quietly falls back to an engine that stops the target.</li>
             <li>The ptrace engine runs only when asked for by name.</li>
             <li>Nothing ever changes a syscall.</li>
             <li>Ring, budget, and string sizes are bounded from the start.</li>
-            <li>A slow uscope loses data and says so; it never slows the target to keep up.</li>
+            <li>A slow microscope loses data and says so; it never slows the target to keep up.</li>
           </ul></article>
         <article class="card"><header><span class="id">G1</span><h3>Run in production</h3></header>
-          <p>Trace a live service without stopping it, injecting code into it, or adding more than tens of nanoseconds per traced call. Count mode adds no work per event in uscope. Overhead is a measured, checked number, as for the profiler.</p></article>
+          <p>Trace a live service without stopping it, injecting code into it, or adding more than tens of nanoseconds per traced call. Count mode adds no work per event in microscope. Overhead is a measured, checked number, as for the profiler.</p></article>
         <article class="card"><header><span class="id">G2</span><h3>Everything strace does that people use</h3></header>
           <p>Filters by name, class, regex, status, path and fd; decoded arguments with fds shown as paths and sockets; timing in all of strace's forms; <span class="mono">-c</span> summaries; following forks; stack traces; attaching to a running process.</p></article>
         <article class="card"><header><span class="id">G3</span><h3>More than strace can</h3></header>
@@ -679,9 +679,9 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
             <li><b>in flight</b>: a per-thread entry map that userspace scans every 100 ms. It shows which call each thread is blocked in right now, and for how long, without waiting for the exit.</li>
           </ul></article>
         <article class="card"><header><span class="id">B2</span><h3>Attach</h3></header>
-          <p>The default is <span class="mono">tp_btf/sys_enter</span> and <span class="mono">sys_exit</span>. When the selection has at most 32 syscalls and all of them have BTF functions, uscope uses fentry/fexit on just those, which removes the system-wide tax. Which mode it chose, and why, goes into the capture's accounting.</p></article>
+          <p>The default is <span class="mono">tp_btf/sys_enter</span> and <span class="mono">sys_exit</span>. When the selection has at most 32 syscalls and all of them have BTF functions, microscope uses fentry/fexit on just those, which removes the system-wide tax. Which mode it chose, and why, goes into the capture's accounting.</p></article>
         <article class="card"><header><span class="id">B3</span><h3>Which processes</h3></header>
-          <p>A tgid hash, seeded before the target runs. uscope launches the child behind the profiler's <span class="mono">pre_exec</span> gate, so no call escapes. <span class="mono">sched_process_fork</span> adds children when following, and <span class="mono">sched_process_exit</span> removes them. Alternatively a cgroup id selects a container or systemd unit. Pids are translated into the target's namespace with <span class="mono">bpf_get_ns_current_pid_tgid</span>.</p></article>
+          <p>A tgid hash, seeded before the target runs. microscope launches the child behind the profiler's <span class="mono">pre_exec</span> gate, so no call escapes. <span class="mono">sched_process_fork</span> adds children when following, and <span class="mono">sched_process_exit</span> removes them. Alternatively a cgroup id selects a container or systemd unit. Pids are translated into the target's namespace with <span class="mono">bpf_get_ns_current_pid_tgid</span>.</p></article>
         <article class="card"><header><span class="id">B4</span><h3>Arguments</h3></header>
           <p>At entry the program stores only a timestamp. It keeps the timestamp in task storage, which needs no cleanup when a thread dies. At exit one generic copier reads the selected call's pointer arguments, following the argument spec table. Strings are bounded by <span class="mono">-s</span>; buffers, <span class="mono">sockaddr</span>, and the first <i>k</i> <span class="mono">iovec</span>s are bounded too. Every copy is marked <span class="mono">ReadAt::Exit</span>. <span class="mono">execve</span>'s arguments are read at entry, since the old memory is gone at exit. <span class="mono">sched_process_exec</span> supplies the new image.</p></article>
         <article class="card"><header><span class="id">B5</span><h3>Records</h3></header>
@@ -698,7 +698,7 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
       <div class="eyebrow">BPF programs</div>
       <h2>Small C programs, built by clang, loaded by aya</h2>
       <div class="prose">
-        <p>The kernel side is a handful of C programs, a few hundred lines in all. They are compiled to BPF objects by clang and embedded in the uscope binary. At run time uscope loads them with <a href="https://aya-rs.dev/">aya</a>, a pure-Rust loader that needs no libbpf and no C library, and attaches them and reads their maps. Everything the programs produce is decoded and interpreted in Rust. The C does as little as possible: filter, timestamp, copy bytes, count.</p>
+        <p>The kernel side is a handful of C programs, a few hundred lines in all. They are compiled to BPF objects by clang and embedded in the microscope binary. At run time microscope loads them with <a href="https://aya-rs.dev/">aya</a>, a pure-Rust loader that needs no libbpf and no C library, and attaches them and reads their maps. Everything the programs produce is decoded and interpreted in Rust. The C does as little as possible: filter, timestamp, copy bytes, count.</p>
         <p>Everything below was built and loaded on this machine, with the pinned nixpkgs, in a privileged container.</p>
       </div>
       <div class="cards">
@@ -715,7 +715,7 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
             <li><span class="mono">-Wall -Werror -nostdinc</span></li>
             <li><span class="mono">-fdebug-prefix-map</span></li>
           </ul>
-          <p>The only include paths are libbpf 1.7's BPF headers and nixpkgs' Linux UAPI headers. The flake exports both as <span class="mono">USCOPE_BPF_CLANG</span> and <span class="mono">USCOPE_BPF_INCLUDE</span>. Outside the dev shell the build fails and names the missing variable; it never falls back to the host's tools.</p>
+          <p>The only include paths are libbpf 1.7's BPF headers and nixpkgs' Linux UAPI headers. The flake exports both as <span class="mono">MICROSCOPE_BPF_CLANG</span> and <span class="mono">MICROSCOPE_BPF_INCLUDE</span>. Outside the dev shell the build fails and names the missing variable; it never falls back to the host's tools.</p>
           <p>A compile takes 0.08 s, and rebuilding gives a byte-identical object (measured). The unwrapped compiler matters: nixpkgs' cc-wrapper adds host flags and warns on <span class="mono">-target bpf</span>.</p></article>
         <article class="card"><header><span class="id">P3</span><h3>CO-RE</h3></header>
           <p>Every field access in the programs is relocated by aya against the running kernel's BTF, so one object runs on every kernel.</p>
@@ -744,12 +744,12 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
           <p>A load failure prints the verifier log to the flight recorder, along with the name of the kernel.</p></article>
         <article class="card"><header><span class="id">P7</span><h3>What the kernel allows</h3></header>
           <ul>
-            <li>Fedora 44 turns <span class="mono">CONFIG_FUNCTION_ERROR_INJECTION</span> off, so <span class="mono">bpf_override_return</span> and <span class="mono">fmod_ret</span> on syscalls are unavailable. BPF cannot change a syscall's result, and uscope never changes syscalls anyway.</li>
+            <li>Fedora 44 turns <span class="mono">CONFIG_FUNCTION_ERROR_INJECTION</span> off, so <span class="mono">bpf_override_return</span> and <span class="mono">fmod_ret</span> on syscalls are unavailable. BPF cannot change a syscall's result, and microscope never changes syscalls anyway.</li>
             <li>Zero-argument syscalls have no BTF function, so fentry cannot attach to them.</li>
             <li>Linux 7.2's sleepable syscall tracepoints (<span class="mono">tp_btf.s</span>) are rejected by aya 0.14, and by libbpf 1.8 as well.</li>
           </ul></article>
         <article class="card"><header><span class="id">P8</span><h3>Privilege</h3></header>
-          <p>As a normal user here, the first map creation fails with <span class="mono">EPERM</span>, because <span class="mono">unprivileged_bpf_disabled</span> is 2. <span class="mono">tp_btf</span> needs only the world-readable <span class="mono">/sys/kernel/btf/vmlinux</span>, not tracefs, which is root-only here. uscope probes before loading and names the missing capability instead of passing <span class="mono">EPERM</span> along.</p></article>
+          <p>As a normal user here, the first map creation fails with <span class="mono">EPERM</span>, because <span class="mono">unprivileged_bpf_disabled</span> is 2. <span class="mono">tp_btf</span> needs only the world-readable <span class="mono">/sys/kernel/btf/vmlinux</span>, not tracefs, which is root-only here. microscope probes before loading and names the missing capability instead of passing <span class="mono">EPERM</span> along.</p></article>
       </div>
     </section>
 
@@ -758,13 +758,13 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
       <div class="eyebrow">The ptrace engine</div>
       <h2>Exact and synchronous, for the debugger</h2>
       <div class="prose">
-        <p>uscope's controller already sets <span class="mono">PTRACE_O_TRACESYSGOOD</span> (<span class="mono">src/backend/linux/native.rs:1072</span>), classifies the stop (<span class="mono">signals.rs:311</span>), and rejects it. This engine turns that rejection into a feature. It is the right engine when uscope is already debugging the target, since a process can have only one ptrace tracer and strace cannot attach alongside uscope. It is also the only engine that can stop at a call, which is what <span class="mono">catch syscall</span> needs. It needs no privilege beyond debugging. It is also the oracle the BPF engine is tested against. It runs only when chosen by name, with <span class="mono">--engine ptrace</span> or by a catchpoint in a debugging session.</p>
+        <p>microscope's controller already sets <span class="mono">PTRACE_O_TRACESYSGOOD</span> (<span class="mono">src/backend/linux/native.rs:1072</span>), classifies the stop (<span class="mono">signals.rs:311</span>), and rejects it. This engine turns that rejection into a feature. It is the right engine when microscope is already debugging the target, since a process can have only one ptrace tracer and strace cannot attach alongside microscope. It is also the only engine that can stop at a call, which is what <span class="mono">catch syscall</span> needs. It needs no privilege beyond debugging. It is also the oracle the BPF engine is tested against. It runs only when chosen by name, with <span class="mono">--engine ptrace</span> or by a catchpoint in a debugging session.</p>
         <ul>
           <li><b>Launch</b>: the <span class="mono">pre_exec</span> hook installs a seccomp filter. The filter returns <span class="mono">RET_TRACE</span> for the chosen calls and <span class="mono">RET_ALLOW</span> otherwise, so calls that are not chosen run at full speed (measured above). After an entry stop, <span class="mono">PTRACE_SYSCALL</span> takes the thread to its exit stop.</li>
-          <li><b>Attach</b>: a running process cannot be given a filter from outside. Attaching means stopping at every call, at about 5 µs each. uscope refuses unless the user also passes <span class="mono">--stop-every-call</span>, and says why.</li>
+          <li><b>Attach</b>: a running process cannot be given a filter from outside. Attaching means stopping at every call, at about 5 µs each. microscope refuses unless the user also passes <span class="mono">--stop-every-call</span>, and says why.</li>
           <li><b>Reading</b>: <span class="mono">PTRACE_GET_SYSCALL_INFO</span> (5.3) gives entry, exit, or seccomp stop, plus arch, number, arguments, and return value. Memory is read at entry with <span class="mono">process_vm_readv</span>, so paging is not a problem.</li>
           <li><b>Catchpoints</b>: <span class="mono">catch syscall openat [entry|exit] [if EXPR]</span>. Conditions are evaluated by the existing expression evaluator, with <span class="mono">$arg0…$arg5</span>, <span class="mono">$ret</span>, and <span class="mono">$path</span> bound.</li>
-          <li><b>Detaching</b>: a seccomp filter cannot be removed, so after detach the chosen calls fail with <span class="mono">ENOSYS</span>. uscope therefore installs the filter only on processes it launched and will kill on exit. On any other detach it refuses unless told <span class="mono">--detach-anyway</span>. strace documents this in its BUGS section and lets it happen.</li>
+          <li><b>Detaching</b>: a seccomp filter cannot be removed, so after detach the chosen calls fail with <span class="mono">ENOSYS</span>. microscope therefore installs the filter only on processes it launched and will kill on exit. On any other detach it refuses unless told <span class="mono">--detach-anyway</span>. strace documents this in its BUGS section and lets it happen.</li>
         </ul>
       </div>
     </section>
@@ -791,20 +791,20 @@ pub struct SyscallStats { calls, errors_by_errno, total_ns, max_ns, log2_ns: [u6
     <!-- ================================================================ -->
     <section id="cli">
       <div class="eyebrow">CLI</div>
-      <h2><span class="mono">uscope syscalls</span>: strace's flags, uscope's engines</h2>
+      <h2><span class="mono">microscope syscalls</span>: strace's flags, microscope's engines</h2>
       <div class="prose"><p>The command is named for the data it collects, as the REPL's <span class="mono">syscalls</span> command and the web UI's Syscalls tab are. That leaves <span class="mono">trace</span> and <span class="mono">traces</span> free for distributed tracing later (D7). The flags follow strace's, so the strace muscle memory carries over without the name promising exact compatibility.</p></div>
 <pre><span class="c"># a launched program and its children, through BPF; fails with an explanation without CAP_BPF+CAP_PERFMON</span>
-uscope syscalls -e trace=%file,%net -yy -T -- ./server --port 8080
+microscope syscalls -e trace=%file,%net -yy -T -- ./server --port 8080
 <span class="c"># strace -c, measured in the kernel; -w for wall clock; latency percentiles beyond strace</span>
-uscope syscalls -c -S p99 -p 4182 --duration 30s
+microscope syscalls -c -S p99 -p 4182 --duration 30s
 <span class="c"># production: one container, a short list (fentry, no system-wide tax), recorded for the web UI</span>
-uscope syscalls --cgroup /sys/fs/cgroup/system.slice/app.service -e trace=openat,connect,fsync -o app.usprof
+microscope syscalls --cgroup /sys/fs/cgroup/system.slice/app.service -e trace=openat,connect,fsync -o app.usprof
 <span class="c"># no privilege: the ptrace engine, by name, with a seccomp filter for just these calls</span>
-uscope syscalls --engine ptrace -e trace=openat,connect -- ./tool
+microscope syscalls --engine ptrace -e trace=openat,connect -- ./tool
 <span class="c"># scriptable</span>
-uscope syscalls --format ndjson -Z -- make -j8 | jq 'select(.errno=="ENOENT") .args.path'
+microscope syscalls --format ndjson -Z -- make -j8 | jq 'select(.errno=="ENOENT") .args.path'
 <span class="c"># syscalls with CPU samples in one capture</span>
-uscope record --syscalls %file,%net --preset prod -- ./server</pre>
+microscope record --syscalls %file,%net --preset prod -- ./server</pre>
       <div class="scroller">
         <table class="data">
           <thead><tr><th>Family</th><th>Flags (strace-compatible unless noted)</th><th>Engines</th></tr></thead>
@@ -823,7 +823,7 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
       <div class="prose">
         <p><b>Other entry points.</b></p>
         <ul>
-          <li><span class="mono">uscope report FILE</span> gains a syscall summary when the capture has one.</li>
+          <li><span class="mono">microscope report FILE</span> gains a syscall summary when the capture has one.</li>
           <li>In the debugger REPL:
             <ul>
               <li><span class="mono">syscalls start|stop|summary|inflight</span></li>
@@ -928,19 +928,19 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
       <h2>Guarantees, not intentions</h2>
       <div class="cards">
         <article class="card"><header><span class="id">S1</span><h3>The target</h3></header><ul><li>The BPF engine runs no code in the target. It sends no signals and takes no ptrace stops.</li><li>Its cost per traced call is measured, and the reference numbers are checked into <span class="mono">bench/syscalls-overhead.json</span>.</li><li>A slow reader loses records at the ring and counts them; it never stalls the target.</li></ul></article>
-        <article class="card"><header><span class="id">S2</span><h3>Everyone else on the host</h3></header><ul><li>The default production recipe is a short syscall list, which uses fentry and costs nothing for other processes.</li><li>Tracepoint mode costs other processes about 33 ns per call. uscope prints that cost when it attaches, and records it in the capture.</li><li><span class="mono">--budget</span> lowers what it captures when its CPU use crosses the budget, in this order: drop stacks, cap strings, sample, then count only. Each step is recorded.</li></ul></article>
+        <article class="card"><header><span class="id">S2</span><h3>Everyone else on the host</h3></header><ul><li>The default production recipe is a short syscall list, which uses fentry and costs nothing for other processes.</li><li>Tracepoint mode costs other processes about 33 ns per call. microscope prints that cost when it attaches, and records it in the capture.</li><li><span class="mono">--budget</span> lowers what it captures when its CPU use crosses the budget, in this order: drop stacks, cap strings, sample, then count only. Each step is recorded.</li></ul></article>
         <article class="card"><header><span class="id">S3</span><h3>Privileges</h3></header><ul><li>The BPF engine needs <span class="mono">CAP_BPF</span> and <span class="mono">CAP_PERFMON</span>, never <span class="mono">CAP_SYS_ADMIN</span>.</li><li>Run it from a systemd unit with <span class="mono">AmbientCapabilities=</span> or a privileged DaemonSet. In a container, give it those capabilities; a BPF token (6.9+) cannot be used, because aya cannot pass one.</li><li>The docs warn against <span class="mono">setcap</span> on a shared host. Those capabilities let any user read any process's syscalls, and much of kernel memory.</li><li>The ptrace engine needs only what debugging already needs.</li></ul></article>
-        <article class="card"><header><span class="id">S7</span><h3>Failing well</h3></header><p>Before loading anything, uscope probes for the capabilities, BTF, the kernel version, lockdown, and each map and program type. Each missing piece produces one specific message with the fix, never a bare <span class="mono">EPERM</span>:</p>
-<pre>error: uscope syscalls needs CAP_BPF and CAP_PERFMON, and this process has neither.
-  uscope uses eBPF so it never stops or slows the traced program, and it will
-  not fall back to ptrace on its own. To continue, one of:
+        <article class="card"><header><span class="id">S7</span><h3>Failing well</h3></header><p>Before loading anything, microscope probes for the capabilities, BTF, the kernel version, lockdown, and each map and program type. Each missing piece produces one specific message with the fix, never a bare <span class="mono">EPERM</span>:</p>
+<pre>error: microscope syscalls needs CAP_BPF and CAP_PERFMON, and this process has neither.
+  microscope uses eBPF so it never stops or slows the traced program, and
+  it will not fall back to ptrace on its own. To continue, one of:
     - run it from a unit with AmbientCapabilities=CAP_BPF CAP_PERFMON
-    - on NixOS or system-manager, import uscope's bpf module and run through
-      /run/wrappers/bin/uscope-bpf (docs/syscalls.md#privileges)
+    - on NixOS or system-manager, import microscope's bpf module and run through
+      /run/wrappers/bin/microscope-bpf (docs/syscalls.md#privileges)
     - trace a program you launch with --engine ptrace, which stops the
       program at each chosen call</pre></article>
         <article class="card"><header><span class="id">S4</span><h3>Kernels</h3></header><ul><li>The BPF engine supports Linux 5.15 and newer, with BTF. Every map and program type it uses is present there, task storage included, so there are no fallback paths.</li><li>A feature probe at start records what the kernel offers:<ul><li>task storage</li><li>fentry for each chosen syscall</li><li><span class="mono">bpf_get_ns_current_pid_tgid</span></li><li>sleepable tracepoints</li></ul></li><li>An older kernel, or one without BTF, fails with the reason. Tests run only on the host kernel; CO-RE, the feature probe, and these errors cover the rest.</li></ul></article>
-        <article class="card"><header><span class="id">S5</span><h3>Continuous</h3></header><p><span class="mono">uscope syscalls --continuous DIR --keep 24h</span> reuses the profiler's sealed segments. In count mode a segment is one statistics snapshot per interval: kilobytes per hour. Triggers flush full-fidelity windows:</p><ul><li>SIGUSR2</li><li>an SDK trigger</li><li>a syscall slower than a threshold</li><li>an errno</li></ul></article>
+        <article class="card"><header><span class="id">S5</span><h3>Continuous</h3></header><p><span class="mono">microscope syscalls --continuous DIR --keep 24h</span> reuses the profiler's sealed segments. In count mode a segment is one statistics snapshot per interval: kilobytes per hour. Triggers flush full-fidelity windows:</p><ul><li>SIGUSR2</li><li>an SDK trigger</li><li>a syscall slower than a threshold</li><li>an errno</li></ul></article>
         <article class="card"><header><span class="id">S6</span><h3>Containers</h3></header><p>Targets can be a cgroup, or a container id resolved to one. Pids and paths are shown in the target's namespaces. Paths resolve through <span class="mono">/proc/PID/root</span>, and module build ids identify binaries as they do for the profiler.</p></article>
       </div>
     </section>
@@ -959,7 +959,7 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
             <tr><td><span class="mono">src/backend/linux/syscalls/bpf.rs</span></td><td>Loading (aya, byte-array map values), feature probe, attach choice, maps, ring reader, in-flight scan, record decode</td><td>decode is pure</td><td>aya; the profiler's <span class="mono">pre_exec</span> gate and pidfd exit watch from <span class="mono">perf::launch</span></td></tr>
             <tr><td><span class="mono">src/backend/linux/syscalls/ptrace.rs</span></td><td>seccomp filter build, syscall-stop handling, <span class="mono">GET_SYSCALL_INFO</span>, catchpoints</td><td>filter build pure</td><td>Controller, <span class="mono">Recorded</span> ptrace wrapper, flight recorder, stop classification in <span class="mono">signals.rs</span></td></tr>
             <tr><td><span class="mono">src/capture</span> (extended)</td><td>Tables <span class="mono">Syscalls</span>, <span class="mono">SyscallBlobs</span>, <span class="mono">SyscallStats</span>, <span class="mono">Processes</span>, <span class="mono">Fds</span>; <span class="mono">CAPTURE_REVISION</span> 8</td><td>yes</td><td>Container, strings, gaps, accounting, segments</td></tr>
-            <tr><td><span class="mono">src/cli/syscalls.rs</span></td><td><span class="mono">uscope syscalls</span>, REPL <span class="mono">syscalls</span>/<span class="mono">catch syscall</span></td><td>—</td><td><span class="mono">cli/profile.rs</span> signal and duration handling</td></tr>
+            <tr><td><span class="mono">src/cli/syscalls.rs</span></td><td><span class="mono">microscope syscalls</span>, REPL <span class="mono">syscalls</span>/<span class="mono">catch syscall</span></td><td>—</td><td><span class="mono">cli/profile.rs</span> signal and duration handling</td></tr>
             <tr><td><span class="mono">src/web/syscalls.rs</span>, <span class="mono">web/src/ui/syscalls/</span></td><td>Queries and canvas views</td><td>—</td><td>Profiles, binary frames, cache, router URL state, paint helpers</td></tr>
             <tr><td><span class="mono">src/sim</span> (extended)</td><td>Syscall-stop and seccomp rules, a tracepoint-stream model, oracles</td><td>—</td><td><span class="mono">kernel/syscalls.rs</span>, conformance dual runs</td></tr>
           </tbody>
@@ -973,7 +973,7 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
       <h2>Choices, with the alternatives</h2>
       <div class="cards">
         <article class="card"><header><span class="id">D1</span><h3>Collection</h3></header><div class="options">
-          <div class="option dec"><span class="tag">Chosen</span><b>eBPF and ptrace, behind one model</b><span class="why">Only eBPF is cheap enough for production. Only ptrace is exact and can stop at a call, and uscope already owns it. It is also the BPF engine's test oracle.</span></div>
+          <div class="option dec"><span class="tag">Chosen</span><b>eBPF and ptrace, behind one model</b><span class="why">Only eBPF is cheap enough for production. Only ptrace is exact and can stop at a call, and microscope already owns it. It is also the BPF engine's test oracle.</span></div>
           <div class="option alt"><span class="tag">Passed</span><b>eBPF only</b><span class="why">It could not provide catchpoints or unprivileged tracing, and it would have no oracle to be tested against.</span></div>
           <div class="option alt"><span class="tag">Passed</span><b>perf_event_open tracepoints without BPF</b><span class="why">No pointer contents, and it needs tracefs.</span></div></div></article>
         <article class="card"><header><span class="id">D2</span><h3>BPF language</h3></header><div class="options">
@@ -985,7 +985,7 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
           <div class="option alt"><span class="tag">Passed</span><b>syscalls:sys_enter_* tracepoints, kprobes</b><span class="why">Slower, need tracefs, and the per-syscall events miss compat calls.</span></div></div></article>
         <article class="card"><header><span class="id">D4</span><h3>When to read arguments</h3></header><div class="options">
           <div class="option dec"><span class="tag">Chosen</span><b>At exit, marked as such; execve at entry</b><span class="why">1000 of 1000 fresh-page reads failed at entry (M1).</span></div>
-          <div class="option alt"><span class="tag">Later</span><b>Sleepable tp_btf.s at entry</b><span class="why">The kernel has it as of 7.2; aya and libbpf do not load it yet (P7). uscope uses it once aya can load it; uscope does not change aya itself.</span></div></div></article>
+          <div class="option alt"><span class="tag">Later</span><b>Sleepable tp_btf.s at entry</b><span class="why">The kernel has it as of 7.2; aya and libbpf do not load it yet (P7). microscope uses it once aya can load it; microscope does not change aya itself.</span></div></div></article>
         <article class="card"><header><span class="id">D5</span><h3>Storage</h3></header><div class="options">
           <div class="option dec"><span class="tag">Chosen</span><b>Tables in the capture container</b><span class="why">One file and one clock with CPU samples. Segments, the web UI, and recovery already work.</span></div>
           <div class="option alt"><span class="tag">Passed</span><b>A separate trace format</b><span class="why">It would duplicate everything above.</span></div></div></article>
@@ -993,10 +993,10 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
           <div class="option dec"><span class="tag">Chosen</span><b>strace's flags and output, with explicit additions</b><span class="why">People already know them, and scripts port over.</span></div>
           <div class="option alt"><span class="tag">Passed</span><b>A new syntax</b><span class="why">Nothing would gain from it.</span></div></div></article>
         <article class="card"><header><span class="id">D7</span><h3>Command name</h3></header><div class="options">
-          <div class="option dec"><span class="tag">Chosen</span><b><span class="mono">uscope syscalls</span></b><span class="why">It names the data, as the REPL command, web tab, and capture tables already do. It cannot collide with OpenTelemetry's traces, and it extends naturally: <span class="mono">libcalls</span> for uprobes later, <span class="mono">traces</span> or <span class="mono">otel</span> for distributed tracing.</span></div>
-          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">uscope strace</span></b><span class="why">Instantly recognizable. But it promises exact strace behavior: every flag, every output byte, ptrace semantics. Each difference would then read as a bug, and the BPF engine never stops the target the way strace does.</span></div>
-          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">uscope trace</span></b><span class="why">It is the word distributed tracing will want.</span></div>
-          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">uscope syscall</span>, <span class="mono">sys</span>, <span class="mono">snoop</span></b><span class="why">Singular reads like an action, "make a syscall". <span class="mono">sys</span> is vague, and <span class="mono">snoop</span> suggests one-off bcc tools.</span></div></div></article>
+          <div class="option dec"><span class="tag">Chosen</span><b><span class="mono">microscope syscalls</span></b><span class="why">It names the data, as the REPL command, web tab, and capture tables already do. It cannot collide with OpenTelemetry's traces, and it extends naturally: <span class="mono">libcalls</span> for uprobes later, <span class="mono">traces</span> or <span class="mono">otel</span> for distributed tracing.</span></div>
+          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">microscope strace</span></b><span class="why">Instantly recognizable. But it promises exact strace behavior: every flag, every output byte, ptrace semantics. Each difference would then read as a bug, and the BPF engine never stops the target the way strace does.</span></div>
+          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">microscope trace</span></b><span class="why">It is the word distributed tracing will want.</span></div>
+          <div class="option alt"><span class="tag">Passed</span><b><span class="mono">microscope syscall</span>, <span class="mono">sys</span>, <span class="mono">snoop</span></b><span class="why">Singular reads like an action, "make a syscall". <span class="mono">sys</span> is vague, and <span class="mono">snoop</span> suggests one-off bcc tools.</span></div></div></article>
       </div>
     </section>
 
@@ -1007,24 +1007,24 @@ uscope record --syscalls %file,%net --preset prod -- ./server</pre>
       <div class="layers">
         <div class="layer"><b>Pure units</b><p>Covers the filter parser, spec tables against the generated numbers, statistics folding, the log2 bucket edges, and fd-table transitions including <span class="mono">close_range</span> and <span class="mono">dup3</span>. Also seccomp filter generation, run through a userspace cBPF interpreter. Decoders and the record parser are fuzzed.</p><span class="speed">seconds</span></div>
         <div class="layer"><b>ptrace scenarios</b><p><span class="mono">Scenario</span> fixtures in <span class="mono">tests/fixtures/c/syscalls/</span> make known call sequences and print sync lines: a path that does not exist, a <span class="mono">sockaddr</span> to a local listener, fork and exec, threads blocked on a pipe, a path on an untouched page, and a 32-bit build. Tests cover catchpoint stops with <span class="mono">StopId</span>s, cleanup, and no surviving inferiors.</p><span class="speed">nextest</span></div>
-        <div class="layer"><b>Dual-engine</b><p>The same fixtures run under both engines, and the decoded sequences must be equal per thread. They may differ only in fields marked as differing, such as <span class="mono">ReadAt</span> and durations. It needs <span class="mono">CAP_BPF</span> and <span class="mono">CAP_PERFMON</span>, so it is a separate test binary run by <span class="mono">just test-bpf</span>. That recipe runs nextest through <span class="mono">/run/wrappers/bin/uscope-bpf</span> when it exists. Otherwise it fails with the setup instructions; it never skips silently. Plain <span class="mono">just test</span> stays unprivileged, so the profiler's permission tests still see what users see.</p><span class="speed">privileged</span></div>
+        <div class="layer"><b>Dual-engine</b><p>The same fixtures run under both engines, and the decoded sequences must be equal per thread. They may differ only in fields marked as differing, such as <span class="mono">ReadAt</span> and durations. It needs <span class="mono">CAP_BPF</span> and <span class="mono">CAP_PERFMON</span>, so it is a separate test binary run by <span class="mono">just test-bpf</span>. That recipe runs nextest through <span class="mono">/run/wrappers/bin/microscope-bpf</span> when it exists. Otherwise it fails with the setup instructions; it never skips silently. Plain <span class="mono">just test</span> stays unprivileged, so the profiler's permission tests still see what users see.</p><span class="speed">privileged</span></div>
         <div class="layer"><b>Simulator</b><p>New conformance-pinned rules K-SYS-1 onward: entry and exit stops, <span class="mono">GET_SYSCALL_INFO</span>, seccomp <span class="mono">RET_TRACE</span> ordering. A model of the tracepoint stream feeds the real decoder and folder. An oracle checks that every call the simulated kernel served is either in the trace or counted as lost. Sabotage tests and coverage marks are included.</p><span class="speed">sweep</span></div>
         <div class="layer"><b>Overhead</b><p><span class="mono">just syscall-overhead</span> runs the three workloads from <a href="#measurements">Measurements</a> plus the Go and tokio server fixtures, under each mode. Results are compared with <span class="mono">bench/syscalls-overhead.json</span>, as <span class="mono">profile-overhead</span> does.</p><span class="speed">minutes</span></div>
         <div class="layer"><b>Web</b><p>Vitest covers the heat-map binning and the formatting round trip. Playwright drives the tabs against a recorded capture. The replay transcripts include a syscall capture.</p><span class="speed">seconds / e2e</span></div>
       </div>
       <div class="cards">
         <article class="card" style="grid-column: 1 / -1"><header><span class="id">H1</span><h3>Dev host setup, once</h3></header>
-          <p>The flake exports <span class="mono">nixosModules.uscope-bpf</span>. It declares one security wrapper around <span class="mono">env</span> that carries <span class="mono">cap_bpf,cap_perfmon</span>. Only the owner and the <span class="mono">wheel</span> group can run it. Each host's own NixOS or system-manager configuration imports it, from dotfiles: this repo's dev shell cannot create a binary with file capabilities, and the nix store cannot hold one. The wrapper moves its capabilities into the ambient set before it runs its command, so they survive <span class="mono">nix develop</span>, <span class="mono">contained.sh</span>'s <span class="mono">systemd-run --scope</span>, and nextest's test processes. That chain is to be verified once the wrapper is installed. No sudo, container, or VM is involved.</p>
+          <p>The flake exports <span class="mono">nixosModules.microscope-bpf</span>. It declares one security wrapper around <span class="mono">env</span> that carries <span class="mono">cap_bpf,cap_perfmon</span>. Only the owner and the <span class="mono">wheel</span> group can run it. Each host's own NixOS or system-manager configuration imports it, from dotfiles: this repo's dev shell cannot create a binary with file capabilities, and the nix store cannot hold one. The wrapper moves its capabilities into the ambient set before it runs its command, so they survive <span class="mono">nix develop</span>, <span class="mono">contained.sh</span>'s <span class="mono">systemd-run --scope</span>, and nextest's test processes. That chain is to be verified once the wrapper is installed. No sudo, container, or VM is involved.</p>
 <pre>{ inputs, ... }: {
-  imports = [ inputs.uscope.nixosModules.uscope-bpf ];
+  imports = [ inputs.microscope.nixosModules.microscope-bpf ];
 }
 <span class="c"># declares, in effect:</span>
-security.wrappers.uscope-bpf = {
+security.wrappers.microscope-bpf = {
   source = "${pkgs.coreutils}/bin/env";
   owner = "root"; group = "wheel"; permissions = "u+rx,g+x";
   capabilities = "cap_bpf,cap_perfmon+ep";
 };</pre>
-          <p class="small muted">Hosts without Nix get the same thing from <span class="mono">docs/syscalls.md</span>: a root-owned copy of <span class="mono">env</span> in <span class="mono">/usr/local/libexec</span> with <span class="mono">setcap cap_bpf,cap_perfmon+ep</span>, mode 0750, group wheel. Capabilities on a plain binary do not reach the programs it runs, so it also has to raise them to ambient; until uscope ships a tiny launcher for that, NixOS's wrapper is the supported path.</p></article>
+          <p class="small muted">Hosts without Nix get the same thing from <span class="mono">docs/syscalls.md</span>: a root-owned copy of <span class="mono">env</span> in <span class="mono">/usr/local/libexec</span> with <span class="mono">setcap cap_bpf,cap_perfmon+ep</span>, mode 0750, group wheel. Capabilities on a plain binary do not reach the programs it runs, so it also has to raise them to ambient; until microscope ships a tiny launcher for that, NixOS's wrapper is the supported path.</p></article>
       </div>
     </section>
 
@@ -1043,18 +1043,18 @@ security.wrappers.uscope-bpf = {
       <div class="phase"><header><span class="pid">Y1</span><h3>ptrace engine and catchpoints</h3><span class="st done">done</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
           <tr><td>Y1.1</td><td>Classify syscall stops in the controller; internal record-and-resume; flight recorder lines</td><td><span class="st done">done</span></td><td><span class="mono">PTRACE_SYSCALL</span> while a catchpoint exists; entry and exit read by <span class="mono">PTRACE_GET_SYSCALL_INFO</span>; flight-recorder lines for both</td></tr>
-          <tr><td>Y1.2</td><td>seccomp <span class="mono">RET_TRACE</span> filter at launch; refuse detach that would strand it</td><td><span class="st done">done</span></td><td>At launch for <span class="mono">uscope syscalls</span> (f144b71c). The debugger installs no filter: see deviations</td></tr>
+          <tr><td>Y1.2</td><td>seccomp <span class="mono">RET_TRACE</span> filter at launch; refuse detach that would strand it</td><td><span class="st done">done</span></td><td>At launch for <span class="mono">microscope syscalls</span> (f144b71c). The debugger installs no filter: see deviations</td></tr>
           <tr><td>Y1.3</td><td><span class="mono">catch syscall</span> in REPL, DAP and web; <span class="mono">StopReason::Syscall</span></td><td><span class="st done">done</span></td><td>REPL <span class="mono">catch syscall [entry|exit] [call&hellip;] [if EXPR]</span>, <span class="mono">info catchpoints</span>, <span class="mono">delete cN</span>; DAP filter <span class="mono">syscalls</span>; the web console runs the REPL command</td></tr>
-          <tr><td>Y1.4</td><td><span class="mono">uscope syscalls --engine ptrace</span>: text and ndjson, <span class="mono">-c</span>, following children, <span class="mono">-y</span></td><td><span class="st done">done</span></td><td>f144b71c; output held to strace&rsquo;s. The tracer blocks in <span class="mono">waitpid</span>, woken each tick, at 4.8 &micro;s a call as strace is</td></tr>
+          <tr><td>Y1.4</td><td><span class="mono">microscope syscalls --engine ptrace</span>: text and ndjson, <span class="mono">-c</span>, following children, <span class="mono">-y</span></td><td><span class="st done">done</span></td><td>f144b71c; output held to strace&rsquo;s. The tracer blocks in <span class="mono">waitpid</span>, woken each tick, at 4.8 &micro;s a call as strace is</td></tr>
           <tr><td>Y1.5</td><td>Simulator rules K-SYS-1… with conformance dual runs</td><td><span class="st done">done</span></td><td>K-SYS-1 to K-SYS-6 pinned by dual runs. Catch accounting, catch stops, and a tracepoint-stream model read by the real decoder and folder, each with a sabotage test; six coverage marks the gate reaches</td></tr>
         </tbody></table></div>
         <p class="exit">Exit: the fixtures trace and catch correctly; <span class="mono">just stress</span> and <span class="mono">just sim 600</span> pass.</p></div>
       <div class="phase"><header><span class="pid">Y2</span><h3>BPF groundwork and count mode</h3><span class="st done">done</span></header>
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
-          <tr><td>Y2.1</td><td>Flake: export <span class="mono">USCOPE_BPF_CLANG</span> (<span class="mono">llvmPackages.clang-unwrapped</span>) and <span class="mono">USCOPE_BPF_INCLUDE</span> (libbpf's headers, <span class="mono">linuxHeaders</span>); <span class="mono">scripts/dev.sh</span> keeps them</td><td><span class="st done">done</span></td><td>Build and CO-RE proven in scratch (P2, P3); 2f531f90</td></tr>
+          <tr><td>Y2.1</td><td>Flake: export <span class="mono">MICROSCOPE_BPF_CLANG</span> (<span class="mono">llvmPackages.clang-unwrapped</span>) and <span class="mono">MICROSCOPE_BPF_INCLUDE</span> (libbpf's headers, <span class="mono">linuxHeaders</span>); <span class="mono">scripts/dev.sh</span> keeps them</td><td><span class="st done">done</span></td><td>Build and CO-RE proven in scratch (P2, P3); 2f531f90</td></tr>
           <tr><td>Y2.2</td><td><span class="mono">build.rs</span> compiles <span class="mono">*.bpf.c</span> with <span class="mono">-Werror -nostdinc -fdebug-prefix-map</span>; objects embedded; <span class="mono">records.h</span> layout test against the Rust decoders</td><td><span class="st done">done</span></td><td>2f531f90; the layout test reads the object&rsquo;s BTF</td></tr>
-          <tr><td>Y2.3</td><td>Feature and privilege probe with named, actionable errors (S7); <span class="mono">nixosModules.uscope-bpf</span> (H1)</td><td><span class="st done">done</span></td><td>S7 messages 2f531f90; the module is checked by <span class="mono">nix flake show</span> but not installed on this machine</td></tr>
-          <tr><td>Y2.4</td><td>Count mode with log2 histograms; <span class="mono">uscope syscalls -c</span> via BPF; <span class="mono">just test-bpf</span> through the wrapper</td><td><span class="st done">done</span></td><td>2f531f90. Counts every one of 3,000,000 calls at +70 ns each</td></tr>
+          <tr><td>Y2.3</td><td>Feature and privilege probe with named, actionable errors (S7); <span class="mono">nixosModules.microscope-bpf</span> (H1)</td><td><span class="st done">done</span></td><td>S7 messages 2f531f90; the module is checked by <span class="mono">nix flake show</span> but not installed on this machine</td></tr>
+          <tr><td>Y2.4</td><td>Count mode with log2 histograms; <span class="mono">microscope syscalls -c</span> via BPF; <span class="mono">just test-bpf</span> through the wrapper</td><td><span class="st done">done</span></td><td>2f531f90. Counts every one of 3,000,000 calls at +70 ns each</td></tr>
           <tr><td>Y2.5</td><td><span class="mono">just syscall-overhead</span> and its baseline file</td><td><span class="st done">done</span></td><td><span class="mono">bench/syscalls-overhead.json</span>: bare 34 ns a call; ptrace +4.8 &micro;s; BPF counting +70 ns, streaming +118 ns; untraced beside a BPF trace +27 ns</td></tr>
         </tbody></table></div>
         <p class="exit">Exit: <span class="mono">-c</span> output matches the ptrace engine's counts exactly on the fixtures; overhead at or below the measured +100 ns per call.</p></div>
@@ -1087,9 +1087,9 @@ security.wrappers.uscope-bpf = {
         <div class="scroller"><table class="data"><thead><tr><th>Task</th><th>Work</th><th>Status</th><th>Result</th></tr></thead><tbody>
           <tr><td>Y6.1</td><td>fentry/fexit attach for short lists; attach choice in accounting</td><td><span class="st done">done</span></td><td>32 fentry/fexit slots share the tracepoints&rsquo; bodies; <code>--attach auto|tracepoint|fentry</code>. The choice and its reason are capture settings, and tracepoints print their cost to everyone else. Held to the tracepoints and to ptrace in the container</td></tr>
           <tr><td>Y6.2</td><td>cgroup and container targets; namespace translation</td><td><span class="st done">done</span></td><td><code>--cgroup PATH</code> and <code>--container ID</code> (docker, podman, containerd, CRI-O names). One ancestor-id compare per call; pids shown in the members&rsquo; pid namespace. The trace ends when stopped or when the cgroup is removed. Tested in the container with a process alone in a user and pid namespace</td></tr>
-          <tr><td>Y6.3</td><td>Budget controller; continuous segments and triggers</td><td><span class="st done">done</span></td><td><code>--budget PERCENT</code>: once a second, over budget, stacks are dropped, then strings cut at 16 bytes, then one call in 2&hellip;64 is sent while the kernel counts the rest, then calls are only counted. Each step is printed and kept as a capture setting. A spinning program&rsquo;s table still counts every call it made, less what the ring reported lost. <code>--continuous DIR --segment --keep</code>: each segment holds its span&rsquo;s statistics, and the kernel counts into one half of its maps while uscope reads the other, so counted segments sum exactly. SIGUSR2, <code>--trigger-slower-than</code> and <code>--trigger-errno</code> save the last <code>--window</code> of calls to <code>DIR/windows</code>. <code>record --syscalls</code> with <code>--window</code> or <code>--continuous</code> cuts its calls with its samples, so the SDK&rsquo;s triggers save both. The page&rsquo;s footer names how BPF attached, the cgroup, each budget step, and what saved a window</td></tr>
+          <tr><td>Y6.3</td><td>Budget controller; continuous segments and triggers</td><td><span class="st done">done</span></td><td><code>--budget PERCENT</code>: once a second, over budget, stacks are dropped, then strings cut at 16 bytes, then one call in 2&hellip;64 is sent while the kernel counts the rest, then calls are only counted. Each step is printed and kept as a capture setting. A spinning program&rsquo;s table still counts every call it made, less what the ring reported lost. <code>--continuous DIR --segment --keep</code>: each segment holds its span&rsquo;s statistics, and the kernel counts into one half of its maps while microscope reads the other, so counted segments sum exactly. SIGUSR2, <code>--trigger-slower-than</code> and <code>--trigger-errno</code> save the last <code>--window</code> of calls to <code>DIR/windows</code>. <code>record --syscalls</code> with <code>--window</code> or <code>--continuous</code> cuts its calls with its samples, so the SDK&rsquo;s triggers save both. The page&rsquo;s footer names how BPF attached, the cgroup, each budget step, and what saved a window</td></tr>
           <tr><td>Y6.4</td><td>BPF token</td><td><span class="st cut">cut</span></td><td>aya cannot pass a token to the kernel. When a container offers one, the privilege error says so</td></tr>
-          <tr><td>Y6.5</td><td><s><span class="mono">tp_btf.s</span> support contributed to aya</s></td><td><span class="st cut">cut</span></td><td>uscope does no work in other projects&rsquo; repositories</td></tr>
+          <tr><td>Y6.5</td><td><s><span class="mono">tp_btf.s</span> support contributed to aya</s></td><td><span class="st cut">cut</span></td><td>microscope does no work in other projects&rsquo; repositories</td></tr>
         </tbody></table></div>
         <p class="exit">Exit: a documented systemd unit traces a service for 24 hours inside its budget, and the overhead baseline is checked.</p></div>
 
@@ -1101,7 +1101,7 @@ security.wrappers.uscope-bpf = {
         <tr><td>Y3.3</td><td><span class="mono">-y</span> paths from <span class="mono">/proc</span></td><td>The path the call named, resolved against its dirfd or cwd; pipes, sockets and anonymous inodes described by the kernel</td><td>A short-lived descriptor is gone from <span class="mono">/proc</span> before the reader sees it. Symlinks and <span class="mono">..</span> are kept as named.</td></tr>
         <tr><td>Y3.1</td><td>&mdash;</td><td>Captures are at most 4 KiB, and an element of a string array or iovec at most 510 bytes, under both engines</td><td>Per-CPU scratch is capped at 32 KiB. The ptrace engine shares the limits so that both engines print the same.</td></tr>
         <tr><td>Y3.2</td><td>&mdash;</td><td>A default-ignored SIGCHLD is not shown</td><td>The kernel never queues it for an untraced process, so the tracepoint never sees it. ptrace and strace do see it.</td></tr>
-        <tr><td>Y1.5</td><td>Simulator rules for seccomp <span class="mono">RET_TRACE</span> ordering</td><td>Only <span class="mono">PTRACE_SYSCALL</span> stops are modeled</td><td>The simulated debugger never installs a filter; only <span class="mono">uscope syscalls --engine ptrace</span> does, and the simulator does not run it. A rule without a user would be a guess.</td></tr>
+        <tr><td>Y1.5</td><td>Simulator rules for seccomp <span class="mono">RET_TRACE</span> ordering</td><td>Only <span class="mono">PTRACE_SYSCALL</span> stops are modeled</td><td>The simulated debugger never installs a filter; only <span class="mono">microscope syscalls --engine ptrace</span> does, and the simulator does not run it. A rule without a user would be a guess.</td></tr>
         <tr><td>Y1.4</td><td>&mdash;</td><td>A step that makes a call, an instruction step or a step over a breakpoint&rsquo;s trap, stops at the call&rsquo;s catchpoints, and a step from inside a call finishes it</td><td>The simulator&rsquo;s catch accounting found single steps across <span class="mono">syscall</span>, and steps over a trap planted on one, making caught calls unseen. Such a step resumes to the next system-call-stop instead.</td></tr>
         <tr><td>Y4.2</td><td>Stacks named as libdw names them</td><td>A frame goes by the symbol the debugger chooses among an address&rsquo;s aliases, unversioned (<span class="mono">write</span>, not <span class="mono">__write</span>); an address no symbol&rsquo;s extent covers shows <span class="mono">()</span>; a source path is resolved against its compilation&rsquo;s directory; a stack cut short ends with <span class="mono">[stack ends: reason]</span></td><td>libdw takes the nearest preceding symbol, which can name the wrong function. The addresses, modules, and the program&rsquo;s own functions and lines are strace&rsquo;s exactly.</td></tr>
         <tr><td>Y4.3</td><td><span class="mono">-n</span> on every line</td><td>Calls and exit lines are numbered; signal lines are not</td><td>strace numbers a signal with the thread&rsquo;s last call, which an engine that sees only the chosen calls does not know.</td></tr>
@@ -1116,22 +1116,22 @@ security.wrappers.uscope-bpf = {
         <tr><td>Y5</td><td>Bulk columns as binary frames; a virtualized log; a <code>syscallHistogram</code> request</td><td>Answers are JSON, and the log pages 500 lines at a time; histograms come with <code>syscallDetail</code></td><td>The largest answer, a heat map of 512 slices by 40 rows, is a few kilobytes, and a page of the log is cheap to render.</td></tr>
         <tr><td>Y5.2</td><td>&mdash;</td><td>A call site is the innermost frame with a source line, or the innermost frame when none has one</td><td>The kernel&rsquo;s entry, libc&rsquo;s wrapper, and the dynamic loader rarely have lines; the program&rsquo;s own line is what one fixes.</td></tr>
         <tr><td>Y5.3</td><td>&mdash;</td><td>Lanes take calls that overlap the range; every other view takes calls that ended in it</td><td>A blocked call that began before the range and ends after it is exactly what a lane must show.</td></tr>
-        <tr><td>Y5.4</td><td>Live traces with either engine</td><td>Live traces from the page use the ptrace engine</td><td>The BPF engine needs the wrapper&rsquo;s privilege, which the web server does not run with; <code>uscope syscalls -o</code> captures from either engine open in the page.</td></tr>
+        <tr><td>Y5.4</td><td>Live traces with either engine</td><td>Live traces from the page use the ptrace engine</td><td>The BPF engine needs the wrapper&rsquo;s privilege, which the web server does not run with; <code>microscope syscalls -o</code> captures from either engine open in the page.</td></tr>
         <tr><td>Y6.1</td><td>fentry for at most 32 syscalls, named as the calls are</td><td>At most 32 kernel functions, each the entry point the kernel&rsquo;s syscall tables name (<code>fstat</code> enters <code>__x64_sys_newfstat</code>); a compat call has its own</td><td>A call&rsquo;s function is not always named after it, so the names come from the tables, kept in <code>src/syscalls/entries.gen.rs</code> by <code>scripts/syscall-entries.sh</code>. One call can need a function per ABI.</td></tr>
         <tr><td>Y6.1</td><td>&mdash;</td><td>A list that needs a call BTF does not describe, such as <code>execve</code> here, or <code>-y</code>&rsquo;s every descriptor-changing call, uses the tracepoints and says why</td><td>Attaching to some of a list&rsquo;s calls would drop the rest without a word.</td></tr>
         <tr><td>Y6.2</td><td>Pids translated with <span class="mono">bpf_get_ns_current_pid_tgid</span></td><td>Each task&rsquo;s <span class="mono">struct pid</span> read at the namespace&rsquo;s level, checked against its inode number</td><td>The helper only answers for the current task, and fork, exit, and the in-flight scan describe others. A process outside the namespace keeps its host id.</td></tr>
-        <tr><td>Y6.2</td><td>&mdash;</td><td>Host ids when the members span pid namespaces, none can be read, or uscope runs in a pid or cgroup namespace of its own; the last refuses cgroup targets</td><td>A cgroup&rsquo;s depth and a namespace&rsquo;s level cannot be learned from inside a nested namespace. Saying so beats a wrong id.</td></tr>
+        <tr><td>Y6.2</td><td>&mdash;</td><td>Host ids when the members span pid namespaces, none can be read, or microscope runs in a pid or cgroup namespace of its own; the last refuses cgroup targets</td><td>A cgroup&rsquo;s depth and a namespace&rsquo;s level cannot be learned from inside a nested namespace. Saying so beats a wrong id.</td></tr>
         <tr><td>Y6.2</td><td>&mdash;</td><td><span class="mono">-k</span> and <span class="mono">--no-follow</span> refused with a cgroup</td><td>Stacks need each process&rsquo;s mappings followed from the start, which a cgroup&rsquo;s newcomers do not give. Every member is traced, so there is nothing to narrow.</td></tr>
         <tr><td>Y6.1</td><td>&mdash;</td><td>A call still held when its thread ends, other than exit, exit_group or execve, or when its thread enters another, is reported lost</td><td>When another tracer attaches to a kernel function, the kernel skips the old trampoline&rsquo;s fexit programs for calls in progress and counts nothing. This was the in-flight test&rsquo;s flake, and a blocked read lost under load.</td></tr>
         <tr><td>Y3.4</td><td>&mdash;</td><td>Losses include the kernel&rsquo;s skipped program runs</td><td>A preempted run makes the next one on its CPU skip. The count covers every process&rsquo;s runs, so it bounds the loss rather than measuring it.</td></tr>
         <tr><td>Y6.1</td><td>&mdash;</td><td>Without x32 in the kernel, x32 calls are left out of a function list; calls without arguments, such as getpid, have no wrapper in BTF and use tracepoints</td><td>Such a kernel fails an x32 call before any function runs, so only tracepoints could see it. pahole leaves <span class="mono">SYSCALL_DEFINE0</span> wrappers out of BTF.</td></tr>
-        <tr><td>Y6.3</td><td>The budget measures uscope&rsquo;s CPU use</td><td>uscope&rsquo;s own CPU time, plus the programs&rsquo; run time when <span class="mono">kernel.bpf_stats_enabled</span> is on; uscope says which</td><td>Turning the kernel&rsquo;s timing on needs CAP_SYS_ADMIN, which uscope never asks for. Estimating it from call counts would be a guess.</td></tr>
+        <tr><td>Y6.3</td><td>The budget measures microscope&rsquo;s CPU use</td><td>microscope&rsquo;s own CPU time, plus the programs&rsquo; run time when <span class="mono">kernel.bpf_stats_enabled</span> is on; microscope says which</td><td>Turning the kernel&rsquo;s timing on needs CAP_SYS_ADMIN, which microscope never asks for. Estimating it from call counts would be a guess.</td></tr>
         <tr><td>Y6.3</td><td>&mdash;</td><td>Paths and structures are never cut by the budget, and no step is taken back</td><td>Paths name the descriptors that <span class="mono">-y</span> shows, and a cut structure cannot be decoded. Stepping back would make a trace&rsquo;s detail change back and forth, which is harder to read.</td></tr>
         <tr><td>Y6.3</td><td>Segments reuse the profiler&rsquo;s, with full-fidelity windows on a trigger</td><td>Segments hold only statistics; windows go to <span class="mono">DIR/windows</span>, at most one a window&rsquo;s span, and are not merged with the segments</td><td>A window&rsquo;s calls are also in its segment&rsquo;s counts, so merging both would count them twice. Back-to-back triggers would otherwise write the same calls over and over.</td></tr>
-        <tr><td>Y6.3</td><td>&mdash;</td><td>Switching halves of the kernel&rsquo;s statistics waits on an array-of-maps update</td><td>The kernel waits for every running program when such a map changes, so none still counts into the half uscope reads and clears.</td></tr>
+        <tr><td>Y6.3</td><td>&mdash;</td><td>Switching halves of the kernel&rsquo;s statistics waits on an array-of-maps update</td><td>The kernel waits for every running program when such a map changes, so none still counts into the half microscope reads and clears.</td></tr>
         <tr><td>Y6.3</td><td>&mdash;</td><td><span class="mono">--continuous</span> needs the BPF engine</td><td>The ptrace engine has no reader tick to end segments on. Continuous tracing is for production, which uses BPF.</td></tr>
-        <tr><td>Y6.3</td><td>An SDK trigger for <span class="mono">uscope syscalls</span></td><td>SDK triggers save syscalls through <span class="mono">record --syscalls</span>, which reads the SDK</td><td>Only the profiler reads the probes SDK&rsquo;s ring. Reading it in <span class="mono">uscope syscalls</span> too would duplicate the collector for no new capability.</td></tr>
-        <tr><td>Y6.4</td><td>A BPF token in containers</td><td>Cut. A delegating bpffs is detected and named in the privilege error</td><td>A token must go with every map, BTF, and program load, which aya makes itself and has no way to give one. uscope does no work in other projects&rsquo; repositories.</td></tr>
+        <tr><td>Y6.3</td><td>An SDK trigger for <span class="mono">microscope syscalls</span></td><td>SDK triggers save syscalls through <span class="mono">record --syscalls</span>, which reads the SDK</td><td>Only the profiler reads the probes SDK&rsquo;s ring. Reading it in <span class="mono">microscope syscalls</span> too would duplicate the collector for no new capability.</td></tr>
+        <tr><td>Y6.4</td><td>A BPF token in containers</td><td>Cut. A delegating bpffs is detected and named in the privilege error</td><td>A token must go with every map, BTF, and program load, which aya makes itself and has no way to give one. microscope does no work in other projects&rsquo; repositories.</td></tr>
         <tr><td>Y6</td><td>The overhead baseline checked</td><td>Checked against the baseline&rsquo;s own commit, rebuilt and run beside this branch on the same day: count +85 ns against +84, stream +127 against +131, other processes +38 against +39. The recorded file reads about 13 ns lower on every BPF row, which the old commit shares</td><td>The machine drifted since the file was recorded, so it was not re-recorded. Namespace translation, first measured at +13 ns a call, now reads only load-time constants, which the verifier drops when they are unused.</td></tr>
 </tbody></table></div>
     </section>
@@ -1145,11 +1145,11 @@ security.wrappers.uscope-bpf = {
           <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
           <tbody>
             <tr><td>C programs drift from the Rust decoders' record layouts</td><td>One <span class="mono">records.h</span>; a test compares its BTF layouts with the zerocopy structs field by field.</td></tr>
-            <tr><td>aya cannot load <span class="mono">tp_btf.s</span>, and needs <span class="mono">allow_unsupported_maps</span> for task storage</td><td>Reading at exit works without sleepable programs, and <span class="mono">allow_unsupported_maps</span> loads task storage. uscope adopts either once aya supports it, and makes no changes to aya.</td></tr>
+            <tr><td>aya cannot load <span class="mono">tp_btf.s</span>, and needs <span class="mono">allow_unsupported_maps</span> for task storage</td><td>Reading at exit works without sleepable programs, and <span class="mono">allow_unsupported_maps</span> loads task storage. microscope adopts either once aya supports it, and makes no changes to aya.</td></tr>
             <tr><td>The system-wide tax surprises an operator</td><td>fentry by default for short lists; the tax is printed at attach and recorded.</td></tr>
             <tr><td>Verifier differences across kernels</td><td>Only the host kernel is tested. Mitigated by CO-RE, the feature probe with named errors, a 5.15 floor with no fallback paths, and small programs. A verifier rejection prints its log and the kernel version.</td></tr>
             <tr><td>Arguments read at exit differ from what the kernel saw (TOCTOU)</td><td>Every capture is marked <span class="mono">ReadAt::Exit</span>. Use the ptrace engine when exactness matters.</td></tr>
-            <tr><td>Privileged tests do not run in <span class="mono">just test</span></td><td><span class="mono">just test-bpf</span> through the <span class="mono">uscope-bpf</span> wrapper (H1); <span class="mono">just all</span> runs it, and fails with the setup instructions when the wrapper is missing.</td></tr>
+            <tr><td>Privileged tests do not run in <span class="mono">just test</span></td><td><span class="mono">just test-bpf</span> through the <span class="mono">microscope-bpf</span> wrapper (H1); <span class="mono">just all</span> runs it, and fails with the setup instructions when the wrapper is missing.</td></tr>
             <tr><td>seccomp filters outlive a detach</td><td>Installed only on launched children; detach refused otherwise.</td></tr>
           </tbody>
         </table>
@@ -1174,7 +1174,7 @@ security.wrappers.uscope-bpf = {
       <div class="eyebrow">Answers</div>
       <h2>Decided with the maintainer, 2026-10-12</h2>
       <div class="prose"><ul>
-        <li><b>Safe by default.</b> Without privilege, <span class="mono">uscope syscalls</span> fails and explains; it never falls back on its own (G0, S7).</li>
+        <li><b>Safe by default.</b> Without privilege, <span class="mono">microscope syscalls</span> fails and explains; it never falls back on its own (G0, S7).</li>
         <li><b>Privileged tests</b> use a capability wrapper declared once in host configuration, with no sudo, container, or VM (H1).</li>
         <li><b>No whole-host tracing.</b> There is always a named target.</li>
         <li><b>Children are followed by default</b> (<span class="mono">--no-follow</span>).</li>
@@ -1219,7 +1219,7 @@ security.wrappers.uscope-bpf = {
           <li><a href="https://internals.rust-lang.org/t/pre-rfc-btf-relocations/24161">Pre-RFC: BTF relocations</a></li>
         </ul></div>
       </details>
-      <p class="muted small">There were three research passes, covering strace's features, Linux and BPF mechanisms, and uscope's own code. The measurements and builds above were run on this machine on 2026-10-12, as scratch experiments that are not in the repository. The tracers were C programs loaded by aya, plus one Rust-built twin, in a privileged container with <span class="mono">--pid=host</span>. Kernel versions marked "memory" in the research notes were not re-verified. The 7.2 sleepable-tracepoint claim rests on the merged series, but no loader could exercise it.</p>
+      <p class="muted small">There were three research passes, covering strace's features, Linux and BPF mechanisms, and microscope's own code. The measurements and builds above were run on this machine on 2026-10-12, as scratch experiments that are not in the repository. The tracers were C programs loaded by aya, plus one Rust-built twin, in a privileged container with <span class="mono">--pid=host</span>. Kernel versions marked "memory" in the research notes were not re-verified. The 7.2 sleepable-tracepoint claim rests on the merged series, but no loader could exercise it.</p>
     </section>
   </main>
 </div>
@@ -1233,11 +1233,11 @@ security.wrappers.uscope-bpf = {
     themeButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
   };
   let saved = "system";
-  try { saved = localStorage.getItem("uscope-plan-theme") || "system"; } catch (_) {}
+  try { saved = localStorage.getItem("microscope-plan-theme") || "system"; } catch (_) {}
   applyTheme(saved);
   themeButtons.forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.themeChoice);
-    try { localStorage.setItem("uscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
+    try { localStorage.setItem("microscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
   }));
 })();
 </script>

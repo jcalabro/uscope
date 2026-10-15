@@ -2263,16 +2263,17 @@ pub enum UnsupportedVariableFeature {
     /// Selecting among simultaneous valid locations for one object.
     AlternativeLocations,
 
-    /// Materializing a valid source type representation not modeled by uscope.
+    /// Materializing a valid source type representation not modeled by
+    /// microscope.
     TypeRepresentation,
 
-    /// Evaluating a valid runtime aggregate layout not modeled by uscope.
+    /// Evaluating a valid runtime aggregate layout not modeled by microscope.
     RuntimeAggregateLocation,
 
-    /// Decoding a valid scalar representation not modeled by uscope.
+    /// Decoding a valid scalar representation not modeled by microscope.
     ScalarRepresentation,
 
-    /// Evaluating a DWARF expression operation uscope does not implement,
+    /// Evaluating a DWARF expression operation microscope does not implement,
     /// such as `DW_OP_GNU_variable_value`.
     ExpressionOperation,
 
@@ -2989,7 +2990,7 @@ pub enum ViewProblem {
     /// used the host wrongly.
     Kernel { kernel: Arc<str>, reason: Arc<str> },
 
-    /// The debugger failed presenting the value; a defect in uscope.
+    /// The debugger failed presenting the value; a defect in microscope.
     Internal(Arc<str>),
 }
 
@@ -3073,7 +3074,7 @@ impl Presentation {
     /// which shows its positional fields.
     #[must_use]
     pub fn is_rust_tuple(&self) -> bool {
-        &*self.view.source == "uscope" && &*self.view.header == RUST_TUPLES
+        &*self.view.source == "microscope" && &*self.view.header == RUST_TUPLES
     }
 }
 
@@ -3497,7 +3498,7 @@ impl TargetDescription {
     };
 
     /// The target's C base type, as its C compiler lays it out, or `None`
-    /// for a target whose C data model uscope does not know.
+    /// for a target whose C data model microscope does not know.
     #[must_use]
     pub fn c_base_type(&self, ty: CBaseType) -> Option<BaseType> {
         use BaseTypeEncoding as E;

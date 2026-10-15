@@ -10,7 +10,7 @@ export function Home() {
   const state = useModel((model) => model.state);
   const profile = useModel((model) => model.profiles.at(-1)?.id);
   if (!state) {
-    return <div className="page muted">Connecting to uscope…</div>;
+    return <div className="page muted">Connecting to microscope…</div>;
   }
   if (state.session) {
     return <Navigate to="/s/$session" params={{ session: state.session }} replace />;
@@ -19,7 +19,7 @@ export function Home() {
   if (profile && !state.busy) {
     return <Navigate to="/profile/$profile" params={{ profile }} replace />;
   }
-  // The program uscope started with is loading; its session comes next.
+  // The program microscope started with is loading; its session comes next.
   if (state.busy) {
     return <div className="page muted">{state.busy}…</div>;
   }
@@ -62,7 +62,7 @@ export function Join() {
   }, [connection, navigate, to]);
 
   if (failed) {
-    return <NeedsLink reason="This link is not for this uscope, or it has expired." />;
+    return <NeedsLink reason="This link is not for this microscope, or it has expired." />;
   }
   return <div className="page muted">Joining…</div>;
 }
@@ -77,8 +77,8 @@ export function NeedsLink({ reason }: { reason: string }) {
         <div className="card-body">
           <p style={{ margin: 0 }}>{reason}</p>
           <p className="muted" style={{ margin: 0 }}>
-            <code>uscope web</code> prints a link when it starts, and anyone in the session can make
-            one with Share.
+            <code>microscope web</code> prints a link when it starts, and anyone in the session can
+            make one with Share.
           </p>
         </div>
       </div>
@@ -107,7 +107,7 @@ export function SessionPage() {
   }, [current, session, navigate]);
 
   if (!state) {
-    return <div className="page muted">Connecting to uscope…</div>;
+    return <div className="page muted">Connecting to microscope…</div>;
   }
   if (current === session) {
     // Nothing a pane holds outlives its session.
@@ -131,8 +131,8 @@ export function SessionPage() {
           <p style={{ margin: 0 }}>
             {ended ? `${ended.name} ${ended.text}. ` : ""}
             {current
-              ? `uscope is now debugging ${targetName(state) ?? "something else"}.`
-              : "uscope is not debugging anything now."}
+              ? `microscope is now debugging ${targetName(state) ?? "something else"}.`
+              : "microscope is not debugging anything now."}
           </p>
           <div className="actions">
             {current ? (

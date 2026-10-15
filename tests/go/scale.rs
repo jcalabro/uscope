@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     ExecutionContext, InferiorState, LaunchOptions, StackFrameId, StopContext, StopReason,
     UnwindTermination,
 };

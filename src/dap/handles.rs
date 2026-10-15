@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::protocol::ErrorBody;
-use uscope::{
+use microscope::{
     DereferenceReference, ExecutionContext, StackFrameId, StopContext, ValueChildrenReference,
     VariableKind,
 };
@@ -32,15 +32,15 @@ pub enum Variables {
     /// The static variables declared in a frame's source file.
     Statics {
         context: StopContext,
-        module: uscope::ModuleId,
-        file: uscope::SourceFileId,
+        module: microscope::ModuleId,
+        file: microscope::SourceFileId,
     },
 
     /// The children of an aggregate, named by `path` when it has a name.
     Children {
         context: StopContext,
         reference: Arc<ValueChildrenReference>,
-        path: Option<uscope::Expression>,
+        path: Option<microscope::Expression>,
 
         /// Whether the children are all elements, all named members, or
         /// (`None`) a view's elements followed by its named children.
@@ -52,13 +52,13 @@ pub enum Variables {
         context: StopContext,
         reference: Box<DereferenceReference>,
         name: Arc<str>,
-        path: Option<uscope::Expression>,
+        path: Option<microscope::Expression>,
     },
 
     /// The elements of an evaluated range, such as `values[2..6]`.
     Range {
         context: StopContext,
-        expression: uscope::Expression,
+        expression: microscope::Expression,
     },
 }
 
@@ -99,16 +99,16 @@ pub struct References {
 
     /// The expression of each named row of a variables list, by the list's
     /// reference and the row's name.
-    paths: HashMap<(i64, String), (StopContext, uscope::Expression)>,
+    paths: HashMap<(i64, String), (StopContext, microscope::Expression)>,
 
     /// What each location reference names.
     locations: HashMap<i64, Location>,
 
     /// The source line each goto target names.
-    targets: HashMap<i64, uscope::BreakpointSpec>,
+    targets: HashMap<i64, microscope::BreakpointSpec>,
 
     /// The call each step-in target names.
-    calls: HashMap<i64, uscope::VirtualAddress>,
+    calls: HashMap<i64, microscope::VirtualAddress>,
 }
 
 /// A place in the program's source a location reference names.
@@ -119,8 +119,8 @@ pub enum Location {
 
     /// Where a module's debug information says something is declared.
     Declared {
-        module: uscope::ModuleId,
-        location: uscope::SourceLocation,
+        module: microscope::ModuleId,
+        location: microscope::SourceLocation,
     },
 }
 
@@ -201,26 +201,26 @@ impl References {
     }
 
     /// Returns a new reference to a location a thread may be moved to.
-    pub fn goto_target(&mut self, location: uscope::BreakpointSpec) -> Result<i64, Exhausted> {
+    pub fn goto_target(&mut self, location: microscope::BreakpointSpec) -> Result<i64, Exhausted> {
         let id = self.allocate()?;
         self.targets.insert(id, location);
         Ok(id)
     }
 
     /// The location a goto target names.
-    pub fn target_of(&self, id: i64) -> Option<&uscope::BreakpointSpec> {
+    pub fn target_of(&self, id: i64) -> Option<&microscope::BreakpointSpec> {
         self.targets.get(&id)
     }
 
     /// Returns a new reference to a call a step in may go into.
-    pub fn step_target(&mut self, call: uscope::VirtualAddress) -> Result<i64, Exhausted> {
+    pub fn step_target(&mut self, call: microscope::VirtualAddress) -> Result<i64, Exhausted> {
         let id = self.allocate()?;
         self.calls.insert(id, call);
         Ok(id)
     }
 
     /// The call a step-in target names.
-    pub fn call_of(&self, id: i64) -> Option<uscope::VirtualAddress> {
+    pub fn call_of(&self, id: i64) -> Option<microscope::VirtualAddress> {
         self.calls.get(&id).copied()
     }
 
@@ -238,20 +238,24 @@ impl References {
         list: i64,
         name: String,
         context: StopContext,
-        path: uscope::Expression,
+        path: microscope::Expression,
     ) {
         self.paths.insert((list, name), (context, path));
     }
 
     /// The expression of a row of a variables list, with its frame: as it
     /// was listed, or else as the list's kind names its rows.
-    pub fn child_path(&self, list: i64, name: &str) -> Option<(StopContext, uscope::Expression)> {
+    pub fn child_path(
+        &self,
+        list: i64,
+        name: &str,
+    ) -> Option<(StopContext, microscope::Expression)> {
         if let Some(recorded) = self.paths.get(&(list, name.to_owned())) {
             return Some(recorded.clone());
         }
 
         // A row is named `[i]`, `[i][j]`, or by its member's name.
-        let row = |parent: &uscope::Expression, name: &str| {
+        let row = |parent: &microscope::Expression, name: &str| {
             if name.starts_with('[') {
                 let indices: Option<Vec<i128>> = name
                     .strip_prefix('[')?
@@ -266,7 +270,9 @@ impl References {
         };
 
         match self.variables.get(&list)? {
-            Variables::Scope { context, .. } => Some((*context, uscope::Expression::name(name)?)),
+            Variables::Scope { context, .. } => {
+                Some((*context, microscope::Expression::name(name)?))
+            }
             Variables::Children {
                 context,
                 path: Some(path),
@@ -292,7 +298,7 @@ impl References {
             } => Some((*context, row(&expression.range_base()?, name)?)),
             Variables::Registers { context } => Some((
                 *context,
-                uscope::Expression::parse(&format!("${name}")).ok()?,
+                microscope::Expression::parse(&format!("${name}")).ok()?,
             )),
             _ => None,
         }
@@ -313,7 +319,7 @@ impl References {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uscope::{StopId, ThreadId};
+    use microscope::{StopId, ThreadId};
 
     fn context(stop: u64, thread: u64) -> StopContext {
         StopContext {

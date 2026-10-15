@@ -15,11 +15,11 @@ async fn stopped_at_line(fixture: &str, source: &str, marker: &str) -> Scenario 
     scenario
 }
 
-fn signed(value: &uscope::InspectedValue) -> i128 {
+fn signed(value: &microscope::InspectedValue) -> i128 {
     match available_value(&value.state) {
-        uscope::VariableValue::Scalar(ScalarValue::Signed(value))
-        | uscope::VariableValue::Enumeration {
-            value: uscope::IntegerValue::Signed(value),
+        microscope::VariableValue::Scalar(ScalarValue::Signed(value))
+        | microscope::VariableValue::Enumeration {
+            value: microscope::IntegerValue::Signed(value),
             ..
         } => *value,
         other => panic!("not a signed value: {other:?}"),
@@ -28,42 +28,45 @@ fn signed(value: &uscope::InspectedValue) -> i128 {
 
 /// Evaluates `text` in a frame, assigning when `mode` allows.
 async fn evaluate(
-    view: &uscope::StopView<'_>,
+    view: &microscope::StopView<'_>,
     text: &str,
-    mode: uscope::EvaluationMode,
-) -> uscope::Result<uscope::InspectedValue> {
-    let expression = uscope::Expression::parse(text).map_err(Error::Expression)?;
+    mode: microscope::EvaluationMode,
+) -> microscope::Result<microscope::InspectedValue> {
+    let expression = microscope::Expression::parse(text).map_err(Error::Expression)?;
     match view
-        .evaluate_with(&expression, mode, uscope::InspectionLimits::default())
+        .evaluate_with(&expression, mode, microscope::InspectionLimits::default())
         .await?
     {
-        uscope::Evaluation::Value { value, .. } => Ok(value),
+        microscope::Evaluation::Value { value, .. } => Ok(value),
         other => panic!("`{text}` has no value: {other:?}"),
     }
 }
 
 /// Assigns `value` to `target`, as `set var` does.
 async fn assign(
-    view: &uscope::StopView<'_>,
+    view: &microscope::StopView<'_>,
     target: &str,
     value: &str,
-) -> uscope::Result<uscope::InspectedValue> {
+) -> microscope::Result<microscope::InspectedValue> {
     evaluate(
         view,
         &format!("{target} = {value}"),
-        uscope::EvaluationMode::Assign,
+        microscope::EvaluationMode::Assign,
     )
     .await
 }
 
-async fn read(view: &uscope::StopView<'_>, text: &str) -> uscope::Result<uscope::InspectedValue> {
-    evaluate(view, text, uscope::EvaluationMode::Read).await
+async fn read(
+    view: &microscope::StopView<'_>,
+    text: &str,
+) -> microscope::Result<microscope::InspectedValue> {
+    evaluate(view, text, microscope::EvaluationMode::Read).await
 }
 
 /// A view of a frame of the stopped thread.
-async fn frame_view(scenario: &mut Scenario, level: u32) -> uscope::StopContext {
+async fn frame_view(scenario: &mut Scenario, level: u32) -> microscope::StopContext {
     let snapshot = scenario.snapshot().await;
-    let uscope::InferiorState::Stopped {
+    let microscope::InferiorState::Stopped {
         stop_id, thread_id, ..
     } = snapshot.inferior
     else {
@@ -73,7 +76,7 @@ async fn frame_view(scenario: &mut Scenario, level: u32) -> uscope::StopContext 
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
-    uscope::StopContext {
+    microscope::StopContext {
         stop: stop_id,
         execution: thread_id.into(),
         frame: trace.frames[usize::try_from(level).expect("level")].id,
@@ -203,7 +206,7 @@ async fn registers_hold_whole_variables_of_the_innermost_frame_only() {
         matches!(
             current.state,
             VariableState::Available {
-                source: uscope::VariableValueSource::Register(_),
+                source: microscope::VariableValueSource::Register(_),
                 ..
             }
         ),
@@ -263,7 +266,7 @@ async fn memory_writes_keep_breakpoints_installed_and_span_words() {
 
     // Bytes across a word boundary, starting mid-word.
     let global = scenario
-        .operation("address", handle.runtime_address("uscope_value"))
+        .operation("address", handle.runtime_address("microscope_value"))
         .await;
     let start = VirtualAddress::new(global.get() + 3);
     scenario
@@ -296,12 +299,12 @@ fn jump_line(marker: &str) -> u64 {
 fn jump_source(marker: &str) -> BreakpointSpec {
     BreakpointSpec::Source {
         path: "jump.c".into(),
-        line: uscope::LineNumber::new(jump_line(marker)).expect("a line"),
+        line: microscope::LineNumber::new(jump_line(marker)).expect("a line"),
     }
 }
 
 /// Stops `jump` at the first line of `checked`, which, run on, exits 111.
-async fn stopped_in_checked() -> (Scenario, uscope::StopId, uscope::ThreadId) {
+async fn stopped_in_checked() -> (Scenario, microscope::StopId, microscope::ThreadId) {
     let mut scenario = Scenario::launch("jump");
     scenario
         .add_source_breakpoint("jump.c", jump_line("start"))
@@ -452,7 +455,7 @@ async fn assigning_the_program_counter_moves_the_thread_under_a_new_stop() {
     assert!(
         matches!(
             available_value(&assigned.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) if *value == u128::from(address)
+            microscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) if *value == u128::from(address)
         ),
         "{assigned:?}"
     );
@@ -510,7 +513,7 @@ async fn assigned_registers_are_what_the_thread_computes_with() {
     assert!(
         matches!(
             available_value(&rax.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(7))
+            microscope::VariableValue::Scalar(ScalarValue::Unsigned(7))
         ),
         "{rax:?}"
     );

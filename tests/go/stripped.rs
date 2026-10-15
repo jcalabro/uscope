@@ -6,7 +6,7 @@
 
 use std::process::Stdio;
 
-use uscope::{Expression, LaunchOptions, StepKind, StopReason, ThreadActivity, ThreadState};
+use microscope::{Expression, LaunchOptions, StepKind, StopReason, ThreadActivity, ThreadState};
 
 use crate::stops::place;
 use crate::support::{self, Scenario};

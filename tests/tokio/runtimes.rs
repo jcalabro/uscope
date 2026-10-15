@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     BreakpointSpec, CoreDumpOptions, LaunchOptions, StopReason, TaskSnapshot, TaskState,
     ThreadActivity, ThreadId,
 };

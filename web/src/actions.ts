@@ -46,7 +46,7 @@ const unavailable = (reason: string): Unavailable => ({ enabled: false, reason }
 export function action(name: ActionName, model: Model, at: At | null = null): Action {
   const state = model.state;
   if (model.link !== "open") {
-    return unavailable("not connected to uscope");
+    return unavailable("not connected to microscope");
   }
   if (!controls(model)) {
     return unavailable("this link can only view the session");

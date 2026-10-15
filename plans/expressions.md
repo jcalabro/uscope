@@ -125,7 +125,7 @@ so a bug spins until a timeout kills it rather than exhausting memory.
 Few tests, each with high leverage.
 
 - **The executable reference.** `src/eval/tests.rs` runs every
-  `uscope-example` block of `docs/expressions.md` against named worlds in
+  `microscope-example` block of `docs/expressions.md` against named worlds in
   `src/eval/fake.rs`: small, deterministic implementations of `Scope` and
   `Machine` with the simplest layouts, memory that can fault, regions that
   fail the test if read, a read log, and a work budget. Each semantic rule

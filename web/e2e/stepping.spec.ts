@@ -70,9 +70,9 @@ async function stepOver(page: Page) {
 
 test("a breakpoint stops the program where the page shows, and steps replace the address", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   // Before it runs, the page opens on main (D2).
   await expect(line(page, "int main(void) {")).toBeInViewport();
   await breakInHandleRequest(page);
@@ -109,9 +109,9 @@ test("a breakpoint stops the program where the page shows, and steps replace the
 
 test("Shift+J moves the thread to the cursor's line without running it", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await breakInHandleRequest(page);
   await stepOver(page);
   await stepOver(page);
@@ -125,8 +125,11 @@ test("Shift+J moves the thread to the cursor's line without running it", async (
   await expect(page.getByTestId("stops")).toContainText("jump · kvstore.c:91");
 });
 
-test("i lists the calls of the line, and steps into the one chosen", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("i lists the calls of the line, and steps into the one chosen", async ({
+  page,
+  microscope,
+}) => {
+  await join(page, microscope.link);
   await breakInHandleRequest(page);
   await stepOver(page);
   await expect(page.locator(".cm-pc-line")).toContainText("table_find(&s->table, req->key)");
@@ -142,9 +145,9 @@ test("i lists the calls of the line, and steps into the one chosen", async ({ pa
 
 test("the gutter sets and clears breakpoints, and conditions narrow them", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await scrollTo(page, 90);
   await clickGutter(page, 90);
   const breakpoints = page.getByTestId("breakpoints");
@@ -171,9 +174,9 @@ test("the gutter sets and clears breakpoints, and conditions narrow them", async
 test("a tab that shows the latest stop follows the program, and a pinned one stays", async ({
   page,
   context,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await breakInHandleRequest(page);
   const other = await context.newPage();
   await other.goto(page.url());
@@ -202,8 +205,8 @@ test("a tab that shows the latest stop follows the program, and a pinned one sta
   await expect(late.getByTestId("stack")).toHaveCount(0);
 });
 
-test("the program reads what the input line sends", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("the program reads what the input line sends", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await page.keyboard.press("F5");
   const input = page.getByRole("textbox", { name: "Program input" });
   await input.fill("hello there");

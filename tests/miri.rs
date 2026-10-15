@@ -1,4 +1,4 @@
-//! The tests of uscope's unsafe code, which `just miri` runs under Miri
+//! The tests of microscope's unsafe code, which `just miri` runs under Miri
 //! as well as natively. They are a test target of their own so that Miri
 //! checks only this file, not the whole crate, each time it runs them.
 
@@ -8,7 +8,7 @@ mod allocator {
     use std::alloc::{GlobalAlloc, Layout};
     use std::sync::atomic::{AtomicPtr, Ordering};
 
-    use uscope::timings::alloc::{
+    use microscope::timings::alloc::{
         Allocated, Counting, PEAK_GRANULARITY, start_totals, stop_totals, thread_counts, totals,
     };
 
@@ -216,7 +216,7 @@ mod ring {
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use uscope::unsafe_parts::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
+    use microscope::unsafe_parts::{DATA_HEAD, DATA_TAIL, HEAP_DATA, RingMemory};
 
     /// What the kernel does to a ring: writes records past the head, then
     /// publishes the head, and reuses only bytes the tail has passed.

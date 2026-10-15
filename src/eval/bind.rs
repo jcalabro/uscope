@@ -207,7 +207,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let path = call
                     .path
                     .clone()
-                    .ok_or_else(|| unsupported("the call names no path uscope could read"))?;
+                    .ok_or_else(|| unsupported("the call names no path microscope could read"))?;
                 return self.node(Op::Constant(Constant::Text(path)), Ty::Text, span);
             }
             _ => {

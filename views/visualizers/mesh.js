@@ -22,7 +22,7 @@
 // problem would look fine. Hover names the nearest vertex. The camera fits
 // the first mesh and keeps its place across stops.
 
-uscope.live((canvas, input) => {
+microscope.live((canvas, input) => {
   const context = canvas.getContext("webgl2", { antialias: true });
   if (context === null) {
     throw new Error("WebGL is unavailable in this browser");
@@ -91,7 +91,7 @@ uscope.live((canvas, input) => {
     if (camera === null && mesh.problem === null && mesh.count > 0) {
       camera = fit(mesh);
     }
-    uscope.caption(mesh.caption);
+    microscope.caption(mesh.caption);
   }
 
   /** The edges of every triangle, for the wireframe, made when first shown. */
@@ -136,7 +136,7 @@ uscope.live((canvas, input) => {
 
   function frame() {
     gl.viewport(0, 0, canvas.width, canvas.height);
-    const [r, g, b] = rgb(uscope.theme.surface);
+    const [r, g, b] = rgb(microscope.theme.surface);
     gl.clearColor(r, g, b, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (camera === null || mesh.problem !== null || mesh.count === 0) {
@@ -156,7 +156,7 @@ uscope.live((canvas, input) => {
     gl.uniformMatrix3fv(u.normalMatrix, false, normalMatrix(mesh.model));
     gl.uniform1i(u.hasNormal, mesh.normals !== null ? 1 : 0);
     gl.uniform3fv(u.eye, eye);
-    const tint = rgb(uscope.theme.series[0]);
+    const tint = rgb(microscope.theme.series[0]);
     if (mesh.colors === null) {
       gl.vertexAttrib4f(at.color, tint[0], tint[1], tint[2], 1);
     }
@@ -166,7 +166,7 @@ uscope.live((canvas, input) => {
       gl.drawElements(gl.TRIANGLES, mesh.indices.length, type, 0);
     } else if (mesh.primitive === "triangles") {
       gl.uniform1i(u.mode, INK);
-      const ink = rgb(uscope.theme.ink);
+      const ink = rgb(microscope.theme.ink);
       gl.uniform4f(u.tint, ink[0], ink[1], ink[2], 1);
       const count = edges();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.edges);
@@ -210,11 +210,11 @@ uscope.live((canvas, input) => {
       }
     }
     if (best < 0) {
-      uscope.hint(null);
+      microscope.hint(null);
       return;
     }
     const [x, y, z] = positions.slice(best * 3, best * 3 + 3);
-    uscope.hint(`vertex ${best}: (${short(x)}, ${short(y)}, ${short(z)})`);
+    microscope.hint(`vertex ${best}: (${short(x)}, ${short(y)}, ${short(z)})`);
   }
 
   upload();
@@ -228,7 +228,7 @@ uscope.live((canvas, input) => {
     pointer(event) {
       if (event.type === "down") {
         dragging = (event.buttons & 1) !== 0;
-        uscope.hint(null);
+        microscope.hint(null);
       } else if (event.type === "up") {
         dragging = false;
       } else if (event.type === "leave") {
@@ -238,20 +238,20 @@ uscope.live((canvas, input) => {
           camera.radius * 100,
           Math.max(camera.radius * 0.05, camera.distance * Math.exp(event.wheel * 0.001)),
         );
-        uscope.redraw();
+        microscope.redraw();
       } else if (event.type === "move" && dragging && camera !== null) {
         camera.yaw -= event.dx * 0.01;
         camera.pitch = Math.min(1.55, Math.max(-1.55, camera.pitch + event.dy * 0.01));
-        uscope.redraw();
+        microscope.redraw();
       } else if (event.type === "move" && event.buttons === 0) {
         hover = { x: event.x, y: event.y };
-        uscope.redraw();
+        microscope.redraw();
       }
     },
     key(event) {
       if (event.key === "w" || event.key === "W") {
         wireframe = !wireframe;
-        uscope.redraw();
+        microscope.redraw();
       }
     },
   };

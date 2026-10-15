@@ -29,7 +29,7 @@ function row(register: Register, innermost: boolean): Row {
 
 export function Registers() {
   const focus = useFocus();
-  const [open, setOpen] = useState(() => read("uscope-registers-open", true, isBoolean));
+  const [open, setOpen] = useState(() => read("microscope-registers-open", true, isBoolean));
   const why = hidden(focus, "Registers");
   const registers = useRequest("registers", open && why === null ? (focus.at as At) : null);
 
@@ -71,7 +71,7 @@ export function Registers() {
           aria-label={`${open ? "Close" : "Open"} registers`}
           onClick={() => {
             setOpen(!open);
-            write("uscope-registers-open", !open);
+            write("microscope-registers-open", !open);
           }}
         >
           {open ? "▾" : "▸"}

@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Rust's standard library. Verified against rustc nightly 2026-07-10, by
 # tests/fixtures/rust/containers.rs.

@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::process::Stdio;
 
-use uscope::{InferiorState, LaunchOptions, StopReason, TaskState, ThreadActivity, ThreadId};
+use microscope::{InferiorState, LaunchOptions, StopReason, TaskState, ThreadActivity, ThreadId};
 
 use crate::invariants::checked;
 use crate::steps::stopped_task;

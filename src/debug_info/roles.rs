@@ -1,5 +1,5 @@
 //! The roles code plays in unwinding and stepping, decided once from what
-//! the debug information and symbol tables name. Nothing else in uscope
+//! the debug information and symbol tables name. Nothing else in microscope
 //! recognizes code by its name.
 
 use std::collections::BTreeSet;

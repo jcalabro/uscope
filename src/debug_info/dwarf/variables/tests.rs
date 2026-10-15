@@ -1000,7 +1000,8 @@ fn malformed_pieces_are_refused() {
         );
     }
 
-    // Big-endian pieces are numbered differently; uscope does not model them.
+    // Big-endian pieces are numbered differently; microscope does not model
+    // them.
     let halves = [
         piece(
             Location::Register {
@@ -1194,7 +1195,7 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
         )
     );
 
-    // Any other operand is a valid expression uscope does not evaluate.
+    // Any other operand is a valid expression microscope does not evaluate.
     let other = pool.add(&[
         gimli::DW_OP_entry_value.0,
         2,

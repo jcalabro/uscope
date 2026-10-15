@@ -73,7 +73,7 @@ func view(expression, summary string) {
 	fmt.Printf("VIEW: %s => %s\n", expression, summary)
 }
 
-// quoted is printable text as uscope quotes it.
+// quoted is printable text as microscope quotes it.
 func quoted(text string) string {
 	return strconv.Quote(text)
 }
@@ -242,7 +242,7 @@ func main() {
 	wrapped = fmt.Errorf("read config: %w", base)
 	both = fmt.Errorf("both: %w and %w", base, wrapped)
 	joined = errors.Join(base, wrapped)
-	_, missing = os.Open("/nonexistent/uscope")
+	_, missing = os.Open("/nonexistent/microscope")
 	errno = syscall.ENOENT
 	view("main.base", errorText(base))
 	view("main.wrapped", errorText(wrapped))

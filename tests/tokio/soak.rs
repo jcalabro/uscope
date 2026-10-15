@@ -1,8 +1,8 @@
-//! uscope attached to the `server` fixture for minutes while clients load
+//! microscope attached to the `server` fixture for minutes while clients load
 //! it: paused and inspected over and over, stopped by a conditional
 //! breakpoint in the handler, and detached and attached again, with every
 //! invariant checked at every stop. It runs only through `just stress` with
-//! `SOAK_MINUTES` set, which says for how long in `USCOPE_SOAK_SECONDS`.
+//! `SOAK_MINUTES` set, which says for how long in `MICROSCOPE_SOAK_SECONDS`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use uscope::{Condition, StopReason};
+use microscope::{Condition, StopReason};
 
 use crate::invariants::check_tokio_stop;
 use crate::stops::{integer, line};
@@ -108,7 +108,7 @@ impl Load {
 /// Resident memory is not used: across rounds it rose and fell while the live
 /// heap stayed flat, so it does not show leaks.
 fn live_heap() -> u64 {
-    u64::try_from(uscope::timings::alloc::totals().live_bytes).expect("a live heap")
+    u64::try_from(microscope::timings::alloc::totals().live_bytes).expect("a live heap")
 }
 
 async fn attach(server: &ExternalProcess) -> Scenario {
@@ -126,7 +126,7 @@ async fn check(scenario: &Scenario, round: u64) {
 #[tokio::test]
 #[ignore = "run through `SOAK_MINUTES=N just stress`"]
 async fn soak() {
-    let seconds = std::env::var("USCOPE_SOAK_SECONDS")
+    let seconds = std::env::var("MICROSCOPE_SOAK_SECONDS")
         .ok()
         .and_then(|seconds| seconds.parse().ok())
         .unwrap_or(60);
@@ -187,7 +187,7 @@ async fn soak() {
             if load.answered() >= before + LINES_PER_ROUND {
                 // The breakpoint may stop the server first.
                 match scenario.handle().pause().await {
-                    Ok(_) | Err(uscope::Error::AlreadyStopped) => {}
+                    Ok(_) | Err(microscope::Error::AlreadyStopped) => {}
                     Err(error) => panic!("round {round}: pause: {error}"),
                 }
 

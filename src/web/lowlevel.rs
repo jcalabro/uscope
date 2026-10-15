@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::str::FromStr as _;
 
-use uscope::{
+use microscope::{
     AddressDescription, BlockCompletion, DebuggerHandle, DisassembledInstruction, DisassemblyQuery,
     DisassemblyRange, DisassemblyView, Expression, FrameKind, InstructionContent,
     InstructionReferenceKind, InstructionTokenKind, LoadedModuleSnapshot, RegisterRole, StopId,
@@ -82,8 +82,8 @@ pub async fn disassemble(
     let query = |range| DisassemblyQuery {
         range,
         syntax: match request.syntax {
-            Some(protocol::Syntax::Att) => uscope::AssemblySyntax::Att,
-            Some(protocol::Syntax::Intel) | None => uscope::AssemblySyntax::Intel,
+            Some(protocol::Syntax::Att) => microscope::AssemblySyntax::Att,
+            Some(protocol::Syntax::Intel) | None => microscope::AssemblySyntax::Intel,
         },
     };
 
@@ -91,7 +91,7 @@ pub async fn disassemble(
         .disassemble(query(DisassemblyRange::Function(shown)))
         .await
     {
-        Err(uscope::Error::NoFunctionContainsAddress(_)) => {
+        Err(microscope::Error::NoFunctionContainsAddress(_)) => {
             view.disassemble(query(DisassemblyRange::Window {
                 address: shown,
                 before: WINDOW_BEFORE,
@@ -157,7 +157,7 @@ pub async fn disassemble(
 /// other returns past its call, so the call holds the byte before. Inline
 /// frames share their activation's address. A suspended task's frame
 /// resumes at its instruction, if it has one.
-fn executing(frames: &[uscope::StackFrame], index: usize) -> Option<VirtualAddress> {
+fn executing(frames: &[microscope::StackFrame], index: usize) -> Option<VirtualAddress> {
     let activation = frames[index..]
         .iter()
         .position(|frame| frame.kind != FrameKind::Inline)
@@ -183,7 +183,7 @@ async fn source_line(images: &Images, instruction: &DisassembledInstruction) -> 
     Some(SourceLine {
         path: image.source_file(location.file)?.path.display().to_string(),
         line: location.line.get(),
-        column: location.column.map(uscope::ColumnNumber::get),
+        column: location.column.map(microscope::ColumnNumber::get),
     })
 }
 
@@ -235,13 +235,13 @@ fn present(
                 .collect::<Vec<_>>();
             match decoded.indirect_target.as_deref() {
                 Some(
-                    uscope::IndirectTarget::Register { target }
-                    | uscope::IndirectTarget::Memory { target, .. },
+                    microscope::IndirectTarget::Register { target }
+                    | microscope::IndirectTarget::Memory { target, .. },
                 ) => comments.push(format!(
                     "→ {}",
                     named(target).unwrap_or_else(|| target.address.to_string())
                 )),
-                Some(uscope::IndirectTarget::Unreadable { address, .. }) => {
+                Some(microscope::IndirectTarget::Unreadable { address, .. }) => {
                     comments.push(format!("→ unreadable slot at {address}"));
                 }
                 _ => {}
@@ -307,7 +307,7 @@ pub async fn read_memory(
         address: hex(start.get()),
         bytes,
         unreadable: match read.completion {
-            uscope::MemoryReadCompletion::Incomplete { next_address, .. } => {
+            microscope::MemoryReadCompletion::Incomplete { next_address, .. } => {
                 Some(hex(next_address.get()))
             }
             _ => None,
@@ -407,19 +407,19 @@ pub async fn add_watchpoint(
 
     let options = WatchpointOptions {
         condition: given(request.condition)
-            .map(|text| uscope::Condition::parse(&text))
+            .map(|text| microscope::Condition::parse(&text))
             .transpose()?,
         hit_condition: given(request.hit_condition)
-            .map(|text| uscope::HitCondition::from_str(&text))
+            .map(|text| microscope::HitCondition::from_str(&text))
             .transpose()?,
         enabled: true,
     };
 
     let access = match request.access {
-        WatchAccess::Change => uscope::WatchAccess::Change,
-        WatchAccess::Write => uscope::WatchAccess::Write,
-        WatchAccess::ReadWrite => uscope::WatchAccess::ReadWrite,
-        WatchAccess::Read => uscope::WatchAccess::Read,
+        WatchAccess::Change => microscope::WatchAccess::Change,
+        WatchAccess::Write => microscope::WatchAccess::Write,
+        WatchAccess::ReadWrite => microscope::WatchAccess::ReadWrite,
+        WatchAccess::Read => microscope::WatchAccess::Read,
     };
 
     Ok(handle
@@ -433,12 +433,12 @@ pub async fn edit_watchpoint(
     handle: &DebuggerHandle,
     edit: protocol::EditWatchpoint,
 ) -> Result<(), Failure> {
-    let id = uscope::WatchpointId::new(edit.id);
+    let id = microscope::WatchpointId::new(edit.id);
     let condition = given(edit.condition)
-        .map(|text| uscope::Condition::parse(&text))
+        .map(|text| microscope::Condition::parse(&text))
         .transpose()?;
     let hit_condition = given(edit.hit_condition)
-        .map(|text| uscope::HitCondition::from_str(&text))
+        .map(|text| microscope::HitCondition::from_str(&text))
         .transpose()?;
     handle.set_watchpoint_condition(id, condition).await?;
     handle
@@ -455,11 +455,11 @@ fn given(text: Option<String>) -> Option<String> {
 
 pub async fn signals(handle: &DebuggerHandle) -> Result<Vec<SignalPolicy>, Failure> {
     let mut signals = Vec::new();
-    for code in uscope::signal_codes() {
+    for code in microscope::signal_codes() {
         let policy = handle.signal_policy(code).await?;
         signals.push(SignalPolicy {
             signal: code,
-            name: uscope::signal_name(code).unwrap_or_else(|| format!("signal {code}")),
+            name: microscope::signal_name(code).unwrap_or_else(|| format!("signal {code}")),
             stop: policy.stop,
             print: policy.print,
             pass: policy.pass,
@@ -473,7 +473,7 @@ pub async fn set_signal(handle: &DebuggerHandle, policy: &SignalPolicy) -> Resul
     handle
         .set_signal_policy(
             policy.signal,
-            uscope::SignalPolicy {
+            microscope::SignalPolicy {
                 stop: policy.stop,
                 // A signal that stops is said, as the terminal debugger says it.
                 print: policy.print || policy.stop,
@@ -481,14 +481,15 @@ pub async fn set_signal(handle: &DebuggerHandle, policy: &SignalPolicy) -> Resul
             },
         )
         .await?;
-    Ok(uscope::signal_name(policy.signal).unwrap_or_else(|| format!("signal {}", policy.signal)))
+    Ok(microscope::signal_name(policy.signal)
+        .unwrap_or_else(|| format!("signal {}", policy.signal)))
 }
 
 pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Module>, Failure> {
     let loaded = match handle.loaded_modules().await {
         Ok(loaded) => loaded,
         // Nothing runs, so nothing is loaded.
-        Err(uscope::Error::NotRunning) => return Ok(Vec::new()),
+        Err(microscope::Error::NotRunning) => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
 
@@ -516,12 +517,11 @@ pub async fn modules(handle: &DebuggerHandle, images: &Images) -> Result<Vec<Mod
                 .as_ref()
                 .and_then(|image| image.separate_debug_file())
                 .map(|debug_file| match debug_file {
-                    uscope::DebugFile::Used(path) | uscope::DebugFile::Unusable { path, .. } => {
-                        path.display().to_string()
-                    }
+                    microscope::DebugFile::Used(path)
+                    | microscope::DebugFile::Unusable { path, .. } => path.display().to_string(),
                 }),
             debug_file_problem: match image.as_ref().and_then(|image| image.separate_debug_file()) {
-                Some(uscope::DebugFile::Unusable { reason, .. }) => Some(reason.to_string()),
+                Some(microscope::DebugFile::Unusable { reason, .. }) => Some(reason.to_string()),
                 _ => None,
             },
             debug_information_problem: image

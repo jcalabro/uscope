@@ -7,7 +7,7 @@
 
 use std::process::{Command, Stdio};
 
-use uscope::{
+use microscope::{
     Evaluation, ExceptionStops, ExitStatus, Expression, LanguageExceptionKind, LaunchOptions,
     StopReason, TaskSnapshot, UnwindTermination, VariableState,
 };
@@ -365,9 +365,10 @@ async fn a_panic_preempted_as_it_begins_stops_once() {
         scenario
             .operation(
                 "request preemption",
-                scenario
-                    .handle()
-                    .write_word(uscope::VirtualAddress::new(guard), 0xffff_ffff_ffff_fade),
+                scenario.handle().write_word(
+                    microscope::VirtualAddress::new(guard),
+                    0xffff_ffff_ffff_fade,
+                ),
             )
             .await;
         let reason = scenario.resume_to_stop().await;

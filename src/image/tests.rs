@@ -2136,7 +2136,8 @@ mod snapshot {
 
     impl ScratchDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("uscope-{name}-{}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("microscope-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)

@@ -53,7 +53,7 @@ describe("places and paths", () => {
     expect(parsePlace("a.c:9-7")).toBeNull();
   });
 
-  it("shortens paths inside uscope's directory and restores them exactly", () => {
+  it("shortens paths inside microscope's directory and restores them exactly", () => {
     const cwd = "/home/me/kv";
     const files = [
       "/home/me/kv/src/server.c",

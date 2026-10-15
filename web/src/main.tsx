@@ -23,7 +23,7 @@ const session = createSession(
   (event) => {
     // A name chosen in an earlier visit is this browser's from now on.
     if (event.type === "message" && event.message.type === "hello") {
-      const name = read("uscope-name", "", isString);
+      const name = read("microscope-name", "", isString);
       if (name) {
         void session.connection.request("setName", { name }).catch(() => undefined);
       }

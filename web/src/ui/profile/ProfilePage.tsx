@@ -67,7 +67,7 @@ export function ProfilePage() {
           <div className="card-body">
             <p style={{ margin: 0 }}>{summary.error.message}.</p>
             <p className="muted" style={{ margin: 0 }}>
-              Serve it with <code>uscope web PROFILE.usprof</code>.
+              Serve it with <code>microscope web PROFILE.usprof</code>.
             </p>
           </div>
         </div>
@@ -531,7 +531,7 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
         <span
           title={`${formatDuration(summary.recorderCpu)} of CPU time recording, ${formatDuration(summary.recorderLoading)} of it reading debug information`}
         >
-          uscope {formatPercent(summary.recorderCpu, span)} of a CPU
+          microscope {formatPercent(summary.recorderCpu, span)} of a CPU
         </span>
       ) : null}
       {summary.gaps.length > 0 ? (
@@ -548,7 +548,7 @@ function ProfileFoot({ summary }: { summary: ProfileSummary }) {
         <span
           className={probesLost > 0 || summary.probeProblems.length > 0 ? "warn" : undefined}
           title={[
-            `${summary.probes.overwritten} records overwritten before uscope read them`,
+            `${summary.probes.overwritten} records overwritten before microscope read them`,
             `${summary.probes.noRing} events found no ring`,
             `${summary.probes.interrupted} events dropped by a signal handler`,
             `${summary.probes.malformed} records broke the probes ABI`,

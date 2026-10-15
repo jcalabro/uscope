@@ -1,7 +1,7 @@
-# Developing uscope
+# Developing microscope
 
-This directory documents how to change uscope. It stays in the repository and
-is not part of the public documentation website.
+This directory documents how to change microscope. It stays in the repository
+and is not part of the public documentation website.
 
 Start with [architecture](architecture.md), then read the page for the area you
 will change:
@@ -75,9 +75,9 @@ Use focused checks while editing. `just all` is the final local gate.
 
 ## Static builds
 
-`just build-static` builds a fully static uscope that runs on any x86-64
-Linux, at `target/x86_64-unknown-linux-musl/debug/uscope`. `just build-static
-release` builds an optimized one, with the web page embedded, under
+`just build-static` builds a fully static microscope that runs on any x86-64
+Linux, at `target/x86_64-unknown-linux-musl/debug/microscope`. `just
+build-static release` builds an optimized one, with the web page embedded, under
 `release/`. The recipe fails if the binary would link anything dynamically.
 
 These builds link the musl and libunwind from the flake's `pkgsStatic`, so
@@ -85,7 +85,7 @@ These builds link the musl and libunwind from the flake's `pkgsStatic`, so
 for development builds. The recipe unsets `RUSTFLAGS` so that Cargo uses the
 musl target's own flags.
 
-uscope must not depend on its own C library when it reads a tracee. Write
+microscope must not depend on its own C library when it reads a tracee. Write
 kernel ABI numbers, such as ioctl requests or the signal numbers a program
 uses, as the kernel defines them. Do not take them from `libc`, whose types
 and real-time signal range differ between glibc and musl. `just all` builds
@@ -188,7 +188,7 @@ documentation by copying it whole.
 
 ## Keeping a change small
 
-uscope has many interacting models: Linux tracees, public threads, runtime
+microscope has many interacting models: Linux tracees, public threads, runtime
 tasks, source frames, image addresses, virtual addresses, stored values,
 presented values, and profile stacks. Make type boundaries carry those
 distinctions. A conversion should happen in one named place with the evidence
@@ -201,9 +201,9 @@ misbehaving; plausible but false output is a serious defect.
 ## Hermetic environment
 
 The Justfile runs every recipe through `scripts/hermetic.sh`. That script
-enters `scripts/dev.sh` unless `USCOPE_HERMETIC=1` already marks the pinned
+enters `scripts/dev.sh` unless `MICROSCOPE_HERMETIC=1` already marks the pinned
 shell. `dev.sh` uses `nix develop --ignore-env` and keeps only the small set of
-user, terminal, Cargo, and uscope variables listed in the script.
+user, terminal, Cargo, and microscope variables listed in the script.
 
 This is part of the test contract. It prevents a host compiler, debug file,
 view, configuration file, Node package, or profiler setting from changing a
@@ -223,9 +223,9 @@ The ordinary development build and test artifacts share the test profile,
 which keeps useful debug information while loading target metadata faster than
 a fully unoptimized debugger build.
 
-`just build-debug` gives uscope its own full debug information when debugging
-the debugger with itself. The next normal build returns to the standard test
-profile.
+`just build-debug` gives microscope its own full debug information when
+debugging the debugger with itself. The next normal build returns to the
+standard test profile.
 
 Cargo features have specific uses:
 
@@ -246,7 +246,7 @@ path:
 
 | Artifact | Update command |
 |---|---|
-| `web/src/protocol.gen.ts` | `USCOPE_UPDATE_PROTOCOL=1 just test protocol` |
+| `web/src/protocol.gen.ts` | `MICROSCOPE_UPDATE_PROTOCOL=1 just test protocol` |
 | Web replay transcripts | `just web-transcripts` |
 | Golden manifests | `just golden-record NAME` |
 | Benchmark baselines | The owning benchmark's explicit record option, only after review |
@@ -282,8 +282,8 @@ Unsafe code lives in a few files, which `scripts/unsafe-sites.sh` lists and
   blocking `waitpid`.
 - `timings/alloc.rs`: the counting allocator.
 - `cli/syscalls.rs`: `localtime_r`.
-- `main.rs` and `cli/config.rs`: removing environment variables before uscope
-  starts any other thread, and the global allocator.
+- `main.rs` and `cli/config.rs`: removing environment variables before
+  microscope starts any other thread, and the global allocator.
 
 The rest of the backend reaches these through safe functions. Code that Miri
 can run has tests in `tests/miri.rs`, which `just miri` runs (see

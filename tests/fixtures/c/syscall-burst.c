@@ -1,6 +1,6 @@
 // Makes COUNT getppid calls, paced to RATE calls a second when RATE is
 // given and as fast as it can otherwise, then prints how many it made and
-// the nanoseconds each took on average: the work `uscope-tools
+// the nanoseconds each took on average: the work `microscope-tools
 // syscall-overhead` times bare and under each engine.
 #define _GNU_SOURCE
 #include <stdio.h>

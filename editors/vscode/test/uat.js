@@ -1,4 +1,4 @@
-// User acceptance test: VS Code itself drives `uscope dap` through the
+// User acceptance test: VS Code itself drives `microscope dap` through the
 // extension, as a user would from the editor, and every message each
 // session exchanges is recorded in the adapter log's format.
 //
@@ -19,8 +19,8 @@ const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
 
-const root = process.env.USCOPE_UAT_ROOT;
-const record = process.env.USCOPE_UAT_RECORD;
+const root = process.env.MICROSCOPE_UAT_ROOT;
+const record = process.env.MICROSCOPE_UAT_RECORD;
 const fixture = (name) => path.join(root, 'build/test-programs', name);
 const source = (name) => path.join(root, 'tests/fixtures/c', name);
 const extension = () => require(path.join(root, 'editors/vscode/extension.js'));
@@ -30,7 +30,7 @@ const TIMEOUT = 15000;
 const transcripts = new Map();
 let waiters = [];
 
-vscode.debug.registerDebugAdapterTrackerFactory('uscope', {
+vscode.debug.registerDebugAdapterTrackerFactory('microscope', {
     createDebugAdapterTracker(session) {
         const lines = [];
         // A restart that starts another adapter for the session keeps both
@@ -197,7 +197,7 @@ const workspace = () => vscode.workspace.workspaceFolders[0];
 /** Starts a session and waits for its first stop. */
 async function launchToStop(configuration, reason) {
     const stopped = event('stopped', (body) => reason === undefined || body.reason === reason);
-    assert.ok(await vscode.debug.startDebugging(undefined, { type: 'uscope', request: 'launch', cwd: root, ...configuration }));
+    assert.ok(await vscode.debug.startDebugging(undefined, { type: 'microscope', request: 'launch', cwd: root, ...configuration }));
     const { session, message: sent } = await stopped;
     // VS Code focuses a frame with source, or else the stopped thread.
     const frame = reason === 'entry' ? await focusThread(sent.body.threadId) : await focus();
@@ -270,7 +270,7 @@ async function createALaunchJson() {
     const launchJson = path.join(folder, '.vscode', 'launch.json');
     fs.writeFileSync(program, 'int main(void) { return 0; }\n');
     try {
-        // The C file makes uscope the only debugger to guess.
+        // The C file makes microscope the only debugger to guess.
         await vscode.window.showTextDocument(vscode.Uri.file(program));
         await vscode.commands.executeCommand('workbench.action.debug.start');
         await until('launch.json', () => fs.existsSync(launchJson));
@@ -278,7 +278,7 @@ async function createALaunchJson() {
         const text = fs.readFileSync(launchJson, 'utf8').replace(/^\s*\/\/.*$/gm, '');
         const { configurations } = JSON.parse(text);
         assert.deepStrictEqual(configurations.map(({ type, request: kind }) => ({ type, request: kind })), [
-            { type: 'uscope', request: 'launch' },
+            { type: 'microscope', request: 'launch' },
         ]);
         assert.strictEqual(vscode.debug.activeDebugSession, undefined);
     } finally {
@@ -288,22 +288,22 @@ async function createALaunchJson() {
     }
 }
 
-/** The uscope.path setting chooses the adapter, and a missing one is named. */
+/** The microscope.path setting chooses the adapter, and a missing one is named. */
 async function findTheAdapterFromTheSetting() {
     const folder = workspace();
-    const wrapper = path.join(folder.uri.fsPath, 'uscope-wrapper');
+    const wrapper = path.join(folder.uri.fsPath, 'microscope-wrapper');
     const marker = `${wrapper}.used`;
-    fs.writeFileSync(wrapper, `#!/bin/sh\ntouch '${marker}'\nexec uscope "$@"\n`, { mode: 0o755 });
-    const settings = vscode.workspace.getConfiguration('uscope');
-    const configuration = (name) => ({ type: 'uscope', request: 'launch', name, program: fixture('basic'), cwd: root });
+    fs.writeFileSync(wrapper, `#!/bin/sh\ntouch '${marker}'\nexec microscope "$@"\n`, { mode: 0o755 });
+    const settings = vscode.workspace.getConfiguration('microscope');
+    const configuration = (name) => ({ type: 'microscope', request: 'launch', name, program: fixture('basic'), cwd: root });
     try {
-        await settings.update('path', '${workspaceFolder}/missing-uscope', vscode.ConfigurationTarget.Global);
+        await settings.update('path', '${workspaceFolder}/missing-microscope', vscode.ConfigurationTarget.Global);
         await assert.rejects(
             vscode.debug.startDebugging(folder, configuration('vscode-missing-adapter')),
-            /Cannot find uscope at "\$\{workspaceFolder\}\/missing-uscope"/,
+            /Cannot find microscope at "\$\{workspaceFolder\}\/missing-microscope"/,
         );
 
-        await settings.update('path', '${workspaceFolder}/uscope-wrapper', vscode.ConfigurationTarget.Global);
+        await settings.update('path', '${workspaceFolder}/microscope-wrapper', vscode.ConfigurationTarget.Global);
         const exited = event('exited');
         const ended = terminated('vscode-setting');
         assert.ok(await vscode.debug.startDebugging(folder, configuration('vscode-setting')));
@@ -317,16 +317,16 @@ async function findTheAdapterFromTheSetting() {
     }
 }
 
-/** The uscope.logFile setting has the adapter log every message. */
+/** The microscope.logFile setting has the adapter log every message. */
 async function logTheProtocolToAFile() {
-    const log = path.join(workspace().uri.fsPath, 'uscope-dap.log');
-    const settings = vscode.workspace.getConfiguration('uscope');
+    const log = path.join(workspace().uri.fsPath, 'microscope-dap.log');
+    const settings = vscode.workspace.getConfiguration('microscope');
     try {
-        await settings.update('logFile', '${workspaceFolder}/uscope-dap.log', vscode.ConfigurationTarget.Global);
+        await settings.update('logFile', '${workspaceFolder}/microscope-dap.log', vscode.ConfigurationTarget.Global);
         const exited = event('exited');
         const ended = terminated('vscode-log');
         assert.ok(await vscode.debug.startDebugging(workspace(), {
-            type: 'uscope', request: 'launch', name: 'vscode-log', program: fixture('basic'),
+            type: 'microscope', request: 'launch', name: 'vscode-log', program: fixture('basic'),
         }));
         await exited;
         await ended;
@@ -340,11 +340,11 @@ async function logTheProtocolToAFile() {
 }
 
 async function launchStepInspectAndRestart() {
-    const breakpoint = sourceBreakpoint(source('basic.c'), 'return uscope_value;');
+    const breakpoint = sourceBreakpoint(source('basic.c'), 'return microscope_value;');
     vscode.debug.addBreakpoints([breakpoint]);
     const stopped = event('stopped', (body) => body.reason === 'breakpoint');
     assert.ok(await vscode.debug.startDebugging(undefined, {
-        type: 'uscope', request: 'launch', name: 'vscode-launch', program: fixture('basic'), cwd: root,
+        type: 'microscope', request: 'launch', name: 'vscode-launch', program: fixture('basic'), cwd: root,
     }));
     const { session, message: sent } = await stopped;
     const threadId = sent.body.threadId;
@@ -352,9 +352,9 @@ async function launchStepInspectAndRestart() {
     await focus();
     let frame = await topFrame(session, threadId);
     assert.strictEqual(frame.name, 'breakpoint_target');
-    assert.strictEqual(frame.line, lineOf(source('basic.c'), 'return uscope_value;') + 1);
+    assert.strictEqual(frame.line, lineOf(source('basic.c'), 'return microscope_value;') + 1);
     const value = await session.customRequest('evaluate', {
-        expression: 'uscope_value', frameId: frame.id, context: 'watch',
+        expression: 'microscope_value', frameId: frame.id, context: 'watch',
     });
     assert.strictEqual(value.result, '1234605616436508552');
 
@@ -566,13 +566,13 @@ async function consoleWatchHoverHexadecimalAndInlineValues() {
     }
 
     // The hexadecimal setting shows every value in hexadecimal.
-    const formatted = request('uscope/setValueFormat', (arguments_) => arguments_.hex === true);
+    const formatted = request('microscope/setValueFormat', (arguments_) => arguments_.hex === true);
     const hexadecimal = answer('evaluate', (arguments_) => arguments_.context === 'watch' && arguments_.expression === 'where->y + x');
-    await vscode.commands.executeCommand('uscope.toggleHexadecimal');
+    await vscode.commands.executeCommand('microscope.toggleHexadecimal');
     await formatted;
     assert.strictEqual((await hexadecimal).body.result, '0x9');
-    const decimal = request('uscope/setValueFormat', (arguments_) => arguments_.hex === false);
-    await vscode.commands.executeCommand('uscope.toggleHexadecimal');
+    const decimal = request('microscope/setValueFormat', (arguments_) => arguments_.hex === false);
+    await vscode.commands.executeCommand('microscope.toggleHexadecimal');
     await decimal;
 
     // Inline values are each variable's, on the lines it is in scope.
@@ -792,7 +792,7 @@ async function pauseAndThreads() {
     const spinning = event('thread', (body) => body.reason === 'started')
         .then(() => answer('threads'));
     assert.ok(await vscode.debug.startDebugging(undefined, {
-        type: 'uscope', request: 'launch', name: 'vscode-spin', program: fixture('spin'), cwd: root,
+        type: 'microscope', request: 'launch', name: 'vscode-spin', program: fixture('spin'), cwd: root,
     }));
     await spinning;
     const spin = vscode.debug.activeDebugSession;
@@ -844,7 +844,7 @@ async function runInTheIntegratedTerminal() {
     const stopped = event('stopped', (body) => body.reason === 'breakpoint');
     const process = event('process');
     assert.ok(await vscode.debug.startDebugging(undefined, {
-        type: 'uscope', request: 'launch', name: 'vscode-terminal', program: fixture('process-environment'),
+        type: 'microscope', request: 'launch', name: 'vscode-terminal', program: fixture('process-environment'),
         args: ['one'], console: 'integratedTerminal', cwd: root,
     }));
     await stopped;
@@ -880,7 +880,7 @@ async function attachToAProcess() {
     try {
         const process = event('process');
         assert.ok(await vscode.debug.startDebugging(undefined, {
-            type: 'uscope', request: 'attach', name: 'vscode-attach', pid: String(target.pid),
+            type: 'microscope', request: 'attach', name: 'vscode-attach', pid: String(target.pid),
         }));
         const { session } = await process;
         // A breakpoint added while the process runs is placed at once.
@@ -926,7 +926,7 @@ async function pickAProcess() {
 
         const attached = event('process');
         const started = vscode.debug.startDebugging(undefined, {
-            type: 'uscope', request: 'attach', name: 'vscode-pick', program: fixture('attach'),
+            type: 'microscope', request: 'attach', name: 'vscode-pick', program: fixture('attach'),
             pid: '${command:pickProcess}',
         });
         let settled = false;
@@ -969,7 +969,7 @@ async function followAForkedChild() {
     const started = message('VS Code to answer startDebugging', (_, sent) =>
         sent.type === 'response' && sent.command === 'startDebugging' && sent.success, 'client');
     assert.ok(await vscode.debug.startDebugging(undefined, {
-        type: 'uscope', request: 'launch', name: 'vscode-fork', program: fixture('fork'), cwd: root,
+        type: 'microscope', request: 'launch', name: 'vscode-fork', program: fixture('fork'), cwd: root,
         followForks: true,
     }));
     const asking = (await asked).message.arguments;
@@ -1003,7 +1003,7 @@ async function openACoreDump() {
     const stopped = event('stopped', (body) => body.reason === 'exception');
     const capabilities = event('capabilities');
     assert.ok(await vscode.debug.startDebugging(undefined, {
-        type: 'uscope', request: 'attach', name: 'vscode-core', coreFile: fixture('crash-gcc-o0-segv.core'),
+        type: 'microscope', request: 'attach', name: 'vscode-core', coreFile: fixture('crash-gcc-o0-segv.core'),
         program: fixture('crash-gcc-o0'),
     }));
     const { session, message: sent } = await stopped;
@@ -1040,7 +1040,7 @@ async function refuseBadConfigurationsAndOfferPrograms() {
     ]) {
         const refused = response(configuration.request, (reply) => !reply.success);
         const disconnected = request('disconnect');
-        const started = vscode.debug.startDebugging(undefined, { type: 'uscope', name, ...configuration });
+        const started = vscode.debug.startDebugging(undefined, { type: 'microscope', name, ...configuration });
         assert.match((await refused).message.message, reason, name);
         // VS Code shows the refusal in a dialog, which its test mode refuses
         // to open, and ends the session it never started.

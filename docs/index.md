@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: uscope
+  name: microscope
   text: Debug and profile native programs
   tagline: A Linux debugger for the terminal, browser, and your editor.
   actions:
@@ -24,12 +24,12 @@ features:
     details: See each call a program makes, as strace prints it, or count them in the kernel without stopping the program.
 ---
 
-uscope runs on Linux x86-64 and understands programs written in C, C++, Rust,
-Go, Zig, Odin, Fortran, D, Nim, and Ada.
+microscope runs on Linux x86-64 and understands programs written in C, C++,
+Rust, Go, Zig, Odin, Fortran, D, Nim, and Ada.
 
 ## Start here
 
-- [Install uscope and run a first session](getting-started.md)
+- [Install microscope and run a first session](getting-started.md)
 - [Learn the debugging workflow](debugging.md)
 - [Use the browser interface](browser.md)
 - [Connect an editor](editors.md)

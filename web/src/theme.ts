@@ -12,7 +12,7 @@ export const THEMES: readonly Theme[] = ["system", "light", "dark"];
 const isTheme = (value: unknown): value is Theme => THEMES.includes(value as Theme);
 
 export function savedTheme(): Theme {
-  return read("uscope-theme", "system", isTheme);
+  return read("microscope-theme", "system", isTheme);
 }
 
 const chosen = createStore(() => ({ theme: savedTheme() }));
@@ -41,7 +41,7 @@ export function useShownScheme(): "light" | "dark" {
 /** Shows `theme`, and remembers it for the next visit. */
 export function chooseTheme(theme: Theme): void {
   apply(theme);
-  write("uscope-theme", theme);
+  write("microscope-theme", theme);
   chosen.setState({ theme });
 }
 

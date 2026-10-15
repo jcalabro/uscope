@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use uscope::{
+use microscope::{
     BreakpointLocation, BreakpointSpec, DebuggerHandle, ImageAddress, InferiorState, LoadBias,
     ModuleId, ModuleImage, StackFrame, StackFrameId, StateSnapshot, StopContext, StopReason,
     VirtualAddress,
@@ -150,7 +150,7 @@ pub fn hex(address: u64) -> String {
 }
 
 /// A watchpoint as tabs show it.
-fn watchpoint(watchpoint: &uscope::Watchpoint) -> protocol::Watchpoint {
+fn watchpoint(watchpoint: &microscope::Watchpoint) -> protocol::Watchpoint {
     protocol::Watchpoint {
         id: watchpoint.id.get(),
         access: watch_access(watchpoint.access),
@@ -158,8 +158,8 @@ fn watchpoint(watchpoint: &uscope::Watchpoint) -> protocol::Watchpoint {
         address: hex(watchpoint.address.get()),
         bytes: watchpoint.byte_size,
         scope: match &watchpoint.scope {
-            uscope::WatchScope::ThreadLocal { thread } => format!("thread {thread}'s instance"),
-            uscope::WatchScope::Frame { thread, activation } => {
+            microscope::WatchScope::ThreadLocal { thread } => format!("thread {thread}'s instance"),
+            microscope::WatchScope::Frame { thread, activation } => {
                 format!("thread {thread}'s frame at {activation}, until it returns")
             }
             _ => String::new(),
@@ -170,12 +170,12 @@ fn watchpoint(watchpoint: &uscope::Watchpoint) -> protocol::Watchpoint {
     }
 }
 
-pub const fn watch_access(access: uscope::WatchAccess) -> protocol::WatchAccess {
+pub const fn watch_access(access: microscope::WatchAccess) -> protocol::WatchAccess {
     match access {
-        uscope::WatchAccess::Change => protocol::WatchAccess::Change,
-        uscope::WatchAccess::Write => protocol::WatchAccess::Write,
-        uscope::WatchAccess::Read => protocol::WatchAccess::Read,
-        uscope::WatchAccess::ReadWrite => protocol::WatchAccess::ReadWrite,
+        microscope::WatchAccess::Change => protocol::WatchAccess::Change,
+        microscope::WatchAccess::Write => protocol::WatchAccess::Write,
+        microscope::WatchAccess::Read => protocol::WatchAccess::Read,
+        microscope::WatchAccess::ReadWrite => protocol::WatchAccess::ReadWrite,
     }
 }
 
@@ -274,7 +274,7 @@ impl Describer {
                 .map(|thread| Thread {
                     id: thread.id.get(),
                     name: thread.name.as_deref().map(str::to_owned),
-                    stopped: matches!(thread.state, uscope::ThreadState::Stopped { .. }),
+                    stopped: matches!(thread.state, microscope::ThreadState::Stopped { .. }),
                 })
                 .collect(),
             breakpoints,
@@ -292,8 +292,8 @@ impl Describer {
         }
 
         let context = StopContext {
-            stop: uscope::StopId::new(stop),
-            execution: uscope::ThreadId::new(thread).into(),
+            stop: microscope::StopId::new(stop),
+            execution: microscope::ThreadId::new(thread).into(),
             frame: StackFrameId::INNERMOST,
         };
 
@@ -330,7 +330,7 @@ impl Describer {
         entry
     }
 
-    async fn breakpoint(&self, breakpoint: &uscope::Breakpoint) -> protocol::Breakpoint {
+    async fn breakpoint(&self, breakpoint: &microscope::Breakpoint) -> protocol::Breakpoint {
         let mut places = Vec::with_capacity(breakpoint.locations.len());
         for location in breakpoint.locations.iter() {
             places.push(self.breakpoint_place(breakpoint, location).await);
@@ -353,8 +353,8 @@ impl Describer {
     /// line, with a line breakpoint keeping the file it names.
     async fn breakpoint_place(
         &self,
-        breakpoint: &uscope::Breakpoint,
-        resolved: &uscope::ResolvedBreakpointLocation,
+        breakpoint: &microscope::Breakpoint,
+        resolved: &microscope::ResolvedBreakpointLocation,
     ) -> Place {
         let (image, address, shown) = match (resolved.location, resolved.library) {
             (BreakpointLocation::Image(address), _) => (
@@ -477,8 +477,8 @@ pub struct Ended {
 }
 
 impl Ended {
-    pub fn observe(&mut self, event: &uscope::DebuggerEvent) {
-        use uscope::DebuggerEvent;
+    pub fn observe(&mut self, event: &microscope::DebuggerEvent) {
+        use microscope::DebuggerEvent;
         match event {
             DebuggerEvent::InferiorExited { status, .. } => {
                 self.exited = Some(plain(&StopReason::Exited(status.clone())));

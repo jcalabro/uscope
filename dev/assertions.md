@@ -1,7 +1,7 @@
 # Assertions
 
-Assertions catch bugs in uscope. They check facts about uscope's own state
-that the type system can't express.
+Assertions catch bugs in microscope. They check facts about microscope's own
+state that the type system can't express.
 
 ## Code map
 
@@ -33,7 +33,7 @@ that the type system can't express.
 
 3. **`debug_assert!` by default.** It runs in test, sim, and fuzz builds and
    costs nothing in release, so expensive checks are fine. Use `assert!` only
-   when continuing would damage the tracee or a file uscope is writing. Use
+   when continuing would damage the tracee or a file microscope is writing. Use
    `const _: () = assert!(...)` for sizes and layouts. Release builds keep
    overflow checks on, so an overflow always panics.
 
@@ -81,13 +81,13 @@ So `Controller::run` catches the unwind and releases an attached process as
 `detach_inferior` does. The cleanup lives at the thread boundary, not in an
 assertion macro, because any panic can end the controller. It trusts the kernel
 over the controller's state: a thread is stopped if it answers a register
-read, and a byte is restored only if memory still holds uscope's trap and the
-original byte is known. Aborts skip it: stack overflow, running out of memory,
-and a panic during cleanup.
+read, and a byte is restored only if memory still holds microscope's trap and
+the original byte is known. Aborts skip it: stack overflow, running out of
+memory, and a panic during cleanup.
 
-In development builds, `USCOPE_TEST_PANIC_AFTER=<request>` makes the controller
-panic after serving a request whose description begins with `<request>`.
-`tests/cli.rs` uses it to check that an attached process survives.
+In development builds, `MICROSCOPE_TEST_PANIC_AFTER=<request>` makes the
+controller panic after serving a request whose description begins with
+`<request>`. `tests/cli.rs` uses it to check that an attached process survives.
 
 The waiter thread asserts nothing. If it ends, the controller hears no more
 wait statuses and stalls.

@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # A vector of integers: `n` of them at `data`, with room for `cap`.
 view c intvec {

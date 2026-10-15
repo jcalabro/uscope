@@ -1,7 +1,7 @@
 //! The loader's worker pool: one per process, shared by every load.
 //!
 //! The number of workers comes from, in order: the option a program
-//! passes to [`configure`], `USCOPE_JOBS`, the `jobs` setting a program
+//! passes to [`configure`], `MICROSCOPE_JOBS`, the `jobs` setting a program
 //! passes as its configuration, and otherwise the CPUs available, at most
 //! [`MAX_DEFAULT_JOBS`], or two under nextest, which runs many tests at
 //! once. Work already running on a pool, such as a test's own, stays there.
@@ -15,7 +15,7 @@ const DEFAULT_JOBS: NonZeroUsize = NonZeroUsize::new(MAX_DEFAULT_JOBS).expect("a
 const TEST_JOBS: NonZeroUsize = NonZeroUsize::new(2).expect("a positive default");
 
 /// The environment variable that sets the number of workers.
-pub const JOBS_VARIABLE: &str = "USCOPE_JOBS";
+pub const JOBS_VARIABLE: &str = "MICROSCOPE_JOBS";
 
 /// Why the pool could not be configured.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -79,7 +79,7 @@ fn start(jobs: NonZeroUsize) -> Result<&'static rayon::ThreadPool, JobsError> {
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs.get())
-        .thread_name(|index| format!("uscope-load-{index}"))
+        .thread_name(|index| format!("microscope-load-{index}"))
         .build()
         .map_err(|error| JobsError::Start(error.to_string()))?;
 

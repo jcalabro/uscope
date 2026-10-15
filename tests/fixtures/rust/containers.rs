@@ -57,7 +57,7 @@ fn main() {
     let empty_text = String::new(); // VIEW: empty_text => ""
     let long_text = "y".repeat(300); // VIEW: long_text => "{y*256}"... (300 bytes)
     let boxed_text: Box<str> = Box::from("boxed"); // VIEW: boxed_text => "boxed"
-    let path = PathBuf::from("/tmp/uscope"); // VIEW: path => "/tmp/uscope"
+    let path = PathBuf::from("/tmp/microscope"); // VIEW: path => "/tmp/microscope"
     let os_text = OsString::from("os text"); // VIEW: os_text => "os text"
     let c_text = CString::new("c text").expect("no NUL"); // VIEW: c_text => "c text"
     let ints: Vec<i32> = vec![1, 2, 3]; // VIEW: ints => len=3 [1, 2, 3]

@@ -113,10 +113,10 @@ responsible for its initial stop, configured ptrace options, later execution,
 and eventual reap. If startup fails after creating a process, the failure path
 still owns cleanup.
 
-An attached program already has an external owner. uscope seizes its threads,
-interrupts them, gathers a complete stop, and detaches them on ordinary
+An attached program already has an external owner. microscope seizes its
+threads, interrupts them, gathers a complete stop, and detaches them on ordinary
 shutdown. Detach must preserve the signal and job-control behavior the session
-promised. Never treat an attached process as one uscope may silently kill.
+promised. Never treat an attached process as one microscope may silently kill.
 
 Threads can appear or disappear while attach is gathering them. The algorithm
 must converge using observed `/proc` and wait state, with a deadline at the

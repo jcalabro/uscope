@@ -252,7 +252,7 @@ int main() {
     std::reference_wrapper<int> reference = std::ref(target); // VIEW: reference => 3
     std::expected<int, std::string> expected = 5; // VIEW: expected => 5
     std::expected<int, std::string> unexpected = std::unexpected(std::string("bad")); // VIEW: unexpected => {unexpected: "bad"}
-    std::filesystem::path where = "/tmp/uscope"; // VIEW: where => "/tmp/uscope"
+    std::filesystem::path where = "/tmp/microscope"; // VIEW: where => "/tmp/microscope"
     std::function<int(int)> no_callable;          // VIEW: no_callable => empty
     std::function<int(int)> callable = [&target](int x) { return x + target; };
     // Mutexes say whether they are held; the owner is a field.

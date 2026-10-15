@@ -1,4 +1,4 @@
-// The tab's one connection to `uscope web`: requests with typed answers,
+// The tab's one connection to `microscope web`: requests with typed answers,
 // server messages turned into model events, and reconnecting after a drop.
 // The transport is injected so tests drive it without a socket.
 
@@ -94,7 +94,7 @@ export class Connection {
     ...params: ParamsOf<M> extends undefined ? [] : [ParamsOf<M>]
   ): Promise<Results[M]> {
     if (!this.#open || this.#transport === null) {
-      return Promise.reject(new RequestError("disconnected", "not connected to uscope"));
+      return Promise.reject(new RequestError("disconnected", "not connected to microscope"));
     }
     const id = this.#nextId++;
     const message = params.length === 0 ? { id, method } : { id, method, params: params[0] };
@@ -202,7 +202,7 @@ export class Connection {
 
   #failPending(): void {
     for (const pending of this.#pending.values()) {
-      pending.reject(new RequestError("disconnected", "the connection to uscope closed"));
+      pending.reject(new RequestError("disconnected", "the connection to microscope closed"));
     }
     this.#pending.clear();
     this.#binary.clear();

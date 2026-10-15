@@ -38,15 +38,15 @@ the debugger does and land in the core, the simulator, and DAP.
 
 Three files, all optional, in TOML:
 
-1. The user's, `$XDG_CONFIG_HOME/uscope/config.toml`, or
-   `~/.config/uscope/config.toml` when `XDG_CONFIG_HOME` is unset or empty,
+1. The user's, `$XDG_CONFIG_HOME/microscope/config.toml`, or
+   `~/.config/microscope/config.toml` when `XDG_CONFIG_HOME` is unset or empty,
    as the user's view files are found today. It is the user's alone and
    applies to every project.
-2. The project's, `.uscope/config.toml` at the project root, usually
+2. The project's, `.microscope/config.toml` at the project root, usually
    committed and shared by everyone who works on the project.
-3. The project's local file, `.uscope/config.local.toml`, for one person's
+3. The project's local file, `.microscope/config.local.toml`, for one person's
    settings in one project. It is meant to be listed in the project's
-   `.gitignore`, which uscope never edits.
+   `.gitignore`, which microscope never edits.
 
 Each setting comes from the first of these that sets it: a command-line
 flag, the environment (`NO_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE`), the
@@ -64,7 +64,7 @@ settings at once and its commands only once the user trusts it; see
 [Trusting a project](#trusting-a-project).
 
 `--config FILE` reads `FILE` in place of the user's file, and
-`USCOPE_CONFIG=FILE` does the same. An empty `USCOPE_CONFIG`, or
+`MICROSCOPE_CONFIG=FILE` does the same. An empty `MICROSCOPE_CONFIG`, or
 `--no-config`, reads none of the files. Tests set it empty, so that a
 developer's own configuration can never change a test's outcome.
 
@@ -72,14 +72,14 @@ developer's own configuration can never change a test's outcome.
 
 One definition serves configuration, view files, and saved breakpoints:
 the nearest directory, from the start directory upwards, that contains
-`.uscope/`; failing that, the nearest that contains `.git` (a directory, or
+`.microscope/`; failing that, the nearest that contains `.git` (a directory, or
 the file a worktree has); failing that, the start directory. The start
-directory is the one uscope runs in, and for DAP the launch request's
+directory is the one microscope runs in, and for DAP the launch request's
 `cwd`. A program's `--cwd` changes only where the program runs.
 
-This moves view discovery from `<working directory>/.uscope/views` to the
-project root's, and from the program's working directory to uscope's own,
-which is a deliberate change: running uscope from a subdirectory of a
+This moves view discovery from `<working directory>/.microscope/views` to the
+project root's, and from the program's working directory to microscope's own,
+which is a deliberate change: running microscope from a subdirectory of a
 project should find the project's views, and a program's `--cwd` says
 nothing about which project is being debugged. `docs/views.md` changes with
 it.
@@ -111,7 +111,7 @@ program = "build/server"
 A configuration's `cwd` defaults to the project root, as its paths are
 relative to it. `--attach` takes a name too, matched the same way.
 
-`uscope --launch NAME` (`-l NAME`) starts one. With no executable, no
+`microscope --launch NAME` (`-l NAME`) starts one. With no executable, no
 `--attach`, and no `--core`, a project with exactly one launch
 configuration starts it, and one with several lists their names and
 exits, since choosing one would be a guess. Flags change the
@@ -128,7 +128,7 @@ local file's, the launch configuration's `startup`, then `-c` files and
 `-e` commands. Unlike other lists they accumulate, because a team's
 startup commands should not remove the user's own.
 
-DAP has its own launch configurations in the editor, and `uscope dap`
+DAP has its own launch configurations in the editor, and `microscope dap`
 reads none of these.
 
 ### Trusting a project
@@ -138,7 +138,7 @@ could change a session's behavior just by being opened. That matters most
 on attaching: a committed `set var` or `handle SIGTERM nopass` would
 quietly change a live service. VS Code meets the same problem in
 `launch.json` with Workspace Trust, and direnv and mise with an `allow`
-or `trust` step; uscope does as they do rather than refusing commands
+or `trust` step; microscope does as they do rather than refusing commands
 from projects, as gdb's `.gdbinit` auto-load safe path does.
 
 Only settings that act need trust: `[startup]`, `[aliases]`, and
@@ -151,7 +151,7 @@ The user's `[projects] trust` chooses the policy:
 - `ask`, the default. An interactive session shows a project's acting
   settings, exactly as written, and asks whether to trust them: `yes`,
   `once` (this session only), or `no`. `yes` records them in
-  `$XDG_STATE_HOME/uscope/trust.toml` against the project root, and the
+  `$XDG_STATE_HOME/microscope/trust.toml` against the project root, and the
   session never asks again until they change. The record holds the
   settings themselves, not a hash, so it is readable and needs no hashing
   crate. A change to a presentation setting does not ask again.
@@ -163,7 +163,7 @@ Declining is never silent: the session starts without the untrusted
 settings and warns once which it left out. A batch session, or one whose
 input is not a terminal, cannot ask, so an untrusted project with acting
 settings is an error naming `--trust-project`, which trusts the project
-for that session. `uscope --launch NAME` from an untrusted project asks
+for that session. `microscope --launch NAME` from an untrusted project asks
 first, since the configuration is what the user asked to run.
 
 ### Strictness
@@ -186,7 +186,7 @@ hyperlinks = "auto"       # OSC 8 links on file:line; auto = terminals known to 
 paths = "relative"        # relative (to the project root) | absolute | name
 pager = "auto"            # auto: $PAGER or `less -FRX` when output outgrows the screen | never
 editor = ""               # for `edit`: "code -g {path}:{line}"; empty uses $VISUAL, $EDITOR +{line}
-prompt = "(uscope) "
+prompt = "(microscope) "
 confirm-quit = true       # ask before killing a launched program that is still alive
 
 [theme]                   # roles: prompt, command, name, type, value, changed, keyword, string, ...
@@ -219,10 +219,10 @@ syntax = "intel"          # intel | att; --disassembly-syntax wins
 show-bytes = true
 
 [breakpoints]
-save = true               # keep breakpoints in the project's .uscope/state
+save = true               # keep breakpoints in the project's .microscope/state
 
 [history]
-size = 10000              # $XDG_STATE_HOME/uscope/history, as today
+size = 10000              # $XDG_STATE_HOME/microscope/history, as today
 
 [signals]
 SIGUSR1 = "nostop noprint pass"
@@ -249,18 +249,18 @@ same ceilings the debugger enforces. Text length stays the debugger's
 `TextSummary::MAX_BYTES`; making it configurable is a core change left for
 later.
 
-### `uscope config`
+### `microscope config`
 
-- `uscope config path` prints the files that would be read, the project
+- `microscope config path` prints the files that would be read, the project
   root, and which exist.
-- `uscope config show` prints every setting in effect and where it came
+- `microscope config show` prints every setting in effect and where it came
   from (`default`, `user`, `project`, `flag`, `environment`).
-- `uscope config check` validates every file and exits non-zero on an
+- `microscope config check` validates every file and exits non-zero on an
   error, for a project's CI.
-- `uscope config trust` and `uscope config untrust` record and forget the
-  current project's acting settings, and `uscope config trusted` lists
+- `microscope config trust` and `microscope config untrust` record and forget
+  the current project's acting settings, and `microscope config trusted` lists
   every trusted project.
-- `uscope config init` writes a user file listing every setting commented
+- `microscope config init` writes a user file listing every setting commented
   out at its default, and refuses to overwrite one.
 
 ### Code
@@ -279,8 +279,8 @@ from the client's launch arguments, as editors expect; reading
 shows paths relative to the project root of the launch `cwd`, as the CLI
 does, so the two print the same at the same stop.
 
-`USCOPE_CONFIG` is read and removed from the environment before the
-runtime starts, as `USCOPE_FLIGHT_RECORDING` is, so a launched program's
+`MICROSCOPE_CONFIG` is read and removed from the environment before the
+runtime starts, as `MICROSCOPE_FLIGHT_RECORDING` is, so a launched program's
 environment, and so its stack layout, never depends on it.
 
 ## Breakpoints
@@ -432,7 +432,7 @@ from the module that contains it:
 Id  On  Hits  Where                              Options
 1   ●      3  main at basic.c:10                 if x > 3
 2   ○      0  parse_header, 2 locations          hits >=2  log "len={len}"
-              ├ parse.c:41 in uscope
+              ├ parse.c:41 in microscope
               └ parse.c:41 in libparse.so
 3   ●      0  init_plugins                       pending
 4   ●      0  render at view.c:88                temporary
@@ -454,11 +454,11 @@ they cost nothing otherwise, and are never acted on.
 ### Saved breakpoints
 
 With `[breakpoints] save` true, the default, an interactive session keeps
-its breakpoints in `.uscope/state/breakpoints.toml` at the project root,
+its breakpoints in `.microscope/state/breakpoints.toml` at the project root,
 restores them when it starts, and rewrites the file after each change. The
-first save creates `.uscope/state/` with a `.gitignore` of `*`, so saved
-state is never committed and uscope never edits the project's own
-`.gitignore`; `.uscope/config.toml` and `.uscope/views` stay beside it,
+first save creates `.microscope/state/` with a `.gitignore` of `*`, so saved
+state is never committed and microscope never edits the project's own
+`.gitignore`; `.microscope/config.toml` and `.microscope/views` stay beside it,
 meant to be committed.
 
 ```toml
@@ -519,11 +519,11 @@ does: a group that fits in the remaining width stays on one line, and one
 that does not puts each child on its own line, indented.
 
 ```text
-(uscope) p config
-(Config) config = {name = "uscope", ports = len=3 [80, 443, 8080], limits = {depth = 4, nodes = 512}, tags = len=2 {"a": len=1 [1], "b": len=0 []}}
-(uscope) pp config
+(microscope) p config
+(Config) config = {name = "microscope", ports = len=3 [80, 443, 8080], limits = {depth = 4, nodes = 512}, tags = len=2 {"a": len=1 [1], "b": len=0 []}}
+(microscope) pp config
 (Config) config = {
-  name = "uscope",
+  name = "microscope",
   ports = len=3 [80, 443, 8080],
   limits = {depth = 4, nodes = 512},
   tags = len=2 {"a": len=1 [1], "b": len=0 []},
@@ -689,7 +689,7 @@ Each phase ends with its tests passing and `just sim 60` where the core
 changed; `just all`, `just stress`, and `just sim 600` run once at the end.
 
 1. **Configuration.** Files, the project root, precedence, strict errors,
-   `uscope config`, and the existing flags and history moved onto
+   `microscope config`, and the existing flags and history moved onto
    `Settings`; themes; view discovery from the project root; launch
    configurations; trust. Tests: one CLI test of precedence across flag,
    local, project, user, and default; one of an error's position and
@@ -697,9 +697,9 @@ changed; `just all`, `just stress`, and `just sim 600` run once at the end.
    and environment, and refused by ambiguity with several; startup
    commands from every file in order; an untrusted project's startup
    commands failing a batch session with a message naming
-   `--trust-project`, running with it, and running after `uscope config
+   `--trust-project`, running with it, and running after `microscope config
    trust` until they change; `never` leaving them out with a warning;
-   `USCOPE_CONFIG=""` in every CLI test's environment. The prompt itself is
+   `MICROSCOPE_CONFIG=""` in every CLI test's environment. The prompt itself is
    tested at the unit level, since a terminal is not driven in tests.
 2. **Enable, disable, temporary, advance.** Core requests and options, the
    simulator's client choosing them and its hit oracles knowing a disabled

@@ -1,4 +1,4 @@
-//! Developer tools behind `uscope-tools`: a canonical dump of every answer
+//! Developer tools behind `microscope-tools`: a canonical dump of every answer
 //! a program's debug information gives, one measured load for benchmarks,
 //! and filling the image cache.
 

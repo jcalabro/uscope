@@ -71,10 +71,10 @@ mod tests {
 
     #[test]
     fn color_choice_stops_at_the_argument_escape() {
-        let arguments = ["uscope", "--color=always", "program"].map(OsString::from);
+        let arguments = ["microscope", "--color=always", "program"].map(OsString::from);
         assert_eq!(color_choice(&arguments), ColorChoice::Always);
 
-        let escaped = ["uscope", "program", "--", "--color", "always"].map(OsString::from);
+        let escaped = ["microscope", "program", "--", "--color", "always"].map(OsString::from);
         assert_eq!(color_choice(&escaped), ColorChoice::Auto);
     }
 }

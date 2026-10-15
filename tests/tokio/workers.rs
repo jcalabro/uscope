@@ -8,7 +8,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     BreakpointSpec, CodeRole, CoreDumpOptions, Evaluation, ExecutionContext, Expression, FrameKind,
     InferiorState, LaunchOptions, ScalarValue, StackFrameId, StopContext, StopReason, TaskPage,
     TaskSnapshot, TaskState, ThreadActivity, ThreadId, UnwindTermination, VariableState,
@@ -405,7 +405,10 @@ async fn tasks_are_listed_exactly(current: bool) {
 }
 
 /// The line of the fixture each task was created at, if the list says.
-fn spawn_lines(tasks: &[TaskSnapshot], image: &uscope::ModuleImage) -> BTreeMap<u64, Option<u64>> {
+fn spawn_lines(
+    tasks: &[TaskSnapshot],
+    image: &microscope::ModuleImage,
+) -> BTreeMap<u64, Option<u64>> {
     tasks
         .iter()
         .map(|task| {
@@ -533,7 +536,7 @@ async fn tokios_machinery_is_marked(current: bool) {
         let workers = Workers::stopped_at(fixture, current, at.clone()).await;
         let trace = backtrace(&workers.scenario).await;
         let image = workers.scenario.handle().module_image();
-        let path = |frame: &uscope::StackFrame| {
+        let path = |frame: &microscope::StackFrame| {
             frame
                 .source
                 .as_ref()
@@ -739,7 +742,7 @@ async fn check_awaits(
         // A suspended frame runs no code, and has no registers.
         let refused = handle.at(view(first.id)).registers().await;
         assert!(
-            matches!(refused, Err(uscope::Error::FrameSuspended)),
+            matches!(refused, Err(microscope::Error::FrameSuspended)),
             "{context}: {refused:?}"
         );
         let recorded = truth.values.get(id).cloned().unwrap_or_default();
@@ -754,7 +757,7 @@ async fn check_awaits(
 pub async fn check_saved_local(
     scenario: &Scenario,
     view: StopContext,
-    frame: &uscope::StackFrame,
+    frame: &microscope::StackFrame,
     recorded: &BTreeMap<String, String>,
     context: &str,
 ) {
@@ -959,13 +962,13 @@ async fn next_over_a_spawn_does_not_enter_the_new_task() {
                 current,
                 BreakpointSpec::Source {
                     path: SOURCE.into(),
-                    line: uscope::LineNumber::new(line(SOURCE, "// SPAWN: channel"))
+                    line: microscope::LineNumber::new(line(SOURCE, "// SPAWN: channel"))
                         .expect("one-based"),
                 },
             )
             .await;
             let scenario = &mut workers.scenario;
-            let kind = uscope::StepKind::OverSource;
+            let kind = microscope::StepKind::OverSource;
             assert_eq!(
                 scenario.step_to_stop(kind).await,
                 StopReason::Step { kind },

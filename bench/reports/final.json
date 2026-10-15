@@ -15,7 +15,7 @@
     {
       "name": "golden/containers-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0",
       "digest": "8dd06ddb681d7450f139d92d99a85b40",
       "bytes": 14688,
       "outcome": {
@@ -41,7 +41,7 @@
     {
       "name": "golden/containers-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0",
       "digest": "8dd06ddb681d7450f139d92d99a85b40",
       "bytes": 14688,
       "outcome": {
@@ -67,7 +67,7 @@
     {
       "name": "golden/containers-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0-nofp",
       "digest": "c1a222529dfd3f33a86117e29fcc377e",
       "bytes": 14552,
       "outcome": {
@@ -93,7 +93,7 @@
     {
       "name": "golden/containers-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0-nofp",
       "digest": "c1a222529dfd3f33a86117e29fcc377e",
       "bytes": 14552,
       "outcome": {
@@ -119,7 +119,7 @@
     {
       "name": "golden/containers-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0-pie",
       "digest": "bb354b0700ff6d6e4affa7acee0c6500",
       "bytes": 19936,
       "outcome": {
@@ -145,7 +145,7 @@
     {
       "name": "golden/containers-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O0-pie",
       "digest": "bb354b0700ff6d6e4affa7acee0c6500",
       "bytes": 19936,
       "outcome": {
@@ -171,7 +171,7 @@
     {
       "name": "golden/containers-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O2",
       "digest": "63fb07d1f4e8a8dba929359bd40ac850",
       "bytes": 16232,
       "outcome": {
@@ -197,7 +197,7 @@
     {
       "name": "golden/containers-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O2",
       "digest": "63fb07d1f4e8a8dba929359bd40ac850",
       "bytes": 16232,
       "outcome": {
@@ -223,7 +223,7 @@
     {
       "name": "golden/containers-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O2-nofp",
       "digest": "1cd1eb575fe41d1df5f64a54dda4267a",
       "bytes": 16136,
       "outcome": {
@@ -249,7 +249,7 @@
     {
       "name": "golden/containers-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-clang-O2-nofp",
       "digest": "1cd1eb575fe41d1df5f64a54dda4267a",
       "bytes": 16136,
       "outcome": {
@@ -275,7 +275,7 @@
     {
       "name": "golden/containers-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O0",
       "digest": "598058d7bd582b9e868b368611207142",
       "bytes": 18432,
       "outcome": {
@@ -301,7 +301,7 @@
     {
       "name": "golden/containers-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O0",
       "digest": "598058d7bd582b9e868b368611207142",
       "bytes": 18432,
       "outcome": {
@@ -327,7 +327,7 @@
     {
       "name": "golden/containers-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O0-nofp",
       "digest": "ce7eeaf97b81728c1aca722e561a3de3",
       "bytes": 18432,
       "outcome": {
@@ -353,7 +353,7 @@
     {
       "name": "golden/containers-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O0-nofp",
       "digest": "ce7eeaf97b81728c1aca722e561a3de3",
       "bytes": 18432,
       "outcome": {
@@ -379,7 +379,7 @@
     {
       "name": "golden/containers-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2",
       "digest": "16278f3521abcdb61de7c34f572913ae",
       "bytes": 22360,
       "outcome": {
@@ -405,7 +405,7 @@
     {
       "name": "golden/containers-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2",
       "digest": "16278f3521abcdb61de7c34f572913ae",
       "bytes": 22360,
       "outcome": {
@@ -431,7 +431,7 @@
     {
       "name": "golden/containers-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2-nofp",
       "digest": "cc9c6ba8ebc6881ae754f044fc033a2a",
       "bytes": 22352,
       "outcome": {
@@ -457,7 +457,7 @@
     {
       "name": "golden/containers-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2-nofp",
       "digest": "cc9c6ba8ebc6881ae754f044fc033a2a",
       "bytes": 22352,
       "outcome": {
@@ -483,7 +483,7 @@
     {
       "name": "golden/containers-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2-pie",
       "digest": "7e009bf7947ac637cd78f30e4014a563",
       "bytes": 24256,
       "outcome": {
@@ -509,7 +509,7 @@
     {
       "name": "golden/containers-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/containers/containers-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/containers/containers-gcc-O2-pie",
       "digest": "7e009bf7947ac637cd78f30e4014a563",
       "bytes": 24256,
       "outcome": {
@@ -535,7 +535,7 @@
     {
       "name": "golden/data-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0",
       "digest": "92b99bdf28ad69cdfd2ac580c78746be",
       "bytes": 13536,
       "outcome": {
@@ -561,7 +561,7 @@
     {
       "name": "golden/data-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0",
       "digest": "92b99bdf28ad69cdfd2ac580c78746be",
       "bytes": 13536,
       "outcome": {
@@ -587,7 +587,7 @@
     {
       "name": "golden/data-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0-nofp",
       "digest": "d65508e1644356fcb8ce761f780ad242",
       "bytes": 13456,
       "outcome": {
@@ -613,7 +613,7 @@
     {
       "name": "golden/data-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0-nofp",
       "digest": "d65508e1644356fcb8ce761f780ad242",
       "bytes": 13456,
       "outcome": {
@@ -639,7 +639,7 @@
     {
       "name": "golden/data-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0-pie",
       "digest": "b46cd9013774a816219fda8b4ad2eb63",
       "bytes": 18712,
       "outcome": {
@@ -665,7 +665,7 @@
     {
       "name": "golden/data-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O0-pie",
       "digest": "b46cd9013774a816219fda8b4ad2eb63",
       "bytes": 18712,
       "outcome": {
@@ -691,7 +691,7 @@
     {
       "name": "golden/data-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O2",
       "digest": "500c426f7bb161348dc4939ae07268f2",
       "bytes": 15248,
       "outcome": {
@@ -717,7 +717,7 @@
     {
       "name": "golden/data-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O2",
       "digest": "500c426f7bb161348dc4939ae07268f2",
       "bytes": 15248,
       "outcome": {
@@ -743,7 +743,7 @@
     {
       "name": "golden/data-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O2-nofp",
       "digest": "ed56582892b42a0b98aea4c618e3401d",
       "bytes": 15152,
       "outcome": {
@@ -769,7 +769,7 @@
     {
       "name": "golden/data-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-clang-O2-nofp",
       "digest": "ed56582892b42a0b98aea4c618e3401d",
       "bytes": 15152,
       "outcome": {
@@ -795,7 +795,7 @@
     {
       "name": "golden/data-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O0",
       "digest": "05311dc83326cf01eaac1c1ec2051e9b",
       "bytes": 13704,
       "outcome": {
@@ -821,7 +821,7 @@
     {
       "name": "golden/data-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O0",
       "digest": "05311dc83326cf01eaac1c1ec2051e9b",
       "bytes": 13704,
       "outcome": {
@@ -847,7 +847,7 @@
     {
       "name": "golden/data-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O0-nofp",
       "digest": "ff014404c57afde058a9bb785a2dcc84",
       "bytes": 13624,
       "outcome": {
@@ -873,7 +873,7 @@
     {
       "name": "golden/data-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O0-nofp",
       "digest": "ff014404c57afde058a9bb785a2dcc84",
       "bytes": 13624,
       "outcome": {
@@ -899,7 +899,7 @@
     {
       "name": "golden/data-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2",
       "digest": "f75ba8823ef36ca3c5db906088f3b8b1",
       "bytes": 17120,
       "outcome": {
@@ -925,7 +925,7 @@
     {
       "name": "golden/data-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2",
       "digest": "f75ba8823ef36ca3c5db906088f3b8b1",
       "bytes": 17120,
       "outcome": {
@@ -951,7 +951,7 @@
     {
       "name": "golden/data-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2-nofp",
       "digest": "5c2b744c4f235d9a11863a330d6e7621",
       "bytes": 17080,
       "outcome": {
@@ -977,7 +977,7 @@
     {
       "name": "golden/data-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2-nofp",
       "digest": "5c2b744c4f235d9a11863a330d6e7621",
       "bytes": 17080,
       "outcome": {
@@ -1003,7 +1003,7 @@
     {
       "name": "golden/data-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2-pie",
       "digest": "21b103be97401fbc0edc98d2e3dca6d3",
       "bytes": 22664,
       "outcome": {
@@ -1029,7 +1029,7 @@
     {
       "name": "golden/data-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/data/data-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/data/data-gcc-O2-pie",
       "digest": "21b103be97401fbc0edc98d2e3dca6d3",
       "bytes": 22664,
       "outcome": {
@@ -1055,7 +1055,7 @@
     {
       "name": "golden/fork-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0",
       "digest": "3137e3167abcb5a7c056d170d88127b5",
       "bytes": 17760,
       "outcome": {
@@ -1081,7 +1081,7 @@
     {
       "name": "golden/fork-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0",
       "digest": "3137e3167abcb5a7c056d170d88127b5",
       "bytes": 17760,
       "outcome": {
@@ -1107,7 +1107,7 @@
     {
       "name": "golden/fork-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0-nofp",
       "digest": "c2d4649401d12f8435944d29369f2521",
       "bytes": 17544,
       "outcome": {
@@ -1133,7 +1133,7 @@
     {
       "name": "golden/fork-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0-nofp",
       "digest": "c2d4649401d12f8435944d29369f2521",
       "bytes": 17544,
       "outcome": {
@@ -1159,7 +1159,7 @@
     {
       "name": "golden/fork-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0-pie",
       "digest": "20bc0b3fae3c6cb171454c9301b2474a",
       "bytes": 22960,
       "outcome": {
@@ -1185,7 +1185,7 @@
     {
       "name": "golden/fork-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O0-pie",
       "digest": "20bc0b3fae3c6cb171454c9301b2474a",
       "bytes": 22960,
       "outcome": {
@@ -1211,7 +1211,7 @@
     {
       "name": "golden/fork-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O2",
       "digest": "51c464c6c731defc07562395f58ec4f8",
       "bytes": 20928,
       "outcome": {
@@ -1237,7 +1237,7 @@
     {
       "name": "golden/fork-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O2",
       "digest": "51c464c6c731defc07562395f58ec4f8",
       "bytes": 20928,
       "outcome": {
@@ -1263,7 +1263,7 @@
     {
       "name": "golden/fork-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O2-nofp",
       "digest": "9ded9bc0a23eb5316c84d12d9d8f268c",
       "bytes": 20624,
       "outcome": {
@@ -1289,7 +1289,7 @@
     {
       "name": "golden/fork-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-clang-O2-nofp",
       "digest": "9ded9bc0a23eb5316c84d12d9d8f268c",
       "bytes": 20624,
       "outcome": {
@@ -1315,7 +1315,7 @@
     {
       "name": "golden/fork-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O0",
       "digest": "280c13f1ee47381ea6a449dcf8f1c46c",
       "bytes": 18096,
       "outcome": {
@@ -1341,7 +1341,7 @@
     {
       "name": "golden/fork-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O0",
       "digest": "280c13f1ee47381ea6a449dcf8f1c46c",
       "bytes": 18096,
       "outcome": {
@@ -1367,7 +1367,7 @@
     {
       "name": "golden/fork-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O0-nofp",
       "digest": "aef1a1e57dcd969a881f6da6704c2443",
       "bytes": 17872,
       "outcome": {
@@ -1393,7 +1393,7 @@
     {
       "name": "golden/fork-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O0-nofp",
       "digest": "aef1a1e57dcd969a881f6da6704c2443",
       "bytes": 17872,
       "outcome": {
@@ -1419,7 +1419,7 @@
     {
       "name": "golden/fork-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2",
       "digest": "2e4c5270f20b03c7ad455ba3115faed5",
       "bytes": 24272,
       "outcome": {
@@ -1445,7 +1445,7 @@
     {
       "name": "golden/fork-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2",
       "digest": "2e4c5270f20b03c7ad455ba3115faed5",
       "bytes": 24272,
       "outcome": {
@@ -1471,7 +1471,7 @@
     {
       "name": "golden/fork-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2-nofp",
       "digest": "c3dd8cd5920c6b686e989b9f1c103622",
       "bytes": 24240,
       "outcome": {
@@ -1497,7 +1497,7 @@
     {
       "name": "golden/fork-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2-nofp",
       "digest": "c3dd8cd5920c6b686e989b9f1c103622",
       "bytes": 24240,
       "outcome": {
@@ -1523,7 +1523,7 @@
     {
       "name": "golden/fork-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2-pie",
       "digest": "2d2f432f9295fa9208a7495550fa23fb",
       "bytes": 29488,
       "outcome": {
@@ -1549,7 +1549,7 @@
     {
       "name": "golden/fork-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/fork/fork-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/fork/fork-gcc-O2-pie",
       "digest": "2d2f432f9295fa9208a7495550fa23fb",
       "bytes": 29488,
       "outcome": {
@@ -1575,7 +1575,7 @@
     {
       "name": "golden/frames-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0",
       "digest": "7cea63a09b45ce0e8c27c52b45be46de",
       "bytes": 15944,
       "outcome": {
@@ -1601,7 +1601,7 @@
     {
       "name": "golden/frames-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0",
       "digest": "7cea63a09b45ce0e8c27c52b45be46de",
       "bytes": 15944,
       "outcome": {
@@ -1627,7 +1627,7 @@
     {
       "name": "golden/frames-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0-nofp",
       "digest": "3863ee3b80daa20cbbc76faeb2695cda",
       "bytes": 15792,
       "outcome": {
@@ -1653,7 +1653,7 @@
     {
       "name": "golden/frames-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0-nofp",
       "digest": "3863ee3b80daa20cbbc76faeb2695cda",
       "bytes": 15792,
       "outcome": {
@@ -1679,7 +1679,7 @@
     {
       "name": "golden/frames-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0-pie",
       "digest": "2b1fa9bcb8e2901dbd8af2d3ce928b87",
       "bytes": 21256,
       "outcome": {
@@ -1705,7 +1705,7 @@
     {
       "name": "golden/frames-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O0-pie",
       "digest": "2b1fa9bcb8e2901dbd8af2d3ce928b87",
       "bytes": 21256,
       "outcome": {
@@ -1731,7 +1731,7 @@
     {
       "name": "golden/frames-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O2",
       "digest": "b84517c7bca59981b31095d4a056e48b",
       "bytes": 18272,
       "outcome": {
@@ -1757,7 +1757,7 @@
     {
       "name": "golden/frames-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O2",
       "digest": "b84517c7bca59981b31095d4a056e48b",
       "bytes": 18272,
       "outcome": {
@@ -1783,7 +1783,7 @@
     {
       "name": "golden/frames-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O2-nofp",
       "digest": "e34c3b3e638aac00d0970bae71c8e707",
       "bytes": 18088,
       "outcome": {
@@ -1809,7 +1809,7 @@
     {
       "name": "golden/frames-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-clang-O2-nofp",
       "digest": "e34c3b3e638aac00d0970bae71c8e707",
       "bytes": 18088,
       "outcome": {
@@ -1835,7 +1835,7 @@
     {
       "name": "golden/frames-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O0",
       "digest": "770ee325d6339524bae580aa24c65305",
       "bytes": 16248,
       "outcome": {
@@ -1861,7 +1861,7 @@
     {
       "name": "golden/frames-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O0",
       "digest": "770ee325d6339524bae580aa24c65305",
       "bytes": 16248,
       "outcome": {
@@ -1887,7 +1887,7 @@
     {
       "name": "golden/frames-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O0-nofp",
       "digest": "0fcd77969d20513a8cc83fa0d9521d7b",
       "bytes": 16096,
       "outcome": {
@@ -1913,7 +1913,7 @@
     {
       "name": "golden/frames-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O0-nofp",
       "digest": "0fcd77969d20513a8cc83fa0d9521d7b",
       "bytes": 16096,
       "outcome": {
@@ -1939,7 +1939,7 @@
     {
       "name": "golden/frames-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2",
       "digest": "0593d226c4e562b884948c3ad5b26eca",
       "bytes": 20896,
       "outcome": {
@@ -1965,7 +1965,7 @@
     {
       "name": "golden/frames-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2",
       "digest": "0593d226c4e562b884948c3ad5b26eca",
       "bytes": 20896,
       "outcome": {
@@ -1991,7 +1991,7 @@
     {
       "name": "golden/frames-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2-nofp",
       "digest": "4d61c12efe9f38f42f0186bd675929c8",
       "bytes": 20880,
       "outcome": {
@@ -2017,7 +2017,7 @@
     {
       "name": "golden/frames-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2-nofp",
       "digest": "4d61c12efe9f38f42f0186bd675929c8",
       "bytes": 20880,
       "outcome": {
@@ -2043,7 +2043,7 @@
     {
       "name": "golden/frames-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2-pie",
       "digest": "d1fa37837c94db6181a4b3be61a7f6dd",
       "bytes": 26320,
       "outcome": {
@@ -2069,7 +2069,7 @@
     {
       "name": "golden/frames-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/frames/frames-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/frames/frames-gcc-O2-pie",
       "digest": "d1fa37837c94db6181a4b3be61a7f6dd",
       "bytes": 26320,
       "outcome": {
@@ -2095,7 +2095,7 @@
     {
       "name": "golden/racing-exit-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0",
       "digest": "8e9e3b390421bb241f2a6e6e715bf63b",
       "bytes": 15456,
       "outcome": {
@@ -2121,7 +2121,7 @@
     {
       "name": "golden/racing-exit-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0",
       "digest": "8e9e3b390421bb241f2a6e6e715bf63b",
       "bytes": 15456,
       "outcome": {
@@ -2147,7 +2147,7 @@
     {
       "name": "golden/racing-exit-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0-nofp",
       "digest": "9899b0b637af9f339c7a331f553271b9",
       "bytes": 15328,
       "outcome": {
@@ -2173,7 +2173,7 @@
     {
       "name": "golden/racing-exit-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0-nofp",
       "digest": "9899b0b637af9f339c7a331f553271b9",
       "bytes": 15328,
       "outcome": {
@@ -2199,7 +2199,7 @@
     {
       "name": "golden/racing-exit-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0-pie",
       "digest": "fae7a091ac53b54019b1a5734136d791",
       "bytes": 20624,
       "outcome": {
@@ -2225,7 +2225,7 @@
     {
       "name": "golden/racing-exit-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O0-pie",
       "digest": "fae7a091ac53b54019b1a5734136d791",
       "bytes": 20624,
       "outcome": {
@@ -2251,7 +2251,7 @@
     {
       "name": "golden/racing-exit-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O2",
       "digest": "d013493f7848717b063133d38ebf6859",
       "bytes": 17432,
       "outcome": {
@@ -2277,7 +2277,7 @@
     {
       "name": "golden/racing-exit-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O2",
       "digest": "d013493f7848717b063133d38ebf6859",
       "bytes": 17432,
       "outcome": {
@@ -2303,7 +2303,7 @@
     {
       "name": "golden/racing-exit-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O2-nofp",
       "digest": "7665186abc4ccd69939ee6c73de25875",
       "bytes": 17248,
       "outcome": {
@@ -2329,7 +2329,7 @@
     {
       "name": "golden/racing-exit-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-clang-O2-nofp",
       "digest": "7665186abc4ccd69939ee6c73de25875",
       "bytes": 17248,
       "outcome": {
@@ -2355,7 +2355,7 @@
     {
       "name": "golden/racing-exit-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O0",
       "digest": "e01605a70d6568a969f61fb7f1a8cda0",
       "bytes": 15768,
       "outcome": {
@@ -2381,7 +2381,7 @@
     {
       "name": "golden/racing-exit-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O0",
       "digest": "e01605a70d6568a969f61fb7f1a8cda0",
       "bytes": 15768,
       "outcome": {
@@ -2407,7 +2407,7 @@
     {
       "name": "golden/racing-exit-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O0-nofp",
       "digest": "007f7e0a3fc702b2497fff1679f7095e",
       "bytes": 15616,
       "outcome": {
@@ -2433,7 +2433,7 @@
     {
       "name": "golden/racing-exit-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O0-nofp",
       "digest": "007f7e0a3fc702b2497fff1679f7095e",
       "bytes": 15616,
       "outcome": {
@@ -2459,7 +2459,7 @@
     {
       "name": "golden/racing-exit-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2",
       "digest": "ad6c27491f1120c14f7e212de75b60e6",
       "bytes": 19872,
       "outcome": {
@@ -2485,7 +2485,7 @@
     {
       "name": "golden/racing-exit-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2",
       "digest": "ad6c27491f1120c14f7e212de75b60e6",
       "bytes": 19872,
       "outcome": {
@@ -2511,7 +2511,7 @@
     {
       "name": "golden/racing-exit-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2-nofp",
       "digest": "cd5d4f0d6996d42833687d7d68dd7c41",
       "bytes": 19840,
       "outcome": {
@@ -2537,7 +2537,7 @@
     {
       "name": "golden/racing-exit-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2-nofp",
       "digest": "cd5d4f0d6996d42833687d7d68dd7c41",
       "bytes": 19840,
       "outcome": {
@@ -2563,7 +2563,7 @@
     {
       "name": "golden/racing-exit-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2-pie",
       "digest": "dab15e5ef357e24b50f537cd3ee9ae7e",
       "bytes": 25240,
       "outcome": {
@@ -2589,7 +2589,7 @@
     {
       "name": "golden/racing-exit-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/racing-exit/racing-exit-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/racing-exit/racing-exit-gcc-O2-pie",
       "digest": "dab15e5ef357e24b50f537cd3ee9ae7e",
       "bytes": 25240,
       "outcome": {
@@ -2615,7 +2615,7 @@
     {
       "name": "golden/stores-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0",
       "digest": "1de09a515d9c19aac6f872fe1f03e026",
       "bytes": 16632,
       "outcome": {
@@ -2641,7 +2641,7 @@
     {
       "name": "golden/stores-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0",
       "digest": "1de09a515d9c19aac6f872fe1f03e026",
       "bytes": 16632,
       "outcome": {
@@ -2667,7 +2667,7 @@
     {
       "name": "golden/stores-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0-nofp",
       "digest": "61ff7a7bd813b2d21c3a69a4ae7112cf",
       "bytes": 16440,
       "outcome": {
@@ -2693,7 +2693,7 @@
     {
       "name": "golden/stores-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0-nofp",
       "digest": "61ff7a7bd813b2d21c3a69a4ae7112cf",
       "bytes": 16440,
       "outcome": {
@@ -2719,7 +2719,7 @@
     {
       "name": "golden/stores-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0-pie",
       "digest": "def5a0befcda540fae85188237ebcb73",
       "bytes": 21808,
       "outcome": {
@@ -2745,7 +2745,7 @@
     {
       "name": "golden/stores-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O0-pie",
       "digest": "def5a0befcda540fae85188237ebcb73",
       "bytes": 21808,
       "outcome": {
@@ -2771,7 +2771,7 @@
     {
       "name": "golden/stores-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O2",
       "digest": "b48fe541cfb049784e4e22f29f30d357",
       "bytes": 18928,
       "outcome": {
@@ -2797,7 +2797,7 @@
     {
       "name": "golden/stores-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O2",
       "digest": "b48fe541cfb049784e4e22f29f30d357",
       "bytes": 18928,
       "outcome": {
@@ -2823,7 +2823,7 @@
     {
       "name": "golden/stores-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O2-nofp",
       "digest": "2de1d73bbdd822778def2e5dda2290f5",
       "bytes": 18744,
       "outcome": {
@@ -2849,7 +2849,7 @@
     {
       "name": "golden/stores-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-clang-O2-nofp",
       "digest": "2de1d73bbdd822778def2e5dda2290f5",
       "bytes": 18744,
       "outcome": {
@@ -2875,7 +2875,7 @@
     {
       "name": "golden/stores-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O0",
       "digest": "02a7d2170cb95ef4c4dd04e2a0dde3c1",
       "bytes": 20224,
       "outcome": {
@@ -2901,7 +2901,7 @@
     {
       "name": "golden/stores-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O0",
       "digest": "02a7d2170cb95ef4c4dd04e2a0dde3c1",
       "bytes": 20224,
       "outcome": {
@@ -2927,7 +2927,7 @@
     {
       "name": "golden/stores-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O0-nofp",
       "digest": "4665c3068981753bb93a3565510c1a97",
       "bytes": 20224,
       "outcome": {
@@ -2953,7 +2953,7 @@
     {
       "name": "golden/stores-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O0-nofp",
       "digest": "4665c3068981753bb93a3565510c1a97",
       "bytes": 20224,
       "outcome": {
@@ -2979,7 +2979,7 @@
     {
       "name": "golden/stores-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2",
       "digest": "7f60821c3c29faa2d1ff2a54764d882e",
       "bytes": 25656,
       "outcome": {
@@ -3005,7 +3005,7 @@
     {
       "name": "golden/stores-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2",
       "digest": "7f60821c3c29faa2d1ff2a54764d882e",
       "bytes": 25656,
       "outcome": {
@@ -3031,7 +3031,7 @@
     {
       "name": "golden/stores-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2-nofp",
       "digest": "42752671b806419ec89733ee1426ae80",
       "bytes": 25616,
       "outcome": {
@@ -3057,7 +3057,7 @@
     {
       "name": "golden/stores-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2-nofp",
       "digest": "42752671b806419ec89733ee1426ae80",
       "bytes": 25616,
       "outcome": {
@@ -3083,7 +3083,7 @@
     {
       "name": "golden/stores-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2-pie",
       "digest": "e006b4cb6f2661b6ed3f1cf1c82e1f6c",
       "bytes": 27432,
       "outcome": {
@@ -3109,7 +3109,7 @@
     {
       "name": "golden/stores-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/stores/stores-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/stores/stores-gcc-O2-pie",
       "digest": "e006b4cb6f2661b6ed3f1cf1c82e1f6c",
       "bytes": 27432,
       "outcome": {
@@ -3135,7 +3135,7 @@
     {
       "name": "golden/straight-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0",
       "digest": "7336b10e01ea9d2a9d4fc1d7f654069e",
       "bytes": 13456,
       "outcome": {
@@ -3161,7 +3161,7 @@
     {
       "name": "golden/straight-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0",
       "digest": "7336b10e01ea9d2a9d4fc1d7f654069e",
       "bytes": 13456,
       "outcome": {
@@ -3187,7 +3187,7 @@
     {
       "name": "golden/straight-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0-nofp",
       "digest": "a0fbd31cb3d24cc0055438384025376b",
       "bytes": 13352,
       "outcome": {
@@ -3213,7 +3213,7 @@
     {
       "name": "golden/straight-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0-nofp",
       "digest": "a0fbd31cb3d24cc0055438384025376b",
       "bytes": 13352,
       "outcome": {
@@ -3239,7 +3239,7 @@
     {
       "name": "golden/straight-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0-pie",
       "digest": "ee27188bcf9eea3c344c8f71a5721614",
       "bytes": 18640,
       "outcome": {
@@ -3265,7 +3265,7 @@
     {
       "name": "golden/straight-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O0-pie",
       "digest": "ee27188bcf9eea3c344c8f71a5721614",
       "bytes": 18640,
       "outcome": {
@@ -3291,7 +3291,7 @@
     {
       "name": "golden/straight-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O2",
       "digest": "036b91b835fa5bf534fdd2ac7468b6dc",
       "bytes": 15064,
       "outcome": {
@@ -3317,7 +3317,7 @@
     {
       "name": "golden/straight-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O2",
       "digest": "036b91b835fa5bf534fdd2ac7468b6dc",
       "bytes": 15064,
       "outcome": {
@@ -3343,7 +3343,7 @@
     {
       "name": "golden/straight-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O2-nofp",
       "digest": "9923f51d02db5e4fd5662623f3d0e498",
       "bytes": 14944,
       "outcome": {
@@ -3369,7 +3369,7 @@
     {
       "name": "golden/straight-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-clang-O2-nofp",
       "digest": "9923f51d02db5e4fd5662623f3d0e498",
       "bytes": 14944,
       "outcome": {
@@ -3395,7 +3395,7 @@
     {
       "name": "golden/straight-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O0",
       "digest": "ec02964512a99827517067ae4c289090",
       "bytes": 13568,
       "outcome": {
@@ -3421,7 +3421,7 @@
     {
       "name": "golden/straight-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O0",
       "digest": "ec02964512a99827517067ae4c289090",
       "bytes": 13568,
       "outcome": {
@@ -3447,7 +3447,7 @@
     {
       "name": "golden/straight-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O0-nofp",
       "digest": "8c176c092098c35b9848cf4d14834938",
       "bytes": 13480,
       "outcome": {
@@ -3473,7 +3473,7 @@
     {
       "name": "golden/straight-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O0-nofp",
       "digest": "8c176c092098c35b9848cf4d14834938",
       "bytes": 13480,
       "outcome": {
@@ -3499,7 +3499,7 @@
     {
       "name": "golden/straight-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2",
       "digest": "7aeb7d093ce1b7084a5b23990dac46c7",
       "bytes": 17136,
       "outcome": {
@@ -3525,7 +3525,7 @@
     {
       "name": "golden/straight-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2",
       "digest": "7aeb7d093ce1b7084a5b23990dac46c7",
       "bytes": 17136,
       "outcome": {
@@ -3551,7 +3551,7 @@
     {
       "name": "golden/straight-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2-nofp",
       "digest": "42fbd5eb6634beea2c08e6be542c75e6",
       "bytes": 17104,
       "outcome": {
@@ -3577,7 +3577,7 @@
     {
       "name": "golden/straight-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2-nofp",
       "digest": "42fbd5eb6634beea2c08e6be542c75e6",
       "bytes": 17104,
       "outcome": {
@@ -3603,7 +3603,7 @@
     {
       "name": "golden/straight-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2-pie",
       "digest": "7224f522cb8a5556c6bc6575da8690ff",
       "bytes": 22640,
       "outcome": {
@@ -3629,7 +3629,7 @@
     {
       "name": "golden/straight-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/straight/straight-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/straight/straight-gcc-O2-pie",
       "digest": "7224f522cb8a5556c6bc6575da8690ff",
       "bytes": 22640,
       "outcome": {
@@ -3655,7 +3655,7 @@
     {
       "name": "golden/threads-clang-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0",
       "digest": "2f31a1ca59debd9a02aec860fa99f3a1",
       "bytes": 16000,
       "outcome": {
@@ -3681,7 +3681,7 @@
     {
       "name": "golden/threads-clang-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0",
       "digest": "2f31a1ca59debd9a02aec860fa99f3a1",
       "bytes": 16000,
       "outcome": {
@@ -3707,7 +3707,7 @@
     {
       "name": "golden/threads-clang-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0-nofp",
       "digest": "f5992bbeb690521e41eaba669009145c",
       "bytes": 15832,
       "outcome": {
@@ -3733,7 +3733,7 @@
     {
       "name": "golden/threads-clang-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0-nofp",
       "digest": "f5992bbeb690521e41eaba669009145c",
       "bytes": 15832,
       "outcome": {
@@ -3759,7 +3759,7 @@
     {
       "name": "golden/threads-clang-O0-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0-pie",
       "digest": "801fedb10bcd7dacbf43ba1437f3e669",
       "bytes": 21192,
       "outcome": {
@@ -3785,7 +3785,7 @@
     {
       "name": "golden/threads-clang-O0-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O0-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O0-pie",
       "digest": "801fedb10bcd7dacbf43ba1437f3e669",
       "bytes": 21192,
       "outcome": {
@@ -3811,7 +3811,7 @@
     {
       "name": "golden/threads-clang-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O2",
       "digest": "9023b9728b0efd1480c82818c1e3c6a1",
       "bytes": 18592,
       "outcome": {
@@ -3837,7 +3837,7 @@
     {
       "name": "golden/threads-clang-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O2",
       "digest": "9023b9728b0efd1480c82818c1e3c6a1",
       "bytes": 18592,
       "outcome": {
@@ -3863,7 +3863,7 @@
     {
       "name": "golden/threads-clang-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O2-nofp",
       "digest": "5666a93d82ac650ef09ab6fa23be3ec9",
       "bytes": 18432,
       "outcome": {
@@ -3889,7 +3889,7 @@
     {
       "name": "golden/threads-clang-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-clang-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-clang-O2-nofp",
       "digest": "5666a93d82ac650ef09ab6fa23be3ec9",
       "bytes": 18432,
       "outcome": {
@@ -3915,7 +3915,7 @@
     {
       "name": "golden/threads-gcc-O0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O0",
       "digest": "277133285f36fc3b14afc835fab0e41f",
       "bytes": 16376,
       "outcome": {
@@ -3941,7 +3941,7 @@
     {
       "name": "golden/threads-gcc-O0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O0",
       "digest": "277133285f36fc3b14afc835fab0e41f",
       "bytes": 16376,
       "outcome": {
@@ -3967,7 +3967,7 @@
     {
       "name": "golden/threads-gcc-O0-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O0-nofp",
       "digest": "1e80164630d59f5c355d97b514791162",
       "bytes": 16224,
       "outcome": {
@@ -3993,7 +3993,7 @@
     {
       "name": "golden/threads-gcc-O0-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O0-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O0-nofp",
       "digest": "1e80164630d59f5c355d97b514791162",
       "bytes": 16224,
       "outcome": {
@@ -4019,7 +4019,7 @@
     {
       "name": "golden/threads-gcc-O2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2",
       "digest": "9f429a388bc4cf689d295e4655dd3a03",
       "bytes": 21448,
       "outcome": {
@@ -4045,7 +4045,7 @@
     {
       "name": "golden/threads-gcc-O2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2",
       "digest": "9f429a388bc4cf689d295e4655dd3a03",
       "bytes": 21448,
       "outcome": {
@@ -4071,7 +4071,7 @@
     {
       "name": "golden/threads-gcc-O2-nofp",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2-nofp",
       "digest": "690a07bf5a1bd3aa93829c3f3c72318d",
       "bytes": 21400,
       "outcome": {
@@ -4097,7 +4097,7 @@
     {
       "name": "golden/threads-gcc-O2-nofp",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-nofp",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2-nofp",
       "digest": "690a07bf5a1bd3aa93829c3f3c72318d",
       "bytes": 21400,
       "outcome": {
@@ -4123,7 +4123,7 @@
     {
       "name": "golden/threads-gcc-O2-pie",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2-pie",
       "digest": "1c45240b19b349674f9f44431d53386d",
       "bytes": 26872,
       "outcome": {
@@ -4149,7 +4149,7 @@
     {
       "name": "golden/threads-gcc-O2-pie",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/golden/threads/threads-gcc-O2-pie",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/golden/threads/threads-gcc-O2-pie",
       "digest": "1c45240b19b349674f9f44431d53386d",
       "bytes": 26872,
       "outcome": {
@@ -4175,7 +4175,7 @@
     {
       "name": "containers-cpp-gcc-o2",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-cpp-gcc-o2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-cpp-gcc-o2",
       "digest": "c0fce2463be86d48c43bc0199a0bbc28",
       "bytes": 2640848,
       "outcome": {
@@ -4201,7 +4201,7 @@
     {
       "name": "containers-cpp-gcc-o2",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-cpp-gcc-o2",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-cpp-gcc-o2",
       "digest": "c0fce2463be86d48c43bc0199a0bbc28",
       "bytes": 2640848,
       "outcome": {
@@ -4227,7 +4227,7 @@
     {
       "name": "containers-zig-self-hosted",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-zig-self-hosted",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-zig-self-hosted",
       "digest": "702db15a07ff0f957d677ab4a2943e1a",
       "bytes": 12833421,
       "outcome": {
@@ -4253,7 +4253,7 @@
     {
       "name": "containers-zig-self-hosted",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-zig-self-hosted",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-zig-self-hosted",
       "digest": "702db15a07ff0f957d677ab4a2943e1a",
       "bytes": 12833421,
       "outcome": {
@@ -4279,7 +4279,7 @@
     {
       "name": "containers-rust-o0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-rust-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-rust-o0",
       "digest": "78978c585e0cd6a19d9bd7022710f30d",
       "bytes": 7559152,
       "outcome": {
@@ -4305,7 +4305,7 @@
     {
       "name": "containers-rust-o0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/containers-rust-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/containers-rust-o0",
       "digest": "78978c585e0cd6a19d9bd7022710f30d",
       "bytes": 7559152,
       "outcome": {
@@ -4331,7 +4331,7 @@
     {
       "name": "server-go-o0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/server-go-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/server-go-o0",
       "digest": "0432c20fd7cf813fce92795671aac7d2",
       "bytes": 11193862,
       "outcome": {
@@ -4357,7 +4357,7 @@
     {
       "name": "server-go-o0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/server-go-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/server-go-o0",
       "digest": "0432c20fd7cf813fce92795671aac7d2",
       "bytes": 11193862,
       "outcome": {
@@ -4383,7 +4383,7 @@
     {
       "name": "tokio-server-o0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-server-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/tokio-server-o0",
       "digest": "b8c87e479365945bdec5eccdbbe747a4",
       "bytes": 14979136,
       "outcome": {
@@ -4409,7 +4409,7 @@
     {
       "name": "tokio-server-o0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-server-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/tokio-server-o0",
       "digest": "b8c87e479365945bdec5eccdbbe747a4",
       "bytes": 14979136,
       "outcome": {
@@ -4435,7 +4435,7 @@
     {
       "name": "tokio-values-o0",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-values-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/tokio-values-o0",
       "digest": "1b14bc29838b6bd3772994f5358b90ce",
       "bytes": 27708624,
       "outcome": {
@@ -4461,7 +4461,7 @@
     {
       "name": "tokio-values-o0",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/build/test-programs/tokio-values-o0",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/build/test-programs/tokio-values-o0",
       "digest": "1b14bc29838b6bd3772994f5358b90ce",
       "bytes": 27708624,
       "outcome": {
@@ -4537,9 +4537,9 @@
       "callgrind_instructions": null
     },
     {
-      "name": "uscope-large",
+      "name": "microscope-large",
       "jobs": 1,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/target/bench/large/uscope",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/target/bench/large/microscope",
       "digest": "2ab7f6f5ca1013bbe8a851aa62781a95",
       "bytes": 454912120,
       "outcome": {
@@ -4563,9 +4563,9 @@
       "callgrind_instructions": null
     },
     {
-      "name": "uscope-large",
+      "name": "microscope-large",
       "jobs": 16,
-      "path": "/home/jcalabro/go/src/github.com/jcalabro/uscope/target/bench/large/uscope",
+      "path": "/home/jcalabro/go/src/github.com/microscope-dev/microscope/target/bench/large/microscope",
       "digest": "2ab7f6f5ca1013bbe8a851aa62781a95",
       "bytes": 454912120,
       "outcome": {

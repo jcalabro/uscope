@@ -1,6 +1,6 @@
 # Diagnosing failures
 
-Start with the evidence uscope already records. A debugger failure often
+Start with the evidence microscope already records. A debugger failure often
 depends on the order of requests, ptrace calls, wait statuses, and events; an
 extra print can change that order.
 
@@ -46,11 +46,11 @@ suite. DAP failures can have both a scenario log and an adapter log. Read both
 from the beginning of the last successful operation through the first broken
 invariant.
 
-Ordinary uscope runs keep recent files under `target/flight-recorder/runs` and
-update `latest.log`. Choose a path explicitly with:
+Ordinary microscope runs keep recent files under `target/flight-recorder/runs`
+and update `latest.log`. Choose a path explicitly with:
 
 ```sh
-USCOPE_FLIGHT_RECORDING=/tmp/uscope.log just run PROGRAM
+MICROSCOPE_FLIGHT_RECORDING=/tmp/microscope.log just run PROGRAM
 ```
 
 An empty value disables recording. Release builds compile it out completely.
@@ -113,7 +113,7 @@ name. Broad cleanup can hide the lifecycle bug and kill unrelated developer
 programs.
 
 For attach, survival may be correct; verify that the process is detached and
-running or stopped according to the public contract. For launch, uscope owns
+running or stopped according to the public contract. For launch, microscope owns
 the child and must reap it.
 
 ## Intermittent run-control failures
@@ -168,9 +168,9 @@ evaluation.
 - A wrong runtime address points to image/virtual conversion or binding.
 - A short stack points to CFI, register state, memory, or a runtime transition.
 
-Use `--no-cache` to compare a fresh load. Use `uscope-tools` dump commands and
-timing reports through existing Just recipes rather than writing ad hoc object
-parsers.
+Use `--no-cache` to compare a fresh load. Use `microscope-tools` dump commands
+and timing reports through existing Just recipes rather than writing ad hoc
+object parsers.
 
 Keep the original compiler, optimization, linker, and fixture variant in the
 reproduction. Producer differences are often the fact under investigation.
@@ -187,8 +187,8 @@ Determine the phase:
 - visualizer failures need serialized inputs, worker error, and picture
   validation.
 
-`uscope views check` and `uscope views explain` expose binding without an
-interactive session. Executable documentation tests provide small fake worlds
+`microscope views check` and `microscope views explain` expose binding without
+an interactive session. Executable documentation tests provide small fake worlds
 for language semantics.
 
 ## Web failures

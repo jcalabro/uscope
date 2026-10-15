@@ -3,7 +3,7 @@
 
 use std::process::Stdio;
 
-use uscope::{BreakpointSpec, CodeRole, LaunchOptions, LineNumber, StepKind, StopReason};
+use microscope::{BreakpointSpec, CodeRole, LaunchOptions, LineNumber, StepKind, StopReason};
 
 use crate::support::Scenario;
 

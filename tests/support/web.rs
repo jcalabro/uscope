@@ -1,9 +1,9 @@
-//! Drives the real `uscope web` as browsers do: a join link's token traded
+//! Drives the real `microscope web` as browsers do: a join link's token traded
 //! for a cookie at `/api/login`, then WebSocket clients sending the page's
 //! requests.
 //!
 //! Every message is kept in a transcript printed when a test fails. With
-//! `USCOPE_WEB_TRANSCRIPTS=DIR`, each test also writes its traffic to
+//! `MICROSCOPE_WEB_TRANSCRIPTS=DIR`, each test also writes its traffic to
 //! `DIR/<test>.jsonl`, which the page's tests replay.
 
 #![allow(dead_code, reason = "each test uses a subset of the harness")]
@@ -31,7 +31,7 @@ pub const DEADLINE: Duration = Duration::from_secs(10);
 
 type Transcript = Arc<Mutex<Vec<String>>>;
 
-/// A running `uscope web`, stopped when dropped.
+/// A running `microscope web`, stopped when dropped.
 pub struct Web {
     name: String,
     child: Option<Child>,
@@ -52,9 +52,9 @@ pub struct Web {
 }
 
 impl Web {
-    /// Starts `uscope web` with `arguments` on a free port.
+    /// Starts `microscope web` with `arguments` on a free port.
     pub fn start(name: &str, arguments: &[&str]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
         command
             .args(["web", "--port", "0"])
             // Names in presence and notices, and so in transcripts.
@@ -64,7 +64,7 @@ impl Web {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let recording = flight_recordings::watch_adapter(&mut command);
-        let mut child = command.spawn().expect("start uscope web");
+        let mut child = command.spawn().expect("start microscope web");
         let started = Instant::now();
         let transcript = Transcript::default();
         let stderr = child.stderr.take().expect("stderr");
@@ -88,9 +88,12 @@ impl Web {
                     .read_line(&mut printed)
                     .expect("read the server's output")
                     > 0,
-                "uscope web exited before printing its link"
+                "microscope web exited before printing its link"
             );
-            if let Some(address) = printed.trim().strip_prefix("uscope web: serving http://") {
+            if let Some(address) = printed
+                .trim()
+                .strip_prefix("microscope web: serving http://")
+            {
                 serving = Some(address.to_owned());
             }
 
@@ -306,7 +309,7 @@ impl Web {
                 return status;
             }
 
-            assert!(Instant::now() < deadline, "uscope web did not exit");
+            assert!(Instant::now() < deadline, "microscope web did not exit");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -604,9 +607,9 @@ impl Client {
     }
 
     /// Writes this client's traffic for the page's replay tests when
-    /// `USCOPE_WEB_TRANSCRIPTS` names a directory.
+    /// `MICROSCOPE_WEB_TRANSCRIPTS` names a directory.
     pub fn save_traffic(&self, name: &str) {
-        let Some(directory) = std::env::var_os("USCOPE_WEB_TRANSCRIPTS") else {
+        let Some(directory) = std::env::var_os("MICROSCOPE_WEB_TRANSCRIPTS") else {
             return;
         };
 

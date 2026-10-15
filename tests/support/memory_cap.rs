@@ -1,10 +1,10 @@
 //! Caps the live heap of a test process, so that a test allocating without
 //! bound aborts before it and its concurrent siblings fill the machine's
 //! memory. Past the cap an allocation fails, which aborts the process after
-//! this module names the cap. Beneath the cap, uscope's counting allocator
+//! this module names the cap. Beneath the cap, microscope's counting allocator
 //! counts what each thread allocates, and what every thread does while a
 //! test measures totals, so a test can measure work that runs on threads of
-//! its own. Blocks come from mimalloc, as they do in uscope itself, which
+//! its own. Blocks come from mimalloc, as they do in microscope itself, which
 //! reads debug information far faster with it than with the C library's
 //! allocator. Under Miri, which cannot run mimalloc's C code, a process keeps
 //! Rust's default allocator, which Miri serves itself and so checks every
@@ -19,13 +19,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mimalloc::MiMalloc;
 
-use uscope::timings::alloc::Counting;
+use microscope::timings::alloc::Counting;
 
 #[allow(
     unused_imports,
     reason = "only some test processes measure their allocations"
 )]
-pub use uscope::timings::alloc::{Allocated, start_totals, stop_totals, totals};
+pub use microscope::timings::alloc::{Allocated, start_totals, stop_totals, totals};
 
 /// The most live heap one test process may hold, several times the heaviest
 /// test's.
@@ -37,7 +37,7 @@ const CAP_BYTES: usize = 1 << 30;
     reason = "only some test processes measure their allocations"
 )]
 pub fn allocated() -> Allocated {
-    uscope::timings::alloc::thread_allocated()
+    microscope::timings::alloc::thread_allocated()
 }
 
 struct CappedAllocator {

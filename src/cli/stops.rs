@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::Result;
-use uscope::{
+use microscope::{
     ExecutionContext, InferiorState, StackFrameId, StateSnapshot, StopContext, StopId, StopReason,
     ThreadActivity, ThreadState, VirtualAddress,
 };
@@ -403,14 +403,14 @@ impl Cli {
     async fn source_section(&self, at_stop: bool) -> Result<String> {
         match self.source_context().await {
             Ok(context) => Ok(self.source_listing(&context, !at_stop).await),
-            Err(uscope::Error::SourceLocationUnavailable) if at_stop => Ok(String::new()),
+            Err(microscope::Error::SourceLocationUnavailable) if at_stop => Ok(String::new()),
             Err(error) => Err(error.into()),
         }
     }
 
     fn locals_section(
         &self,
-        variables: &uscope::VariableSnapshot,
+        variables: &microscope::VariableSnapshot,
         activation: Option<&Activation>,
     ) -> String {
         value::variables_marked(variables, self.renderers.stdout, &mut |name, line| {
@@ -516,7 +516,7 @@ impl Cli {
         let count = self.settings.config.stop.disassembly_instructions;
         let before = count / 2;
         let disassembly = self
-            .disassemble_query(uscope::DisassemblyRange::Window {
+            .disassemble_query(microscope::DisassemblyRange::Window {
                 address: marked,
                 before,
                 after: count - before,
@@ -542,7 +542,7 @@ impl Cli {
             anyhow::bail!("display takes an expression; `display` alone lists them");
         }
 
-        uscope::Expression::parse(expression)
+        microscope::Expression::parse(expression)
             .map_err(|error| anyhow::anyhow!(format::expression_error(expression, &error)))?;
         let display = self
             .displays

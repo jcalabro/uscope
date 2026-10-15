@@ -1,7 +1,7 @@
 //! Type identities: what a type is, whatever a producer named it.
 
 use super::*;
-use uscope::{
+use microscope::{
     ArgumentOrigin, GoKind, IntegerValue, SliceWords, SourceLanguage, TypeArgument, TypeIdentity,
     TypeInfo, TypeKind, TypeReference,
 };
@@ -89,7 +89,7 @@ fn named<'a>(image: &'a ModuleImage, name: &str) -> &'a TypeInfo {
     image
         .types()
         .find_map(|node| match node {
-            uscope::TypeNode::Resolved(info) if info.name.as_ref() == name => Some(info),
+            microscope::TypeNode::Resolved(info) if info.name.as_ref() == name => Some(info),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no type is named {name}"))
@@ -351,7 +351,7 @@ async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
         assert_eq!(text_of(&variables.variables, name), text, "{name}");
     }
 
-    let full = inspect_text(&scenario, uscope::InspectionLimits::default()).await;
+    let full = inspect_text(&scenario, microscope::InspectionLimits::default()).await;
     let VariableState::Available { text, .. } = &full.state else {
         panic!("{full:?}");
     };
@@ -359,15 +359,15 @@ async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
     assert_eq!(text.as_deref().cloned(), Some(complete("hello")));
 
     // Three bytes short of the whole text.
-    let limits = uscope::InspectionLimits {
+    let limits = microscope::InspectionLimits {
         memory_bytes: full.usage.memory_bytes - 3,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let tight = inspect_text(&scenario, limits).await;
     assert_eq!(
         tight.completion,
-        uscope::InspectionCompletion::Complete,
+        microscope::InspectionCompletion::Complete,
         "{tight:?}"
     );
     let VariableState::Available {
@@ -381,10 +381,10 @@ async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
     assert!(
         matches!(
             text.completion,
-            uscope::TextCompletion::Limited {
+            microscope::TextCompletion::Limited {
                 length: Some(5),
-                exhaustion: uscope::InspectionExhaustion {
-                    resource: uscope::InspectionLimit::MemoryBytes,
+                exhaustion: microscope::InspectionExhaustion {
+                    resource: microscope::InspectionLimit::MemoryBytes,
                     ..
                 },
             }
@@ -414,13 +414,13 @@ async fn size_of(scenario: &Scenario, text: &str) -> i128 {
         .evaluate(&parsed_value_expression(text))
         .await
         .unwrap_or_else(|error| panic!("{text}: {error}"));
-    let uscope::Evaluation::Value { value, .. } = evaluation else {
+    let microscope::Evaluation::Value { value, .. } = evaluation else {
         panic!("{text} is not a value: {evaluation:?}");
     };
 
     match available_value(&value.state) {
-        uscope::VariableValue::Scalar(ScalarValue::Signed(size)) => *size,
-        uscope::VariableValue::Scalar(ScalarValue::Unsigned(size)) => {
+        microscope::VariableValue::Scalar(ScalarValue::Signed(size)) => *size,
+        microscope::VariableValue::Scalar(ScalarValue::Unsigned(size)) => {
             i128::try_from(*size).expect("size fits")
         }
         other => panic!("{text} is not an integer: {other:?}"),
@@ -486,10 +486,10 @@ async fn expressions_name_types_by_their_identities() {
     }
 }
 
-fn complete(text: &str) -> uscope::TextSummary {
-    uscope::TextSummary {
+fn complete(text: &str) -> microscope::TextSummary {
+    microscope::TextSummary {
         bytes: text.as_bytes().into(),
-        completion: uscope::TextCompletion::Complete,
+        completion: microscope::TextCompletion::Complete,
     }
 }
 
@@ -516,18 +516,18 @@ async fn rust_text_slices_read_as_text() {
 
 async fn inspect_text(
     scenario: &Scenario,
-    limits: uscope::InspectionLimits,
-) -> uscope::InspectedValue {
+    limits: microscope::InspectionLimits,
+) -> microscope::InspectedValue {
     let evaluation = scenario
         .handle()
         .evaluate_with(
             &parsed_value_expression("text"),
-            uscope::EvaluationMode::Read,
+            microscope::EvaluationMode::Read,
             limits,
         )
         .await
         .expect("evaluate text");
-    let uscope::Evaluation::Value { value, .. } = evaluation else {
+    let microscope::Evaluation::Value { value, .. } = evaluation else {
         panic!("text is not a value: {evaluation:?}");
     };
 

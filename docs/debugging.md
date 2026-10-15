@@ -1,6 +1,6 @@
 # Debugging
 
-uscope can launch a program, attach to a running process, or inspect a core
+microscope can launch a program, attach to a running process, or inspect a core
 dump. The terminal, browser, and editor interfaces use the same debugger.
 
 ## Launch a program
@@ -8,7 +8,7 @@ dump. The terminal, browser, and editor interfaces use the same debugger.
 Pass the executable before `--` and its arguments after it:
 
 ```sh
-uscope ./server -- --port 8080
+microscope ./server -- --port 8080
 ```
 
 Use `--cwd DIR` to choose the program's working directory and `--env
@@ -20,11 +20,11 @@ begins. Set breakpoints, then run it.
 Attach by process ID or by a name that matches exactly one process:
 
 ```sh
-uscope --attach 1842
-uscope --attach my-server
+microscope --attach 1842
+microscope --attach my-server
 ```
 
-uscope normally finds the executable through `/proc`. Supply it as the
+microscope normally finds the executable through `/proc`. Supply it as the
 positional executable when that is not possible.
 
 Quitting an attached session detaches and leaves the process alive. Killing an
@@ -33,10 +33,10 @@ attached process requires an explicit command.
 ## Open a core dump
 
 ```sh
-uscope --core core.1842
+microscope --core core.1842
 ```
 
-uscope uses the executable recorded in the dump when it can find a matching
+microscope uses the executable recorded in the dump when it can find a matching
 file. For a dump copied from another machine, `--sysroot` points at a copy of
 that machine's file tree. `--module-path` adds directories to search for
 missing modules.
@@ -96,11 +96,11 @@ path it names:
 
 ```text
 stopped at catchpoint c1 as the call began: openat(AT_FDCWD, "missing", O_RDONLY)
-(uscope) print $path
+(microscope) print $path
 (string) $path = "missing"
-(uscope) continue
+(microscope) continue
 stopped at catchpoint c1 as the call returned: openat(AT_FDCWD, "missing", O_RDONLY) = -1 ENOENT (No such file or directory)
-(uscope) print $ret
+(microscope) print $ret
 (integer) $ret = -2
 ```
 
@@ -108,7 +108,7 @@ stopped at catchpoint c1 as the call returned: openat(AT_FDCWD, "missing", O_RDO
 
 While a catchpoint exists, every system call stops its thread briefly, even
 calls no catchpoint names, so the program runs slower. To watch calls without
-stopping the program, use [`uscope syscalls`](syscalls.md) instead.
+stopping the program, use [`microscope syscalls`](syscalls.md) instead.
 
 ## Step through code
 
@@ -155,7 +155,7 @@ print/d address
 print/t mask
 ```
 
-uscope uses one [expression language](expressions.md) for every source
+microscope uses one [expression language](expressions.md) for every source
 language. [Views](views.md) make containers, strings, maps, and sum types read
 as their logical values.
 
@@ -180,7 +180,7 @@ suppress it according to the configured policy.
 file. `--batch` exits after those commands instead of opening the REPL:
 
 ```sh
-uscope --batch \
+microscope --batch \
   -e 'break parse' \
   -e run \
   -e bt \

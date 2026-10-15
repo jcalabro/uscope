@@ -138,12 +138,12 @@ async fn breakpoints_change_their_conditions_and_go_before_the_program_runs() {
         .clone();
     tab.ok(
         "editBreakpoint",
-        json!({"id": id, "condition": "uscope_value == 0", "hitCondition": ">=2"}),
+        json!({"id": id, "condition": "microscope_value == 0", "hitCondition": ">=2"}),
     )
     .await;
     let changed = tab
         .state("the condition", |state| {
-            state["breakpoints"][0]["condition"] == "uscope_value == 0"
+            state["breakpoints"][0]["condition"] == "microscope_value == 0"
         })
         .await;
     assert_eq!(changed["breakpoints"][0]["hitCondition"], ">=2");

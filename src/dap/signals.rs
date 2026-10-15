@@ -12,8 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use microscope::ExceptionStops;
 use serde_json::{Value, json};
-use uscope::ExceptionStops;
 
 use super::protocol::SetExceptionBreakpointsArguments;
 
@@ -116,7 +116,7 @@ pub struct Selection {
 
     /// The system calls that stop, every call when empty, when the filter
     /// is on.
-    syscalls: Option<Arc<[uscope::syscalls::SyscallId]>>,
+    syscalls: Option<Arc<[microscope::syscalls::SyscallId]>>,
 }
 
 impl Default for Selection {
@@ -134,16 +134,16 @@ impl Default for Selection {
 }
 
 /// Every call of every ABI the comma-separated `text` names.
-fn syscall_list(text: &str) -> Result<Arc<[uscope::syscalls::SyscallId]>, String> {
+fn syscall_list(text: &str) -> Result<Arc<[microscope::syscalls::SyscallId]>, String> {
     let mut calls = Vec::new();
     for name in text
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
-        let named: Vec<_> = uscope::syscalls::Abi::ALL
+        let named: Vec<_> = microscope::syscalls::Abi::ALL
             .into_iter()
-            .filter_map(|abi| uscope::syscalls::SyscallId::named(abi, name))
+            .filter_map(|abi| microscope::syscalls::SyscallId::named(abi, name))
             .collect();
         if named.is_empty() {
             return Err(format!("unknown system call '{name}'"));
@@ -168,7 +168,7 @@ impl Selection {
 
     /// The system calls that stop, every one when empty, or none when the
     /// filter is off.
-    pub const fn syscalls(&self) -> Option<&Arc<[uscope::syscalls::SyscallId]>> {
+    pub const fn syscalls(&self) -> Option<&Arc<[microscope::syscalls::SyscallId]>> {
         self.syscalls.as_ref()
     }
 
@@ -251,7 +251,7 @@ impl Selection {
             .iter()
             .filter_map(|filter| filter.signals)
             .flatten()
-            .filter_map(|name| uscope::signal_named(name))
+            .filter_map(|name| microscope::signal_named(name))
             .collect::<BTreeSet<_>>();
         let mut stopping = BTreeSet::new();
         for filter in &FILTERS {
@@ -260,10 +260,14 @@ impl Selection {
                 Some(Some(listed)) => stopping.extend(listed),
                 Some(None) => match filter.signals {
                     Some(names) => {
-                        stopping.extend(names.iter().filter_map(|name| uscope::signal_named(name)));
+                        stopping.extend(
+                            names
+                                .iter()
+                                .filter_map(|name| microscope::signal_named(name)),
+                        );
                     }
                     None => stopping
-                        .extend(uscope::signal_codes().filter(|code| !grouped.contains(code))),
+                        .extend(microscope::signal_codes().filter(|code| !grouped.contains(code))),
                 },
             }
         }
@@ -284,7 +288,9 @@ fn signal_list(text: &str) -> Result<BTreeSet<u64>, String> {
     text.split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(|name| uscope::signal_named(name).ok_or_else(|| format!("unknown signal '{name}'")))
+        .map(|name| {
+            microscope::signal_named(name).ok_or_else(|| format!("unknown signal '{name}'"))
+        })
         .collect()
 }
 
@@ -294,7 +300,7 @@ mod tests {
     use crate::dap::protocol::ExceptionFilterOptions;
 
     fn code(name: &str) -> u64 {
-        uscope::signal_named(name).expect("known signal")
+        microscope::signal_named(name).expect("known signal")
     }
 
     #[test]

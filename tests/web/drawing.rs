@@ -216,7 +216,7 @@ async fn a_rust_programs_own_views_draw_its_board_with_typed_inputs() {
     assert!(
         renderer["source"]
             .as_str()
-            .is_some_and(|source| source.contains("uscope.draw")),
+            .is_some_and(|source| source.contains("microscope.draw")),
         "{renderer}"
     );
     let (kind, _) = tab
@@ -352,7 +352,7 @@ async fn a_drawing_names_the_input_it_could_not_read() {
     let views = scratch.path().join("problems.views");
     std::fs::write(
         &views,
-        r#"uscope-views 1
+        r#"microscope-views 1
 
 extend c life {
     visualize "bitmap" {
@@ -451,12 +451,12 @@ async fn reloading_views_reads_the_files_and_renderers_again() {
 
     std::fs::write(
         &renderer,
-        "uscope.draw(() => uscope.picture({width: 1, height: 1, shapes: []}));\n",
+        "microscope.draw(() => microscope.picture({width: 1, height: 1, shapes: []}));\n",
     )
     .expect("change the renderer");
     std::fs::write(
         &views,
-        "uscope-views 1\nextend c life { visualize \"life\" { cells = bytes(&cells[0][0], 64) } }\n",
+        "microscope-views 1\nextend c life { visualize \"life\" { cells = bytes(&cells[0][0], 64) } }\n",
     )
     .expect("change the views");
     tab.ok("reloadViews", json!(null)).await;

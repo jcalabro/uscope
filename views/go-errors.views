@@ -1,7 +1,7 @@
-uscope-views 1
+microscope-views 1
 
 # Go's errors as the text their Error methods return, where the error keeps
-# that text, and the errors they wrap. uscope calls no method, so an error
+# that text, and the errors they wrap. microscope calls no method, so an error
 # whose method computes its text, as *fs.PathError's does, shows the parts
 # it computes it from. Verified against Go 1.27.1, by
 # tests/fixtures/go/stdlib.

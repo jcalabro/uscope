@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::dap::{Configuration, Dap, Profile, fixture};
 use crate::support::{self, ExternalProcess, ScratchDir};
 
-/// `uscope dap --listen` on an unused port, killed on drop so a failing
+/// `microscope dap --listen` on an unused port, killed on drop so a failing
 /// test leaves nothing behind.
 struct ListeningAdapter {
     child: std::process::Child,
@@ -22,7 +22,7 @@ impl ListeningAdapter {
     /// Starts the adapter, logging its traffic to `log`, and waits for it
     /// to announce its address.
     fn start(log: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let child = Command::new(env!("CARGO_BIN_EXE_microscope"))
             .args(["dap", "--listen", "127.0.0.1:0", "--log"])
             .arg(log)
             .stdin(Stdio::null())
@@ -41,7 +41,7 @@ impl ListeningAdapter {
             .expect("read the listening address");
         adapter.address = line
             .trim()
-            .strip_prefix("uscope dap listening on ")
+            .strip_prefix("microscope dap listening on ")
             .unwrap_or_else(|| panic!("unexpected announcement {line:?}"))
             .parse()
             .expect("an address");
@@ -101,7 +101,7 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
     // A second client connects and asks during the first session, and is
     // served once it ends.
     let mut second = Dap::connect("tcp second", adapter.address);
-    let initialize = second.send("initialize", json!({"adapterID": "uscope"}));
+    let initialize = second.send("initialize", json!({"adapterID": "microscope"}));
     first.finish();
     second.success(initialize);
     let launch = second.send("launch", json!({"program": fixture("basic")}));
@@ -246,7 +246,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
     // at every stop, the threads the client was told of are the threads
     // there are. A stop waits for every exiting thread to be gone, so no
     // thread starts or exits while the program is stopped.
-    let mut dap = Dap::start_in("lagged threads", &[("USCOPE_EVENT_CAPACITY", "1")]);
+    let mut dap = Dap::start_in("lagged threads", &[("MICROSCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::Helix,
         &fixture("thread-stress"),
@@ -298,7 +298,7 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
 
     // Libraries load and unload in bursts too: at every stop, the modules
     // the client was told of are the modules loaded.
-    let mut dap = Dap::start_in("lagged modules", &[("USCOPE_EVENT_CAPACITY", "1")]);
+    let mut dap = Dap::start_in("lagged modules", &[("MICROSCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::VsCode,
         &fixture("globals-shared"),

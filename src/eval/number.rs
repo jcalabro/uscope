@@ -593,7 +593,7 @@ pub enum FloatFormat {
 }
 
 impl FloatFormat {
-    /// The format of a float type's values, when uscope computes with it.
+    /// The format of a float type's values, when microscope computes with it.
     pub(crate) const fn of(layout: crate::model::FloatLayout) -> Self {
         use crate::model::FloatLayout;
         match layout {
@@ -616,7 +616,7 @@ impl FloatFormat {
         }
     }
 
-    /// The format's name in uscope's expressions.
+    /// The format's name in microscope's expressions.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Binary16 => "f16",

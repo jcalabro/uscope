@@ -1,8 +1,8 @@
 [package]
-name = "uscope-probes"
+name = "microscope-probes"
 version = "0.1.0"
 edition = "2024"
-description = "Zones, plots, messages, labels, and triggers that uscope records"
+description = "Zones, plots, messages, labels, and triggers that microscope records"
 license = "MIT OR Apache-2.0"
 
 [features]

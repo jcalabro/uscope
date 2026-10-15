@@ -1,7 +1,7 @@
 //! Stepping into one chosen call of a line that makes several, as DAP's
 //! `stepInTargets` offers.
 
-use uscope::StepTarget;
+use microscope::StepTarget;
 
 use super::*;
 
@@ -70,7 +70,7 @@ async fn signed_variable(scenario: &Scenario, name: &str) -> i128 {
         .operation(name, scenario.handle().variable(name))
         .await;
     match available_value(&variable.state) {
-        uscope::VariableValue::Scalar(ScalarValue::Signed(value)) => *value,
+        microscope::VariableValue::Scalar(ScalarValue::Signed(value)) => *value,
         other => panic!("{name} is {other:?}"),
     }
 }
@@ -210,7 +210,7 @@ async fn a_step_into_another_address_is_refused() {
     let mut scenario = stopped_at("step-targets-gcc-o0", "targets: calls").await;
     let listed = targets(&scenario).await;
     let call = listed[0].call;
-    let elsewhere = uscope::VirtualAddress::new(call.get() + 1);
+    let elsewhere = microscope::VirtualAddress::new(call.get() + 1);
     let refused = scenario.handle().step_into(elsewhere).await;
     assert!(
         matches!(refused, Err(Error::NotAStepTarget(address)) if address == elsewhere),
@@ -230,8 +230,8 @@ async fn a_step_into_another_address_is_refused() {
 async fn a_declined_breakpoint_in_a_passed_call_does_not_end_the_step() {
     for fixture in BUILDS {
         let mut scenario = stopped_at(fixture, "targets: calls").await;
-        let condition =
-            uscope::HitCondition::new(uscope::HitComparison::Equal, 5).expect("a hit condition");
+        let condition = microscope::HitCondition::new(microscope::HitComparison::Equal, 5)
+            .expect("a hit condition");
         scenario
             .operation(
                 "declining breakpoint",
@@ -279,7 +279,7 @@ async fn a_breakpoint_on_a_passed_call_does_not_take_the_step_into_it() {
                     continue;
                 }
 
-                let condition = uscope::HitCondition::new(uscope::HitComparison::Equal, 5)
+                let condition = microscope::HitCondition::new(microscope::HitComparison::Equal, 5)
                     .expect("a hit condition");
                 scenario
                     .operation(
@@ -334,15 +334,15 @@ async fn a_skipped_call_ends_the_step_at_the_next_line_on_a_declining_breakpoint
     for fixture in ["step-targets-gcc-o0", "step-targets-clang-o0"] {
         let mut scenario = stopped_at(fixture, "targets: skipped").await;
         let next = source_line(SOURCE, "targets: after skipped");
-        let condition =
-            uscope::HitCondition::new(uscope::HitComparison::Equal, 5).expect("a hit condition");
+        let condition = microscope::HitCondition::new(microscope::HitComparison::Equal, 5)
+            .expect("a hit condition");
         scenario
             .operation(
                 "declining breakpoint",
                 scenario.handle().add_breakpoint_with_hit_condition(
                     BreakpointSpec::Source {
                         path: "step-targets.c".into(),
-                        line: uscope::LineNumber::new(next).expect("a line"),
+                        line: microscope::LineNumber::new(next).expect("a line"),
                     },
                     condition,
                 ),

@@ -7,14 +7,14 @@ mod support;
 
 use std::sync::Arc;
 
-use object::{Object as _, ObjectSymbol as _};
-use support::Scenario;
-use uscope::syscalls::{Abi, SyscallId};
-use uscope::{
+use microscope::syscalls::{Abi, SyscallId};
+use microscope::{
     BreakpointSpec, CatchPhase, Catchpoint, Condition, ConditionOwner, DebuggerEvent, ExitStatus,
     LaunchOptions, ScalarValue, StepKind, StopReason, SyscallStop, VariableState, VariableValue,
     VirtualAddress,
 };
+use object::{Object as _, ObjectSymbol as _};
+use support::Scenario;
 
 /// The program across a compiler and position-independence pair: the
 /// calls go through libc's wrappers either way.
@@ -59,12 +59,12 @@ fn caught(reason: &StopReason) -> &SyscallStop {
 
 /// Whether a boolean expression holds in the selected frame.
 async fn holds(scenario: &Scenario, text: &str) -> bool {
-    let expression = uscope::Expression::parse(text).expect("test expression");
+    let expression = microscope::Expression::parse(text).expect("test expression");
     match scenario
         .operation(text, scenario.handle().evaluate(&expression))
         .await
     {
-        uscope::Evaluation::Value { value, .. } => match value.state {
+        microscope::Evaluation::Value { value, .. } => match value.state {
             VariableState::Available {
                 value: VariableValue::Scalar(ScalarValue::Boolean(holds)),
                 ..
@@ -95,7 +95,7 @@ async fn a_catchpoint_stops_at_a_calls_entry_and_exit_with_what_it_passed_and_re
         // The dynamic loader opens libraries first; each of its calls stops
         // at its entry and its exit.
         let mut entry = scenario.run_to_stop().await;
-        while caught(&entry).path.as_deref() != Some("/nonexistent/uscope-catch") {
+        while caught(&entry).path.as_deref() != Some("/nonexistent/microscope-catch") {
             entry = scenario.resume_to_stop().await;
         }
 
@@ -106,9 +106,9 @@ async fn a_catchpoint_stops_at_a_calls_entry_and_exit_with_what_it_passed_and_re
             (call("openat"), None, [openat.id].as_slice()),
             "{fixture}"
         );
-        assert_eq!(stop.path.as_deref(), Some("/nonexistent/uscope-catch"));
+        assert_eq!(stop.path.as_deref(), Some("/nonexistent/microscope-catch"));
         assert_eq!(stop.args[0].cast_signed(), -100, "AT_FDCWD");
-        assert!(holds(&scenario, r#"$path == "/nonexistent/uscope-catch""#).await);
+        assert!(holds(&scenario, r#"$path == "/nonexistent/microscope-catch""#).await);
         assert!(holds(&scenario, "(int)$arg0 == -100").await);
 
         let exit = scenario.resume_to_stop().await;
@@ -177,7 +177,7 @@ async fn a_condition_reads_the_call_and_one_it_cannot_judge_stops() {
         failures,
         [(
             ConditionOwner::Catchpoint(failing.id),
-            Arc::from("the call names no path uscope could read")
+            Arc::from("the call names no path microscope could read")
         )]
     );
     scenario.shutdown().await;

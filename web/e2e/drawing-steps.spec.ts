@@ -19,9 +19,9 @@ interface Recording {
 
 test("a card keeps up with rapid stops, drawing only the latest, once a frame at most", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  const server = await uscope.start([
+  const server = await microscope.start([
     "--views",
     path.join(root, "tests/fixtures/c/metrics/metrics.views"),
     fixture("metrics"),

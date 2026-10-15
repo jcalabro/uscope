@@ -1,11 +1,11 @@
 //! Structures behind pointer arguments, under x86-64 layouts, printed as
 //! strace prints them: abbreviated unless `-v` asks for every field.
 
+use microscope::syscalls::SyscallEvent;
+use microscope::syscalls::blobs;
+use microscope::syscalls::sockaddr::SocketAddress;
+use microscope::syscalls::specs::{Arg, Count, Direction, Spec, Struct};
 use nix::libc;
-use uscope::syscalls::SyscallEvent;
-use uscope::syscalls::blobs;
-use uscope::syscalls::sockaddr::SocketAddress;
-use uscope::syscalls::specs::{Arg, Count, Direction, Spec, Struct};
 
 use super::{Kind, Style, Tokens, sets};
 
@@ -980,7 +980,7 @@ pub fn siginfo(out: &mut Tokens, bytes: &[u8]) -> Option<()> {
     out.push(Kind::Constant, super::signal(signo));
     field(out, "si_code", Kind::Constant, si_code(signo, code));
     if errno != 0 {
-        let (name, _) = super::errno(uscope::syscalls::Errno(
+        let (name, _) = super::errno(microscope::syscalls::Errno(
             u16::try_from(errno.unsigned_abs()).unwrap_or(0),
         ));
         field(out, "si_errno", Kind::Error, name);

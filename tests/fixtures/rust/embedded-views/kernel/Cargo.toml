@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-uscope-views = { path = "../../../../../sdk/rust" }
+microscope-views = { path = "../../../../../sdk/rust" }
 
 [profile.release]
 opt-level = "s"

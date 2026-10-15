@@ -8,7 +8,7 @@ import { context, pixel, renderer, sandbox, Watched } from "./sandboxes";
 // Fills its canvas with the input's color and says, after each frame, what
 // it has heard since the last.
 const reporting = `
-uscope.live((canvas, input, context) => {
+microscope.live((canvas, input, context) => {
   const draw = canvas.getContext("2d");
   let color = input.color;
   let heard = ["start " + context.width + "x" + context.height + " " + canvas.width + "x" + canvas.height];
@@ -16,7 +16,7 @@ uscope.live((canvas, input, context) => {
     frame() {
       draw.fillStyle = color;
       draw.fillRect(0, 0, canvas.width, canvas.height);
-      uscope.caption(heard.join("; "));
+      microscope.caption(heard.join("; "));
       heard = [];
     },
     update(next, given) {
@@ -29,14 +29,14 @@ uscope.live((canvas, input, context) => {
     pointer(event) {
       heard.push(event.type + " " + event.x + "," + event.y + " " + event.buttons + " " + Object.isFrozen(event));
       if (event.type === "down") {
-        uscope.hint("vertex 3");
-        uscope.select("cells[2]");
-        uscope.redraw();
+        microscope.hint("vertex 3");
+        microscope.select("cells[2]");
+        microscope.redraw();
       }
     },
     key(event) {
       heard.push("key " + event.key + (event.shift ? " shift" : ""));
-      uscope.animate(event.key === "a");
+      microscope.animate(event.key === "a");
     },
   };
 });`;
@@ -90,7 +90,7 @@ describe("a live renderer", () => {
 
   it("is ended when it stops answering, and starts afresh", async () => {
     const box = sandbox();
-    const stuck = "uscope.live(() => ({ frame() { for (;;) {} } }));";
+    const stuck = "microscope.live(() => ({ frame() { for (;;) {} } }));";
     const live = new Watched(box, "card", stuck);
     await live.expect("started");
     live.session.frame(0);
@@ -98,7 +98,7 @@ describe("a live renderer", () => {
     expect(await live.next()).toEqual({ type: "failed", failure: { kind: "unresponsive" } });
     expect(performance.now() - started).toBeGreaterThanOrEqual(2_000);
 
-    const again = new Watched(box, "card", "uscope.live(() => ({ frame() {} }));", {}, "calm");
+    const again = new Watched(box, "card", "microscope.live(() => ({ frame() {} }));", {}, "calm");
     await again.expect("started");
     again.session.frame(0);
     // A canvas no context drew on sends no pixels.
@@ -107,7 +107,7 @@ describe("a live renderer", () => {
 
   it("is ended when a function it returned never settles", async () => {
     const box = sandbox();
-    const pending = "uscope.live(() => ({ frame: () => new Promise(() => {}) }));";
+    const pending = "microscope.live(() => ({ frame: () => new Promise(() => {}) }));";
     const live = new Watched(box, "card", pending);
     await live.expect("started");
     live.session.frame(0);
@@ -117,7 +117,7 @@ describe("a live renderer", () => {
 
   it("fails where its code threw, and once the page stops it says nothing", async () => {
     const box = sandbox();
-    const throwing = `uscope.live(() => ({
+    const throwing = `microscope.live(() => ({
   key() {
     throw new RangeError("no such key");
   },
@@ -133,7 +133,7 @@ describe("a live renderer", () => {
       },
     });
 
-    const broken = new Watched(box, "other", "uscope.live(", {}, "broken");
+    const broken = new Watched(box, "other", "microscope.live(", {}, "broken");
     await broken.expect("started");
     const failed = await broken.expect("failed");
     expect(failed.failure).toMatchObject({
@@ -142,23 +142,26 @@ describe("a live renderer", () => {
     });
   });
 
-  it("calls uscope.draw or uscope.live, once", async () => {
+  it("calls microscope.draw or microscope.live, once", async () => {
     const box = sandbox();
     const outcome = await box.draw(
       "card",
-      renderer("both", "uscope.live(() => ({}));\nuscope.draw(() => null);"),
+      renderer("both", "microscope.live(() => ({}));\nmicroscope.draw(() => null);"),
       {},
       { ...context, width: 40 },
     );
     expect(outcome).toMatchObject({
       kind: "failed",
-      failure: { message: "Error: a renderer calls uscope.draw or uscope.live once", line: 2 },
+      failure: {
+        message: "Error: a renderer calls microscope.draw or microscope.live once",
+        line: 2,
+      },
     });
   });
 
   it("runs four sessions at once; the fifth waits for one to stop", async () => {
     const box = sandbox();
-    const calm = "uscope.live(() => ({ frame() { uscope.caption('drawn'); } }));";
+    const calm = "microscope.live(() => ({ frame() { microscope.caption('drawn'); } }));";
     const running = ["1", "2", "3", "4"].map((card) => new Watched(box, card, calm));
     for (const live of running) {
       await live.expect("started");
@@ -173,14 +176,14 @@ describe("a live renderer", () => {
 
   it("gets the pointer and keys sent before it started, in order", async () => {
     const box = sandbox();
-    const calm = "uscope.live(() => ({}));";
+    const calm = "microscope.live(() => ({}));";
     const running = ["1", "2", "3", "4"].map((card) => new Watched(box, card, calm));
     for (const live of running) {
       await live.expect("started");
     }
-    const echo = `uscope.live(() => ({
-  pointer(event) { uscope.hint(event.type + " " + event.x); },
-  key(event) { uscope.hint(event.key); },
+    const echo = `microscope.live(() => ({
+  pointer(event) { microscope.hint(event.type + " " + event.x); },
+  key(event) { microscope.hint(event.key); },
 }));`;
     const late = new Watched(box, "5", echo);
     await late.expect("waiting");
@@ -208,7 +211,7 @@ describe("a live renderer", () => {
 
   it("ends with the sandbox", async () => {
     const box = sandbox();
-    const live = new Watched(box, "card", "uscope.live(() => ({}));");
+    const live = new Watched(box, "card", "microscope.live(() => ({}));");
     await live.expect("started");
     box.dispose();
     expect(await live.next()).toMatchObject({

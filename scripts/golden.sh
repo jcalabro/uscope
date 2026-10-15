@@ -20,7 +20,7 @@ set -euo pipefail
 readonly golden_dir="tests/golden"
 readonly build_dir="build/golden"
 # Debug information places the repository here wherever it is checked out.
-readonly source_root="/uscope"
+readonly source_root="/microscope"
 # How many more times a build runs each binary to check that it behaves the
 # same however its threads interleave.
 readonly determinism_runs=20
@@ -211,7 +211,7 @@ entry_values() {
          }' <(readelf -W --debug-dump=loc "$1") <(readelf -W --debug-dump=info "$1")
 }
 
-# Prints what GNU binutils, not uscope, say about each variant of program
+# Prints what GNU binutils, not microscope, say about each variant of program
 # NAME: its functions from the symbol table, its line table rows in program
 # order, how many inlined calls its debug information describes, and where
 # variables are computed from entry values. The simulator's semantic

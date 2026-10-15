@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Nim's system types as its C backend lays them out under ARC and ORC.
 # Verified against Nim 2.2.4 by tests/fixtures/nim/values.nim.

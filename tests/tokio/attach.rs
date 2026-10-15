@@ -1,4 +1,4 @@
-//! uscope attached to the running `server` fixture: its listener's and its
+//! microscope attached to the running `server` fixture: its listener's and its
 //! connection's tasks are listed as a launched program's would be, each
 //! with what it waits for, a request stops at a breakpoint in the handler
 //! on the connection's task, and once detached the server answers the
@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use uscope::{ExecutionContext, StackFrameId, StopContext, StopReason, TaskState};
+use microscope::{ExecutionContext, StackFrameId, StopContext, StopReason, TaskState};
 
 use crate::invariants::check_tokio_stop;
 use crate::steps::stopped_task;

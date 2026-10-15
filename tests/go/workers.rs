@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use uscope::{
+use microscope::{
     Backtrace, BreakpointOptions, BreakpointSpec, Condition, Evaluation, ExecutionContext,
     Expression, InferiorState, ScalarValue, StackFrameId, StackSegment, StopContext, StopReason,
     TaskSnapshot, TaskState, ThreadActivity, ThreadId, VariableState, VariableValue,
@@ -311,7 +311,7 @@ async fn a_parked_goroutine_can_be_selected() {
         .scenario
         .operation(
             "memory",
-            handle.read_word(uscope::VirtualAddress::new(stack)),
+            handle.read_word(microscope::VirtualAddress::new(stack)),
         )
         .await;
 

@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use serde_json::{Map, Value, json};
-use uscope::{
+use microscope::{
     ExecutionContext, StackFrame, StopContext, StopReason, UnwindTermination, VariableKind,
 };
+use serde_json::{Map, Value, json};
 
 use super::handles::{Location, Variables};
 use super::protocol::{
@@ -31,7 +31,7 @@ const TASK_PAGE: usize = 1024;
 /// A thread's name in a list of tasks, which it is in because it stopped
 /// running none.
 fn thread_name(
-    snapshot: &uscope::StateSnapshot,
+    snapshot: &microscope::StateSnapshot,
     context: ExecutionContext,
     stopped: Option<String>,
 ) -> Result<String, ErrorBody> {
@@ -75,7 +75,7 @@ impl Session {
                 // A thread the stop found stopped for a reason of its own,
                 // such as a breakpoint it hit too, says what stopped it.
                 let stopped = match &thread.state {
-                    uscope::ThreadState::Stopped {
+                    microscope::ThreadState::Stopped {
                         reason: Some(reason),
                     } if self.stop.is_some() => Some(self.stopped_detail(reason)),
                     _ => None,
@@ -138,14 +138,14 @@ impl Session {
         // A closed client has no use for the list either.
         let _ = self.forget_tasks(&tasks).await;
         let snapshot = handle.snapshot().await.map_err(error)?;
-        let stopped = |thread: uscope::ThreadId| {
+        let stopped = |thread: microscope::ThreadId| {
             snapshot
                 .threads
                 .iter()
                 .find(|listed| listed.id == thread)
                 .and_then(|listed| match &listed.state {
-                    uscope::ThreadState::Stopped { reason } => reason.clone(),
-                    uscope::ThreadState::Running => None,
+                    microscope::ThreadState::Stopped { reason } => reason.clone(),
+                    microscope::ThreadState::Running => None,
                 })
         };
 
@@ -182,8 +182,11 @@ impl Session {
         // there too, so its stop can be inspected, and so is every thread
         // of the program's own; only a runtime's idle threads are not.
         for thread in snapshot.threads.iter() {
-            let runs_task = matches!(thread.activity, Some(uscope::ThreadActivity::Task { .. }));
-            let own = matches!(thread.activity, Some(uscope::ThreadActivity::Outside));
+            let runs_task = matches!(
+                thread.activity,
+                Some(microscope::ThreadActivity::Task { .. })
+            );
+            let own = matches!(thread.activity, Some(microscope::ThreadActivity::Outside));
             if !runs_task && (own || stopped(thread.id).is_some()) {
                 let context = ExecutionContext::Thread(thread.id);
                 entries.push((rank(context, true, false), None, context));
@@ -228,7 +231,7 @@ impl Session {
     async fn task_name(
         &mut self,
         stop: &Stop,
-        task: &uscope::TaskSnapshot,
+        task: &microscope::TaskSnapshot,
         stopped: Option<String>,
     ) -> String {
         let place = self
@@ -372,7 +375,7 @@ impl Session {
 
     async fn stack_frame(
         &mut self,
-        stop: uscope::StopId,
+        stop: microscope::StopId,
         execution: ExecutionContext,
         frame: &StackFrame,
     ) -> Result<Value, ErrorBody> {
@@ -381,7 +384,7 @@ impl Session {
             execution,
             frame: frame.id,
         })?;
-        let mut name = if let uscope::FrameKind::Awaited { .. } = frame.kind {
+        let mut name = if let microscope::FrameKind::Awaited { .. } = frame.kind {
             let image = match frame.module {
                 Some(module) => self.image(module).await,
                 None => None,
@@ -410,12 +413,12 @@ impl Session {
         };
 
         match frame.kind {
-            uscope::FrameKind::Inline => name.push_str(" [inlined]"),
-            uscope::FrameKind::TailCall => name.push_str(" [tail call]"),
-            uscope::FrameKind::Async { .. } => name.insert_str(0, "async "),
-            uscope::FrameKind::Physical
-            | uscope::FrameKind::Signal
-            | uscope::FrameKind::Awaited { .. } => {}
+            microscope::FrameKind::Inline => name.push_str(" [inlined]"),
+            microscope::FrameKind::TailCall => name.push_str(" [tail call]"),
+            microscope::FrameKind::Async { .. } => name.insert_str(0, "async "),
+            microscope::FrameKind::Physical
+            | microscope::FrameKind::Signal
+            | microscope::FrameKind::Awaited { .. } => {}
         }
 
         let mut body = json!({
@@ -456,7 +459,7 @@ impl Session {
         if frame
             .function
             .as_ref()
-            .is_some_and(|function| function.role != uscope::CodeRole::Ordinary)
+            .is_some_and(|function| function.role != microscope::CodeRole::Ordinary)
         {
             body["presentationHint"] = "subtle".into();
         }
@@ -664,7 +667,7 @@ impl Session {
                 row.get("name").and_then(Value::as_str),
                 row.get("evaluateName")
                     .and_then(Value::as_str)
-                    .and_then(|path| uscope::Expression::parse(path).ok()),
+                    .and_then(|path| microscope::Expression::parse(path).ok()),
             ) {
                 self.references
                     .record_path(list, name.to_owned(), context, path);
@@ -697,7 +700,7 @@ impl Session {
                         values::register(
                             value,
                             registers.target.byte_order,
-                            context.frame == uscope::StackFrameId::INNERMOST,
+                            context.frame == microscope::StackFrameId::INNERMOST,
                         )
                     })
                     .collect());
@@ -848,7 +851,7 @@ impl Session {
         let command = repl
             .then(|| crate::cli::commands::line_command(expression))
             .flatten();
-        let parsed = match (uscope::Expression::parse(expression), command) {
+        let parsed = match (microscope::Expression::parse(expression), command) {
             (Ok(parsed), _) => parsed,
             (Err(_), Some(_)) => return self.console_line(expression, context).await,
             (Err(failure), None) => return Err(expression_failure(expression, &failure, repl)),
@@ -865,24 +868,24 @@ impl Session {
         let options = self.value_options(arguments.format.as_ref());
         let handle = self.target_handle()?;
         let mode = if repl {
-            uscope::EvaluationMode::Assign
+            microscope::EvaluationMode::Assign
         } else {
-            uscope::EvaluationMode::Read
+            microscope::EvaluationMode::Read
         };
 
         let evaluation = match handle
             .at(context)
-            .evaluate_with(&parsed, mode, uscope::InspectionLimits::default())
+            .evaluate_with(&parsed, mode, microscope::InspectionLimits::default())
             .await
         {
             Ok(evaluation) => evaluation,
             // The frame does not know the command's name, so it is the command.
-            Err(uscope::Error::Expression(failure))
+            Err(microscope::Error::Expression(failure))
                 if command.is_some_and(|(_, name)| present::names_only(&failure, name)) =>
             {
                 return self.console_line(expression, Some(context)).await;
             }
-            Err(uscope::Error::Expression(failure)) => {
+            Err(microscope::Error::Expression(failure)) => {
                 return Err(expression_failure(expression, &failure, repl));
             }
             Err(other) => return Err(error(other)),
@@ -894,7 +897,7 @@ impl Session {
         }
 
         let mut body = match evaluation {
-            uscope::Evaluation::Value { value, .. } => self.present(
+            microscope::Evaluation::Value { value, .. } => self.present(
                 Item {
                     name: expression,
                     path: Some(parsed),
@@ -906,7 +909,7 @@ impl Session {
                 context,
                 options,
             )?,
-            uscope::Evaluation::Range(page) => {
+            microscope::Evaluation::Range(page) => {
                 let length = page.children.len();
                 let reference = self.references.variables(Variables::Range {
                     context,
@@ -980,7 +983,7 @@ impl Session {
         {
             Location::Code(address) => {
                 let code = self.code();
-                let entry = code.function_entry(uscope::VirtualAddress::new(*address));
+                let entry = code.function_entry(microscope::VirtualAddress::new(*address));
                 let (image, address) = entry.ok_or_else(|| {
                     ErrorBody::new(format!("no loaded module has code at {address:#x}"))
                 })?;
@@ -1062,7 +1065,7 @@ impl Session {
                 let mut body = json!({
                     "exceptionId": id,
                     "description": exception.message.as_ref(),
-                    "breakMode": if exception.kind == uscope::LanguageExceptionKind::Raised {
+                    "breakMode": if exception.kind == microscope::LanguageExceptionKind::Raised {
                         "always"
                     } else {
                         "unhandled"
@@ -1138,8 +1141,8 @@ impl Session {
         };
 
         let expression = arguments.expression.trim();
-        let parsed = uscope::Expression::parse(expression)
-            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
+        let parsed = microscope::Expression::parse(expression)
+            .map_err(|failure| error(microscope::Error::Expression(failure)))?;
         let options = self.value_options(arguments.format.as_ref());
         self.assign(context, expression, parsed, &arguments.value, options)
             .await
@@ -1150,23 +1153,23 @@ impl Session {
         &mut self,
         context: StopContext,
         name: &str,
-        path: uscope::Expression,
+        path: microscope::Expression,
         value: &str,
         options: Options,
     ) -> Result<Value, ErrorBody> {
         let handle = self.target_handle()?;
-        let assignment = uscope::Expression::parse(&format!("{path} = {value}"))
-            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
+        let assignment = microscope::Expression::parse(&format!("{path} = {value}"))
+            .map_err(|failure| error(microscope::Error::Expression(failure)))?;
         let evaluation = handle
             .at(context)
             .evaluate_with(
                 &assignment,
-                uscope::EvaluationMode::Assign,
-                uscope::InspectionLimits::default(),
+                microscope::EvaluationMode::Assign,
+                microscope::InspectionLimits::default(),
             )
             .await
             .map_err(error)?;
-        let uscope::Evaluation::Value {
+        let microscope::Evaluation::Value {
             value: assigned, ..
         } = evaluation
         else {
@@ -1266,11 +1269,15 @@ impl Session {
 
 /// An expression's mistake: in the console, pointing at the text it is
 /// about, as the terminal debugger prints it; elsewhere, on one line.
-fn expression_failure(text: &str, failure: &uscope::ExpressionError, console: bool) -> ErrorBody {
+fn expression_failure(
+    text: &str,
+    failure: &microscope::ExpressionError,
+    console: bool,
+) -> ErrorBody {
     if console {
         ErrorBody::new(crate::cli::format::expression_error(text, failure))
     } else {
-        error(uscope::Error::Expression(failure.clone()))
+        error(microscope::Error::Expression(failure.clone()))
     }
 }
 
@@ -1281,7 +1288,7 @@ fn stale(kind: &str, id: i64) -> ErrorBody {
 }
 
 const fn presenter<'a>(
-    handle: &'a uscope::DebuggerHandle,
+    handle: &'a microscope::DebuggerHandle,
     code: &'a present::Code,
     options: Options,
 ) -> Presenter<'a> {
@@ -1301,9 +1308,9 @@ fn list_error(failure: ListError) -> ErrorBody {
 
 /// Every task at the stop, or every one that runs the program's code.
 async fn all_tasks(
-    handle: &uscope::DebuggerHandle,
+    handle: &microscope::DebuggerHandle,
     program_only: bool,
-) -> Result<Vec<uscope::TaskSnapshot>, ErrorBody> {
+) -> Result<Vec<microscope::TaskSnapshot>, ErrorBody> {
     let mut tasks = Vec::new();
     let mut from = None;
     loop {

@@ -16,8 +16,8 @@
 const MOST = 40;
 const MOST_IN_ORDER = 400;
 
-uscope.draw((input, { previous, width, paths }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, paths }) => {
+  const theme = microscope.theme;
   const { bars, keyed } = barsOf(input, paths);
   const before = new Map();
   if (previous !== null) {
@@ -74,8 +74,8 @@ uscope.draw((input, { previous, width, paths }) => {
     const toX = (v) => left + ((v - axis.lo) / (axis.hi - axis.lo)) * (right - left);
     for (const tick of axis.ticks) {
       shapes.push(
-        uscope.line({ x1: toX(tick), y1: 4, x2: toX(tick), y2: H - 22, stroke: tick === 0 ? theme.ink3 : theme.line }),
-        uscope.text({ x: toX(tick), y: H - 8, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }),
+        microscope.line({ x1: toX(tick), y1: 4, x2: toX(tick), y2: H - 22, stroke: tick === 0 ? theme.ink3 : theme.line }),
+        microscope.text({ x: toX(tick), y: H - 8, text: label(tick), size: 11, anchor: "middle", fill: theme.ink3 }),
       );
     }
     const row = (k, bar, fill, title, select) => {
@@ -83,13 +83,13 @@ uscope.draw((input, { previous, width, paths }) => {
       const zero = toX(0);
       const end = Number.isFinite(bar.value) ? toX(bar.value) : zero;
       shapes.push(
-        uscope.rect({ x: Math.min(zero, end), y, width: Math.max(1, Math.abs(end - zero)), height: 14, radius: 2, fill, title, select }),
-        uscope.text({ x: left - 8, y: y + 7, text: truncate(bar.label, labelWidth), size: 11, anchor: "end", baseline: "middle", fill: theme.ink2, title: bar.label }),
-        uscope.text({ x: bar.value < 0 ? Math.min(zero, end) - 5 : Math.max(zero, end) + 5, y: y + 7, text: bar.text, size: 11, family: "mono", anchor: bar.value < 0 ? "end" : "start", baseline: "middle", fill: theme.ink }),
+        microscope.rect({ x: Math.min(zero, end), y, width: Math.max(1, Math.abs(end - zero)), height: 14, radius: 2, fill, title, select }),
+        microscope.text({ x: left - 8, y: y + 7, text: truncate(bar.label, labelWidth), size: 11, anchor: "end", baseline: "middle", fill: theme.ink2, title: bar.label }),
+        microscope.text({ x: bar.value < 0 ? Math.min(zero, end) - 5 : Math.max(zero, end) + 5, y: y + 7, text: bar.text, size: 11, family: "mono", anchor: bar.value < 0 ? "end" : "start", baseline: "middle", fill: theme.ink }),
       );
       const was = before.get(bar.key);
       if (was !== undefined && Number.isFinite(was) && was !== bar.value) {
-        shapes.push(uscope.line({ x1: toX(was), y1: y - 2, x2: toX(was), y2: y + 16, stroke: theme.ink, strokeWidth: 1.5, title: `${bar.label} at the stop before: ${was}` }));
+        shapes.push(microscope.line({ x1: toX(was), y1: y - 2, x2: toX(was), y2: y + 16, stroke: theme.ink, strokeWidth: 1.5, title: `${bar.label} at the stop before: ${was}` }));
       }
     };
     shown.forEach((bar, k) => row(k, bar, color, titleOf(bar), bar.select));
@@ -98,7 +98,7 @@ uscope.draw((input, { previous, width, paths }) => {
       row(shown.length, { label: `Other (${other.count} more)`, value: Number(total), text: String(total), key: null }, theme.ink3,
         `Other: ${other.count} more entries, total ${total}`, undefined);
     }
-    return uscope.picture({ width: W, height: H, shapes, caption: captionOf() });
+    return microscope.picture({ width: W, height: H, shapes, caption: captionOf() });
   }
 
   const left = 56;
@@ -111,8 +111,8 @@ uscope.draw((input, { previous, width, paths }) => {
   const toY = (v) => bottom - ((v - axis.lo) / (axis.hi - axis.lo)) * (bottom - top);
   for (const tick of axis.ticks) {
     shapes.push(
-      uscope.line({ x1: left, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
-      uscope.text({ x: left - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
+      microscope.line({ x1: left, y1: toY(tick), x2: right, y2: toY(tick), stroke: tick === 0 ? theme.ink3 : theme.line }),
+      microscope.text({ x: left - 6, y: toY(tick), text: label(tick), size: 11, anchor: "end", baseline: "middle", fill: theme.ink3 }),
     );
   }
   const every = Math.max(1, Math.ceil(rows / Math.max(1, Math.floor((right - left) / 44))));
@@ -120,13 +120,13 @@ uscope.draw((input, { previous, width, paths }) => {
     const x = left + k * slot + (slot - bar) / 2;
     const zero = toY(0);
     const end = Number.isFinite(item.value) ? toY(item.value) : zero;
-    shapes.push(uscope.rect({ x, y: Math.min(zero, end), width: bar, height: Math.max(1, Math.abs(end - zero)), radius: Math.min(2, bar / 2), fill, title, select }));
+    shapes.push(microscope.rect({ x, y: Math.min(zero, end), width: bar, height: Math.max(1, Math.abs(end - zero)), radius: Math.min(2, bar / 2), fill, title, select }));
     if (k % every === 0) {
-      shapes.push(uscope.text({ x: x + bar / 2, y: bottom + 14, text: truncate(item.label, slot * every), size: 11, anchor: "middle", fill: theme.ink3, title: item.label }));
+      shapes.push(microscope.text({ x: x + bar / 2, y: bottom + 14, text: truncate(item.label, slot * every), size: 11, anchor: "middle", fill: theme.ink3, title: item.label }));
     }
     const was = before.get(item.key);
     if (was !== undefined && Number.isFinite(was) && was !== item.value) {
-      shapes.push(uscope.line({ x1: x - 2, y1: toY(was), x2: x + bar + 2, y2: toY(was), stroke: theme.ink, strokeWidth: 1.5, title: `${item.label} at the stop before: ${was}` }));
+      shapes.push(microscope.line({ x1: x - 2, y1: toY(was), x2: x + bar + 2, y2: toY(was), stroke: theme.ink, strokeWidth: 1.5, title: `${item.label} at the stop before: ${was}` }));
     }
   };
   shown.forEach((item, k) => column(k, item, color, titleOf(item), item.select));
@@ -137,9 +137,9 @@ uscope.draw((input, { previous, width, paths }) => {
   const largest = finite.reduce((best, item) => (item.value > best.value ? item : best), finite[0]);
   if (largest !== undefined && largest.value > 0) {
     const k = shown.indexOf(largest);
-    shapes.push(uscope.text({ x: left + k * slot + slot / 2, y: toY(largest.value) - 5, text: largest.text, size: 11, family: "mono", anchor: "middle", fill: theme.ink }));
+    shapes.push(microscope.text({ x: left + k * slot + slot / 2, y: toY(largest.value) - 5, text: largest.text, size: 11, family: "mono", anchor: "middle", fill: theme.ink }));
   }
-  return uscope.picture({ width: W, height: H, shapes, caption: captionOf() });
+  return microscope.picture({ width: W, height: H, shapes, caption: captionOf() });
 
   function titleOf(item) {
     return `${item.label}: ${item.text}`;

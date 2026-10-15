@@ -48,7 +48,7 @@ export function People() {
               const name = event.currentTarget.value.trim();
               setEditing(false);
               if (name) {
-                write("uscope-name", name);
+                write("microscope-name", name);
                 void connection.request("setName", { name }).catch(() => undefined);
               }
             }

@@ -321,20 +321,20 @@ fn validation_rejects_every_out_of_bounds_reference() {
 }
 
 /// The capture fuzzer's seed is a whole file of this revision, so that
-/// the fuzzer starts past validation. `USCOPE_UPDATE_SEED=1` rewrites it.
+/// the fuzzer starts past validation. `MICROSCOPE_UPDATE_SEED=1` rewrites it.
 #[test]
 fn the_fuzzers_seed_is_a_capture_of_this_revision() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/capture/two-threads");
     let mut expected = Vec::new();
     file::write(&sample_capture(0), &mut expected).expect("write");
-    if std::env::var_os("USCOPE_UPDATE_SEED").is_some() {
+    if std::env::var_os("MICROSCOPE_UPDATE_SEED").is_some() {
         std::fs::write(&path, &expected).expect("write the seed");
     }
 
     let seed = std::fs::read(&path).expect("read the seed");
     assert!(
         seed == expected,
-        "the seed is stale: rerun with USCOPE_UPDATE_SEED=1"
+        "the seed is stale: rerun with MICROSCOPE_UPDATE_SEED=1"
     );
 }

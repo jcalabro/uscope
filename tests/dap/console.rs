@@ -109,7 +109,7 @@ fn breakpoints_made_in_the_console_are_announced_and_reported() {
     assert_eq!(new["breakpoint"]["verified"], true);
     assert_eq!(
         new["breakpoint"]["line"],
-        line_of(&source("c/basic.c"), "return uscope_value;")
+        line_of(&source("c/basic.c"), "return microscope_value;")
     );
     let id = new["breakpoint"]["id"].clone();
 
@@ -167,7 +167,7 @@ fn console_output_is_styled_only_for_clients_that_accept_styling() {
         let mark = dap.mark();
         dap.request(
             "initialize",
-            json!({"adapterID": "uscope", "supportsANSIStyling": ansi}),
+            json!({"adapterID": "microscope", "supportsANSIStyling": ansi}),
         );
         dap.event(mark, "initialized", |_| true);
         let launch = dap.send(
@@ -215,9 +215,9 @@ fn console_commands_print_what_the_cli_prints_at_the_same_stop() {
 
     for (command, console) in commands.iter().zip(console) {
         // The console may always show Unicode, so the CLI is told to.
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_microscope"))
             .env(
-                "USCOPE_CONFIG",
+                "MICROSCOPE_CONFIG",
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/tests/support/settings/unicode.toml"

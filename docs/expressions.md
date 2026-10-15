@@ -1,6 +1,6 @@
 # Expressions
 
-uscope reads expressions in one language for every program it debugs,
+microscope reads expressions in one language for every program it debugs,
 whether it is written in C, C++, Rust, Go, Zig, Odin, Fortran, D, Nim, or
 Ada. The language is small and exact, and the same everywhere: it has no
 per-language parsers, type checkers, or compilers behind it.
@@ -11,12 +11,12 @@ implicitly except where this page says so, and a value the program cannot
 provide, such as an optimized-out variable, is reported as unavailable rather
 than guessed.
 
-Every example on this page runs as one of uscope's tests, against small worlds
-of variables. Each row reads `expression => outcome`. An outcome is a value
-and its type, `value : type`; `reads as` and the expression's normal form, the
-spelling uscope prints it in; `error` and the kind of error with the text it
-points at; or `unavailable` and the operand whose value the program could not
-provide.
+Every example on this page runs as one of microscope's tests, against small
+worlds of variables. Each row reads `expression => outcome`. An outcome is a
+value and its type, `value : type`; `reads as` and the expression's normal form,
+the spelling microscope prints it in; `error` and the kind of error with the
+text it points at; or `unavailable` and the operand whose value the program
+could not provide.
 
 ## Names
 
@@ -35,7 +35,7 @@ pointer.
 
 `$task` is the id of the selected task, or of the task the selected thread
 runs, an exact integer: in Go, a goroutine's, so a breakpoint's condition
-`$task == 7` stops only in goroutine 7. Where the program has no tasks, or uscope cannot tell which one
+`$task == 7` stops only in goroutine 7. Where the program has no tasks, or microscope cannot tell which one
 a thread runs, `$task` is refused; a thread between tasks, such as one idle
 in Go's scheduler, has none, and `$task` is unavailable there.
 
@@ -43,7 +43,7 @@ in Go's scheduler, has none, and `$task` is unavailable there.
 which holds the variables it keeps across its awaits and the state it is in.
 A frame that runs no future has none.
 
-```uscope-example
+```microscope-example
 ns::counter               => reads as `ns::counter`
 ::counter                 => reads as `::counter`
 `github.com/acme/pkg.x`   => reads as `` `github.com/acme/pkg.x` ``
@@ -67,7 +67,7 @@ program may name a variable or member with it: `long * 2` multiplies the
 variable `long`. Inside a cast's parentheses, after `as`, and in `sizeof`, the
 word is the type.
 
-```uscope-example
+```microscope-example
 world: memory
 s.a                    => 5 : int
 ptr->b                 => 7 : long int
@@ -94,7 +94,7 @@ words.int + words.class => 10 : integer
 sizeof(long)           => 8 : integer
 ```
 
-```uscope-example
+```microscope-example
 world: scalars
 $task                  => error unsupported at `$task`
 $future                => error unknown-name at `$future`
@@ -107,7 +107,7 @@ Each is an exact integer, or text for `$path`. Before the call returns,
 `$ret` is refused, and so is `$path` for a call that names no path. A stop of
 any other kind has none of them.
 
-```uscope-example
+```microscope-example
 world: syscall
 $ret == -2             => true : bool
 $arg0                  => 18446744073709551516 : integer
@@ -118,7 +118,7 @@ $path                  => "/etc/hosts" : string
 $arg6                  => error unknown-name at `$arg6`
 ```
 
-```uscope-example
+```microscope-example
 world: scalars
 $ret                   => error unsupported at `$ret`
 $arg0                  => error unsupported at `$arg0`
@@ -144,7 +144,7 @@ spelling of `null`, which prints as `null`. `nullptr` and `NULL` are refused
 with a hint to write `null`: C's `NULL` is a macro, and the two spellings
 are enough for a condition to read the same in every language.
 
-```uscope-example
+```microscope-example
 0x2a + 0b1010_1010 + 0o17 => reads as `42 + 170 + 15`
 0xffu8                    => reads as `255u8`
 1_000_i64                 => reads as `1000i64`
@@ -161,7 +161,7 @@ nil                       => reads as `null`
 nullptr                   => error syntax at `nullptr`
 ```
 
-```uscope-example
+```microscope-example
 world: scalars
 0x2a                   => 42 : integer
 255u8                  => 255 : u8
@@ -210,7 +210,7 @@ slices (see Slices), and `m[key]` indexes a map (see Maps). `len(x)` is a
 length, `cap(x)` a capacity, and `sizeof(x)` a size. The language does not
 call functions.
 
-```uscope-example
+```microscope-example
 a+b*c                     => reads as `a + b * c`
 x & 1 == 0                => reads as `x & 1 == 0`
 (x & 1) == 0              => reads as `x & 1 == 0`
@@ -247,7 +247,7 @@ dividend's sign, as C, Rust, and Go agree.
 
 To get a program's wrapping arithmetic, cast the result: `(u8)(uc + 10)`.
 
-```uscope-example
+```microscope-example
 world: scalars
 uc + 10                => 260 : integer
 (u8)(uc + 10)          => 4 : u8
@@ -267,7 +267,7 @@ flag + 1               => error type at `flag`
 
 Comparisons are exact too, so signed and unsigned values compare as numbers.
 
-```uscope-example
+```microscope-example
 world: scalars
 -1 < 1u32              => true : bool
 i32v < u32v            => true : bool
@@ -288,7 +288,7 @@ Exact integers alone behave as infinite two's complement.
 of the value shifted. A shift by a negative amount, or by the width or more,
 is an error.
 
-```uscope-example
+```microscope-example
 world: scalars
 ~uc                    => 5 : unsigned char
 uc << 1                => 244 : unsigned char
@@ -317,7 +317,7 @@ operand converts to the nearest value. x87 `long double`, half precision
 double; half and bfloat16 together, neither of which holds the other's
 values, compute as `f32`. Floats compare with integers exactly.
 
-```uscope-example
+```microscope-example
 world: scalars
 f * 2                  => 3.0 : f32
 f + d                  => 11.5 : f64
@@ -341,7 +341,7 @@ which are true when nonzero. `&&`, `||`, and `?:` evaluate only what they
 need, so `ptr != null && ptr->a > 3` never follows a null pointer. Booleans
 are not numbers; convert one with `flag as u8`.
 
-```uscope-example
+```microscope-example
 world: memory
 null_ptr != null && null_ptr->a > 3 => false : bool
 ptr != null && ptr->a > 3          => true : bool
@@ -376,7 +376,7 @@ what they point to, dereferences to that value: `*arc` is what the `Arc`
 shares, and `*p` on one the view presents as empty, such as a null
 `unique_ptr`, is an error.
 
-```uscope-example
+```microscope-example
 world: memory
 *ip                    => 22 : int
 ip[1]                  => 33 : int
@@ -428,7 +428,7 @@ like a range must be the whole expression. Slicing text, which is a
 language's string or what a character pointer points to, is text: a string
 that compares with `==` and `!=`, has a length, slices again, and prints.
 
-```uscope-example
+```microscope-example
 world: memory
 items[1:3]             => range 1..3
 items[:2]              => range 0..2
@@ -461,7 +461,7 @@ a type error, and a key the map does not hold is a missing-key error, never
 a zero value. The entries are searched in the view's order, as far as the
 inspection's budget allows. A map is never indexed by position.
 
-```uscope-example
+```microscope-example
 world: memory
 squares[3]             => 9 : int
 squares[3u8]           => 9 : int
@@ -503,7 +503,7 @@ is, as C reads it, with a value in scope winning. Anything else after the
 parentheses is unambiguous: `(n) + 1` always adds, and `(T)x` always casts.
 An expression may hold at most four such names.
 
-```uscope-example
+```microscope-example
 (unsigned long)-1         => reads as `(unsigned long)-1`
 (long unsigned)-1         => reads as `(unsigned long)-1`
 (const char*)p            => reads as `(char*)p`
@@ -529,7 +529,7 @@ of its base classes is that base's part of it, as `static_cast` makes it, and
 is ambiguous when the object holds several. Casting a value to the type it
 already has changes nothing.
 
-```uscope-example
+```microscope-example
 world: scalars
 (short)-70000          => -4464 : short int
 (u8)-1                 => 255 : u8
@@ -552,7 +552,7 @@ flag as u8 + 1         => 2 : integer
 (nothing)1             => error unknown-name at `nothing`
 ```
 
-```uscope-example
+```microscope-example
 world: memory
 *(long*)&s.b           => 7 : long int
 *(&s.b as *long)       => 7 : long int
@@ -591,7 +591,7 @@ bare enumerator name is found among that enumeration's enumerators, so
 `color == RED` works even where `RED` alone is ambiguous. An integer casts to
 an enumeration, whether or not an enumerator has its value.
 
-```uscope-example
+```microscope-example
 world: memory
 color                  => BLUE : Color
 color == BLUE          => true : bool
@@ -611,7 +611,7 @@ light == Light::AMBER  => true : bool
 A tagged union, such as a Rust enum, equals the bare name of the variant it
 holds, and a member of a variant it does not hold is unavailable.
 
-```uscope-example
+```microscope-example
 world: memory
 maybe == Some          => true : bool
 maybe != None          => true : bool
@@ -629,7 +629,7 @@ A string literal compares with the program's text: a `char*`, a character
 array, or a language's string type. Text that could not be read to its end
 does not compare at all, unless what was read already differs.
 
-```uscope-example
+```microscope-example
 world: memory
 name == "hello"        => true : bool
 name != "help"         => true : bool
@@ -654,7 +654,7 @@ field of the view that presents `x` says, as the views of Go's channels, of
 C++'s vectors and strings, and of Rust's and Zig's lists do. Anything else,
 a Go map among them, has no capacity.
 
-```uscope-example
+```microscope-example
 world: memory
 sizeof(s)              => 16 : integer
 sizeof(S)              => 16 : integer
@@ -684,7 +684,7 @@ it first. Only numbers, truth values, enumerations, and pointers are
 assigned. The result is the target read again. Hovering, watching, and
 breakpoint conditions cannot assign.
 
-```uscope-example
+```microscope-example
 world: scalars
 assign: uc = 7         => 7 : unsigned char
 assign: uc -= 10       => 240 : unsigned char
@@ -705,7 +705,7 @@ assign: uc + 1 = 2     => error not-an-lvalue at `uc + 1`
 assign: uc = sc = 1    => error mode at `sc = 1`
 ```
 
-```uscope-example
+```microscope-example
 world: memory
 assign: color = GREEN  => GREEN : Color
 assign: ptr = 0        => 0x0 : S*
@@ -720,7 +720,7 @@ registers belong to the thread; a caller's are what unwinding recovered, and
 are refused. Assigning `$pc` moves where the thread resumes: the stop is
 published again at its new place, under a new stop.
 
-```uscope-example
+```microscope-example
 world: memory
 assign: $rsp = 0x7ffe0010    => 2147352592 : u64
 assign: $sp -= 16            => 2147352560 : u64

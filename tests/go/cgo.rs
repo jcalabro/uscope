@@ -6,7 +6,7 @@
 
 use std::process::Stdio;
 
-use uscope::{LanguageExceptionKind, LaunchOptions, StackSegment, StepKind, StopReason};
+use microscope::{LanguageExceptionKind, LaunchOptions, StackSegment, StepKind, StopReason};
 
 use crate::invariants::checked;
 use crate::stops::place;
@@ -275,7 +275,7 @@ async fn a_fault_in_c_is_fatal_where_it_faulted() {
         );
         assert_eq!(
             scenario.resume_to_stop().await,
-            StopReason::Exited(uscope::ExitStatus::Code(2)),
+            StopReason::Exited(microscope::ExitStatus::Code(2)),
             "{fixture}"
         );
         scenario.shutdown().await;

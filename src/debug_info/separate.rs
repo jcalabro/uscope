@@ -541,7 +541,7 @@ fn debug_sup(object: &object::File<'_>) -> Result<Option<DebugSup>, String> {
         read(&mut reader).map_err(|error| malformed(&error))?;
     if version != 5 {
         return Err(format!(
-            "its .debug_sup has version {version}, which uscope does not read"
+            "its .debug_sup has version {version}, which microscope does not read"
         ));
     }
 

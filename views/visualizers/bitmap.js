@@ -22,8 +22,8 @@ const FORMATS = { gray8: 1, rgba8: 4, rgb565: 2, bits: 0 };
 const OUTLINE = 4;
 const MARKS = 4;
 
-uscope.draw((input, { previous, width, theme: mode }) => {
-  const theme = uscope.theme;
+microscope.draw((input, { previous, width, theme: mode }) => {
+  const theme = microscope.theme;
   const image = imageOf(input);
   const { columns, rows } = image;
   /** @type {ReturnType<typeof imageOf> | null} */
@@ -40,7 +40,7 @@ uscope.draw((input, { previous, width, theme: mode }) => {
   const zoom = Math.max(1, Math.floor(Math.min(room / columns, MOST_HEIGHT / rows)));
   const W = columns * zoom;
   const H = rows * zoom;
-  const shapes = [uscope.image({ x: 0, y: 0, width: W, height: H, pixels: image.rgba, columns, rows, title: "pixels" })];
+  const shapes = [microscope.image({ x: 0, y: 0, width: W, height: H, pixels: image.rgba, columns, rows, title: "pixels" })];
   let changes = 0;
   // Outlines need a few screen pixels to each image pixel.
   const outlined = zoom >= OUTLINE;
@@ -55,10 +55,10 @@ uscope.draw((input, { previous, width, theme: mode }) => {
     }
     if (changes > 0) {
       const marks = outlined ? outline(changed, columns, rows, mode) : tint(changed, columns, rows, mode);
-      shapes.push(uscope.image({ x: 0, y: 0, width: W, height: H, pixels: marks.pixels, columns: marks.columns, rows: marks.rows }));
+      shapes.push(microscope.image({ x: 0, y: 0, width: W, height: H, pixels: marks.pixels, columns: marks.columns, rows: marks.rows }));
     }
   }
-  shapes.push(uscope.rect({ x: 0, y: 0, width: W, height: H, fill: "none", stroke: theme.line }));
+  shapes.push(microscope.rect({ x: 0, y: 0, width: W, height: H, fill: "none", stroke: theme.line }));
   const caption = [`${columns} × ${rows} ${image.format}`, `at ${zoom}×`];
   if (before !== null) {
     caption.push(
@@ -68,7 +68,7 @@ uscope.draw((input, { previous, width, theme: mode }) => {
     );
   }
   if (W > room) caption.push("scaled down to fit");
-  return uscope.picture({ width: W, height: H, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: H, shapes, caption: caption.join(" · ") });
 });
 
 /** The image as RGBA pixels, from its bytes in its format. */

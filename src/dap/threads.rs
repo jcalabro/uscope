@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use uscope::{ExecutionContext, ThreadId};
+use microscope::{ExecutionContext, ThreadId};
 
 use super::protocol::ErrorBody;
 
@@ -119,7 +119,7 @@ impl ThreadHandles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uscope::{RuntimeId, TaskId};
+    use microscope::{RuntimeId, TaskId};
 
     #[test]
     fn contexts_keep_their_own_numbers_unless_taken_and_others_get_lasting_ids() {

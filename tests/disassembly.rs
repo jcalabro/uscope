@@ -5,9 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use object::{Object, ObjectSection, ObjectSymbol, ObjectSymbolTable};
-use support::Scenario;
-use uscope::{
+use microscope::{
     AddressDescription, AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence,
     BreakpointSpec, ContextShortfall, ControlFlow, CoreDumpOptions, CoreModuleState,
     DisassembledInstruction, Disassembly, DisassemblyBlock, DisassemblyQuery, DisassemblyRange,
@@ -16,6 +14,8 @@ use uscope::{
     MemoryReadUnavailableReason, ModuleImage, StepKind, StopReason, SymbolExtentProvenance,
     SymbolKind, TargetBoundary, VirtualAddress,
 };
+use object::{Object, ObjectSection, ObjectSymbol, ObjectSymbolTable};
+use support::Scenario;
 
 /// GNU objdump's decoding of one ELF file, by image address.
 struct Objdump {
@@ -126,7 +126,7 @@ fn into_window(
     }
 }
 
-fn decoded(instruction: &DisassembledInstruction) -> &uscope::DecodedInstruction {
+fn decoded(instruction: &DisassembledInstruction) -> &microscope::DecodedInstruction {
     match &instruction.content {
         InstructionContent::Decoded(decoded) => decoded,
         other => panic!("{:#x} did not decode: {other:?}", instruction.address),
@@ -136,7 +136,7 @@ fn decoded(instruction: &DisassembledInstruction) -> &uscope::DecodedInstruction
 /// The modules of one stopped process with their images.
 struct Modules {
     records: Vec<LoadedModuleRecord>,
-    images: BTreeMap<uscope::ModuleId, Arc<ModuleImage>>,
+    images: BTreeMap<microscope::ModuleId, Arc<ModuleImage>>,
 }
 
 impl Modules {
@@ -325,7 +325,7 @@ fn pair_with_objdump<'a, 'b>(
     invented.truncate(4);
     assert!(
         missing.is_empty() && invented.is_empty(),
-        "{context}: objdump-only starts {missing:x?}, uscope-only starts {invented:x?}"
+        "{context}: objdump-only starts {missing:x?}, microscope-only starts {invented:x?}"
     );
     pairs
 }
@@ -347,7 +347,7 @@ async fn faulted_with_breakpoints(fixture: &str) -> (Scenario, Modules) {
     let (record, image) = modules.named(fixture);
     let starts = image
         .symbols()
-        .filter_map(uscope::Symbol::extent)
+        .filter_map(microscope::Symbol::extent)
         .map(|extent| extent.range.start.get())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -475,7 +475,7 @@ async fn functions_cover_every_debug_information_range() {
         let mut names = Vec::new();
         for instance in image
             .code_instances()
-            .filter(|instance| matches!(instance.kind(), uscope::CodeInstanceKind::OutOfLine))
+            .filter(|instance| matches!(instance.kind(), microscope::CodeInstanceKind::OutOfLine))
         {
             names.push(
                 image
@@ -596,7 +596,7 @@ async fn functions_known_only_by_symbols_use_their_extents() {
             .expect("code at a symbol is named");
         let named_extent = image
             .symbol(named.symbol)
-            .and_then(uscope::Symbol::extent)
+            .and_then(microscope::Symbol::extent)
             .expect("extent");
         let context = format!("{library}: {}", symbol.name());
         assert_eq!(
@@ -1229,7 +1229,7 @@ async fn stub_jump(scenario: &Scenario, call: &DisassembledInstruction) -> Disas
         .clone()
 }
 
-fn register(registers: &uscope::RegisterSnapshot, name: &str) -> u64 {
+fn register(registers: &microscope::RegisterSnapshot, name: &str) -> u64 {
     let value = registers
         .registers
         .iter()
@@ -1485,7 +1485,7 @@ async fn indirect_branch_sites(
     let skipped = image
         .symbols()
         .filter(|symbol| skipped.contains(&symbol.name()))
-        .filter_map(uscope::Symbol::extent)
+        .filter_map(microscope::Symbol::extent)
         .map(|extent| bias + extent.range.start.get()..bias + extent.range.end.get())
         .collect::<Vec<_>>();
     let kept =
@@ -1571,7 +1571,7 @@ async fn assert_executed_targets(
     loop {
         let pc = match stop {
             StopReason::Exited(status) => {
-                assert_eq!(status, uscope::ExitStatus::Code(0), "{fixture}");
+                assert_eq!(status, microscope::ExitStatus::Code(0), "{fixture}");
                 break;
             }
             StopReason::Breakpoint { address, .. } => address,

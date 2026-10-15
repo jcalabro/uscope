@@ -22,7 +22,7 @@ narrower limits and report them when used.
   inlined frames, and values available for only part of a function.
 - Separate debug files and debuginfod are supported when they can be matched
   to a module.
-- A partial value or stack stays partial; uscope does not fill missing state
+- A partial value or stack stays partial; microscope does not fill missing state
   with assumed values.
 
 ## Run control
@@ -37,7 +37,7 @@ narrower limits and report them when used.
 
 ## System calls
 
-- `uscope syscalls` traces x86-64 programs, including their 32-bit and x32
+- `microscope syscalls` traces x86-64 programs, including their 32-bit and x32
   calls.
 - The BPF engine needs Linux 5.15 or newer with BTF, `CAP_BPF`, and
   `CAP_PERFMON`. It cannot use a BPF token.
@@ -71,5 +71,5 @@ narrower limits and report them when used.
 
 ## Distribution
 
-uscope does not yet publish a supported package or stable release artifact.
+microscope does not yet publish a supported package or stable release artifact.
 The repository development environment is not an end-user installation path.

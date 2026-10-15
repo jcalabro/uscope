@@ -103,7 +103,7 @@ pub struct Stacks {
     /// The identifier the next image read gets, the vDSO's among them.
     next_image: u32,
 
-    /// The vDSO's image, read from uscope's own, which the kernel maps
+    /// The vDSO's image, read from microscope's own, which the kernel maps
     /// alike into every process, and the address it links at.
     vdso: Vdso,
 }
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn the_vdso_and_a_file_read_after_it_have_their_own_images() {
         let mut stacks = Stacks::default();
-        let (vdso, _) = stacks.vdso().expect("uscope's own vDSO is readable");
+        let (vdso, _) = stacks.vdso().expect("microscope's own vDSO is readable");
         let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/basic");
         let file = stacks.image(&file, 0);
         let id = |image: &Image| image.info.as_ref().map(|info| info.image.id());

@@ -6,7 +6,7 @@
 // and then calls reached(checkpoint); the tests inspect reached's caller.
 // A path names a variable, or a child of one after a dot. Floats are their
 // bits in hexadecimal; complex numbers are their parts' bits, real first.
-// Kind `summary` is how uscope writes the value, `absent` says the
+// Kind `summary` is how microscope writes the value, `absent` says the
 // variable must not be listed, `addressable` that it is in memory, and
 // `result` that it is listed as one of the function's results, and
 // `hidden` that it is not listed but its name reaches it. Kind `symbol`

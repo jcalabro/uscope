@@ -1,4 +1,4 @@
-//! A small instrumented service to record and explore with uscope.
+//! A small instrumented service to record and explore with microscope.
 //!
 //! A producer queues requests at a rate that rises and falls; four workers
 //! take them, each request a zone labeled with its route, holding nested
@@ -11,8 +11,8 @@
 //!
 //! ```sh
 //! CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --example demo --features enabled
-//! uscope record -o demo.usprof -- target/release/examples/demo 5
-//! uscope web demo.usprof
+//! microscope record -o demo.usprof -- target/release/examples/demo 5
+//! microscope web demo.usprof
 //! ```
 
 use std::collections::VecDeque;
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use uscope_probes::{frame, label, message, plot, zone};
+use microscope_probes::{frame, label, message, plot, zone};
 
 const WORKERS: usize = 4;
 const ROUTES: [&str; 4] = ["/users", "/orders", "/search", "/health"];
@@ -194,7 +194,7 @@ fn main() {
 
     // A recording switches the sites on just after the program starts.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !uscope_probes::listening() && Instant::now() < deadline {
+    while !microscope_probes::listening() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
 

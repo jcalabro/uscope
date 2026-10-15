@@ -1,4 +1,4 @@
-// Each test gets its own `uscope web`, started from the development build
+// Each test gets its own `microscope web`, started from the development build
 // (which serves build/web from disk), and stopped when the test ends.
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -15,27 +15,27 @@ export function fixture(name: string): string {
   return path.join(root, "build", "test-programs", name);
 }
 
-export interface Uscope {
+export interface Microscope {
   /** The server's origin, such as `http://127.0.0.1:41234`. */
   origin: string;
-  /** The link `uscope web` printed, which gives control. */
+  /** The link `microscope web` printed, which gives control. */
   link: string;
-  /** Starts another `uscope web` with these arguments. */
-  start(args: string[]): Promise<Uscope>;
+  /** Starts another `microscope web` with these arguments. */
+  start(args: string[]): Promise<Microscope>;
   /** Everything the server printed so far, for failure messages. */
   log: string[];
   stop(): Promise<void>;
 }
 
-/** Starts `uscope web`, flight-recording to `recording`. */
-export async function startUscope(args: string[], recording: string): Promise<Uscope> {
+/** Starts `microscope web`, flight-recording to `recording`. */
+export async function startMicroscope(args: string[], recording: string): Promise<Microscope> {
   const child = spawn(
     // A release build can stand in, to see how fast a large program is.
-    process.env.USCOPE_WEB_BINARY ?? path.join(root, "target", "debug", "uscope"),
+    process.env.MICROSCOPE_WEB_BINARY ?? path.join(root, "target", "debug", "microscope"),
     ["web", "--port", "0", ...args],
     {
       cwd: root,
-      env: { ...process.env, USER: "tester", USCOPE_FLIGHT_RECORDING: recording },
+      env: { ...process.env, USER: "tester", MICROSCOPE_FLIGHT_RECORDING: recording },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -44,7 +44,7 @@ export async function startUscope(args: string[], recording: string): Promise<Us
   createInterface({ input: child.stderr }).on("line", (line) => log.push(`stderr: ${line}`));
   const link = await new Promise<string>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`uscope web never printed a link: ${log}`)),
+      () => reject(new Error(`microscope web never printed a link: ${log}`)),
       10_000,
     );
     lines.on("line", (line) => {
@@ -54,13 +54,13 @@ export async function startUscope(args: string[], recording: string): Promise<Us
         resolve(line.slice("open ".length));
       }
     });
-    child.on("exit", (code) => reject(new Error(`uscope web exited with ${code}: ${log}`)));
+    child.on("exit", (code) => reject(new Error(`microscope web exited with ${code}: ${log}`)));
   });
   return {
     origin: new URL(link).origin,
     link,
     log,
-    start: (more) => startUscope(more, `${recording}.next`),
+    start: (more) => startMicroscope(more, `${recording}.next`),
     stop: () => stopChild(child),
   };
 }
@@ -77,10 +77,10 @@ function stopChild(child: ChildProcess): Promise<void> {
 }
 
 /**
- * `uscope` serves `program`. A failing test keeps each server's output and
+ * `microscope` serves `program`. A failing test keeps each server's output and
  * flight recording in its output directory.
  */
-export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: undefined }>({
+export const test = base.extend<{ program: string[]; microscope: Microscope; quiet: undefined }>({
   // Every page stays free of console errors, such as a blocked font or a
   // failed request, unless a test expects one.
   quiet: [
@@ -120,16 +120,16 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
     { auto: true },
   ],
   program: [[fixture("spin")], { option: true }],
-  uscope: async ({ program, context }, use, info) => {
-    const servers: Uscope[] = [];
+  microscope: async ({ program, context }, use, info) => {
+    const servers: Microscope[] = [];
     await mkdir(info.outputDir, { recursive: true });
-    const recording = (index: number) => info.outputPath(`uscope-${index}.flight.log`);
-    const first = await startUscope(program, recording(0));
+    const recording = (index: number) => info.outputPath(`microscope-${index}.flight.log`);
+    const first = await startMicroscope(program, recording(0));
     servers.push(first);
     await use({
       ...first,
       start: async (args) => {
-        const another = await startUscope(args, recording(servers.length));
+        const another = await startMicroscope(args, recording(servers.length));
         servers.push(another);
         return another;
       },
@@ -146,7 +146,7 @@ export const test = base.extend<{ program: string[]; uscope: Uscope; quiet: unde
       await rm(info.outputDir, { recursive: true, force: true });
     } else {
       for (const [index, server] of servers.entries()) {
-        await writeFile(info.outputPath(`uscope-${index}.log`), server.log.join("\n"));
+        await writeFile(info.outputPath(`microscope-${index}.log`), server.log.join("\n"));
       }
     }
   },

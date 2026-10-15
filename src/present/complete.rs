@@ -1,7 +1,7 @@
 //! What completes the part of a console line being completed: names,
 //! members, and registers, as the frame knows them.
 
-use uscope::{StopContext, VariableSnapshot};
+use microscope::{StopContext, VariableSnapshot};
 
 use super::Presenter;
 pub use super::completing::{Completing, completing};
@@ -25,8 +25,8 @@ pub async fn candidates(
             }
         }
         Completing::Name { first: false } if command == "handle" => {
-            for code in uscope::signal_codes() {
-                if let Some(name) = uscope::signal_name(code) {
+            for code in microscope::signal_codes() {
+                if let Some(name) = microscope::signal_name(code) {
                     candidates.push((name, "value"));
                 }
             }

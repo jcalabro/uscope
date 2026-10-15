@@ -19,7 +19,7 @@ const TABS: readonly { key: Tab; label: string }[] = [
 ];
 
 export function BottomPanel() {
-  const split = useSplit("uscope-split-bottom", 220, {
+  const split = useSplit("microscope-split-bottom", 220, {
     min: 90,
     max: 640,
     axis: "rows",
@@ -27,14 +27,14 @@ export function BottomPanel() {
   });
   const [shown, setShown] = useState<Tab>(() =>
     read(
-      "uscope-bottom-tab",
+      "microscope-bottom-tab",
       "output",
       (value): value is Tab => isString(value) && TABS.some((tab) => tab.key === value),
     ),
   );
   const choose = (tab: Tab) => {
     setShown(tab);
-    write("uscope-bottom-tab", tab);
+    write("microscope-bottom-tab", tab);
   };
   return (
     <>

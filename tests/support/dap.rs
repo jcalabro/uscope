@@ -1,6 +1,6 @@
 //! The harness for Debug Adapter Protocol scenarios.
 //!
-//! A [`Dap`] drives the real `uscope dap` binary over its stdin and stdout,
+//! A [`Dap`] drives the real `microscope dap` binary over its stdin and stdout,
 //! as editors do. It records every message in a transcript that it prints
 //! on failure, bounds every wait with a deadline, and checks every message
 //! the adapter sends against the protocol's JSON schema and against the
@@ -84,7 +84,7 @@ impl Profile {
         json!({
             "clientID": id,
             "clientName": id,
-            "adapterID": "uscope",
+            "adapterID": "microscope",
             "pathFormat": "path",
             "linesStartAt1": true,
             "columnsStartAt1": true,
@@ -232,14 +232,14 @@ struct Checks {
 }
 
 impl Dap {
-    /// Starts `uscope dap` with no session yet.
+    /// Starts `microscope dap` with no session yet.
     pub fn start(name: impl Into<String>) -> Self {
         Self::start_in(name, &[])
     }
 
-    /// Starts `uscope dap` with extra environment variables.
+    /// Starts `microscope dap` with extra environment variables.
     pub fn start_in(name: impl Into<String>, environment: &[(&str, &str)]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
         command.arg("dap").envs(environment.iter().copied());
         let recording = flight_recordings::watch_adapter(&mut command);
         let mut dap = Self::spawn(name, &mut command);
@@ -411,7 +411,7 @@ impl Dap {
                 let name = child_configuration["name"].as_str().expect("child name");
                 let mut child = Self::start(format!("{} › {name}", self.name));
                 let mut start = child_configuration.clone();
-                start["type"] = "uscope".into();
+                start["type"] = "microscope".into();
                 start["request"] = request.into();
                 child.begin(Profile::VsCode, (request, start), configuration);
                 started.push(child);
@@ -1124,7 +1124,7 @@ impl Dap {
         configuration: &Configuration,
     ) -> Started {
         let mut arguments = json!({
-            "type": "uscope",
+            "type": "microscope",
             "request": "launch",
             "name": "Launch",
             "program": program,
@@ -1439,7 +1439,7 @@ fn validate_schema(message: &Value) -> Result<(), String> {
     });
     let custom = message["command"]
         .as_str()
-        .is_some_and(|command| command.starts_with("uscope/"));
+        .is_some_and(|command| command.starts_with("microscope/"));
     let definition = match message["type"].as_str() {
         Some("response") if message["success"] == false => "ErrorResponse".to_owned(),
         // The adapter's own requests, which the protocol allows any adapter

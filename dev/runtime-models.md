@@ -1,9 +1,9 @@
 # Runtime models
 
-uscope presents language-level work as tasks and logical stacks without making
-the public debugger depend on one runtime. Go goroutines and tokio tasks use
-the same public concepts even though their metadata, scheduling, stack shape,
-and saved state differ.
+microscope presents language-level work as tasks and logical stacks without
+making the public debugger depend on one runtime. Go goroutines and tokio tasks
+use the same public concepts even though their metadata, scheduling, stack
+shape, and saved state differ.
 
 ## Code map
 

@@ -88,8 +88,8 @@ recording before adding temporary logging.
 
 A failing scenario keeps `tests/<suite>/<test>.log`; DAP tests may also keep an
 adapter log. Ordinary runs stream under `runs/`, retain the latest 20, and
-update `latest.log`. Set `USCOPE_FLIGHT_RECORDING=PATH` to choose a path or to
-an empty value to disable recording.
+update `latest.log`. Set `MICROSCOPE_FLIGHT_RECORDING=PATH` to choose a path or
+to an empty value to disable recording.
 
 Record new native control paths with `record!` or the `Recorded` ptrace
 wrapper. Recording must never change what the inferior observes.
@@ -208,8 +208,8 @@ and target directory have separate handling. All fixture dependencies are
 pinned and available to the pure Nix shell; a test run must not fetch from the
 network.
 
-`USCOPE_FIXTURE_JOBS=1` is useful when debugging the build script. It is not a
-fix for a dependency race in the script.
+`MICROSCOPE_FIXTURE_JOBS=1` is useful when debugging the build script. It is not
+a fix for a dependency race in the script.
 
 ## Compiler matrix
 
@@ -305,8 +305,8 @@ the implementation.
 ## Cache isolation
 
 No test may read the user's image cache. Under nextest the cache is disabled
-unless `USCOPE_CACHE_DIR` names one. `just test` warms `target/image-cache` and
-passes that path to tests. Cache-specific tests use scratch directories.
+unless `MICROSCOPE_CACHE_DIR` names one. `just test` warms `target/image-cache`
+and passes that path to tests. Cache-specific tests use scratch directories.
 
 `just stress` intentionally omits the warmed cache so repeated runs cover the
 loader. Do not “speed it up” by adding the test cache; that removes part of the
@@ -367,17 +367,17 @@ artifact forever.
 
 ## Miri
 
-`just miri` runs the tests of uscope's unsafe code under Miri, which stops at
-undefined behavior: an access out of bounds, misaligned, or after a free, a
+`just miri` runs the tests of microscope's unsafe code under Miri, which stops
+at undefined behavior: an access out of bounds, misaligned, or after a free, a
 block freed with the wrong layout, a data race, or a pointer made from an
 integer. Miri cannot start processes or call most C code, so these tests live
 in their own target, `tests/miri.rs`, and reach the code through
-`uscope::unsafe_parts`. When you add or change unsafe code that Miri can
+`microscope::unsafe_parts`. When you add or change unsafe code that Miri can
 reach, test it there. The same tests run natively with the rest of the suite.
 
 `just miri` also runs the Rust probe SDK's own tests, in
-`sdk/rust-probes/src/probes/tests.rs`. They play uscope's part: they read the
-rings that threads write and free the rings that exiting threads leave.
+`sdk/rust-probes/src/probes/tests.rs`. They play microscope's part: they read
+the rings that threads write and free the rings that exiting threads leave.
 
 A test of their own keeps the loop short: Miri checks only that file, not the
 whole crate, so a warm run takes about four seconds. Tests whose names contain
@@ -396,7 +396,7 @@ run reaches only by luck. `just loom` runs the models in `loom/` in about
 two seconds.
 
 A model builds the protocol's own source file, not a copy. The file uses
-only the types `crate::sync` names, which are std's in uscope. The `loom/`
+only the types `crate::sync` names, which are std's in microscope. The `loom/`
 crate includes the file with `#[path]` and gives it a `sync` of loom's
 types. Its `Mutex` and `Condvar` stand in for loom's, which miss three
 things: loom never runs another thread right after an unlock, so a

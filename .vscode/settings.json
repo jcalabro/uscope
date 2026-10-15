@@ -1,4 +1,4 @@
 {
-	// The uscope launch configurations debug with the uscope this checkout builds.
-	"uscope.path": "${workspaceFolder}/target/debug/uscope"
+	// The microscope launch configurations debug with the microscope this checkout builds.
+	"microscope.path": "${workspaceFolder}/target/debug/microscope"
 }

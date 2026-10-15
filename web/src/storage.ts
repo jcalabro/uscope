@@ -57,10 +57,10 @@ export const isRecentLaunches = (value: unknown): value is RecentLaunch[] =>
 
 /** Remembers a launch, most recent first, without duplicates. */
 export function rememberLaunch(launch: RecentLaunch): RecentLaunch[] {
-  const previous = read("uscope-recent", [], isRecentLaunches).filter(
+  const previous = read("microscope-recent", [], isRecentLaunches).filter(
     (item) => item.program !== launch.program || item.arguments !== launch.arguments,
   );
   const recent = [launch, ...previous].slice(0, 8);
-  write("uscope-recent", recent);
+  write("microscope-recent", recent);
   return recent;
 }

@@ -30,9 +30,9 @@ export function Toolbar() {
 
   return (
     <header className="toolbar">
-      <Link to="/" className="brand" aria-label="uscope home">
+      <Link to="/" className="brand" aria-label="microscope home">
         <img src="/favicon.svg" alt="" />
-        uscope
+        microscope
       </Link>
       {!control && model.hello && (
         <span className="pill idle" title="This link can watch the session but not run or stop it">

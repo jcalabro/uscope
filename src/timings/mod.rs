@@ -1,9 +1,9 @@
-//! Where uscope's time and memory go.
+//! Where microscope's time and memory go.
 //!
 //! Code marks its phases with [`span!`] and counts its work with
 //! [`count!`]; a [`Recording`] collects both from every thread into a
 //! [`Report`], which `--timings` writes as JSON with Chrome trace events
-//! and `uscope-tools timings` summarizes as text.
+//! and `microscope-tools timings` summarizes as text.
 //!
 //! Nothing is measured unless a recording is running: a span then costs one
 //! predictable branch, and reads no clock and allocates nothing. Spans mark

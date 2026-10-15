@@ -14,9 +14,9 @@ const marked = (page: Page) => disassembly(page).locator(".asm-row[aria-current=
 
 test("disassembly marks the frame's instruction and follows its calls", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
 
   await page.keyboard.press("Alt+d");
@@ -65,8 +65,8 @@ test("disassembly marks the frame's instruction and follows its calls", async ({
   await expect(marked(page)).toHaveCount(1);
 });
 
-test("memory opens at a value, marks its bytes, and writes them", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("memory opens at a value, marks its bytes, and writes them", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   await page.getByRole("button", { name: "Open req" }).click();
   await valueRow(page, "variables", "key").getByRole("button", { name: "Memory of key" }).click();
@@ -90,8 +90,8 @@ test("memory opens at a value, marks its bytes, and writes them", async ({ page,
   await expect(page.locator(".cm-pc-line")).toContainText("int status = 0;");
 });
 
-test("registers, watchpoints, signals, and modules", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("registers, watchpoints, signals, and modules", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
 
   const rip = valueRow(page, "registers", "rip");

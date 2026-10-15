@@ -18,7 +18,7 @@ export function Shell() {
 
   useEffect(() => {
     const state = inferior === "stopped" ? "stopped" : inferior === "running" ? "running" : null;
-    document.title = name ? `${name}${state ? ` · ${state}` : ""} · uscope` : "uscope";
+    document.title = name ? `${name}${state ? ` · ${state}` : ""} · microscope` : "microscope";
   }, [name, inferior]);
 
   // Pages outside a session have nothing to control.
@@ -26,9 +26,9 @@ export function Shell() {
     location.pathname === "/join" ? (
       <Outlet />
     ) : link === "unauthorized" ? (
-      <NeedsLink reason="This browser has not joined this uscope session yet." />
+      <NeedsLink reason="This browser has not joined this microscope session yet." />
     ) : link === "incompatible" ? (
-      <NeedsLink reason="This page is from another version of uscope. Reload to get this one's." />
+      <NeedsLink reason="This page is from another version of microscope. Reload to get this one's." />
     ) : null;
   if (bare) {
     return (

@@ -2,7 +2,7 @@
 // as `/debug/7/`, which the server names in a meta tag (`--public-url`).
 
 function read(): string {
-  const content = document.querySelector<HTMLMetaElement>('meta[name="uscope-base"]')?.content;
+  const content = document.querySelector<HTMLMetaElement>('meta[name="microscope-base"]')?.content;
   if (!content?.startsWith("/")) {
     return "/";
   }

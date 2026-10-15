@@ -1,6 +1,6 @@
 //! Launching a program in the client's terminal with `runInTerminal`.
 //!
-//! The client runs `uscope dap-launcher` in a terminal. The launcher
+//! The client runs `microscope dap-launcher` in a terminal. The launcher
 //! connects to a socket in a directory only this user can enter, which
 //! identifies its process, and waits; once the adapter traces that process,
 //! it is released to execute the program, whose exec completes the launch.
@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use microscope::{DebuggerHandle, ExecutionId, ProcessId};
 use serde_json::{Map, Value, json};
 use tokio::net::UnixListener;
-use uscope::{DebuggerHandle, ExecutionId, ProcessId};
 
 use super::config::{Console, Launch};
 use super::protocol::ErrorBody;
@@ -122,7 +122,7 @@ impl LauncherSocket {
         let base = std::env::temp_dir();
         let directory = loop {
             let directory = base.join(format!(
-                "uscope-{}-{}",
+                "microscope-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));

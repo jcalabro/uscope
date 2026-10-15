@@ -1,6 +1,7 @@
 //! Pointers, aggregates, child pages, dereferences, and inspection budgets.
 
 use super::*;
+use microscope::ValueChildRelationship;
 
 #[tokio::test]
 async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
@@ -19,15 +20,15 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
         let pointer = &variables.variables[1];
         assert!(matches!(
             pointer.type_info.as_ref().map(|info| &info.kind),
-            Some(uscope::TypeKind::Pointer { .. })
+            Some(microscope::TypeKind::Pointer { .. })
         ));
         let reference = match &pointer.state {
             VariableState::Available {
                 value,
-                dereference: uscope::DereferenceState::Available(reference),
+                dereference: microscope::DereferenceState::Available(reference),
                 ..
             } => {
-                let uscope::VariableValue::Address(value) = value else {
+                let microscope::VariableValue::Address(value) = value else {
                     panic!("pointer value was not an address: {value:?}");
                 };
 
@@ -46,22 +47,22 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
         assert!(matches!(
             dereferenced.state,
             VariableState::Available {
-                dereference: uscope::DereferenceState::NotApplicable,
+                dereference: microscope::DereferenceState::NotApplicable,
                 ..
             }
         ));
         assert_eq!(
             available_value(&dereferenced.state),
-            &uscope::VariableValue::Scalar(ScalarValue::Signed(42))
+            &microscope::VariableValue::Scalar(ScalarValue::Signed(42))
         );
         let constrained = partial
             .operation(
                 "bound scalar dereference bytes",
                 partial.handle().dereference_with_limits(
                     reference,
-                    uscope::InspectionLimits {
+                    microscope::InspectionLimits {
                         memory_bytes: 3,
-                        ..uscope::InspectionLimits::default()
+                        ..microscope::InspectionLimits::default()
                     },
                 ),
             )
@@ -69,8 +70,8 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
         assert!(matches!(
             constrained.state,
             VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(
-                uscope::InspectionExhaustion {
-                    resource: uscope::InspectionLimit::MemoryBytes,
+                microscope::InspectionExhaustion {
+                    resource: microscope::InspectionLimit::MemoryBytes,
                     limit: 3,
                     used: 0,
                     requested: 4,
@@ -79,8 +80,8 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
         ));
         assert!(matches!(
             constrained.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::MemoryBytes,
+            microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+                resource: microscope::InspectionLimit::MemoryBytes,
                 limit: 3,
                 used: 0,
                 requested: 4,
@@ -116,10 +117,10 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
         assert!(
             matches!(
                 terminal_pointer.type_info.as_ref().map(|info| &info.kind),
-                Some(uscope::TypeKind::Pointer { .. })
+                Some(microscope::TypeKind::Pointer { .. })
             ) && matches!(
                 available_value(&terminal_pointer.state),
-                uscope::VariableValue::Address(uscope::AddressValue { address, .. })
+                microscope::VariableValue::Address(microscope::AddressValue { address, .. })
                     if address.get() != 0
             ),
             "{fixture}: terminal pointer was implicitly dereferenced: {terminal_pointer:?}"
@@ -167,7 +168,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
             matches!(
                 unavailable.state,
                 VariableState::Unavailable(VariableUnavailableReason::ValueAccess(
-                    uscope::ValueAccessUnavailableReason::NullPointer
+                    microscope::ValueAccessUnavailableReason::NullPointer
                 ))
             ),
             "{fixture}: {unavailable:?}"
@@ -300,15 +301,15 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
             matches!(
                 null.state,
                 VariableState::Available {
-                    dereference: uscope::DereferenceState::Unavailable {
-                        reason: uscope::DereferenceUnavailableReason::Null,
+                    dereference: microscope::DereferenceState::Unavailable {
+                        reason: microscope::DereferenceUnavailableReason::Null,
                         ..
                     },
                     ..
                 }
             ) && matches!(
                 available_value(&null.state),
-                uscope::VariableValue::Address(uscope::AddressValue { address, .. })
+                microscope::VariableValue::Address(microscope::AddressValue { address, .. })
                     if address.get() == 0
             ),
             "{fixture}: {null:?}"
@@ -346,8 +347,8 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 matches!(
                     void_pointer.state,
                     VariableState::Available {
-                        dereference: uscope::DereferenceState::Unavailable {
-                            reason: uscope::DereferenceUnavailableReason::UnspecifiedPointee,
+                        dereference: microscope::DereferenceState::Unavailable {
+                            reason: microscope::DereferenceUnavailableReason::UnspecifiedPointee,
                             ..
                         },
                         ..
@@ -396,8 +397,8 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 fixture,
             );
             for (name, kind) in [
-                ("lvalue_reference", uscope::ReferenceKind::Lvalue),
-                ("rvalue_reference", uscope::ReferenceKind::Rvalue),
+                ("lvalue_reference", microscope::ReferenceKind::Lvalue),
+                ("rvalue_reference", microscope::ReferenceKind::Rvalue),
             ] {
                 let variable = scenario
                     .operation(
@@ -408,7 +409,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 assert!(
                     matches!(
                         variable.type_info.as_ref().map(|info| &info.kind),
-                        Some(uscope::TypeKind::Reference { kind: actual, .. }) if *actual == kind
+                        Some(microscope::TypeKind::Reference { kind: actual, .. }) if *actual == kind
                     ),
                     "{fixture}: {variable:?}"
                 );
@@ -476,7 +477,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                         evaluate_range(
                             scenario.handle(),
                             "slice[0..2]",
-                            uscope::InspectionLimits::default(),
+                            microscope::InspectionLimits::default(),
                         ),
                     )
                     .await;
@@ -488,9 +489,9 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 assert!(
                     matches!(
                         out_of_bounds,
-                        Ok(uscope::InspectedValue {
+                        Ok(microscope::InspectedValue {
                             state: VariableState::Unavailable(
-                                uscope::VariableUnavailableReason::IndexOutOfBounds {
+                                microscope::VariableUnavailableReason::IndexOutOfBounds {
                                     index: 2,
                                     lower_bound: 0,
                                     count: 2,
@@ -508,7 +509,7 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     matches!(
                         slice.state,
                         VariableState::Available {
-                            source: uscope::VariableValueSource::Composite,
+                            source: microscope::VariableValueSource::Composite,
                             ..
                         }
                     ),
@@ -633,15 +634,15 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
                 matches!(
                     variable.state,
                     VariableState::Available {
-                        dereference: uscope::DereferenceState::Unavailable {
-                            reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                        dereference: microscope::DereferenceState::Unavailable {
+                            reason: microscope::DereferenceUnavailableReason::UnsupportedPointee(_),
                             ..
                         },
                         ..
                     }
                 ) && matches!(
                     available_value(&variable.state),
-                    uscope::VariableValue::Address(_)
+                    microscope::VariableValue::Address(_)
                 ),
                 "{fixture} {name}: {variable:?}"
             );
@@ -653,8 +654,8 @@ async fn record_pointees_are_bounded_values_and_unsupported_pointees_remain_prin
                 scenario.handle().variable("array_pointer"),
             )
             .await;
-        let uscope::VariableState::Available {
-            dereference: uscope::DereferenceState::Available(reference),
+        let microscope::VariableState::Available {
+            dereference: microscope::DereferenceState::Available(reference),
             ..
         } = array.state
         else {
@@ -699,7 +700,7 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
                 .children
                 .iter()
                 .filter_map(|child| match &child.relationship {
-                    uscope::ValueChildRelationship::Member(member) => Some(member),
+                    ValueChildRelationship::Member(member) => Some(member),
                     _ => None,
                 })
                 .all(|member| member.declaration.is_some()),
@@ -718,15 +719,15 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             assert_signed(&named_child(&bits_page, "negative").state, -3, fixture);
             assert!(matches!(
                 available_value(&named_child(&bits_page, "first").state),
-                uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))
+                microscope::VariableValue::Scalar(ScalarValue::Unsigned(5))
             ));
             assert!(matches!(
                 available_value(&named_child(&bits_page, "second").state),
-                uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
             ));
 
             let records = dereference_named(&scenario, "records", 1).await;
-            let uscope::VariableValue::Array { .. } = available_value(&records.state) else {
+            let microscope::VariableValue::Array { .. } = available_value(&records.state) else {
                 panic!("{fixture}: pointer-to-array did not decode: {records:?}");
             };
 
@@ -735,7 +736,7 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             let second_page =
                 record_page(&scenario, &records_page.children[1].state, 2, fixture).await;
             let values = named_child(&second_page, "values");
-            let uscope::VariableValue::Array { .. } = available_value(&values.state) else {
+            let microscope::VariableValue::Array { .. } = available_value(&values.state) else {
                 panic!("{fixture}: nested array was not decoded: {records:?}");
             };
 
@@ -750,7 +751,7 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             assert_eq!(
                 named_child(&flexible_page, "values").state,
                 VariableState::Unavailable(VariableUnavailableReason::ValueAccess(
-                    uscope::ValueAccessUnavailableReason::UnknownLength
+                    microscope::ValueAccessUnavailableReason::UnknownLength
                 )),
                 "{fixture}"
             );
@@ -764,8 +765,8 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             assert!(matches!(
                 incomplete.state,
                 VariableState::Available {
-                    dereference: uscope::DereferenceState::Unavailable {
-                        reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                    dereference: microscope::DereferenceState::Unavailable {
+                        reason: microscope::DereferenceUnavailableReason::UnsupportedPointee(_),
                         ..
                     },
                     ..
@@ -807,7 +808,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             whole_record.state,
             VariableState::Available {
                 raw: None,
-                value: uscope::VariableValue::Record,
+                value: microscope::VariableValue::Record,
                 ..
             }
         ) && available_children(&whole_record.state).total() == 2,
@@ -821,7 +822,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     assert!(
         matches!(
             available_value(&padding.state),
-            uscope::VariableValue::Array { .. }
+            microscope::VariableValue::Array { .. }
         ) && available_children(&padding.state).total() == 2048,
         "{fixture}: large member did not remain lazy: {padding:?}"
     );
@@ -829,11 +830,11 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     assert_eq!(middle.children.len(), 256, "{fixture}: {middle:?}");
     assert!(middle.children.iter().all(|child| matches!(
         available_value(&child.state),
-        uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+        microscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
     )));
     assert!(matches!(
         &middle.children[255].relationship,
-        uscope::ValueChildRelationship::ArrayElement {
+        ValueChildRelationship::ArrayElement {
             index: 1279,
             indices,
         } if indices.as_ref() == [1279]
@@ -849,7 +850,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             huge.state,
             VariableState::Available {
                 raw: None,
-                value: uscope::VariableValue::Array { .. },
+                value: microscope::VariableValue::Array { .. },
                 ..
             }
         ) && available_children(&huge.state).total() == 1024 * 1024 + 1,
@@ -858,7 +859,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     let huge_tail = child_page(&scenario, &huge.state, 1024 * 1024, 1).await;
     assert!(matches!(
         available_value(&huge_tail.children[0].state),
-        uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+        microscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
     ));
     for expression in ["huge_array[0]", "huge_array[1048576]"] {
         let indexed = scenario
@@ -872,7 +873,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         assert!(
             matches!(
                 available_value(&indexed.state),
-                uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+                microscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
             ),
             "{fixture}: {expression}: {indexed:?}"
         );
@@ -902,7 +903,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             evaluate_range(
                 scenario.handle(),
                 "huge_array[3..7]",
-                uscope::InspectionLimits::default(),
+                microscope::InspectionLimits::default(),
             ),
         )
         .await;
@@ -911,7 +912,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     assert!(range_page.children.iter().enumerate().all(|(relative, child)| {
         matches!(
             &child.relationship,
-            uscope::ValueChildRelationship::ArrayElement { index, indices }
+            ValueChildRelationship::ArrayElement { index, indices }
                 if *index == 3 + u64::try_from(relative).expect("small index")
                     && indices.as_ref() == [i128::try_from(3 + relative).expect("small index")]
         )
@@ -923,7 +924,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         .iter()
         .map(|child| match &child.state {
             VariableState::Available {
-                source: uscope::VariableValueSource::Memory(address),
+                source: microscope::VariableValueSource::Memory(address),
                 ..
             } => address.get(),
             other => panic!("{fixture}: element is not in memory: {other:?}"),
@@ -939,7 +940,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             evaluate_range(
                 scenario.handle(),
                 "huge_array[7..7]",
-                uscope::InspectionLimits::default(),
+                microscope::InspectionLimits::default(),
             ),
         )
         .await;
@@ -955,18 +956,18 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         let result = evaluate_range(
             scenario.handle(),
             expression,
-            uscope::InspectionLimits::default(),
+            microscope::InspectionLimits::default(),
         )
         .await;
         let expected = match expression {
             // A range is checked against the array's bounds as it runs.
             "huge_array[7..3]" | "huge_array[1048576..1048578]" => matches!(
                 &result,
-                Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Bounds
+                Err(Error::Expression(error)) if error.kind == microscope::ExpressionErrorKind::Bounds
             ),
             "global_record[0..1]" => matches!(
                 &result,
-                Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Type
+                Err(Error::Expression(error)) if error.kind == microscope::ExpressionErrorKind::Type
             ),
             _ => matches!(&result, Err(Error::InvalidValueRange(_))),
         };
@@ -981,8 +982,8 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     assert!(
         matches!(
             &out_of_bounds,
-            Err(uscope::Error::Expression(error))
-                if error.kind == uscope::ExpressionErrorKind::Bounds
+            Err(microscope::Error::Expression(error))
+                if error.kind == microscope::ExpressionErrorKind::Bounds
         ),
         "{fixture}: {out_of_bounds:?}"
     );
@@ -1025,7 +1026,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
     assert!(
         matches!(
             available_value(&unsigned_bit_field.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+            microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
         ),
         "{fixture}: {unsigned_bit_field:?}"
     );
@@ -1057,9 +1058,9 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         StopReason::Breakpoint { .. }
     ));
 
-    let limits = uscope::InspectionLimits {
+    let limits = microscope::InspectionLimits {
         variables: 1,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let variables = scenario
@@ -1071,8 +1072,8 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert_eq!(variables.variables.len(), 1, "{variables:?}");
     assert!(matches!(
         variables.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::Variables,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::Variables,
             limit: 1,
             used: 1,
             requested: 1,
@@ -1084,9 +1085,9 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             "reserve each visible variable and value node atomically",
             scenario
                 .handle()
-                .variables_with_limits(uscope::InspectionLimits {
+                .variables_with_limits(microscope::InspectionLimits {
                     value_nodes: 1,
-                    ..uscope::InspectionLimits::default()
+                    ..microscope::InspectionLimits::default()
                 }),
         )
         .await;
@@ -1101,8 +1102,8 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     );
     assert!(matches!(
         node_limited_variables.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::ValueNodes,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::ValueNodes,
             limit: 1,
             used: 1,
             requested: 1,
@@ -1125,9 +1126,9 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             evaluate_range(
                 scenario.handle(),
                 "huge_array[0..4]",
-                uscope::InspectionLimits {
+                microscope::InspectionLimits {
                     value_nodes: 3,
-                    ..uscope::InspectionLimits::default()
+                    ..microscope::InspectionLimits::default()
                 },
             ),
         )
@@ -1138,17 +1139,17 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert_eq!(range.children.len(), 3, "{range:?}");
     assert!(matches!(
         range.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::ValueNodes,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::ValueNodes,
             limit: 3,
             used: 3,
             requested: 1,
         })
     ));
 
-    let node_limits = uscope::InspectionLimits {
+    let node_limits = microscope::InspectionLimits {
         value_nodes: 2,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let nodes = scenario
@@ -1156,7 +1157,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             "truncate a child page by value nodes",
             scenario.handle().value_children_with_limits(
                 reference.clone(),
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 0,
                     limit: 4,
                 },
@@ -1167,8 +1168,8 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert_eq!(nodes.children.len(), 2, "{nodes:?}");
     assert!(matches!(
         nodes.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::ValueNodes,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::ValueNodes,
             limit: 2,
             used: 2,
             requested: 1,
@@ -1179,7 +1180,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             "resume after a truncated child prefix with a fresh budget",
             scenario.handle().value_children_with_limits(
                 reference.clone(),
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 2,
                     limit: 2,
                 },
@@ -1192,16 +1193,16 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         [first, second]
             if matches!(
                 &first.relationship,
-                uscope::ValueChildRelationship::ArrayElement { index: 2, .. }
+                ValueChildRelationship::ArrayElement { index: 2, .. }
             ) && matches!(
                 &second.relationship,
-                uscope::ValueChildRelationship::ArrayElement { index: 3, .. }
+                ValueChildRelationship::ArrayElement { index: 3, .. }
             )
     ));
 
-    let byte_limits = uscope::InspectionLimits {
+    let byte_limits = microscope::InspectionLimits {
         memory_bytes: 2,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let bytes = scenario
@@ -1209,7 +1210,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             "truncate a child page by requested memory bytes",
             scenario.handle().value_children_with_limits(
                 reference.clone(),
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 0,
                     limit: 4,
                 },
@@ -1221,18 +1222,18 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert_eq!(bytes.usage.memory_bytes, 2, "{bytes:?}");
     assert!(matches!(
         bytes.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::MemoryBytes,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::MemoryBytes,
             limit: 2,
             used: 2,
             requested: 1,
         })
     ));
 
-    let read_limits = uscope::InspectionLimits {
+    let read_limits = microscope::InspectionLimits {
         memory_reads: 1,
         memory_bytes: 3,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let reads = scenario
@@ -1240,7 +1241,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             "truncate a child page by logical memory reads",
             scenario.handle().value_children_with_limits(
                 reference,
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 0,
                     limit: 4,
                 },
@@ -1252,17 +1253,17 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert_eq!(reads.usage.memory_reads, 1, "{reads:?}");
     assert!(matches!(
         reads.completion,
-        uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-            resource: uscope::InspectionLimit::MemoryReads,
+        microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+            resource: microscope::InspectionLimit::MemoryReads,
             limit: 1,
             used: 1,
             requested: 1,
         })
     ));
 
-    let work_limits = uscope::InspectionLimits {
+    let work_limits = microscope::InspectionLimits {
         expression_work: 1,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     let work = scenario
@@ -1276,8 +1277,8 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
     assert!(
         matches!(
             work.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::ExpressionWork,
+            microscope::InspectionCompletion::Truncated(microscope::InspectionExhaustion {
+                resource: microscope::InspectionLimit::ExpressionWork,
                 limit: 1,
                 ..
             })
@@ -1285,9 +1286,9 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         "{work:?}"
     );
 
-    let invalid = uscope::InspectionLimits {
+    let invalid = microscope::InspectionLimits {
         memory_reads: 0,
-        ..uscope::InspectionLimits::default()
+        ..microscope::InspectionLimits::default()
     };
 
     assert!(matches!(
@@ -1295,8 +1296,8 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             .handle()
             .inspect_with_limits(&parsed_value_expression("huge_array"), invalid)
             .await,
-        Err(uscope::Error::InvalidInspectionLimit {
-            resource: uscope::InspectionLimit::MemoryReads,
+        Err(microscope::Error::InvalidInspectionLimit {
+            resource: microscope::InspectionLimit::MemoryReads,
             value: 0,
             maximum: 1_024,
         })
@@ -1324,7 +1325,7 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
         let bases = derived_page
             .children
             .iter()
-            .filter(|child| matches!(child.relationship, uscope::ValueChildRelationship::Base(_)))
+            .filter(|child| matches!(child.relationship, ValueChildRelationship::Base(_)))
             .collect::<Vec<_>>();
         assert_eq!(bases.len(), 2, "{fixture}: {derived:?}");
         assert!(
@@ -1332,7 +1333,7 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
                 .children
                 .iter()
                 .filter_map(|child| match &child.relationship {
-                    uscope::ValueChildRelationship::Member(member) => Some(member),
+                    ValueChildRelationship::Member(member) => Some(member),
                     _ => None,
                 })
                 .all(|member| member.name.as_deref() != Some("static_value")),
@@ -1349,13 +1350,13 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
         let bases = virtual_page
             .children
             .iter()
-            .filter(|child| matches!(child.relationship, uscope::ValueChildRelationship::Base(_)))
+            .filter(|child| matches!(child.relationship, ValueChildRelationship::Base(_)))
             .collect::<Vec<_>>();
         assert_eq!(bases.len(), 1, "{fixture}: {virtual_derived:?}");
         assert!(matches!(
             bases[0].relationship,
-            uscope::ValueChildRelationship::Base(uscope::BaseClass {
-                virtuality: uscope::BaseClassVirtuality::Virtual,
+            ValueChildRelationship::Base(microscope::BaseClass {
+                virtuality: microscope::BaseClassVirtuality::Virtual,
                 ..
             })
         ));
@@ -1371,7 +1372,7 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
         let bases = diamond_page
             .children
             .iter()
-            .filter(|child| matches!(child.relationship, uscope::ValueChildRelationship::Base(_)))
+            .filter(|child| matches!(child.relationship, ValueChildRelationship::Base(_)))
             .collect::<Vec<_>>();
         assert_eq!(bases.len(), 2, "{fixture}: {diamond:?}");
         for branch in &bases {
@@ -1379,12 +1380,15 @@ async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
             let root = branch_page
                 .children
                 .iter()
-                .find(|child| matches!(child.relationship, uscope::ValueChildRelationship::Base(_)))
+                .find(|child| matches!(child.relationship, ValueChildRelationship::Base(_)))
                 .unwrap_or_else(|| {
                     panic!("{fixture}: diamond branch had no base: {branch_page:?}")
                 });
             assert!(
-                matches!(available_value(&root.state), uscope::VariableValue::Record),
+                matches!(
+                    available_value(&root.state),
+                    microscope::VariableValue::Record
+                ),
                 "{fixture}: virtual root was not lazy-expandable: {root:?}"
             );
         }
@@ -1438,15 +1442,15 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
 
             let value = dereference_named(&scenario, name, 1).await;
             match available_value(&value.state) {
-                uscope::VariableValue::Record => {
+                microscope::VariableValue::Record => {
                     record_page(&scenario, &value.state, 2, &format!("{fixture} {name}")).await;
                 }
-                uscope::VariableValue::Array { .. } => {
+                microscope::VariableValue::Array { .. } => {
                     let page = child_page(&scenario, &value.state, 0, 2).await;
                     assert_eq!(page.children.len(), 2, "{fixture}: {value:?}");
                     assert!(matches!(
                         available_value(&page.children[0].state),
-                        uscope::VariableValue::Record
+                        microscope::VariableValue::Record
                     ));
                 }
                 other => panic!("{fixture} {name}: unexpected value {other:?}"),
@@ -1457,7 +1461,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
             let slice = scenario
                 .operation("inspect record slice", scenario.handle().variable("slice"))
                 .await;
-            let uscope::VariableValue::Slice { length: 2, .. } = available_value(&slice.state)
+            let microscope::VariableValue::Slice { length: 2, .. } = available_value(&slice.state)
             else {
                 panic!("{fixture}: slice did not decode: {slice:?}");
             };
@@ -1466,7 +1470,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
             assert_eq!(slice_page.children.len(), 2, "{fixture}: {slice:?}");
             assert!(matches!(
                 available_value(&slice_page.children[0].state),
-                uscope::VariableValue::Record
+                microscope::VariableValue::Record
             ));
             assert_record_members(&scenario, "inner.signed_value", fixture).await;
             if fixture.starts_with("records-zig-") {
@@ -1475,7 +1479,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 assert_eq!(packed_page.children.len(), 1, "{packed:?}");
                 assert_eq!(
                     match &packed_page.children[0].relationship {
-                        uscope::ValueChildRelationship::Member(member) => member.name.as_deref(),
+                        ValueChildRelationship::Member(member) => member.name.as_deref(),
                         _ => None,
                     },
                     Some("bits"),
@@ -1508,14 +1512,14 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
             assert!(
                 record_page.children.iter().any(|child| matches!(
                     &child.relationship,
-                    uscope::ValueChildRelationship::Member(member) if member.embedded
+                    ValueChildRelationship::Member(member) if member.embedded
                 )),
                 "{fixture}: Go embedded-field metadata was lost: {record:?}"
             );
             let records = dereference_named(&scenario, "records", 1).await;
             assert!(matches!(
                 available_value(&records.state),
-                uscope::VariableValue::Array { .. }
+                microscope::VariableValue::Array { .. }
             ));
             assert_eq!(available_children(&records.state).total(), 2);
             let slice = scenario
@@ -1526,7 +1530,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 .await;
             assert!(matches!(
                 available_value(&slice.state),
-                uscope::VariableValue::Slice { length: 2, .. }
+                microscope::VariableValue::Slice { length: 2, .. }
             ));
             assert_record_members(&scenario, "inner.signedValue", fixture).await;
         } else {
@@ -1582,29 +1586,29 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
         for (name, expected, expected_names) in [
             (
                 "signed_value",
-                uscope::IntegerValue::Signed(-3),
+                microscope::IntegerValue::Signed(-3),
                 &["SIGNED_NEGATIVE"][..],
             ),
             (
                 "zero_alias",
-                uscope::IntegerValue::Signed(0),
+                microscope::IntegerValue::Signed(0),
                 &["SIGNED_ZERO", "SIGNED_ZERO_ALIAS"][..],
             ),
             // Single bits are flags, and a value is the ones it sets.
             (
                 "flags",
-                uscope::IntegerValue::Unsigned(3),
+                microscope::IntegerValue::Unsigned(3),
                 &["FLAG_READ", "FLAG_WRITE"][..],
             ),
             (
                 "byte_value",
-                uscope::IntegerValue::Unsigned(255),
+                microscope::IntegerValue::Unsigned(255),
                 &["BYTE_MAX"][..],
             ),
-            ("sequence", uscope::IntegerValue::Unsigned(3), &[][..]),
+            ("sequence", microscope::IntegerValue::Unsigned(3), &[][..]),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
-            let uscope::VariableValue::Enumeration { value, matches } =
+            let microscope::VariableValue::Enumeration { value, matches } =
                 available_value(&inspected.state)
             else {
                 panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
@@ -1622,7 +1626,7 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
         }
 
         let raw = dereference_named(&scenario, "raw", 1).await;
-        let uscope::VariableValue::Union = available_value(&raw.state) else {
+        let microscope::VariableValue::Union = available_value(&raw.state) else {
             panic!("{fixture}: raw value was not a union: {raw:?}");
         };
 
@@ -1631,7 +1635,7 @@ async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretation
             page.children
                 .iter()
                 .filter_map(|child| match &child.relationship {
-                    uscope::ValueChildRelationship::Member(member) => member.name.as_deref(),
+                    ValueChildRelationship::Member(member) => member.name.as_deref(),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
@@ -1678,8 +1682,8 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         assert!(
             matches!(
                 available_value(&fieldless.state),
-                uscope::VariableValue::Enumeration {
-                    value: uscope::IntegerValue::Signed(-3),
+                microscope::VariableValue::Enumeration {
+                    value: microscope::IntegerValue::Signed(-3),
                     matches,
                 } if matches.len() == 1 && matches[0].name.as_ref() == "Negative"
             ),
@@ -1689,7 +1693,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         assert!(
             matches!(
                 available_value(&value.state),
-                uscope::VariableValue::Variant {
+                microscope::VariableValue::Variant {
                     active: Some(active),
                     ..
                 } if active.members.first().and_then(|member| member.name.as_deref())
@@ -1701,8 +1705,8 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         assert!(
             matches!(
                 available_value(&wide.state),
-                uscope::VariableValue::Enumeration {
-                    value: uscope::IntegerValue::Unsigned(value),
+                microscope::VariableValue::Enumeration {
+                    value: microscope::IntegerValue::Unsigned(value),
                     matches,
                 } if *value == (1_u128 << 100) + 9
                     && matches.len() == 1
@@ -1714,7 +1718,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         assert!(
             matches!(
                 available_value(&optional.state),
-                uscope::VariableValue::Variant {
+                microscope::VariableValue::Variant {
                     active: Some(active),
                     ..
                 } if active.members.first().and_then(|member| member.name.as_deref())
@@ -1726,7 +1730,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         assert!(
             matches!(
                 available_value(&empty.state),
-                uscope::VariableValue::Variant {
+                microscope::VariableValue::Variant {
                     active: Some(active),
                     ..
                 } if active.members.first().and_then(|member| member.name.as_deref())
@@ -1741,13 +1745,13 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
             let payload_page = record_page(&scenario, &active.state, 1, fixture).await;
             let payload = named_child(&payload_page, "__0");
             let decoded = match (name, available_value(&payload.state)) {
-                ("done", uscope::VariableValue::Record) => {
+                ("done", microscope::VariableValue::Record) => {
                     record_page(&scenario, &payload.state, 0, fixture)
                         .await
                         .children
                         .is_empty()
                 }
-                ("failed", uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
+                ("failed", microscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
                 _ => false,
             };
 
@@ -1755,7 +1759,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
         }
 
         if fixture == "enums-rust-o0" {
-            let uscope::VariableValue::Variant {
+            let microscope::VariableValue::Variant {
                 discriminant,
                 active: Some(active),
             } = available_value(&value.state)
@@ -1765,7 +1769,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
 
             assert_eq!(
                 *discriminant,
-                Some(uscope::IntegerValue::Unsigned(1)),
+                Some(microscope::IntegerValue::Unsigned(1)),
                 "{value:?}"
             );
             assert_eq!(active.members.len(), 1, "{value:?}");
@@ -1781,7 +1785,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
             assert!(
                 matches!(
                     available_value(&payload.state),
-                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                    microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
                 ),
                 "{value:?}"
             );
@@ -1797,7 +1801,7 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
             assert!(
                 matches!(
                     available_value(&selected_payload.state),
-                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                    microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
                 ),
                 "{selected_payload:?}"
             );
@@ -1812,8 +1816,8 @@ async fn rust_enums_decode_their_variants_and_unit_payloads() {
             assert!(
                 matches!(
                     inactive_payload.state,
-                    VariableState::Unavailable(uscope::VariableUnavailableReason::ValueAccess(
-                        uscope::ValueAccessUnavailableReason::InactiveVariant(Some(_))
+                    VariableState::Unavailable(microscope::VariableUnavailableReason::ValueAccess(
+                        microscope::ValueAccessUnavailableReason::InactiveVariant(Some(_))
                     ))
                 ),
                 "{inactive_payload:?}"
@@ -1838,17 +1842,17 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
         for (name, expected, expected_names) in [
             (
                 "negative",
-                uscope::IntegerValue::Signed(-3),
+                microscope::IntegerValue::Signed(-3),
                 &["main.StateNegative"][..],
             ),
             (
                 "alias",
-                uscope::IntegerValue::Signed(0),
+                microscope::IntegerValue::Signed(0),
                 &["main.StateZero", "main.StateAlias"][..],
             ),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
-            let uscope::VariableValue::Enumeration { value, matches } =
+            let microscope::VariableValue::Enumeration { value, matches } =
                 available_value(&inspected.state)
             else {
                 panic!("{fixture} {name}: value was not symbolic: {inspected:?}");
@@ -1869,7 +1873,7 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
         let unknown = dereference_named(&scenario, "unknown", 1).await;
         assert_eq!(
             available_value(&unknown.state),
-            &uscope::VariableValue::Scalar(ScalarValue::Signed(5)),
+            &microscope::VariableValue::Scalar(ScalarValue::Signed(5)),
             "{fixture}"
         );
 
@@ -1894,15 +1898,19 @@ async fn cpp_scoped_enums_and_unions_preserve_language_semantics() {
         ));
 
         for (name, expected, expected_names) in [
-            ("state", uscope::IntegerValue::Signed(-3), &["Negative"][..]),
+            (
+                "state",
+                microscope::IntegerValue::Signed(-3),
+                &["Negative"][..],
+            ),
             (
                 "alias",
-                uscope::IntegerValue::Signed(0),
+                microscope::IntegerValue::Signed(0),
                 &["Zero", "Alias"][..],
             ),
         ] {
             let inspected = dereference_named(&scenario, name, 1).await;
-            let uscope::VariableValue::Enumeration { value, matches } =
+            let microscope::VariableValue::Enumeration { value, matches } =
                 available_value(&inspected.state)
             else {
                 panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
@@ -1921,8 +1929,10 @@ async fn cpp_scoped_enums_and_unions_preserve_language_semantics() {
 
         let raw = dereference_named(&scenario, "raw", 1).await;
         assert!(
-            matches!(available_value(&raw.state), uscope::VariableValue::Union)
-                && available_children(&raw.state).total() == 2,
+            matches!(
+                available_value(&raw.state),
+                microscope::VariableValue::Union
+            ) && available_children(&raw.state).total() == 2,
             "{fixture}: {raw:?}"
         );
 
@@ -1957,8 +1967,8 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
         assert!(
             matches!(
                 state_graph,
-                uscope::VariableValue::Enumeration {
-                    value: uscope::IntegerValue::Signed(-3),
+                microscope::VariableValue::Enumeration {
+                    value: microscope::IntegerValue::Signed(-3),
                     matches,
                 } if matches.len() == 1 && matches[0].name.as_ref() == "negative"
             ),
@@ -1969,7 +1979,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
             panic!("{fixture}: tagged union was unavailable: {tagged:?}");
         };
 
-        let uscope::VariableValue::Variant {
+        let microscope::VariableValue::Variant {
             active: Some(active),
             ..
         } = graph
@@ -1987,19 +1997,21 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
         assert!(
             matches!(
                 available_value(&named_child(&tagged_page, "integer").state),
-                uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
             ),
             "{fixture}: {tagged:?}"
         );
         let raw = dereference_named(&scenario, "raw", 1).await;
         assert!(
-            matches!(available_value(&raw.state), uscope::VariableValue::Union)
-                && available_children(&raw.state).total() == 2,
+            matches!(
+                available_value(&raw.state),
+                microscope::VariableValue::Union
+            ) && available_children(&raw.state).total() == 2,
             "{fixture}: {raw:?}"
         );
         for (name, arm, expected) in [("optional", "some", 43), ("failure", "success", 44)] {
             let inspected = dereference_named(&scenario, name, 1).await;
-            let uscope::VariableValue::Variant {
+            let microscope::VariableValue::Variant {
                 active: Some(active),
                 ..
             } = available_value(&inspected.state)
@@ -2013,7 +2025,7 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
             assert!(
                 matches!(
                     available_value(&page.children[0].state),
-                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(value))
+                    microscope::VariableValue::Scalar(ScalarValue::Unsigned(value))
                         if *value == expected
                 ),
                 "{fixture}: {inspected:?}"
@@ -2068,7 +2080,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             array.state,
             VariableState::Available {
                 raw: None,
-                value: uscope::VariableValue::Array { .. },
+                value: microscope::VariableValue::Array { .. },
                 ..
             }
         ) && available_children(&array.state).total() == 4,
@@ -2128,7 +2140,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             evaluate_range(
                 scenario.handle(),
                 "(*boundary_array)[0..4]",
-                uscope::InspectionLimits::default(),
+                microscope::InspectionLimits::default(),
             ),
         )
         .await;
@@ -2153,7 +2165,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             scenario.handle().variable("boundary_array"),
         )
         .await;
-    let uscope::VariableValue::Address(boundary) = available_value(&pointer.state) else {
+    let microscope::VariableValue::Address(boundary) = available_value(&pointer.state) else {
         panic!("{fixture}: boundary array was not an address: {pointer:?}");
     };
 
@@ -2168,9 +2180,9 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
         prefix.bytes.as_ref(),
         [41_i32.to_le_bytes(), 42_i32.to_le_bytes()].concat()
     );
-    let inaccessible = uscope::MemoryReadCompletion::Incomplete {
+    let inaccessible = microscope::MemoryReadCompletion::Incomplete {
         next_address: end,
-        reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+        reason: microscope::MemoryReadUnavailableReason::Inaccessible,
     };
 
     assert_eq!(prefix.completion, inaccessible);
@@ -2206,7 +2218,7 @@ async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
         .operation("pointer", scenario.handle().variable("pointer"))
         .await;
     let VariableState::Available {
-        dereference: uscope::DereferenceState::Available(target),
+        dereference: microscope::DereferenceState::Available(target),
         ..
     } = pointer.state
     else {
@@ -2233,7 +2245,7 @@ async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
     assert_signed(&tail.children[0].state, 22, fixture);
     assert!(matches!(
         &tail.children[0].relationship,
-        uscope::ValueChildRelationship::ArrayElement { index: 1, indices }
+        ValueChildRelationship::ArrayElement { index: 1, indices }
             if indices.as_ref() == [1]
     ));
     assert_eq!(
@@ -2251,7 +2263,7 @@ async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
                 .handle()
                 .value_children(
                     reference.clone(),
-                    uscope::ValueChildQuery { offset: 0, limit },
+                    microscope::ValueChildQuery { offset: 0, limit },
                 )
                 .await,
             Err(Error::InvalidValueChildPageLimit(actual)) if actual == limit
@@ -2267,7 +2279,7 @@ async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
             .handle()
             .value_children(
                 reference,
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 0,
                     limit: 1,
                 },
@@ -2301,14 +2313,14 @@ async fn stop_scoped_capabilities_reject_running_state_before_becoming_stale() {
         .operation("spin pointer", scenario.handle().variable("spin_pointer"))
         .await;
     let VariableState::Available {
-        dereference: uscope::DereferenceState::Available(target),
+        dereference: microscope::DereferenceState::Available(target),
         ..
     } = pointer.state
     else {
         panic!("spin pointer was not dereferenceable: {pointer:?}");
     };
 
-    let page = uscope::ValueChildQuery {
+    let page = microscope::ValueChildQuery {
         offset: 0,
         limit: 1,
     };
@@ -2359,14 +2371,14 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
         matches!(
             pointer_pointer.state,
             VariableState::Available {
-                source: uscope::VariableValueSource::ImplicitPointer,
+                source: microscope::VariableValueSource::ImplicitPointer,
                 raw: None,
-                dereference: uscope::DereferenceState::Available(_),
+                dereference: microscope::DereferenceState::Available(_),
                 ..
             }
         ) && matches!(
             available_value(&pointer_pointer.state),
-            uscope::VariableValue::ImplicitPointer
+            microscope::VariableValue::ImplicitPointer
         ),
         "{pointer_pointer:?}"
     );
@@ -2403,21 +2415,21 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
         matches!(
             byte_pointer.state,
             VariableState::Available {
-                source: uscope::VariableValueSource::ImplicitPointer,
+                source: microscope::VariableValueSource::ImplicitPointer,
                 raw: None,
-                dereference: uscope::DereferenceState::Available(_),
+                dereference: microscope::DereferenceState::Available(_),
                 ..
             }
         ) && matches!(
             available_value(&byte_pointer.state),
-            uscope::VariableValue::ImplicitPointer
+            microscope::VariableValue::ImplicitPointer
         ),
         "{byte_pointer:?}"
     );
     let byte = dereference_named(&offset, "byte_pointer", 1).await;
     assert_eq!(
         available_value(&byte.state),
-        &uscope::VariableValue::Scalar(ScalarValue::Unsigned(42)),
+        &microscope::VariableValue::Scalar(ScalarValue::Unsigned(42)),
         "{byte:?}"
     );
     let atomic_byte = offset
@@ -2431,7 +2443,7 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
     assert!(
         matches!(
             available_value(&atomic_byte.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+            microscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
         ),
         "{atomic_byte:?}"
     );
@@ -2497,9 +2509,9 @@ async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malfo
         matches!(
             value.state,
             VariableState::Invalid {
-                source: uscope::VariableValueSource::Memory(_),
+                source: microscope::VariableValueSource::Memory(_),
                 ref raw,
-                reason: uscope::VariableInvalidReason::BooleanRepresentation(2),
+                reason: microscope::VariableInvalidReason::BooleanRepresentation(2),
             } if raw.as_ref() == [2]
         ),
         "{fixture}: {value:?}"
@@ -2512,18 +2524,18 @@ async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malfo
     scenario.shutdown().await;
 }
 
-fn text(bytes: &[u8], completion: uscope::TextCompletion) -> uscope::TextSummary {
-    uscope::TextSummary {
+fn text(bytes: &[u8], completion: microscope::TextCompletion) -> microscope::TextSummary {
+    microscope::TextSummary {
         bytes: bytes.into(),
         completion,
     }
 }
 
 /// Text longer than a summary holds, of one repeated byte.
-fn truncated(byte: u8, length: Option<u64>) -> uscope::TextSummary {
+fn truncated(byte: u8, length: Option<u64>) -> microscope::TextSummary {
     text(
-        &[byte; uscope::TextSummary::MAX_BYTES],
-        uscope::TextCompletion::Truncated { length },
+        &[byte; microscope::TextSummary::MAX_BYTES],
+        microscope::TextCompletion::Truncated { length },
     )
 }
 
@@ -2533,7 +2545,7 @@ async fn assert_strings(
     fixture: &str,
     source: &str,
     function: Option<&str>,
-    expected: &[(&str, Option<uscope::TextSummary>)],
+    expected: &[(&str, Option<microscope::TextSummary>)],
 ) {
     let mut scenario = Scenario::launch(fixture);
     if let Some(function) = function {
@@ -2564,7 +2576,7 @@ async fn assert_strings(
 
 #[tokio::test]
 async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
-    use uscope::TextCompletion::{Complete, Unreadable};
+    use microscope::TextCompletion::{Complete, Unreadable};
 
     let unreadable = Unreadable {
         address: VirtualAddress::new(1),
@@ -2604,7 +2616,7 @@ async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
 
 #[tokio::test]
 async fn cpp_rust_and_go_strings_read_their_recorded_length() {
-    use uscope::TextCompletion::Complete;
+    use microscope::TextCompletion::Complete;
 
     assert_strings(
         "strings-cpp-clang-o0",
@@ -2656,7 +2668,7 @@ async fn text_running_into_an_unmapped_page_stops_at_the_page() {
         .await;
     let edge = text_of(&variables.variables, "edge").expect("text");
     assert_eq!(&*edge.bytes, b"eeeee");
-    let uscope::TextCompletion::Unreadable { address } = edge.completion else {
+    let microscope::TextCompletion::Unreadable { address } = edge.completion else {
         panic!("the text continues into an unmapped page: {edge:?}");
     };
 
@@ -2708,7 +2720,7 @@ async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
         .find(|variable| variable.name.as_ref() == "stack")
         .expect("rt_start's parameter");
     assert!(
-        matches!(stack.state, uscope::VariableState::Unavailable(_)),
+        matches!(stack.state, microscope::VariableState::Unavailable(_)),
         "{stack:?}"
     );
     scenario.shutdown().await;
@@ -2716,10 +2728,10 @@ async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
 
 async fn assert_array_values(
     scenario: &Scenario,
-    value: &uscope::DereferencedValue,
+    value: &microscope::DereferencedValue,
     fixture: &str,
 ) {
-    let uscope::VariableValue::Array { .. } = available_value(&value.state) else {
+    let microscope::VariableValue::Array { .. } = available_value(&value.state) else {
         panic!("{fixture}: expected decoded array, got {value:?}");
     };
 
@@ -2728,7 +2740,7 @@ async fn assert_array_values(
         .children
         .iter()
         .map(|child| match available_value(&child.state) {
-            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            microscope::VariableValue::Scalar(microscope::ScalarValue::Signed(value)) => *value,
             other => panic!("{fixture}: expected scalar array element, got {other:?}"),
         })
         .collect();
@@ -2737,19 +2749,19 @@ async fn assert_array_values(
 
 /// The page of elements a range expression selects.
 async fn evaluate_range(
-    handle: &uscope::DebuggerHandle,
+    handle: &microscope::DebuggerHandle,
     text: &str,
-    limits: uscope::InspectionLimits,
-) -> uscope::Result<uscope::ValueChildPage> {
+    limits: microscope::InspectionLimits,
+) -> microscope::Result<microscope::ValueChildPage> {
     match handle
         .evaluate_with(
             &parsed_value_expression(text),
-            uscope::EvaluationMode::Read,
+            microscope::EvaluationMode::Read,
             limits,
         )
         .await?
     {
-        uscope::Evaluation::Range(page) => Ok(page),
+        microscope::Evaluation::Range(page) => Ok(page),
         other => panic!("`{text}` is not a range: {other:?}"),
     }
 }

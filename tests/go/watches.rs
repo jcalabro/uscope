@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     DebuggerEvent, LaunchOptions, StopReason, WatchAccess, WatchScope, Watchpoint,
     WatchpointInvalidation,
 };
@@ -38,7 +38,7 @@ async fn watching(fixture: &str, access: WatchAccess) -> (Scenario, Watchpoint, 
     let before = address(&scenario, "&counter")
         .await
         .expect("counter's address");
-    let expression = uscope::Expression::parse("counter").expect("parses");
+    let expression = microscope::Expression::parse("counter").expect("parses");
     let watchpoint = scenario
         .operation(
             "watch counter",

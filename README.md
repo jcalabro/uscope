@@ -1,12 +1,12 @@
-# uscope
+# microscope
 
-uscope is a native debugger and profiler for Linux x86-64. It understands C,
+microscope is a native debugger and profiler for Linux x86-64. It understands C,
 C++, Rust, Go, Zig, Odin, Fortran, D, Nim, and Ada programs. You can use it in a
 terminal, in a browser, or through an editor that supports the Debug Adapter
 Protocol.
 
-> uscope is under active development. It does not have a supported installation
-> method or stable release yet.
+> microscope is under active development. It does not have a supported
+> installation method or stable release yet.
 
 ## Documentation
 
@@ -26,7 +26,7 @@ Protocol.
 
 ## What it can do
 
-uscope can launch a program, attach to a running process, or inspect a core
+microscope can launch a program, attach to a running process, or inspect a core
 dump. It supports source and instruction stepping, conditional breakpoints,
 hardware watchpoints, stack traces, expressions, memory, registers, and
 disassembly.
@@ -35,19 +35,19 @@ It presents common containers as their contents instead of their internal
 fields. It also understands Go goroutines and async Rust tasks. The profiler
 can record native and logical stacks and open them in the browser interface.
 
-`uscope syscalls` traces the system calls a program makes, as strace does. By
-default it uses eBPF, so the traced program never stops.
+`microscope syscalls` traces the system calls a program makes, as strace does.
+By default it uses eBPF, so the traced program never stops.
 
-When debug information or memory is missing, uscope reports what it could not
-read. It does not fill gaps with guessed values.
+When debug information or memory is missing, microscope reports what it could
+not read. It does not fill gaps with guessed values.
 
 ## Platform support
 
-uscope currently runs on Linux x86-64, version 3.8 or newer. Some features
+microscope currently runs on Linux x86-64, version 3.8 or newer. Some features
 need a newer kernel: catchpoints and the ptrace syscall engine need 5.3, the
 BPF syscall engine 5.15, and the profiler 6.0.
 
-To read thread-local variables in a program that uses glibc, uscope needs
+To read thread-local variables in a program that uses glibc, microscope needs
 glibc 2.27 or newer. Before glibc 2.34, the program must also have loaded
 libpthread.
 

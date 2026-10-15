@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # A node as the flame graph reads one: its own samples are its value.
 view rust profile::Node {

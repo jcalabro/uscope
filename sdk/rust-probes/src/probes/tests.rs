@@ -37,7 +37,7 @@ fn mine() -> &'static Ring {
     }
 }
 
-/// Whether the registry uscope reads lists `ring`.
+/// Whether the registry microscope reads lists `ring`.
 fn registered(ring: &'static Ring) -> bool {
     let rings = CONTROL.rings.load(Ordering::Acquire) as usize;
     CONTROL.registry[..rings]
@@ -45,7 +45,7 @@ fn registered(ring: &'static Ring) -> bool {
         .any(|slot| ptr::eq(slot.load(Ordering::Acquire), &ring.header))
 }
 
-/// An event as uscope decodes it.
+/// An event as microscope decodes it.
 #[derive(Debug)]
 struct Event {
     site: u32,
@@ -54,7 +54,7 @@ struct Event {
     more: Vec<u8>,
 }
 
-/// Reads `ring`'s records from `tail` to its head, as uscope does, and
+/// Reads `ring`'s records from `tail` to its head, as microscope does, and
 /// returns the events and the new tail.
 fn read(ring: &Ring, tail: u64) -> (Vec<Event>, u64) {
     let head = ring.header.head.load(Ordering::Acquire);
@@ -132,7 +132,7 @@ fn a_threads_events_are_whole_records_in_its_own_ring() {
 }
 
 #[test]
-fn a_ring_uscope_freed_is_taken_again_but_not_after_a_fork() {
+fn a_ring_microscope_freed_is_taken_again_but_not_after_a_fork() {
     let _serial = listen();
     let emit = || {
         std::thread::spawn(|| {
@@ -145,7 +145,10 @@ fn a_ring_uscope_freed_is_taken_again_but_not_after_a_fork() {
 
     let (first, _) = emit();
     let (other, _) = emit();
-    assert!(!ptr::eq(first, other), "a retired ring is uscope's to read");
+    assert!(
+        !ptr::eq(first, other),
+        "a retired ring is microscope's to read"
+    );
 
     first.header.state.store(abi::RING_FREE, Ordering::Release);
     let (again, thread) = emit();
@@ -181,7 +184,7 @@ fn concurrent_threads_reuse_the_rings_a_reader_frees() {
         MADE[..made].iter().filter_map(OnceLock::get).copied()
     };
 
-    // Where uscope last read each ring that other tests made.
+    // Where microscope last read each ring that other tests made.
     let mut tails = made()
         .map(|ring| {
             (
@@ -211,7 +214,7 @@ fn concurrent_threads_reuse_the_rings_a_reader_frees() {
         let reader = scope.spawn(move || {
             let mut seen = Vec::new();
             let mut sweep = || {
-                // As uscope does, it reads rings as their threads write
+                // As microscope does, it reads rings as their threads write
                 // them, and frees those their threads left.
                 for ring in made() {
                     let state = ring.header.state.load(Ordering::Acquire);

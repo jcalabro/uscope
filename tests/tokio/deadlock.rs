@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use uscope::{
+use microscope::{
     Evaluation, ExecutionContext, Expression, StackFrameId, StopContext, StopId, StopReason,
     TaskId, TaskState, VariableState, VariableValue,
 };

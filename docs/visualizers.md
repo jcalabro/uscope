@@ -1,6 +1,6 @@
 # Visualizers
 
-A visualizer draws a value in the web page, `uscope web`: a chess position
+A visualizer draws a value in the web page, `microscope web`: a chess position
 as a board, a framebuffer as an image, samples as a plot, a mesh as a
 model you can turn. A view says which
 of a value's data the drawing needs, with `visualize` ([Views](views.md)),
@@ -9,7 +9,7 @@ picture. The page runs the renderer in a sandbox, checks the picture, and
 draws it. The terminal and debug adapters never draw: a `visualize`
 changes nothing they show.
 
-Every renderer example on this page runs as one of uscope's tests.
+Every renderer example on this page runs as one of microscope's tests.
 
 ## A first drawing
 
@@ -26,7 +26,7 @@ Next to a view file, `life.views`, that names what a drawing of a `struct
 life` needs:
 
 ```text
-uscope-views 1
+microscope-views 1
 
 # A life board, drawn from its cells' bytes by life.js beside this file.
 extend c life {
@@ -43,7 +43,7 @@ goes the renderer that draws it, `life.js`, named for the drawing:
 ```js
 // @ts-check
 // Draws a life board: one byte a cell, 1 for alive, row by row.
-uscope.draw(({ cells, columns, generation }, { previous }) => {
+microscope.draw(({ cells, columns, generation }, { previous }) => {
   const rows = cells.length / columns;
   const pixels = new Uint8ClampedArray(cells.length * 4);
   for (let i = 0; i < cells.length; i++) {
@@ -51,14 +51,14 @@ uscope.draw(({ cells, columns, generation }, { previous }) => {
     const [r, g, b] = cells[i] !== 1 ? [238, 241, 245] : born ? [176, 80, 10] : [26, 34, 48];
     pixels.set([r, g, b, 255], i * 4);
   }
-  return uscope.picture({
+  return microscope.picture({
     width: columns * 6, height: rows * 6, caption: `generation ${generation}`,
-    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows, title: "cells" })],
+    shapes: [microscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows, title: "cells" })],
   });
 });
 ```
 
-`uscope web --views life.views ./life` loads both. Stop anywhere a `struct
+`microscope web --views life.views ./life` loads both. Stop anywhere a `struct
 life` is in scope, or a pointer to one, and press Alt+V: the Drawings view
 draws it, and draws it again at each stop, with the cells born since the
 stop before in orange. Edit `life.js` and run Reload views from the
@@ -160,13 +160,13 @@ is 3.
 
 ## Renderers
 
-A renderer is one script that calls `uscope.draw` once with a function,
-or `uscope.live` for a live drawing (see Live renderers). The function
+A renderer is one script that calls `microscope.draw` once with a function,
+or `microscope.live` for a live drawing (see Live renderers). The function
 gets the inputs and a context, and returns a picture; it may be `async`. The only global it can use beyond the language and drawing is
-`uscope`.
+`microscope`.
 
 ```text
-uscope.draw((input, context) => picture)
+microscope.draw((input, context) => picture)
 
 context.previous   the inputs drawn for this value at the stop before, or null
 context.paths      the part of the drawn value each input is, or null
@@ -181,19 +181,19 @@ square 28 selects `${paths.squares}[28]`; the value itself, as `self` or
 as Draw as… hands it over, has `""`; anything else, such as `bytes(…)`,
 `len * 2`, or a string, has null, and has no parts to open.
 
-```uscope-renderer-example
+```microscope-renderer-example
 // A bar per value, from a zero baseline, with each value in its title.
-uscope.draw(({ values }, { paths }) => {
+microscope.draw(({ values }, { paths }) => {
   const most = Math.max(1, ...Array.from(values, Math.abs));
   const shapes = Array.from(values, (value, index) =>
-    uscope.rect({
+    microscope.rect({
       x: index * 22, y: 100 - (Math.max(0, value) / most) * 100,
       width: 20, height: (Math.abs(value) / most) * 100,
-      fill: uscope.theme.series[0], title: `[${index}] = ${value}`,
+      fill: microscope.theme.series[0], title: `[${index}] = ${value}`,
       select: paths.values === null ? undefined : `${paths.values}[${index}]`,
     }),
   );
-  return uscope.picture({ width: values.length * 22, height: 100, shapes, caption: `${values.length} values` });
+  return microscope.picture({ width: values.length * 22, height: 100, shapes, caption: `${values.length} values` });
 });
 ---
 ({ values: new Float64Array([3, 1, 4, 1, 5]) })
@@ -201,20 +201,20 @@ uscope.draw(({ values }, { paths }) => {
 
 ### Pictures and shapes
 
-`uscope.picture({width, height, shapes, caption?})` is a picture of
+`microscope.picture({width, height, shapes, caption?})` is a picture of
 `width` by `height` units, scaled to fit its card and never cropped. Its
 shapes are drawn in order, later ones on top.
 
 | Shape | Properties |
 |---|---|
-| `uscope.rect` | `x`, `y`, `width`, `height`, `radius?` |
-| `uscope.circle` | `x`, `y`, `r` |
-| `uscope.line` | `x1`, `y1`, `x2`, `y2` |
-| `uscope.polyline`, `uscope.polygon` | `points`: x0, y0, x1, y1, …, an array or a `Float32Array` or `Float64Array` |
-| `uscope.path` | `d`: SVG path data |
-| `uscope.text` | `x`, `y`, `text`, `size?`, `weight?` (`"normal"`, `"bold"`, or 100 to 900), `family?` (`"sans"` or `"mono"`), `anchor?` (`"start"`, `"middle"`, `"end"`), `baseline?` (`"auto"`, `"alphabetic"`, `"middle"`, `"central"`, `"hanging"`, `"ideographic"`) |
-| `uscope.group` | `shapes`; `x?` and `y?` move them, and `rotate?` (degrees, clockwise) and `scale?` turn and size them about that point |
-| `uscope.image` | `x`, `y`, `width`, `height`, and either `pixels` (RGBA, a `Uint8ClampedArray`), `columns`, and `rows`, or a `canvas`, an `OffscreenCanvas` the renderer drew; `smooth?` blends pixels when scaled, which stay sharp otherwise |
+| `microscope.rect` | `x`, `y`, `width`, `height`, `radius?` |
+| `microscope.circle` | `x`, `y`, `r` |
+| `microscope.line` | `x1`, `y1`, `x2`, `y2` |
+| `microscope.polyline`, `microscope.polygon` | `points`: x0, y0, x1, y1, …, an array or a `Float32Array` or `Float64Array` |
+| `microscope.path` | `d`: SVG path data |
+| `microscope.text` | `x`, `y`, `text`, `size?`, `weight?` (`"normal"`, `"bold"`, or 100 to 900), `family?` (`"sans"` or `"mono"`), `anchor?` (`"start"`, `"middle"`, `"end"`), `baseline?` (`"auto"`, `"alphabetic"`, `"middle"`, `"central"`, `"hanging"`, `"ideographic"`) |
+| `microscope.group` | `shapes`; `x?` and `y?` move them, and `rotate?` (degrees, clockwise) and `scale?` turn and size them about that point |
+| `microscope.image` | `x`, `y`, `width`, `height`, and either `pixels` (RGBA, a `Uint8ClampedArray`), `columns`, and `rows`, or a `canvas`, an `OffscreenCanvas` the renderer drew; `smooth?` blends pixels when scaled, which stay sharp otherwise |
 
 Every shape also takes:
 
@@ -236,10 +236,10 @@ lets the pointer through to the shapes beneath it, so a piece drawn on a
 square leaves the square clickable, and marks drawn over a titled image
 leave its pixels named.
 
-```uscope-renderer-example
+```microscope-renderer-example
 // Every kind of shape, in the page's colors.
-uscope.draw(() => {
-  const { series, ink2, changed } = uscope.theme;
+microscope.draw(() => {
+  const { series, ink2, changed } = microscope.theme;
   const pixels = new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 255, 255]);
   const canvas = new OffscreenCanvas(8, 8);
   const pen = canvas.getContext("2d");
@@ -247,19 +247,19 @@ uscope.draw(() => {
     pen.fillStyle = series[1];
     pen.fillRect(0, 0, 8, 4);
   }
-  return uscope.picture({
+  return microscope.picture({
     width: 200, height: 60, caption: "shapes",
     shapes: [
-      uscope.rect({ x: 0, y: 0, width: 20, height: 20, radius: 3, fill: series[0], title: "a rect" }),
-      uscope.circle({ x: 35, y: 10, r: 9, stroke: changed, strokeWidth: 2, fill: "none" }),
-      uscope.line({ x1: 50, y1: 0, x2: 70, y2: 20, dash: [3, 2] }),
-      uscope.polyline({ points: new Float64Array([75, 20, 80, 0, 85, 20]), stroke: series[2] }),
-      uscope.polygon({ points: [90, 20, 100, 0, 110, 20], fill: "rgb(40 120 200 / 50%)" }),
-      uscope.path({ d: "M115 20 Q125 0 135 20 Z", fill: "hsl(30 80% 50%)" }),
-      uscope.text({ x: 0, y: 40, text: "mono", family: "mono", size: 12, fill: ink2 }),
-      uscope.group({ x: 60, y: 30, rotate: 10, scale: 0.5, shapes: [uscope.rect({ x: 0, y: 0, width: 20, height: 20 })] }),
-      uscope.image({ x: 140, y: 0, width: 20, height: 10, pixels, columns: 2, rows: 1 }),
-      uscope.image({ x: 165, y: 0, width: 20, height: 20, canvas, smooth: true }),
+      microscope.rect({ x: 0, y: 0, width: 20, height: 20, radius: 3, fill: series[0], title: "a rect" }),
+      microscope.circle({ x: 35, y: 10, r: 9, stroke: changed, strokeWidth: 2, fill: "none" }),
+      microscope.line({ x1: 50, y1: 0, x2: 70, y2: 20, dash: [3, 2] }),
+      microscope.polyline({ points: new Float64Array([75, 20, 80, 0, 85, 20]), stroke: series[2] }),
+      microscope.polygon({ points: [90, 20, 100, 0, 110, 20], fill: "rgb(40 120 200 / 50%)" }),
+      microscope.path({ d: "M115 20 Q125 0 135 20 Z", fill: "hsl(30 80% 50%)" }),
+      microscope.text({ x: 0, y: 40, text: "mono", family: "mono", size: 12, fill: ink2 }),
+      microscope.group({ x: 60, y: 30, rotate: 10, scale: 0.5, shapes: [microscope.rect({ x: 0, y: 0, width: 20, height: 20 })] }),
+      microscope.image({ x: 140, y: 0, width: 20, height: 10, pixels, columns: 2, rows: 1 }),
+      microscope.image({ x: 165, y: 0, width: 20, height: 20, canvas, smooth: true }),
     ],
   });
 });
@@ -269,28 +269,28 @@ uscope.draw(() => {
 
 ### Helpers
 
-- `uscope.theme` holds the page's colors in the theme it shows, each
+- `microscope.theme` holds the page's colors in the theme it shows, each
   `#rrggbb`: `ink`,
   `ink2`, `ink3`, `paper`, `surface`, `line`, `accent`, `changed`,
   `good`, `bad`, and `series`, eight categorical colors in an order
   checked for color-blind readers. A card draws again when the theme
   changes.
-- `uscope.same(a, b)` compares two input values deeply, typed arrays and
+- `microscope.same(a, b)` compares two input values deeply, typed arrays and
   bigints included, for marking what changed since `previous`.
-- `uscope.color.scale(t, from, to)` blends from `from` to `to`, two `#rgb`
+- `microscope.color.scale(t, from, to)` blends from `from` to `to`, two `#rgb`
   or `#rrggbb` colors, `t` of the way, for heatmaps.
 
-```uscope-renderer-example
+```microscope-renderer-example
 // The squares that changed since the stop before, outlined.
-uscope.draw(({ cells }, { previous }) => {
+microscope.draw(({ cells }, { previous }) => {
   const shapes = Array.from(cells, (cell, index) =>
-    uscope.rect({
+    microscope.rect({
       x: index * 12, y: 0, width: 10, height: 10,
-      fill: uscope.color.scale(cell / 255, "#eef1f5", "#1a2230"),
-      stroke: previous !== null && !uscope.same(previous.cells[index], cell) ? uscope.theme.changed : undefined,
+      fill: microscope.color.scale(cell / 255, "#eef1f5", "#1a2230"),
+      stroke: previous !== null && !microscope.same(previous.cells[index], cell) ? microscope.theme.changed : undefined,
     }),
   );
-  return uscope.picture({ width: cells.length * 12, height: 10, shapes });
+  return microscope.picture({ width: cells.length * 12, height: 10, shapes });
 });
 ---
 ({ cells: new Uint8Array([0, 128, 255]) })
@@ -301,26 +301,26 @@ uscope.draw(({ cells }, { previous }) => {
 The page names a renderer's own file and line when it fails, in Chromium
 and Firefox alike: a thrown error or a rejected promise shows as
 `life.js:12:5: TypeError: …`. A renderer that does not parse, or calls
-neither `uscope.draw` nor `uscope.live`, says so. A picture the page cannot show exactly as
+neither `microscope.draw` nor `microscope.live`, says so. A picture the page cannot show exactly as
 described is refused whole, naming the first shape at fault, such as
 `shape 3 (rect): fill is not a color`: unknown properties, numbers that
 are not finite, colors that are not colors, path data outside SVG's
 grammar, and pictures over the limits below.
 
 To have an editor check a renderer, start it with `// @ts-check` and give
-the editor `sdk/web/uscope-visualizer.d.ts`, which declares `uscope`.
+the editor `sdk/web/microscope-visualizer.d.ts`, which declares `microscope`.
 
 ## Live renderers
 
 A picture is drawn once a stop. A **live** renderer instead keeps a
 canvas of its own while its card is on screen, and draws into it whenever
 it asks to: a model to turn, a level to fly through, bones to inspect. It
-calls `uscope.live` in place of `uscope.draw`, with a function that gets
+calls `microscope.live` in place of `microscope.draw`, with a function that gets
 the canvas, an `OffscreenCanvas` sized to the card in device pixels, the
 first stop's inputs, and a context, and returns what it does next:
 
 ```text
-uscope.live((canvas, input, context) => ({ frame, update, pointer, key, resize }))
+microscope.live((canvas, input, context) => ({ frame, update, pointer, key, resize }))
 
 context            previous, paths, and theme, as a picture's, and width and
                    height, the canvas's size in CSS pixels
@@ -332,11 +332,11 @@ pointer(event)     {type, x, y, dx, dy, buttons, wheel, shift, ctrl, alt}, in
 key(event)         {key, shift, ctrl, alt}, while the canvas has focus
 resize(width, height)    the canvas's new size in device pixels; a frame follows
 
-uscope.redraw()          ask for one more frame, as after a drag
-uscope.animate(on)       ask for a frame every display frame, or stop asking
-uscope.caption(text)     the card's caption
-uscope.hint(text)        the tooltip beside the pointer, or none with null
-uscope.select(path)      open a part of the value, as a shape's select does
+microscope.redraw()          ask for one more frame, as after a drag
+microscope.animate(on)       ask for a frame every display frame, or stop asking
+microscope.caption(text)     the card's caption
+microscope.hint(text)        the tooltip beside the pointer, or none with null
+microscope.select(path)      open a part of the value, as a shape's select does
 ```
 
 Each function is optional, and each may be `async`. The canvas takes
@@ -344,8 +344,8 @@ Each function is optional, and each may be `async`. The canvas takes
 
 - **The page drives frames.** It calls `frame` from its own animation
   frame, one at a time, only after the renderer starts, gets a new stop,
-  or is resized, after `uscope.redraw()`, and every frame while
-  `uscope.animate(true)` holds, and never while the card is off screen or
+  or is resized, after `microscope.redraw()`, and every frame while
+  `microscope.animate(true)` holds, and never while the card is off screen or
   the tab hidden. Each frame reaches the page as an `ImageBitmap`, only
   pixels.
 - **One worker for as long as the card is on screen.** A new stop calls
@@ -362,22 +362,22 @@ Each function is optional, and each may be `async`. The canvas takes
 - Headless Firefox has no WebGL at all, so a WebGL renderer fails there
   with its own message, as `mesh` says WebGL is unavailable.
 
-```uscope-live-example
+```microscope-live-example
 // A bar per value that follows the pointer: the bar under it is lit,
 // and named beside it.
-uscope.live((canvas, { values }) => {
+microscope.live((canvas, { values }) => {
   const draw = canvas.getContext("2d");
   let shown = values;
   let lit = -1;
   const width = () => canvas.width / Math.max(1, shown.length);
   return {
     frame() {
-      draw.fillStyle = uscope.theme.surface;
+      draw.fillStyle = microscope.theme.surface;
       draw.fillRect(0, 0, canvas.width, canvas.height);
       const most = Math.max(1, ...Array.from(shown, Math.abs));
       shown.forEach((value, index) => {
         const height = (Math.abs(value) / most) * canvas.height;
-        draw.fillStyle = index === lit ? uscope.theme.accent : uscope.theme.series[0];
+        draw.fillStyle = index === lit ? microscope.theme.accent : microscope.theme.series[0];
         draw.fillRect(index * width(), canvas.height - height, width() - 2, height);
       });
     },
@@ -388,8 +388,8 @@ uscope.live((canvas, { values }) => {
       const at = type === "leave" ? -1 : Math.floor(x / width());
       if (at !== lit) {
         lit = at;
-        uscope.hint(at >= 0 && at < shown.length ? `[${at}] = ${shown[at]}` : null);
-        uscope.redraw();
+        microscope.hint(at >= 0 && at < shown.length ? `[${at}] = ${shown[at]}` : null);
+        microscope.redraw();
       }
     },
   };
@@ -400,7 +400,7 @@ uscope.live((canvas, { values }) => {
 
 ## Built-in renderers
 
-uscope builds in eleven renderers, in `views/visualizers/`. Any `visualize`
+microscope builds in eleven renderers, in `views/visualizers/`. Any `visualize`
 can name one, and Draw as… offers every one for any value. They are
 ordinary renderers, written against this page's API alone, so each is
 also an example to copy.
@@ -445,15 +445,15 @@ A view calls the renderers of its own source before the built-in ones:
 - a view file's are `NAME.js` files beside it, read with it, and read
   again by Reload views;
 - a module's own views call the renderers the module carries in its
-  `.debug_uscope_views` section. A C or C++ program carries one with
-  `USCOPE_VISUALIZER("board", "views/board.js");` from `uscope_views.h`,
-  and a Rust program with `uscope_views::uscope_visualizer!("board",
+  `.debug_microscope_views` section. A C or C++ program carries one with
+  `MICROSCOPE_VISUALIZER("board", "views/board.js");` from `microscope_views.h`,
+  and a Rust program with `microscope_views::microscope_visualizer!("board",
   PATH);`;
 - the built-ins come last.
 
-`uscope views check PROGRAM` lists every renderer the views call, each as
+`microscope views check PROGRAM` lists every renderer the views call, each as
 its JavaScript, and fails when a drawing does not bind, such as one whose
-input names no member. A renderer is never run outside the page: uscope
+input names no member. A renderer is never run outside the page: microscope
 has no JavaScript engine of its own.
 
 ## What a renderer cannot do

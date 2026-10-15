@@ -1,6 +1,6 @@
 //! Differential tests against gdb's Debug Adapter Protocol server.
 //!
-//! The same scripted session drives `uscope dap` and `gdb -i=dap` over the
+//! The same scripted session drives `microscope dap` and `gdb -i=dap` over the
 //! same program, and each stop must agree: its function and line, the
 //! arguments and locals it shows and their numeric values, what a step out
 //! returned, and how many threads exist.
@@ -99,7 +99,7 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
     let mut values = BTreeMap::new();
     for scope in scopes["scopes"].as_array().into_iter().flatten() {
         // gdb shows what a step out returned in a scope of its own, and
-        // uscope as a local named for the function.
+        // microscope as a local named for the function.
         let returned = scope["name"] == "Return";
         if !returned && !matches!(scope["name"].as_str(), Some("Arguments" | "Locals")) {
             continue;
@@ -135,8 +135,8 @@ fn inspect(dap: &mut Dap, thread: i64, reason: &str) -> Stop {
 
 /// Runs a script through both adapters and returns their stops.
 fn compare(program: &str, function: &str, steps: &[&str]) -> (Vec<Stop>, Vec<Stop>) {
-    let mut ours = Dap::start(format!("uscope {program}"));
-    let uscope = walk(&mut ours, program, function, steps);
+    let mut ours = Dap::start(format!("microscope {program}"));
+    let microscope = walk(&mut ours, program, function, steps);
     ours.finish();
     let mut reference = Dap::reference(
         format!("gdb {program}"),
@@ -144,7 +144,7 @@ fn compare(program: &str, function: &str, steps: &[&str]) -> (Vec<Stop>, Vec<Sto
     );
     let gdb = walk(&mut reference, program, function, steps);
     reference.abandon();
-    (uscope, gdb)
+    (microscope, gdb)
 }
 
 #[test]
@@ -156,17 +156,24 @@ fn stepping_stops_where_gdb_stops_with_the_same_values() {
         "stepIn", "stepOut", "next",
     ];
     for program in ["stepping-boundaries-gcc-o0", "stepping-boundaries-clang-o0"] {
-        let (mut uscope, gdb) = compare(program, "main", &steps);
-        assert_eq!(uscope.len(), steps.len() + 1, "{program}: {uscope:#?}");
+        let (mut microscope, gdb) = compare(program, "main", &steps);
+        assert_eq!(
+            microscope.len(),
+            steps.len() + 1,
+            "{program}: {microscope:#?}"
+        );
 
         // gdb names every breakpoint stop "breakpoint"; the protocol has a
         // reason for a function breakpoint's.
         assert_eq!(
-            (uscope[0].reason.as_str(), gdb[0].reason.as_str()),
+            (microscope[0].reason.as_str(), gdb[0].reason.as_str()),
             ("function breakpoint", "breakpoint")
         );
-        uscope[0].reason = gdb[0].reason.clone();
-        assert_eq!(uscope, gdb, "{program}: uscope stops differ from gdb's");
+        microscope[0].reason = gdb[0].reason.clone();
+        assert_eq!(
+            microscope, gdb,
+            "{program}: microscope stops differ from gdb's"
+        );
     }
 }
 
@@ -176,26 +183,29 @@ fn threads_stop_and_step_where_gdb_stops_them() {
     // while the other thread runs. The worker waits at a gate the joining
     // line opens, so it is alive at every stop before that line's step, and
     // gone after it: a stop waits for an exiting thread's exit status.
-    let (mut uscope, gdb) = compare(
+    let (mut microscope, gdb) = compare(
         "thread-steps-gcc-o0",
         "main",
         &["next", "next", "next", "next"],
     );
     assert_eq!(
-        uscope.iter().map(|stop| stop.threads).collect::<Vec<_>>(),
+        microscope
+            .iter()
+            .map(|stop| stop.threads)
+            .collect::<Vec<_>>(),
         [1, 1, 2, 2, 1]
     );
-    uscope[0].reason = gdb[0].reason.clone();
-    assert_eq!(uscope, gdb);
+    microscope[0].reason = gdb[0].reason.clone();
+    assert_eq!(microscope, gdb);
 
     // In a thread other than the first, and out to its caller.
-    let (mut uscope, gdb) = compare(
+    let (mut microscope, gdb) = compare(
         "thread-steps-gcc-o0",
         "worker_reached",
         &["stepOut", "next", "next"],
     );
-    assert_eq!(uscope.len(), 4, "{uscope:#?}");
-    assert_eq!(uscope[0].threads, 2);
-    uscope[0].reason = gdb[0].reason.clone();
-    assert_eq!(uscope, gdb);
+    assert_eq!(microscope.len(), 4, "{microscope:#?}");
+    assert_eq!(microscope[0].threads, 2);
+    microscope[0].reason = gdb[0].reason.clone();
+    assert_eq!(microscope, gdb);
 }

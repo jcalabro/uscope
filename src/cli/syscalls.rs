@@ -1,4 +1,4 @@
-//! `uscope syscalls`: strace's flags over uscope's engines
+//! `microscope syscalls`: strace's flags over microscope's engines
 //! (`plans/syscalls.html`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,22 +13,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use serde_json::{Map, Value, json};
-use uscope::syscall_engines::bpf::{self, AttachMode, Attachment, BpfOptions};
-use uscope::syscall_engines::capture::SyscallCapture;
-use uscope::syscall_engines::cgroup::{self, Cgroup};
-use uscope::syscall_engines::continuous::{Continuous, ContinuousOptions, Saved};
-use uscope::syscall_engines::ptrace;
-use uscope::syscall_engines::stacks::{Frame, SharedStacks};
-use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
-use uscope::syscalls::StatusSet;
-use uscope::syscalls::captures::Limits;
-use uscope::syscalls::fds::FdTable;
-use uscope::syscalls::filter::{self, Filter};
-use uscope::syscalls::stats::{Folded, SyscallStats, bytes_moved};
-use uscope::syscalls::{
+use microscope::syscall_engines::bpf::{self, AttachMode, Attachment, BpfOptions};
+use microscope::syscall_engines::capture::SyscallCapture;
+use microscope::syscall_engines::cgroup::{self, Cgroup};
+use microscope::syscall_engines::continuous::{Continuous, ContinuousOptions, Saved};
+use microscope::syscall_engines::ptrace;
+use microscope::syscall_engines::stacks::{Frame, SharedStacks};
+use microscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic};
+use microscope::syscalls::StatusSet;
+use microscope::syscalls::captures::Limits;
+use microscope::syscalls::fds::FdTable;
+use microscope::syscalls::filter::{self, Filter};
+use microscope::syscalls::stats::{Folded, SyscallStats, bytes_moved};
+use microscope::syscalls::{
     Abi, CallStack, InFlight, Outcome, Pid, ProcessEnd, SyscallEvent, SyscallId, Tid, TraceEvent,
 };
+use serde_json::{Map, Value, json};
 
 use super::Renderers;
 use super::terminal::{ColorChoice, Renderer, Role};
@@ -66,7 +66,7 @@ pub enum AttachArg {
     Fentry,
 }
 
-/// The flags follow strace's; see `uscope syscalls --help`.
+/// The flags follow strace's; see `microscope syscalls --help`.
 #[derive(Debug, clap::Args)]
 #[command(about = "Trace the system calls a program makes, as strace does")]
 #[expect(clippy::struct_excessive_bools, reason = "one per flag")]
@@ -103,7 +103,7 @@ pub struct SyscallsArgs {
     #[arg(short = 'C')]
     summary_too: bool,
 
-    /// Time calls by wall clock, from entry to exit. uscope always does.
+    /// Time calls by wall clock, from entry to exit. microscope always does.
     #[arg(short = 'w')]
     wall_clock: bool,
 
@@ -185,7 +185,7 @@ pub struct SyscallsArgs {
     stack_trace_frame_limit: usize,
 
     /// Write the trace to FILE; `-` is standard output. A FILE ending in
-    /// `.usprof` gets a capture, which `uscope report` and the web UI read.
+    /// `.usprof` gets a capture, which `microscope report` and the web UI read.
     #[arg(short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
 
@@ -270,7 +270,7 @@ pub struct SyscallsArgs {
 
     /// Trace without end into DIR: a file every --segment holding that
     /// span's statistics, and the last --window of calls in DIR/windows on
-    /// SIGUSR2 or a trigger. `uscope report DIR` reads the segments as one.
+    /// SIGUSR2 or a trigger. `microscope report DIR` reads the segments as one.
     #[arg(long, value_name = "DIR", conflicts_with = "output")]
     continuous: Option<PathBuf>,
 
@@ -314,12 +314,12 @@ pub struct SyscallsArgs {
     command: Vec<OsString>,
 }
 
-/// Runs `uscope syscalls`, exiting as the traced program did.
+/// Runs `microscope syscalls`, exiting as the traced program did.
 pub fn run(args: &SyscallsArgs) -> std::process::ExitCode {
     match trace(args) {
         Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(error) => {
-            eprintln!("uscope: {error:#}");
+            eprintln!("microscope: {error:#}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -485,7 +485,7 @@ fn check_targets(args: &SyscallsArgs, attached: &[u32]) -> Result<()> {
 
     if !launching && attached.is_empty() && args.cgroup.is_none() && args.container.is_none() {
         bail!(
-            "nothing to trace: give a program after --, or -p PID; uscope never traces the whole host"
+            "nothing to trace: give a program after --, or -p PID; microscope never traces the whole host"
         );
     }
 
@@ -632,7 +632,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
     // not, for what -y, -P, and ndjson's paths say to be true.
     let mut calls = plan.filter.calls.clone();
     if args.decode_fds > 0 || !args.paths.is_empty() || args.format == OutputFormat::Ndjson {
-        for id in uscope::syscalls::fds::followed() {
+        for id in microscope::syscalls::fds::followed() {
             calls.insert(id);
         }
     }
@@ -655,7 +655,7 @@ fn trace(args: &SyscallsArgs) -> Result<i32> {
             dump: if plan.filter.read_dumps.is_empty() && plan.filter.write_dumps.is_empty() {
                 0
             } else {
-                uscope::syscalls::captures::MOST_BYTES
+                microscope::syscalls::captures::MOST_BYTES
             },
             ..Limits::default()
         },
@@ -758,7 +758,7 @@ fn trace_cgroup(
 fn stop_after(text: &str, stop: Arc<AtomicBool>) -> Result<()> {
     let after = Duration::from_nanos(nanoseconds(text).context("--duration")?);
     std::thread::Builder::new()
-        .name("uscope-syscalls-timer".into())
+        .name("microscope-syscalls-timer".into())
         .spawn(move || {
             std::thread::sleep(after);
             stop.store(true, Ordering::Relaxed);
@@ -827,7 +827,7 @@ fn continuous(
     };
 
     eprintln!(
-        "uscope: writing a segment every {} to {}, keeping {}; `kill -USR2 {}` saves the last {}",
+        "microscope: writing a segment every {} to {}, keeping {}; `kill -USR2 {}` saves the last {}",
         args.segment,
         directory.display(),
         args.keep,
@@ -943,7 +943,7 @@ impl Background {
         let (to_writer, from_main) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
         let (to_main, from_writer) = std::sync::mpsc::channel();
         let writer = std::thread::Builder::new()
-            .name("uscope-output".into())
+            .name("microscope-output".into())
             .spawn(move || {
                 // An empty buffer asks for a flush.
                 for mut buffer in from_main {
@@ -1395,13 +1395,13 @@ impl Printer {
         }
     }
 
-    /// A line of uscope's own, as strace's `strace: ...` lines.
+    /// A line of microscope's own, as strace's `strace: ...` lines.
     fn message(&mut self, text: &str) {
         if self.format == OutputFormat::Ndjson {
             return;
         }
 
-        let line = format!("uscope: {text}\n");
+        let line = format!("microscope: {text}\n");
         if let Err(error) = io::stderr().write_all(line.as_bytes()) {
             self.error.get_or_insert(error);
         }
@@ -2043,7 +2043,7 @@ impl Printer {
         }
 
         if self.summarize {
-            let errno = |number: u16| present::errno(uscope::syscalls::Errno(number)).0;
+            let errno = |number: u16| present::errno(microscope::syscalls::Errno(number)).0;
             match self.format {
                 OutputFormat::Text => {
                     let lines = summary::table(&self.stats, &self.columns, self.sort, &errno);
@@ -2229,7 +2229,7 @@ impl Sink for Printer {
                 entered: Some(call.entered),
                 exited: None,
                 stack: None,
-                flags: uscope::syscalls::EventFlags::default(),
+                flags: microscope::syscalls::EventFlags::default(),
             };
 
             if !self.filter.calls.contains(call.call) || !self.show_calls {

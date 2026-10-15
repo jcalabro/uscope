@@ -1,4 +1,4 @@
-//! The one debugging session a `uscope web` server holds, shared by every
+//! The one debugging session a `microscope web` server holds, shared by every
 //! connected tab.
 //!
 //! The session owns at most one [`Debugger`] at a time. Choosing something
@@ -21,16 +21,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use microscope::{
+    BreakpointOptions, CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle, EvaluationMode,
+    ExceptionDisposition, Expression, InferiorState, InspectionLimits, LaunchOptions, ProcessId,
+    ResumeScope, StopId,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::unix::pipe;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use uscope::{
-    BreakpointOptions, CoreDumpOptions, Debugger, DebuggerEvent, DebuggerHandle, EvaluationMode,
-    ExceptionDisposition, Expression, InferiorState, InspectionLimits, LaunchOptions, ProcessId,
-    ResumeScope, StopId,
-};
 
 use super::auth::{Tokens, random_hex};
 use super::describe::{Cause, Describer, Images};
@@ -90,9 +90,9 @@ impl Failure {
     }
 }
 
-impl From<uscope::Error> for Failure {
-    fn from(error: uscope::Error) -> Self {
-        use uscope::Error;
+impl From<microscope::Error> for Failure {
+    fn from(error: microscope::Error) -> Self {
+        use microscope::Error;
         let kind = match error {
             Error::StaleStop => ErrorKind::StaleStop,
             Error::NotStopped
@@ -144,7 +144,7 @@ pub struct Session {
     views: Vec<PathBuf>,
 
     /// Where every program's separate debug files are found.
-    debug_files: uscope::DebugFileOptions,
+    debug_files: microscope::DebugFileOptions,
 
     /// What links begin with, such as `http://127.0.0.1:7341/`, or the
     /// public URL a proxy serves the page at.
@@ -223,7 +223,7 @@ impl Session {
         cwd: PathBuf,
         link_base: String,
         tokens: Tokens,
-        debug_files: uscope::DebugFileOptions,
+        debug_files: microscope::DebugFileOptions,
         views: Vec<PathBuf>,
     ) -> Arc<Self> {
         let (state, _) = watch::channel(Arc::new(State::idle(None)));
@@ -570,7 +570,7 @@ impl Session {
                 let handle = self.current_handle().await?;
                 let context = inspect::context(&handle, at.stop, at.execution(), 0).await?;
                 let targets = handle.at(context).step_targets().await?;
-                let hex = |address: uscope::VirtualAddress| format!("{:#x}", address.get());
+                let hex = |address: microscope::VirtualAddress| format!("{:#x}", address.get());
                 Ok(to_value(&protocol::StepTargets {
                     calls: targets
                         .iter()
@@ -726,7 +726,7 @@ impl Session {
             Request::EditBreakpoint(edit) => edit_breakpoint(&handle, edit).await?,
             Request::RemoveBreakpoint(protocol::BreakpointRef { id }) => {
                 handle
-                    .remove_breakpoint(uscope::BreakpointId::new(id))
+                    .remove_breakpoint(microscope::BreakpointId::new(id))
                     .await?;
                 self.notice(connection, format!("removed breakpoint {id}"));
             }
@@ -762,7 +762,7 @@ impl Session {
             }
             Request::RemoveWatchpoint(protocol::WatchpointRef { id }) => {
                 handle
-                    .remove_watchpoint(uscope::WatchpointId::new(id))
+                    .remove_watchpoint(microscope::WatchpointId::new(id))
                     .await?;
                 format!("removed watchpoint {id}")
             }
@@ -805,12 +805,12 @@ impl Session {
         };
 
         let (kind, action) = match step.kind {
-            StepKind::Over => (uscope::StepKind::OverSource, "stepped over"),
-            StepKind::Into => (uscope::StepKind::IntoSource, "stepped into"),
-            StepKind::Out => (uscope::StepKind::Out, "stepped out"),
-            StepKind::Instruction => (uscope::StepKind::Instruction, "stepped an instruction"),
+            StepKind::Over => (microscope::StepKind::OverSource, "stepped over"),
+            StepKind::Into => (microscope::StepKind::IntoSource, "stepped into"),
+            StepKind::Out => (microscope::StepKind::Out, "stepped out"),
+            StepKind::Instruction => (microscope::StepKind::Instruction, "stepped an instruction"),
             StepKind::OverInstruction => (
-                uscope::StepKind::OverInstruction,
+                microscope::StepKind::OverInstruction,
                 "stepped over an instruction",
             ),
         };
@@ -1073,7 +1073,7 @@ impl Session {
         };
 
         match handle.kill().await {
-            Ok(()) | Err(uscope::Error::NotRunning) => {}
+            Ok(()) | Err(microscope::Error::NotRunning) => {}
             Err(error) => return Err(error.into()),
         }
 
@@ -1213,13 +1213,13 @@ impl Session {
         {
             Ok(evaluation) => evaluation,
             // The frame does not know the command's name, so it is the command.
-            Err(uscope::Error::Expression(failure))
+            Err(microscope::Error::Expression(failure))
                 if command.is_some_and(|(_, name)| present::names_only(&failure, name)) =>
             {
                 drop(reader);
                 return self.command(role, text, Some(at)).await;
             }
-            Err(uscope::Error::Expression(failure)) => {
+            Err(microscope::Error::Expression(failure)) => {
                 return Err(Failure::new(
                     ErrorKind::Invalid,
                     crate::cli::format::expression_error(text, &failure),
@@ -1240,7 +1240,7 @@ impl Session {
         })
     }
 
-    /// Runs one of uscope's commands in the frame `at`.
+    /// Runs one of microscope's commands in the frame `at`.
     async fn command(
         &self,
         role: Role,
@@ -1583,7 +1583,7 @@ async fn edit_breakpoint(
     handle: &DebuggerHandle,
     edit: protocol::EditBreakpoint,
 ) -> Result<(), Failure> {
-    let id = uscope::BreakpointId::new(edit.id);
+    let id = microscope::BreakpointId::new(edit.id);
     let wanted = options(edit.condition, edit.hit_condition, edit.log_message)?;
     let current = handle
         .snapshot()
@@ -1670,10 +1670,10 @@ fn options(
     log_message: Option<String>,
 ) -> Result<BreakpointOptions, Failure> {
     let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
-    let invalid = |error: uscope::Error| Failure::new(ErrorKind::Invalid, error.to_string());
+    let invalid = |error: microscope::Error| Failure::new(ErrorKind::Invalid, error.to_string());
     Ok(BreakpointOptions {
         condition: given(condition)
-            .map(|text| uscope::Condition::parse(&text))
+            .map(|text| microscope::Condition::parse(&text))
             .transpose()
             .map_err(invalid)?,
         hit_condition: given(hit_condition)
@@ -1681,7 +1681,7 @@ fn options(
             .transpose()
             .map_err(invalid)?,
         log_message: given(log_message)
-            .map(|text| uscope::LogMessage::parse(&text))
+            .map(|text| microscope::LogMessage::parse(&text))
             .transpose()
             .map_err(invalid)?,
         pending: false,
@@ -1702,7 +1702,10 @@ fn to_value<T: serde::Serialize>(value: &T) -> Value {
 
 /// Opens the debugger `start` describes, off the async threads where it
 /// loads debug information.
-async fn open(start: &Start, debug_files: &uscope::DebugFileOptions) -> Result<Debugger, String> {
+async fn open(
+    start: &Start,
+    debug_files: &microscope::DebugFileOptions,
+) -> Result<Debugger, String> {
     match start {
         Start::Launch { spec, .. } => {
             let program = spec.program.clone();
@@ -1716,7 +1719,7 @@ async fn open(start: &Start, debug_files: &uscope::DebugFileOptions) -> Result<D
             .await
             .map_err(|error| format!("failed to attach to process {process}: {error}")),
         Start::Core(options) => {
-            let options = uscope::CoreDumpOptions {
+            let options = microscope::CoreDumpOptions {
                 debug_files: debug_files.clone(),
                 ..options.clone()
             };
@@ -1821,9 +1824,9 @@ fn observe(describer: &mut Describer, outlet: &Outlet, event: &DebuggerEvent) {
         }
         DebuggerEvent::ConditionFailed { owner, error, .. } => {
             let owner = match owner {
-                uscope::ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
-                uscope::ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
-                uscope::ConditionOwner::Catchpoint(id) => format!("catchpoint {id}"),
+                microscope::ConditionOwner::Breakpoint(id) => format!("breakpoint {id}"),
+                microscope::ConditionOwner::Watchpoint(id) => format!("watchpoint {id}"),
+                microscope::ConditionOwner::Catchpoint(id) => format!("catchpoint {id}"),
             };
 
             outlet.publish(

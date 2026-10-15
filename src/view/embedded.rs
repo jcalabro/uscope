@@ -1,5 +1,5 @@
 //! The view files and kernels a module carries in its
-//! `.debug_uscope_views` section.
+//! `.debug_microscope_views` section.
 //!
 //! The section holds records, each a kind byte, a format byte, a 32-bit
 //! little-endian length, and that many bytes. Zero bytes between records
@@ -16,19 +16,19 @@ use super::ViewSet;
 use super::syntax::{Error, MAX_FILE_BYTES};
 
 /// The section's name.
-pub const SECTION: &str = ".debug_uscope_views";
+pub const SECTION: &str = ".debug_microscope_views";
 
-/// The kind of a record of view text, and the format this uscope reads.
+/// The kind of a record of view text, and the format this microscope reads.
 pub const VIEW_TEXT: u8 = 1;
 
 pub const VIEW_TEXT_FORMAT: u8 = 1;
 
-/// The kind of a kernel's record, and the format this uscope reads.
+/// The kind of a kernel's record, and the format this microscope reads.
 pub const KERNEL: u8 = 2;
 
 pub const KERNEL_FORMAT: u8 = 1;
 
-/// The kind of a renderer's record, and the format this uscope reads.
+/// The kind of a renderer's record, and the format this microscope reads.
 pub const RENDERER: u8 = 3;
 
 pub const RENDERER_FORMAT: u8 = 1;
@@ -187,7 +187,7 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
             },
             (VIEW_TEXT, format) => errors.push(error(
                 index,
-                format!("the record's views are in format {format}, and this uscope reads format {VIEW_TEXT_FORMAT}"),
+                format!("the record's views are in format {format}, and this microscope reads format {VIEW_TEXT_FORMAT}"),
             )),
             (KERNEL, KERNEL_FORMAT) => match kernel(payload) {
                 // A kernel's source is no larger than a view file may be.
@@ -205,7 +205,7 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
             },
             (KERNEL, format) => errors.push(error(
                 index,
-                format!("the kernel is in format {format}, and this uscope reads format {KERNEL_FORMAT}"),
+                format!("the kernel is in format {format}, and this microscope reads format {KERNEL_FORMAT}"),
             )),
             (RENDERER, RENDERER_FORMAT) => match renderer(payload) {
                 Ok((name, source)) => renderers.push(RendererRecord {
@@ -217,11 +217,11 @@ fn records<'a>(module: &str, bytes: &'a [u8]) -> Records<'a> {
             },
             (RENDERER, format) => errors.push(error(
                 index,
-                format!("the renderer is in format {format}, and this uscope reads format {RENDERER_FORMAT}"),
+                format!("the renderer is in format {format}, and this microscope reads format {RENDERER_FORMAT}"),
             )),
             (kind, _) => errors.push(error(
                 index,
-                format!("the record is of kind {kind}, which this uscope does not read"),
+                format!("the record is of kind {kind}, which this microscope does not read"),
             )),
         }
 
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn records_are_read_past_padding_and_bad_ones_are_named() {
-        let view = b"uscope-views 1\nview c intvec {\n    show empty(\"v\")\n}\n";
+        let view = b"microscope-views 1\nview c intvec {\n    show empty(\"v\")\n}\n";
         let mut bytes = vec![0, 0];
         bytes.extend(record(VIEW_TEXT, VIEW_TEXT_FORMAT, view));
         bytes.extend([0; 3]);
@@ -301,7 +301,8 @@ mod tests {
             KERNEL_FORMAT,
             &kernel_payload("../tree", "", module),
         ));
-        let board = "uscope.draw(() => uscope.picture({ width: 8, height: 8, shapes: [] }));";
+        let board =
+            "microscope.draw(() => microscope.picture({ width: 8, height: 8, shapes: [] }));";
         bytes.extend(record(
             RENDERER,
             RENDERER_FORMAT,
@@ -335,11 +336,11 @@ mod tests {
             errors,
             [
                 "app.views[1]:0:0: the kernel's record is cut short",
-                "app.views[2]:0:0: the record's views are in format 2, and this uscope reads format 1",
-                "app.views[3]:0:0: the record is of kind 9, which this uscope does not read",
+                "app.views[2]:0:0: the record's views are in format 2, and this microscope reads format 1",
+                "app.views[3]:0:0: the record is of kind 9, which this microscope does not read",
                 "app.views[5]:0:0: the record's views are larger than a view file may be, 262144 bytes",
-                "app.views[8]:0:0: the kernel is in format 2, and this uscope reads format 1",
-                "app.views[11]:0:0: the renderer is in format 2, and this uscope reads format 1",
+                "app.views[8]:0:0: the kernel is in format 2, and this microscope reads format 1",
+                "app.views[11]:0:0: the renderer is in format 2, and this microscope reads format 1",
                 "app.views[12]:0:0: the renderer's record is cut short",
                 "app.views[14]:0:0: the record claims 200 bytes, past the section's end",
                 "app.views[7]:0:0: kernel `junk`: it is not a module a kernel may be: unexpected end-of-file (at offset 0x4)",

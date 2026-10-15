@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # A life board, drawn from its cells' bytes by life.js beside this file.
 extend c life {

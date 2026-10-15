@@ -8,7 +8,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use uscope::DebugFileOptions;
+use microscope::DebugFileOptions;
 
 use super::libraries::pending_function;
 use super::*;
@@ -114,7 +114,7 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
     let image = scenario.handle().module_image();
     assert_eq!(image.debug_file(), None);
     assert_eq!(image.functions().len(), 0);
-    let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
+    let Some(microscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
         panic!("{:?}", image.separate_debug_file());
     };
 
@@ -129,7 +129,10 @@ async fn a_debug_link_to_a_file_from_another_build_is_refused() {
             ),
         "{reason}"
     );
-    assert_eq!(image.debug_information(), uscope::DebugInformation::Absent);
+    assert_eq!(
+        image.debug_information(),
+        microscope::DebugInformation::Absent
+    );
     scenario.shutdown().await;
 }
 
@@ -357,7 +360,7 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
 
     for global in image.globals() {
         let ty = match &global.type_info {
-            uscope::GlobalVariableType::Resolved(info) => info.name.to_string(),
+            microscope::GlobalVariableType::Resolved(info) => info.name.to_string(),
             other => format!("{other:?}"),
         };
 
@@ -378,7 +381,7 @@ fn described(image: &ModuleImage) -> BTreeSet<String> {
 
     for node in image.types() {
         described.insert(match node {
-            uscope::TypeNode::Resolved(info) => {
+            microscope::TypeNode::Resolved(info) => {
                 let kind = format!("{:?}", info.kind);
                 let kind = kind.split([' ', '(', '{']).next().unwrap_or_default();
                 format!("type {} {:?} {kind}", info.name, info.byte_size)
@@ -473,14 +476,14 @@ async fn frame_places(scenario: &Scenario) -> Vec<(String, String)> {
     places
 }
 
-async fn evaluated(scenario: &Scenario, text: &str) -> uscope::VariableValue {
+async fn evaluated(scenario: &Scenario, text: &str) -> microscope::VariableValue {
     let expression =
-        uscope::Expression::parse(text).unwrap_or_else(|error| panic!("`{text}`: {error}"));
+        microscope::Expression::parse(text).unwrap_or_else(|error| panic!("`{text}`: {error}"));
     match scenario
         .operation(text, scenario.handle().evaluate(&expression))
         .await
     {
-        uscope::Evaluation::Value { value, .. } => available_value(&value.state).clone(),
+        microscope::Evaluation::Value { value, .. } => available_value(&value.state).clone(),
         other => panic!("`{text}` is not a value: {other:?}"),
     }
 }
@@ -531,11 +534,11 @@ async fn debug_files_read_what_they_share_from_their_supplementary_file() {
     // The library's types are the supplementary file's.
     assert!(matches!(
         evaluated(&scenario, "shape.opposite_.y").await,
-        uscope::VariableValue::Scalar(ScalarValue::Signed(4))
+        microscope::VariableValue::Scalar(ScalarValue::Signed(4))
     ));
     assert!(matches!(
         evaluated(&scenario, "shapes::shapes_measured").await,
-        uscope::VariableValue::Scalar(ScalarValue::Signed(0))
+        microscope::VariableValue::Scalar(ScalarValue::Signed(0))
     ));
 
     // `width` and `Span::length`, inlined into `area`, are declared only in
@@ -624,7 +627,8 @@ async fn a_supplementary_file_must_be_the_one_its_debug_files_name() {
     let refused = |scenario: &Scenario| {
         let image = scenario.handle().module_image();
         assert_eq!(image.functions().len(), 0);
-        let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
+        let Some(microscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file()
+        else {
             panic!("{:?}", image.separate_debug_file());
         };
 
@@ -717,14 +721,14 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     let image = Arc::clone(scenario.handle().module_image());
     assert_eq!(image.functions().len(), 0);
     assert_eq!(image.debug_file(), None);
-    let Some(uscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
+    let Some(microscope::DebugFile::Unusable { path, reason }) = image.separate_debug_file() else {
         panic!("{:?}", image.separate_debug_file());
     };
 
     assert!(path.starts_with(split("altlink-root")), "{path:?}");
     assert_eq!(
         &**reason,
-        "its dwz supplementary file ../../.dwz/uscope-fixture (build-id 01020304) was \
+        "its dwz supplementary file ../../.dwz/microscope-fixture (build-id 01020304) was \
          not found"
     );
     assert!(matches!(
@@ -738,7 +742,7 @@ async fn a_debug_file_whose_supplementary_file_is_missing_is_refused_with_its_re
     fs::copy(dwz("gcc-o0/dwz/shapes"), &program).expect("copy the program");
     let scenario = Scenario::new("dwz-own-missing", &program);
     let image = scenario.handle().module_image();
-    let uscope::DebugInformation::Unusable { reason } = image.debug_information() else {
+    let microscope::DebugInformation::Unusable { reason } = image.debug_information() else {
         panic!("{:?}", image.debug_information());
     };
 
@@ -798,7 +802,7 @@ async fn a_debug_sup_names_its_supplementary_file_by_checksum() {
     let scenario = Scenario::new("debug-sup-missing", &program);
     assert_eq!(
         scenario.handle().module_image().debug_information(),
-        uscope::DebugInformation::Unusable {
+        microscope::DebugInformation::Unusable {
             reason: format!(
                 "its supplementary file .dwz/shapes (checksum {checksum}) was not found"
             )

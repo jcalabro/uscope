@@ -4,7 +4,7 @@
 //! and under each engine, and, as the tax every other process pays while
 //! the BPF engine's tracepoints are attached, untraced beside a trace of
 //! another program. Setups are interleaved so that drift in the machine
-//! falls on every one alike. The loop runs on cores of its own, and uscope
+//! falls on every one alike. The loop runs on cores of its own, and microscope
 //! on others that share their last-level cache, as `overhead` places them.
 
 use std::io::{BufRead as _, BufReader, Read as _};
@@ -33,10 +33,10 @@ pub struct Options {
     /// Where the built fixtures are.
     pub programs: PathBuf,
 
-    /// The uscope executable traced runs use.
-    pub uscope: PathBuf,
+    /// The microscope executable traced runs use.
+    pub microscope: PathBuf,
 
-    /// Starts uscope with `CAP_BPF` and `CAP_PERFMON`: the `uscope-bpf`
+    /// Starts microscope with `CAP_BPF` and `CAP_PERFMON`: the `microscope-bpf`
     /// wrapper, given the executable and its arguments.
     pub launcher: PathBuf,
 
@@ -53,15 +53,15 @@ pub struct Options {
 pub fn measure(options: &Options, mut progress: impl FnMut(&Run)) -> Result<Vec<Run>> {
     if !options.launcher.exists() {
         bail!(
-            "{} is missing. The BPF engine needs CAP_BPF and CAP_PERFMON: import uscope's \
-             nixosModules.uscope-bpf and rebuild, or pass a launcher that grants them with \
+            "{} is missing. The BPF engine needs CAP_BPF and CAP_PERFMON: import microscope's \
+             nixosModules.microscope-bpf and rebuild, or pass a launcher that grants them with \
              --launcher",
             options.launcher.display()
         );
     }
 
     let placement = Placement::new()?;
-    placement.uscope()?;
+    placement.microscope()?;
     let taskset = which("taskset")?;
     let mut runs = Vec::new();
     for _ in 0..options.runs.max(1) {
@@ -91,7 +91,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
     .max(1)
     .to_string();
 
-    // The loop runs on the program's CPUs, wherever uscope does.
+    // The loop runs on the program's CPUs, wherever microscope does.
     let mut looping = Command::new(taskset);
     looping
         .arg("--cpu-list")
@@ -101,7 +101,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
     let traced = |engine: &[&str]| {
         let mut command = Command::new(&options.launcher);
         command
-            .arg(&options.uscope)
+            .arg(&options.microscope)
             .arg("syscalls")
             .args(engine)
             .args(["-e", "trace=getppid", "-o", "/dev/null", "--"])
@@ -123,7 +123,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
             command
                 .arg("--cpu-list")
                 .arg(placement.program_list())
-                .arg(&options.uscope)
+                .arg(&options.microscope)
                 .args(["syscalls", "--engine", "ptrace", "-c"])
                 .args(["-e", "trace=getppid", "-o", "/dev/null", "--"])
                 .arg(&burst)
@@ -142,7 +142,7 @@ fn run(setup: &str, options: &Options, placement: &Placement, taskset: &Path) ->
     }
 }
 
-/// Runs the loop, or uscope tracing it, and reads the nanoseconds a call
+/// Runs the loop, or microscope tracing it, and reads the nanoseconds a call
 /// the loop printed.
 fn timed(mut command: Command) -> Result<f64> {
     let output = command
@@ -175,7 +175,7 @@ impl Tracing {
     fn start(options: &Options) -> Result<Self> {
         let shell = which("sh")?;
         let mut child = Command::new(&options.launcher)
-            .arg(&options.uscope)
+            .arg(&options.microscope)
             .args(["syscalls", "-o", "/dev/null", "--"])
             .arg(shell)
             .args(["-c", "echo ready; read line || true"])
@@ -198,7 +198,7 @@ impl Tracing {
         Ok(Self { child })
     }
 
-    /// Ends the traced program by closing its input, and waits for uscope.
+    /// Ends the traced program by closing its input, and waits for microscope.
     fn finish(&mut self) -> Result<()> {
         drop(self.child.stdin.take());
         let status = self.child.wait()?;

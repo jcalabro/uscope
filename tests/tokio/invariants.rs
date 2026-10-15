@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     Backtrace, CodeRole, DebuggerHandle, ExecutionContext, FrameKind, InferiorState, StackFrameId,
     StackSegment, StopContext, TaskSnapshot, TaskState, ThreadActivity, ThreadId,
     UnwindTermination,
@@ -59,7 +59,7 @@ async fn check(handle: &DebuggerHandle) -> Result<(), String> {
 
 /// The stop the debugger is at, or `None` when it is at none.
 async fn read(handle: &DebuggerHandle) -> Result<Option<Stop>, String> {
-    let failed = |what: &str, error: uscope::Error| format!("{what}: {error}");
+    let failed = |what: &str, error: microscope::Error| format!("{what}: {error}");
     let snapshot = handle
         .snapshot()
         .await
@@ -262,7 +262,7 @@ fn check_awaits(trace: &Backtrace) -> Result<(), String> {
 /// names its functions, just before a frame of tokio's that drives it, and
 /// each future the trace does not show is noted at such a frame.
 fn check_driven(trace: &Backtrace) -> Result<(), String> {
-    let driver = |frame: Option<&uscope::StackFrame>| {
+    let driver = |frame: Option<&microscope::StackFrame>| {
         frame.is_some_and(|frame| {
             frame.role == CodeRole::RuntimeInternal && frame.segment != StackSegment::Future
         })
@@ -397,7 +397,7 @@ async fn the_checks_fail_on_the_faults_they_look_for() {
         .iter()
         .position(|frame| matches!(frame.kind, FrameKind::Async { .. }))
         .expect("an async frame");
-    let sabotage = |change: &dyn Fn(&mut Vec<uscope::StackFrame>)| {
+    let sabotage = |change: &dyn Fn(&mut Vec<microscope::StackFrame>)| {
         let mut frames = trace.frames.to_vec();
         change(&mut frames);
         let mut sabotaged = stop.clone();
@@ -466,7 +466,7 @@ async fn the_checks_fail_on_a_future_nothing_drives() {
         trace.frames = frames.into();
     });
     let misplaced = thread_sabotage(&|trace| {
-        trace.unfollowed = Arc::from([uscope::UnfollowedFuture {
+        trace.unfollowed = Arc::from([microscope::UnfollowedFuture {
             driver: StackFrameId::INNERMOST,
             reason: "unread".into(),
         }]);

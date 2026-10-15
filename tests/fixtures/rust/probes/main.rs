@@ -1,5 +1,5 @@
-//! A program instrumented with uscope's probes SDK. Each mode waits until
-//! uscope listens, does its work, and exits.
+//! A program instrumented with microscope's probes SDK. Each mode waits until
+//! microscope listens, does its work, and exits.
 //!
 //! - `zones`: three rounds of nested zones, each in a label, with a plot,
 //!   a message, and a frame, while a worker thread runs zones of its own,
@@ -8,10 +8,10 @@
 //! - `churn COUNT`: COUNT threads, one after another, each one zone.
 //! - `fork`: a zone around a forked child, whose own zone records nothing.
 //! - `exec`: executes this program again as `execed`, which waits until
-//!   uscope listens to the new program and runs a zone.
+//!   microscope listens to the new program and runs a zone.
 //! - `quiet`: says it is ready to be attached to, then zones until the
 //!   sites switch themselves off.
-//! - `cost COUNT`: times COUNT zones as they are, off unless uscope reads;
+//! - `cost COUNT`: times COUNT zones as they are, off unless microscope reads;
 //!   `cost-on COUNT` waits until it does.
 //! - `rate`: zones without end, a line for every hundred, listened to or
 //!   not.
@@ -19,7 +19,7 @@
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use uscope_probes::{frame, label, message, plot, trigger, zone};
+use microscope_probes::{frame, label, message, plot, trigger, zone};
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
@@ -51,11 +51,11 @@ fn main() {
     }
 }
 
-/// Waits until uscope has switched the sites on.
+/// Waits until microscope has switched the sites on.
 fn wait_until_listening() {
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !uscope_probes::listening() {
-        assert!(Instant::now() < deadline, "uscope never listened");
+    while !microscope_probes::listening() {
+        assert!(Instant::now() < deadline, "microscope never listened");
         std::thread::sleep(Duration::from_millis(1));
     }
 }
@@ -120,7 +120,7 @@ fn forked() {
         {
             let _child = zone!("child");
         }
-        let line = format!("child listening: {}\n", uscope_probes::listening());
+        let line = format!("child listening: {}\n", microscope_probes::listening());
         let _ = std::io::stdout().write_all(line.as_bytes());
         let _ = std::io::stdout().flush();
         // SAFETY: the child ends here, without its parent's exit handlers.
@@ -141,7 +141,7 @@ fn exec() {
 fn quiet() {
     println!("listening");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while uscope_probes::listening() {
+    while microscope_probes::listening() {
         assert!(Instant::now() < deadline, "the sites never switched off");
         let _spin = zone!("spin");
         std::hint::black_box(spin(10));
@@ -156,14 +156,14 @@ fn cost(count: u64) {
     }
     #[expect(clippy::cast_precision_loss, reason = "a mean")]
     let each = started.elapsed().as_secs_f64() * 1e9 / count as f64;
-    let state = if uscope_probes::listening() { "on" } else { "off" };
+    let state = if microscope_probes::listening() { "on" } else { "off" };
     println!("a zone {state}: {each:.2} ns");
 }
 
 /// Steady work for measuring what recording costs: units of a hundred
 /// zones, each around some microseconds of work, as instrumentation would
 /// mark a request's steps, a line written as each unit ends, whether or
-/// not uscope listens. A measurer counts the lines in a window.
+/// not microscope listens. A measurer counts the lines in a window.
 fn rate() {
     let mut out = std::io::stdout();
     loop {

@@ -3,7 +3,7 @@
 //! (`docs/views.md`).
 //!
 //! A kernel is a core WebAssembly module. It may import only
-//! `uscope_kernel_v1`'s `read(address: i64, buffer: i32, length: i32) ->
+//! `microscope_kernel_v1`'s `read(address: i64, buffer: i32, length: i32) ->
 //! i32` and `yield(words: i32, count: i32) -> i32`, and it exports
 //! `run(arguments: i32, count: i32) -> i32` and its `memory`. A start
 //! function, floats, SIMD, threads, or any other import keeps a module from
@@ -25,7 +25,7 @@ use wasmi::{
 };
 
 /// The module a kernel imports the host's functions from.
-pub const ABI: &str = "uscope_kernel_v1";
+pub const ABI: &str = "microscope_kernel_v1";
 
 /// The largest module a kernel may be.
 pub const MAX_MODULE_BYTES: usize = 256 * 1024;
@@ -615,7 +615,7 @@ pub struct Recording {
 }
 
 /// The first line of a recording's text.
-const HEADER: &str = "uscope-kernel-run 1";
+const HEADER: &str = "microscope-kernel-run 1";
 
 impl fmt::Display for Recording {
     /// A recording as text: a header, then a line for the kernel, its
@@ -1169,7 +1169,7 @@ mod tests {
                     imports: vec![(ABI, "read", YIELD), (ABI, "yield", YIELD)],
                     ..Wasm::kernel(&returns)
                 },
-                "`uscope_kernel_v1.read` does not have the host's type",
+                "`microscope_kernel_v1.read` does not have the host's type",
             ),
             (
                 Wasm {
@@ -1319,7 +1319,7 @@ mod tests {
         let text = recording.to_string();
         assert_eq!(
             text,
-            "uscope-kernel-run 1\nkernel test\narguments 0x1000\nread 0x1000 edfe000000000000\nitem 0xfeed\nend finished\n"
+            "microscope-kernel-run 1\nkernel test\narguments 0x1000\nread 0x1000 edfe000000000000\nitem 0xfeed\nend finished\n"
         );
         assert_eq!(parse_recordings(&text), Ok(vec![recording.clone()]));
         assert_eq!(replay(&kernel, &recording), Ok(2));
@@ -1338,13 +1338,14 @@ mod tests {
 
         // A run its host stopped replays as far as it went.
         let stopped = parse_recordings(
-            "uscope-kernel-run 1\nkernel test\narguments 0x1000\nread 0x1000 edfe000000000000\nend stopped\n",
+            "microscope-kernel-run 1\nkernel test\narguments 0x1000\nread 0x1000 edfe000000000000\nend stopped\n",
         )
         .expect("parses");
         assert_eq!(replay(&kernel, &stopped[0]), Ok(1));
 
         // What no host could have given or taken is no recording.
-        let run = |body: &str| format!("uscope-kernel-run 1\nkernel test\n{body}\nend stopped\n");
+        let run =
+            |body: &str| format!("microscope-kernel-run 1\nkernel test\n{body}\nend stopped\n");
         for body in [
             "arguments x".to_owned(),
             format!("arguments{}", " 0x0".repeat(MAX_ARGUMENTS + 1)),
@@ -1356,7 +1357,7 @@ mod tests {
         }
 
         assert!(parse_recordings(&run("arguments\nitem 0x1")).is_ok());
-        assert!(parse_recordings("uscope-kernel-run 1\nkernelfoo test\n").is_err());
+        assert!(parse_recordings("microscope-kernel-run 1\nkernelfoo test\n").is_err());
     }
 
     /// A Rust B-tree laid out in `memory`: leaves of `fill` keys, each key

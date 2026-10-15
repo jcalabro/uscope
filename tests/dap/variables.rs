@@ -792,7 +792,7 @@ fn hexadecimal_is_a_session_default_each_request_may_override() {
 
     let mark = dap.mark();
     assert_eq!(
-        dap.request("uscope/setValueFormat", json!({"hex": true})),
+        dap.request("microscope/setValueFormat", json!({"hex": true})),
         json!({})
     );
     assert_eq!(
@@ -809,13 +809,13 @@ fn hexadecimal_is_a_session_default_each_request_may_override() {
 
     // Setting what is already set changes nothing.
     let mark = dap.mark();
-    dap.request("uscope/setValueFormat", json!({"hex": true}));
+    dap.request("microscope/setValueFormat", json!({"hex": true}));
     dap.request("threads", Value::Null);
     assert!(dap.events(mark, "invalidated").is_empty());
-    dap.request("uscope/setValueFormat", json!({"hex": false}));
+    dap.request("microscope/setValueFormat", json!({"hex": false}));
     assert_eq!(parameter(&mut dap, Value::Null), "40");
     assert!(
-        dap.request_error("uscope/setValueFormat", json!({"hex": "yes"}))
+        dap.request_error("microscope/setValueFormat", json!({"hex": "yes"}))
             .contains("hex")
     );
     dap.finish();
@@ -1100,7 +1100,7 @@ fn launch_view_files_present_values_and_report_their_errors() {
     let views = directory.path().join("launch.views");
     std::fs::write(
         &views,
-        "uscope-views 1\nview c point {\n    show empty(\"from the launch\")\n}\nview c intvec {\n    show nothing\n}\n",
+        "microscope-views 1\nview c point {\n    show empty(\"from the launch\")\n}\nview c intvec {\n    show nothing\n}\n",
     )
     .expect("write the launch's views");
     let mut dap = Dap::start("view files");

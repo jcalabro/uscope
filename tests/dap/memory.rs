@@ -56,7 +56,7 @@ fn memory_reads_return_readable_bytes_and_say_where_reading_stopped() {
         .as_array()
         .expect("statics")
         .iter()
-        .find(|variable| variable["name"] == "uscope_value")
+        .find(|variable| variable["name"] == "microscope_value")
         .expect("the file's global")
         .clone();
     assert_eq!(value["value"], "1234605616436508552");

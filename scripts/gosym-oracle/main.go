@@ -1,6 +1,6 @@
 // Records what Go's own debug/gosym reads from an executable's function
 // table: every function's name, entry, and end, and the source position of
-// sampled addresses in each. Tests compare uscope's reader with it.
+// sampled addresses in each. Tests compare microscope's reader with it.
 //
 // Usage: gosym-oracle EXECUTABLE
 package main
@@ -50,7 +50,7 @@ func record(path string) error {
 
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
-	fmt.Fprintln(out, "uscope-gosym-oracle-v1")
+	fmt.Fprintln(out, "microscope-gosym-oracle-v1")
 	for _, function := range table.Funcs {
 		fmt.Fprintf(out, "func\t%#x\t%#x\t%s\n", function.Entry, function.End, function.Name)
 	}

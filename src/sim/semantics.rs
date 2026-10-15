@@ -4,7 +4,7 @@
 //!
 //! Each judges by the kernel's shadow state (calls made and not returned
 //! from, instructions retired, positions a stepping thread passed) and by
-//! what binutils say about the binary (`facts`), never by uscope's own
+//! what binutils say about the binary (`facts`), never by microscope's own
 //! reading of the debug information.
 
 use std::collections::{BTreeMap, BTreeSet};

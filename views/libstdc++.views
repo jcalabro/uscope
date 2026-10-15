@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # GCC's libstdc++. Verified against gcc 15.2 and clang 21.1.8 with
 # libstdc++ 15, by tests/fixtures/cpp/containers.cpp, in the C++11 and
@@ -322,7 +322,7 @@ view c++ std::vector<bool, _> {
 }
 
 # A bitset is the positions of the bits it sets. Its words, one or an
-# array of them, are 64 bits on the targets uscope supports; each is read
+# array of them, are 64 bits on the targets microscope supports; each is read
 # once.
 view c++ std::bitset<N> {
     let words = (u64*)&_M_w
@@ -351,7 +351,7 @@ view c++ std::flat_set<K, _, _> {
 }
 
 # A duration is a count of its period, written as Go writes durations
-# where the period is one of seconds' that uscope writes. Durations of
+# where the period is one of seconds' that microscope writes. Durations of
 # other periods, and of floats, show as stored.
 view c++ std::chrono::duration<_, std::ratio<1, 1000000000>> {
     show value(__r)

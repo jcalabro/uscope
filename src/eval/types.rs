@@ -90,7 +90,7 @@ pub trait TypeSource {
     /// The target's byte order.
     fn byte_order(&self) -> crate::ByteOrder;
 
-    /// The target's layout of a C base type, or `None` when uscope does not
+    /// The target's layout of a C base type, or `None` when microscope does not
     /// know the target's C data model.
     fn c_base_type(&self, ty: CBaseType) -> Option<BaseType>;
 
@@ -239,14 +239,18 @@ fn base_category(base: &BaseType) -> Category {
         BaseTypeEncoding::Floating => base.float_layout().map_or_else(
             || {
                 Category::Opaque(
-                    format!("`{}` is not a float format uscope computes with", base.name).into(),
+                    format!(
+                        "`{}` is not a float format microscope computes with",
+                        base.name
+                    )
+                    .into(),
                 )
             },
             |layout| Category::Float(FloatFormat::of(layout)),
         ),
         BaseTypeEncoding::ComplexFloating => Category::Opaque(
             format!(
-                "`{}` is a complex number, which uscope does not compute with",
+                "`{}` is a complex number, which microscope does not compute with",
                 base.name
             )
             .into(),

@@ -991,7 +991,7 @@ impl Record<'_> {
         self.result(&format!("write DR{index} of {name}"), result);
     }
 
-    /// Watches `address` with slot 0 for `control`'s accesses, as uscope
+    /// Watches `address` with slot 0 for `control`'s accesses, as microscope
     /// programs the registers: DR7 cleared, the address, then DR7.
     pub(super) fn watch(&mut self, thread: Tid, address: u64, control: u64) {
         self.set_debug(thread, 7, 0);

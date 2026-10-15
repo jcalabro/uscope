@@ -8,9 +8,9 @@ test.use({ program: [fixture("tokio-runtimes-o0")] });
 
 test("tasks are listed, grouped, and chosen, and a link names the task", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   const adder = page.getByRole("textbox", { name: "Add a breakpoint" });
   await adder.fill("truth_reached");
   await adder.press("Enter");

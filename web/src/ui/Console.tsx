@@ -1,4 +1,4 @@
-// The console: expressions and uscope's commands, in the frame the tab
+// The console: expressions and microscope's commands, in the frame the tab
 // shows. Tab completes from the frame's names, members, and registers, and
 // the arrow keys walk the lines run before.
 
@@ -26,7 +26,8 @@ export function Console() {
       <div className="pane-body console" ref={body} data-testid="console">
         {entries.length === 0 ? (
           <div className="empty">
-            Expressions and uscope's commands run in the frame shown. Tab completes; ↑ and ↓ recall.
+            Expressions and microscope's commands run in the frame shown. Tab completes; ↑ and ↓
+            recall.
           </div>
         ) : (
           <LocalExpansion>

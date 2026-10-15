@@ -1,4 +1,4 @@
-//! Instrumentation: the sites a program compiled in with uscope's probes
+//! Instrumentation: the sites a program compiled in with microscope's probes
 //! SDK, and the records its threads write to rings in its own memory.
 //!
 //! The ABI is the SDK's `abi` module. This module is pure: it parses a
@@ -6,13 +6,13 @@
 //! program's memory, and turns records into zones, labels, plots, and
 //! markers. A program can make its own instrumentation wrong, and every
 //! record that breaks the ABI is counted, but nothing it writes can crash
-//! or stall uscope.
+//! or stall microscope.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use microscope_probes::abi;
 use object::{Object as _, ObjectSection as _};
-use uscope_probes::abi;
 
 use crate::capture::CaptureBuilder;
 use crate::capture::records::{
@@ -52,7 +52,7 @@ pub const MOST_EVENT_RECORDS: u64 = 1 + abi::MOST_TEXT.div_ceil(15) as u64;
 
 /// A module's instrumentation, if its file has any.
 pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
-    let Some(control) = file.section_by_name("uscope_probe_control") else {
+    let Some(control) = file.section_by_name("microscope_probe_control") else {
         return Ok(None);
     };
 
@@ -68,12 +68,12 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
     let version = u16::from_le_bytes([block[8], block[9]]);
     if version != abi::ABI {
         return Err(format!(
-            "its probes are ABI version {version}, which this uscope does not read"
+            "its probes are ABI version {version}, which this microscope does not read"
         ));
     }
 
     let sites = file
-        .section_by_name("uscope_sites")
+        .section_by_name("microscope_sites")
         .ok_or("it has a control block but no sites")?;
     let data = sites
         .data()
@@ -118,7 +118,7 @@ pub fn table(file: &object::File<'_>) -> Result<Option<Table>, String> {
 
         if record[0] != abi::SITE_VERSION {
             return Err(format!(
-                "a site is version {}, which this uscope does not read",
+                "a site is version {}, which this microscope does not read",
                 record[0]
             ));
         }
@@ -498,7 +498,7 @@ pub struct Stacks {
 
 impl Stacks {
     /// Says that the thread's records were lost before the next it writes:
-    /// overwritten, or written before uscope began reading them.
+    /// overwritten, or written before microscope began reading them.
     pub fn lost(&mut self, thread: u32) {
         self.threads.entry(thread).or_default().lost = true;
     }

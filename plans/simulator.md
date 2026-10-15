@@ -1,6 +1,6 @@
 # Deterministic Simulation
 
-uscope's hardest bugs come from orderings: a thread leaves its stop between
+microscope's hardest bugs come from orderings: a thread leaves its stop between
 two ptrace requests, a fork event races a pause, SIGKILL lands while a step
 unwinds. Real-kernel tests meet such an ordering once in hundreds of runs,
 and never on demand. The simulator runs the real debugger against a
@@ -113,8 +113,8 @@ its debugger releases those forked after.
   never asks for source context.
 
 The simulator lives in `src/sim`, compiled for the crate's tests and with
-the `sim` feature, which builds the `uscope-sim` binary; release builds of
-`uscope` never contain it. `LinuxTraceOps` is private to the Linux backend,
+the `sim` feature, which builds the `microscope-sim` binary; release builds of
+`microscope` never contain it. `LinuxTraceOps` is private to the Linux backend,
 so `SimTrace` and the controller facade live in
 `backend/linux/sim_edge.rs`. They only translate; the semantics are in
 `sim/kernel`.
@@ -383,7 +383,7 @@ entries that depend on the machine, the user, or the kernel's version,
 none of which a golden program reads, with `AT_RANDOM`'s bytes from the
 seed), and sets `rip` to the entry point. The conformance tests launch
 programs natively with an empty environment too. Randomization is off, as
-uscope launches programs. A static-PIE runtime relocates itself.
+microscope launches programs. A static-PIE runtime relocates itself.
 
 **Shadow state** is what threads really did, kept where the debugger cannot
 see or change it (`kernel/shadow.rs`, `kernel/watching.rs`):
@@ -471,8 +471,8 @@ its line table rows from `readelf --debug-dump=decodedline`, the addresses
 `--debug-dump=rawline` marks `epilogue_begin`, the address ranges where
 `--debug-dump=loc` says a variable outside inlined code is exactly a
 register's entry value, whether it was optimized, and how many inlined
-calls its DWARF describes. Coming from GNU binutils rather than uscope,
-they let the stepping oracle check uscope against another implementation.
+calls its DWARF describes. Coming from GNU binutils rather than microscope,
+they let the stepping oracle check microscope against another implementation.
 Rows at one address collapse as gdb collapses them, and a row never
 describes code past the start of another function (GCC's last row before
 hand-written assembly runs on through it).
@@ -486,7 +486,7 @@ visit(item); // MARK: index < 4 // EXPECT: item == &items[index]
 ```
 
 A `MARK` joins comparisons of integer expressions over variables in scope
-with `&&` (`markers.rs`). An `EXPECT` is written in uscope's expression
+with `&&` (`markers.rs`). An `EXPECT` is written in microscope's expression
 language, which only the debugger evaluates.
 
 ## 9. Faults and scheduling
@@ -738,7 +738,7 @@ judged once its stop is over or its process is ending.
   or bytes beyond the register.
 - *Views* (`views.rs`): a container's presentation is what its view makes
   of memory, walked exactly as `containers.views` says from the program's
-  C layout, never from uscope's reading of the debug information: its
+  C layout, never from microscope's reading of the debug information: its
   elements or entries, each read from where the walk finds it and the same
   in pages of any size; or, for a broken container, the typed problem the
   walk ends in.
@@ -823,7 +823,7 @@ breakage fails silently.
 - **Action:** one atomic thing the world does in a step.
 - **Fingerprint:** the hash of a run's trace. Equal fingerprints mean
   identical runs.
-- **Model gap:** something uscope or a program does that the simulator does
+- **Model gap:** something microscope or a program does that the simulator does
   not model, reported as such, never guessed.
 - **Oracle:** a check of the debugger's behavior against the simulation's
   ground truth.

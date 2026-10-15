@@ -84,7 +84,7 @@ pub fn launch(mut command: Command, options: GateOptions) -> std::io::Result<Gat
     let (hold, released) = mpsc::channel::<()>();
     let reap = options.reap;
     let spawner = std::thread::Builder::new()
-        .name("uscope-syscalls-child".into())
+        .name("microscope-syscalls-child".into())
         .spawn(move || {
             let spawned = command.spawn();
             drop((pid_write, go_read));

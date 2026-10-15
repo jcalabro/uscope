@@ -1,7 +1,7 @@
 //! Every tokio type with a view, in each state its view tells apart.
 //!
 //! The program holds its values in `main`'s locals and prints a `VIEW:`
-//! marker for each, saying what uscope must show, before each call to
+//! marker for each, saying what microscope must show, before each call to
 //! `barrier`; tests/debugger stops there and checks them in `main`'s frame.
 //! Markers name task ids and times, which only the program knows. With
 //! `TRUTH_CORE` set, the program traps after its first barrier, for a core
@@ -68,7 +68,7 @@ fn task<T>(handle: &JoinHandle<T>) -> String {
     format!("task {}", handle.id())
 }
 
-/// A count of nanoseconds as uscope writes a duration, as Go does:
+/// A count of nanoseconds as microscope writes a duration, as Go does:
 /// `1h2m3.5s`, `1m0s`, `1.5s`, or `0s`; never under a second here.
 fn duration(nanoseconds: u128) -> String {
     const SECOND: u128 = 1_000_000_000;
@@ -297,7 +297,7 @@ fn main() {
     let (unix_read, unix_write) = unix_left.into_split();
     let mut exact = [0_u8; 8];
     let read_exact = unix.read_exact(&mut exact);
-    let name = format!("uscope-values-{}", std::process::id());
+    let name = format!("microscope-values-{}", std::process::id());
     let unix_listener = {
         let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
             .expect("an abstract name");

@@ -6,7 +6,7 @@
 
 use std::process::Stdio;
 
-use uscope::{BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, TaskEnding};
+use microscope::{BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason, TaskEnding};
 
 use crate::invariants::checked;
 use crate::stops::{line, place};
@@ -267,7 +267,7 @@ async fn a_waiting_step_ends_with_its_session() {
                 let ended = stepping.await.expect("the step's task").expect("the step");
                 assert_eq!(
                     ended,
-                    StopReason::Exited(uscope::ExitStatus::Code(3)),
+                    StopReason::Exited(microscope::ExitStatus::Code(3)),
                     "{fixture}"
                 );
             } else {
@@ -280,7 +280,7 @@ async fn a_waiting_step_ends_with_its_session() {
                 assert!(
                     matches!(
                         scenario.snapshot().await.inferior,
-                        uscope::InferiorState::NotRunning
+                        microscope::InferiorState::NotRunning
                     ),
                     "{fixture}"
                 );

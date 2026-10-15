@@ -4,7 +4,7 @@
 import { mkdir } from "node:fs/promises";
 import * as path from "node:path";
 import { chromium, type Page } from "@playwright/test";
-import { fixture, root, startUscope } from "./server.ts";
+import { fixture, root, startMicroscope } from "./server.ts";
 
 const out = path.join(root, "target", "web-shots");
 const program = process.argv[2] ?? fixture("kvstore");
@@ -27,7 +27,7 @@ async function shoot(page: Page, name: string, settle = 0): Promise<void> {
 }
 
 await mkdir(out, { recursive: true });
-const server = await startUscope([program], "");
+const server = await startMicroscope([program], "");
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 800 } });
@@ -93,7 +93,7 @@ try {
  * shows the stop before. */
 async function shootDrawings(page: Page): Promise<void> {
   const views = path.join(root, "tests/fixtures/c/metrics/metrics.views");
-  const metrics = await startUscope(["--views", views, fixture("metrics")], "");
+  const metrics = await startMicroscope(["--views", views, fixture("metrics")], "");
   try {
     await page.setViewportSize({ width: 1440, height: 800 });
     await page.goto(metrics.link);
@@ -119,7 +119,7 @@ async function shootDrawings(page: Page): Promise<void> {
 /** The mesh fixture's torus in the built-in live viewer. */
 async function shootMesh(page: Page): Promise<void> {
   const views = path.join(root, "tests/fixtures/cpp/mesh/mesh.views");
-  const mesh = await startUscope(["--views", views, fixture("mesh")], "");
+  const mesh = await startMicroscope(["--views", views, fixture("mesh")], "");
   try {
     await page.setViewportSize({ width: 1440, height: 800 });
     await page.goto(mesh.link);

@@ -1,5 +1,5 @@
-//! `uscope record`, `uscope report`, and `uscope convert`: the sampling
-//! profiler from the command line.
+//! `microscope record`, `microscope report`, and `microscope convert`: the
+//! sampling profiler from the command line.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use super::format::plural;
 use anyhow::{Context, Result};
-use uscope::profiler::budget::Budget;
-use uscope::profiler::{
+use microscope::profiler::budget::Budget;
+use microscope::profiler::{
     Format, GapReason, Preset, ProbeSelection, Profile, RecordOptions, SampleSource, Save,
     StackCopy, StackView, Watch,
 };
@@ -48,7 +48,7 @@ pub enum OnOff {
 #[derive(Debug, clap::Args)]
 pub struct RecordArgs {
     /// Write the profile to FILE.
-    #[arg(short, long, value_name = "FILE", default_value = "uscope.usprof")]
+    #[arg(short, long, value_name = "FILE", default_value = "microscope.usprof")]
     output: PathBuf,
 
     /// How much to record, and what it may cost the program.
@@ -68,7 +68,7 @@ pub struct RecordArgs {
     #[arg(long, value_enum)]
     off_cpu: Option<OnOff>,
 
-    /// Hold uscope's own CPU time to PERCENT of one CPU by sampling less of
+    /// Hold microscope's own CPU time to PERCENT of one CPU by sampling less of
     /// each second, over the preset's: 1 in production, and otherwise
     /// none. 0 lifts it.
     #[arg(long, value_name = "PERCENT")]
@@ -107,8 +107,8 @@ pub struct RecordArgs {
 
     /// Record without end into DIR, as a segment file every --segment,
     /// each a complete profile of its span, deleting segments older than
-    /// --keep. SIGUSR2 ends a segment early. `uscope report DIR` and
-    /// `uscope web DIR` read them as one profile.
+    /// --keep. SIGUSR2 ends a segment early. `microscope report DIR` and
+    /// `microscope web DIR` read them as one profile.
     #[arg(long, value_name = "DIR", conflicts_with_all = ["window", "output"])]
     continuous: Option<PathBuf>,
 
@@ -132,13 +132,13 @@ pub struct RecordArgs {
     keep: String,
 
     /// The instrumentation sites to switch on in a program built with
-    /// uscope's probes SDK: all, off, or names separated by commas, where a
+    /// microscope's probes SDK: all, off, or names separated by commas, where a
     /// name that ends in `*` is a prefix.
     #[arg(long, value_name = "SITES", default_value = "all")]
     probes: String,
 
-    /// How long the program goes on writing its instrumentation once uscope
-    /// stops reading it, as when uscope is killed, before it switches it
+    /// How long the program goes on writing its instrumentation once microscope
+    /// stops reading it, as when microscope is killed, before it switches it
     /// off.
     #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
     probe_timeout: f64,
@@ -147,7 +147,7 @@ pub struct RecordArgs {
     #[arg(long, value_enum, default_value = "now")]
     symbols: SymbolsArg,
 
-    /// Trace these system calls too, with their stacks, as `uscope syscalls
+    /// Trace these system calls too, with their stacks, as `microscope syscalls
     /// -e trace=SET` names them: `all`, or names and classes such as
     /// `%file,%net,connect`. Needs the BPF engine's privileges.
     #[arg(long, value_name = "SET", conflicts_with = "pid")]
@@ -202,7 +202,7 @@ pub struct SymbolizeArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ConvertArgs {
-    /// The profile to read: uscope's own, pprof's, gzipped or not, or
+    /// The profile to read: microscope's own, pprof's, gzipped or not, or
     /// folded stacks.
     input: PathBuf,
 
@@ -220,7 +220,7 @@ pub struct ConvertArgs {
     native: bool,
 }
 
-/// Runs `uscope convert`.
+/// Runs `microscope convert`.
 pub fn run_convert(args: &ConvertArgs) -> std::process::ExitCode {
     match convert(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -273,7 +273,7 @@ fn convert(args: &ConvertArgs) -> Result<()> {
     Ok(())
 }
 
-/// Runs `uscope symbolize`.
+/// Runs `microscope symbolize`.
 pub fn run_symbolize(args: &SymbolizeArgs) -> std::process::ExitCode {
     match symbolize(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -294,10 +294,10 @@ fn symbolize(args: &SymbolizeArgs) -> Result<()> {
         args.file.display()
     );
     let mut profile = read.profile;
-    let found = profile.symbolize(&uscope::DebugFileOptions {
+    let found = profile.symbolize(&microscope::DebugFileOptions {
         directories: args.debug_dirs.clone(),
         debuginfod: args.debuginfod,
-        ..uscope::DebugFileOptions::default()
+        ..microscope::DebugFileOptions::default()
     });
     if found.is_empty() {
         eprintln!("note: every frame of {} has its lines", args.file.display());
@@ -324,7 +324,7 @@ fn symbolize(args: &SymbolizeArgs) -> Result<()> {
 /// files and debug directories hold, writing a note for each module they
 /// do not.
 pub fn symbolize_here(profile: &mut Profile, out: &mut impl std::io::Write) -> Result<()> {
-    for module in profile.symbolize(&uscope::DebugFileOptions::default()) {
+    for module in profile.symbolize(&microscope::DebugFileOptions::default()) {
         if let Err(why) = &module.source {
             writeln!(out, "note: {} keeps its addresses: {why}", module.module)?;
         }
@@ -333,7 +333,7 @@ pub fn symbolize_here(profile: &mut Profile, out: &mut impl std::io::Write) -> R
     Ok(())
 }
 
-/// Runs `uscope record`, exiting as the program did.
+/// Runs `microscope record`, exiting as the program did.
 pub fn run_record(args: &RecordArgs) -> std::process::ExitCode {
     match record(args) {
         Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
@@ -344,7 +344,7 @@ pub fn run_record(args: &RecordArgs) -> std::process::ExitCode {
     }
 }
 
-/// Runs `uscope report` to standard output.
+/// Runs `microscope report` to standard output.
 pub fn run_report(args: &ReportArgs) -> std::process::ExitCode {
     match report(args, &mut std::io::stdout().lock()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -404,7 +404,7 @@ fn options(args: &RecordArgs) -> Result<RecordOptions> {
     }
 
     if let Some(set) = &args.syscalls {
-        let filter = uscope::syscalls::Filter::parse(
+        let filter = microscope::syscalls::Filter::parse(
             &[format!("trace={set}")],
             &crate::present::syscalls::signal_named,
         )
@@ -456,7 +456,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
                 .with_context(|| format!("creating {}", directory.display()))?;
             let keep = duration(&args.keep).context("--keep")?;
             eprintln!(
-                "uscope: writing a segment every {} s to {}, keeping {}",
+                "microscope: writing a segment every {} s to {}, keeping {}",
                 args.segment,
                 directory.display(),
                 args.keep
@@ -471,7 +471,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
         if let Some((directory, keep)) = continuous {
             if let Err(error) = profile.write_segment(directory, keep) {
                 eprintln!(
-                    "uscope: writing a segment to {} failed: {error}",
+                    "microscope: writing a segment to {} failed: {error}",
                     directory.display()
                 );
             }
@@ -483,17 +483,17 @@ fn record(args: &RecordArgs) -> Result<i32> {
         let path = numbered(&args.output, saves);
         match profile.write(&path) {
             Ok(()) => eprintln!(
-                "uscope: saved {} samples of the window to {}",
+                "microscope: saved {} samples of the window to {}",
                 profile.samples(),
                 path.display()
             ),
-            Err(error) => eprintln!("uscope: writing {} failed: {error}", path.display()),
+            Err(error) => eprintln!("microscope: writing {} failed: {error}", path.display()),
         }
     };
 
     if let Some(window) = options.window {
         eprintln!(
-            "uscope: keeping the last {:.3} s; `kill -USR2 {}` saves it",
+            "microscope: keeping the last {:.3} s; `kill -USR2 {}` saves it",
             window.as_secs_f64(),
             std::process::id()
         );
@@ -510,12 +510,12 @@ fn record(args: &RecordArgs) -> Result<i32> {
     };
 
     let (profile, code) = if let Some(pid) = args.pid {
-        let attachment = uscope::profiler::record_attached(pid, &options, &mut watch)?;
+        let attachment = microscope::profiler::record_attached(pid, &options, &mut watch)?;
         (attachment.profile, 0)
     } else {
         let mut command = Command::new(&args.command[0]);
         command.args(&args.command[1..]);
-        let recording = uscope::profiler::record_watched(command, &options, &mut watch)?;
+        let recording = microscope::profiler::record_watched(command, &options, &mut watch)?;
         (recording.profile, recording.status.code().unwrap_or(1))
     };
 
@@ -523,13 +523,16 @@ fn record(args: &RecordArgs) -> Result<i32> {
         let path = profile
             .write_segment(directory, keep)
             .with_context(|| format!("writing a segment to {}", directory.display()))?;
-        eprintln!("uscope: recorded the last segment to {}", path.display());
+        eprintln!(
+            "microscope: recorded the last segment to {}",
+            path.display()
+        );
     } else {
         profile
             .write(&args.output)
             .with_context(|| format!("writing {}", args.output.display()))?;
         eprintln!(
-            "uscope: recorded {} samples to {}",
+            "microscope: recorded {} samples to {}",
             profile.samples(),
             args.output.display()
         );
@@ -537,7 +540,7 @@ fn record(args: &RecordArgs) -> Result<i32> {
 
     let lost = profile.lost_samples();
     if lost > 0 {
-        eprintln!("uscope: the kernel dropped {lost} samples");
+        eprintln!("microscope: the kernel dropped {lost} samples");
     }
 
     Ok(code)
@@ -573,7 +576,7 @@ fn numbered(path: &std::path::Path, number: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Keeps Ctrl-C from ending uscope, setting `stop` if there is one, and
+/// Keeps Ctrl-C from ending microscope, setting `stop` if there is one, and
 /// sets `trigger` at each SIGUSR2.
 pub(super) fn handle_signals(
     stop: Option<Arc<AtomicBool>>,
@@ -737,7 +740,7 @@ fn report(args: &ReportArgs, out: &mut impl std::io::Write) -> Result<()> {
     Ok(())
 }
 
-/// What recording cost uscope, and how the budget held it.
+/// What recording cost microscope, and how the budget held it.
 #[expect(
     clippy::cast_precision_loss,
     reason = "seconds and percentages need no more precision than f64's"
@@ -750,7 +753,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
     if used > 0 {
         writeln!(
             out,
-            "Recording took {:.3} s of uscope's CPU time, {:.2}% of one CPU, {:.3} s of it \
+            "Recording took {:.3} s of microscope's CPU time, {:.2}% of one CPU, {:.3} s of it \
              reading debug information.",
             seconds(used),
             used as f64 * 100.0 / span as f64,
@@ -766,7 +769,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
             .sum();
         writeln!(
             out,
-            "Sampling paused for {:.3} s of the {:.3} s recorded, to hold uscope to {}; \
+            "Sampling paused for {:.3} s of the {:.3} s recorded, to hold microscope to {}; \
              the share sampled changed {}.",
             seconds(paused),
             seconds(span),
@@ -779,7 +782,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
     } else if profile.setting("budget") == Some("none") && used * 20 > span {
         writeln!(
             out,
-            "That is more than --preset prod allows, which holds uscope to 1% of a CPU."
+            "That is more than --preset prod allows, which holds microscope to 1% of a CPU."
         )?;
     }
 
@@ -835,7 +838,7 @@ fn cost(profile: &Profile, out: &mut impl std::io::Write) -> Result<()> {
     Ok(())
 }
 
-/// The system calls a capture holds, as `uscope syscalls -c` shows them.
+/// The system calls a capture holds, as `microscope syscalls -c` shows them.
 #[expect(
     clippy::cast_precision_loss,
     reason = "seconds need no more precision than f64's"
@@ -862,7 +865,7 @@ fn syscall_summary(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
     }
 
     writeln!(out)?;
-    let errno = |number: u16| errno(uscope::syscalls::Errno(number)).0;
+    let errno = |number: u16| errno(microscope::syscalls::Errno(number)).0;
     let sort = summary::sort_key("time").map_err(anyhow::Error::msg)?;
     for line in summary::table(&calls, &summary::Column::DEFAULT, sort, &errno) {
         writeln!(out, "{line}")?;
@@ -974,7 +977,10 @@ fn instrumentation(profile: &Profile, out: &mut impl std::io::Write) -> Result<(
         plural(sites.len() as u64, "site")
     )?;
     let lost = [
-        (counts.overwritten, "overwritten before uscope read them"),
+        (
+            counts.overwritten,
+            "overwritten before microscope read them",
+        ),
         (counts.no_ring, "events found no ring to take them"),
         (
             counts.interrupted,
@@ -1075,7 +1081,7 @@ impl Profiling {
 
 impl super::Cli {
     /// `profile start|stop|save`: samples the session's program from
-    /// outside, as `uscope record --pid` does, while it runs.
+    /// outside, as `microscope record --pid` does, while it runs.
     pub(super) async fn profile(&self, arguments: &[&str]) -> Result<String> {
         let live = if arguments.first() == Some(&"start") {
             self.live_process().await
@@ -1092,7 +1098,11 @@ impl super::Cli {
 
 impl Profiling {
     /// Runs one `profile` command; `live` is the process to start on.
-    fn command(&mut self, arguments: &[&str], live: Option<uscope::ProcessId>) -> Result<String> {
+    fn command(
+        &mut self,
+        arguments: &[&str],
+        live: Option<microscope::ProcessId>,
+    ) -> Result<String> {
         self.settle()?;
         match arguments {
             ["start", window @ ..] if window.len() <= 1 => {
@@ -1160,7 +1170,7 @@ fn start_recording(pid: u32, options: RecordOptions) -> SessionRecording {
                 let _ = send.send(profile);
             };
 
-            uscope::profiler::record_attached(
+            microscope::profiler::record_attached(
                 pid,
                 &options,
                 &mut Watch {

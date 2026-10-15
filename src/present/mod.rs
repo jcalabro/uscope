@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     DebuggerHandle, DereferenceReference, DereferenceState, Expression, ImageAddress,
     InspectionExhaustion, InspectionLimits, IntegerValue, LoadBias, ModuleId, ModuleImage,
     PresentedShape, ScalarValue, SourceLocation, StopContext, SymbolKind, TypeInfo, ValueChild,
@@ -148,7 +148,7 @@ pub enum Listed {
 
 /// The renderers of the drawings a presentation offers, each once.
 #[must_use]
-pub fn drawings(presentation: &uscope::Presentation) -> Vec<Arc<str>> {
+pub fn drawings(presentation: &microscope::Presentation) -> Vec<Arc<str>> {
     let mut names = Vec::<Arc<str>>::new();
     for visualizer in presentation.visualizers.iter() {
         if !names.contains(&visualizer.renderer.name) {
@@ -193,14 +193,14 @@ impl Window {
 /// Why a listing failed.
 #[derive(Debug)]
 pub enum ListError {
-    Debugger(uscope::Error),
+    Debugger(microscope::Error),
 
     /// The program changed so the listing no longer applies.
     Changed(&'static str),
 }
 
-impl From<uscope::Error> for ListError {
-    fn from(error: uscope::Error) -> Self {
+impl From<microscope::Error> for ListError {
+    fn from(error: microscope::Error) -> Self {
         Self::Debugger(error)
     }
 }
@@ -428,7 +428,7 @@ impl Presenter<'_> {
         let mut unnamed = BTreeSet::new();
         for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
             let bound = if let Some(expression) = Expression::name(name)
-                && let Ok(uscope::Evaluation::Value { value, .. }) =
+                && let Ok(microscope::Evaluation::Value { value, .. }) =
                     self.handle.at(context).evaluate(&expression).await
             {
                 storage(&value.state)
@@ -460,7 +460,7 @@ impl Presenter<'_> {
         context: StopContext,
         image: &ModuleImage,
         module: ModuleId,
-        file: uscope::SourceFileId,
+        file: microscope::SourceFileId,
         window: Window,
     ) -> Result<Vec<Listed>, ListError> {
         let mut rows = Vec::new();
@@ -475,7 +475,7 @@ impl Presenter<'_> {
                 .handle
                 .at(context)
                 .global_with_limits(
-                    uscope::GlobalVariableReference {
+                    microscope::GlobalVariableReference {
                         module,
                         image: image.id(),
                         variable: global.id,
@@ -558,7 +558,7 @@ impl Presenter<'_> {
         window: Window,
     ) -> Result<Vec<Listed>, ListError> {
         let evaluation = self.handle.at(context).evaluate(expression).await?;
-        let uscope::Evaluation::Range(page) = evaluation else {
+        let microscope::Evaluation::Range(page) = evaluation else {
             return Err(ListError::Changed(
                 "the range no longer evaluates to elements",
             ));
@@ -650,12 +650,12 @@ impl Presenter<'_> {
             return Vec::new();
         };
 
-        let Ok(uscope::Evaluation::Value { value, .. }) = self
+        let Ok(microscope::Evaluation::Value { value, .. }) = self
             .handle
             .at(context)
             .evaluate_with(
                 &expression,
-                uscope::EvaluationMode::Read,
+                microscope::EvaluationMode::Read,
                 InspectionLimits::default(),
             )
             .await
@@ -786,7 +786,7 @@ fn editable(
     let storage = match source {
         VariableValueSource::Memory(_) => true,
         VariableValueSource::Register(_) => {
-            context.frame == uscope::StackFrameId::INNERMOST && whole
+            context.frame == microscope::StackFrameId::INNERMOST && whole
         }
         _ => false,
     };
@@ -913,7 +913,7 @@ fn hex(byte_size: Option<u64>, state: &VariableState) -> Option<String> {
 /// the same, that name qualified by its file's name or path.
 fn global_expression(
     image: &ModuleImage,
-    global: &uscope::GlobalVariableInfo,
+    global: &microscope::GlobalVariableInfo,
 ) -> Option<Expression> {
     let mut selectors = vec![global.qualified_name.to_string()];
     if let Some(file) = global
@@ -948,8 +948,8 @@ fn global_expression(
 
 /// Whether an evaluation failed only because the frame does not know the
 /// name that starts the text, `name`.
-pub fn names_only(failure: &uscope::ExpressionError, name: &str) -> bool {
-    failure.kind == uscope::ExpressionErrorKind::UnknownName
+pub fn names_only(failure: &microscope::ExpressionError, name: &str) -> bool {
+    failure.kind == microscope::ExpressionErrorKind::UnknownName
         && failure.span.start == 0
         && failure.span.end as usize == name.len()
 }
@@ -990,8 +990,8 @@ mod tests {
     /// hexadecimal: the stored number is one step away, as `[raw]`.
     #[test]
     fn hexadecimal_never_hides_what_a_view_presents() {
-        let presentation = uscope::Presentation {
-            view: Arc::new(uscope::ViewName {
+        let presentation = microscope::Presentation {
+            view: Arc::new(microscope::ViewName {
                 source: Arc::from("app.views"),
                 line: 2,
                 header: Arc::from("c status"),

@@ -1,7 +1,7 @@
 //! Sweeps and replays deterministic simulations of debugging sessions.
 //!
-//! `uscope-sim sweep` runs random seeds on every core for a while and
-//! reports each kind of failure once, with its shortest run. `uscope-sim
+//! `microscope-sim sweep` runs random seeds on every core for a while and
+//! reports each kind of failure once, with its shortest run. `microscope-sim
 //! replay SEED` reruns one seed and prints its whole trace.
 
 use std::collections::BTreeMap;
@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use uscope::sim::{Corpus, Outcome, Reach, Settings, describe_failure, run};
+use microscope::sim::{Corpus, Outcome, Reach, Settings, describe_failure, run};
 
 #[derive(Parser)]
-#[command(about = "Deterministic simulation of uscope debugging sessions")]
+#[command(about = "Deterministic simulation of microscope debugging sessions")]
 struct Args {
     #[command(subcommand)]
     command: Command,

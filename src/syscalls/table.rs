@@ -194,13 +194,13 @@ mod tests {
     /// The kernel UAPI headers the flake provides, among the BPF include
     /// directories.
     fn uapi() -> std::path::PathBuf {
-        let include = std::env::var("USCOPE_BPF_INCLUDE")
-            .expect("USCOPE_BPF_INCLUDE names the kernel headers; run in the dev shell");
+        let include = std::env::var("MICROSCOPE_BPF_INCLUDE")
+            .expect("MICROSCOPE_BPF_INCLUDE names the kernel headers; run in the dev shell");
         include
             .split(':')
             .map(Path::new)
             .find(|path| path.join("asm/unistd_64.h").exists())
-            .expect("one USCOPE_BPF_INCLUDE directory holds asm/unistd_64.h")
+            .expect("one MICROSCOPE_BPF_INCLUDE directory holds asm/unistd_64.h")
             .to_owned()
     }
 
@@ -229,7 +229,7 @@ mod tests {
         let mut text = String::from(
             "// Generated from the kernel's asm/unistd_{64,32,x32}.h by\n\
              // `syscalls::table::tests::tables_match_the_kernel_headers`; do not edit.\n\
-             // Rerun it with USCOPE_UPDATE_SYSCALLS=1 after the headers change.\n",
+             // Rerun it with MICROSCOPE_UPDATE_SYSCALLS=1 after the headers change.\n",
         );
         for (constant, file) in [
             ("X86_64", "unistd_64.h"),
@@ -251,11 +251,11 @@ mod tests {
     }
 
     /// Fails when `table.gen.rs` no longer matches the pinned kernel
-    /// headers. Set `USCOPE_UPDATE_SYSCALLS=1` to rewrite it.
+    /// headers. Set `MICROSCOPE_UPDATE_SYSCALLS=1` to rewrite it.
     #[test]
     fn tables_match_the_kernel_headers() {
         let expected = generate();
-        if std::env::var_os("USCOPE_UPDATE_SYSCALLS").is_some() {
+        if std::env::var_os("MICROSCOPE_UPDATE_SYSCALLS").is_some() {
             std::fs::write(GENERATED, &expected).expect("write the generated tables");
             return;
         }
@@ -263,7 +263,7 @@ mod tests {
         let actual = std::fs::read_to_string(GENERATED).unwrap_or_default();
         assert!(
             actual == expected,
-            "src/syscalls/table.gen.rs is stale; rerun with USCOPE_UPDATE_SYSCALLS=1"
+            "src/syscalls/table.gen.rs is stale; rerun with MICROSCOPE_UPDATE_SYSCALLS=1"
         );
     }
 

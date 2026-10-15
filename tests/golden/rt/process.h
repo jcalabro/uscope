@@ -1,8 +1,8 @@
 // Processes for golden programs: fork, waiting for a child, and process
 // identities. A waiting parent polls and yields rather than blocking.
 
-#ifndef USCOPE_GOLDEN_PROCESS_H
-#define USCOPE_GOLDEN_PROCESS_H
+#ifndef MICROSCOPE_GOLDEN_PROCESS_H
+#define MICROSCOPE_GOLDEN_PROCESS_H
 
 #include "rt.h"
 

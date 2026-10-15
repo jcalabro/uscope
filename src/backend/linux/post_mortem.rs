@@ -41,7 +41,7 @@ use crate::{
     ModuleImageId, Result, VirtualAddress,
 };
 
-const POST_MORTEM_THREAD_NAME: &str = "uscope-core";
+const POST_MORTEM_THREAD_NAME: &str = "microscope-core";
 
 /// Registers and memory recorded by a core dump.
 pub(super) struct CoreTarget {

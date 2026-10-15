@@ -1,11 +1,11 @@
-// The API a uscope renderer runs against (docs/visualizers.md). A renderer
-// is one classic script that calls `uscope.draw` or `uscope.live` once; the
-// only global it can use beyond the language and drawing is `uscope`.
+// The API a microscope renderer runs against (docs/visualizers.md). A renderer
+// is one classic script that calls `microscope.draw` or `microscope.live` once;
+// the only global it can use beyond the language and drawing is `microscope`.
 //
 // To have an editor check a renderer, start it with `// @ts-check` and
 // point the editor at this file, as with `/// <reference path="…" />`.
 
-declare namespace uscope {
+declare namespace microscope {
   /** A value as a renderer receives it, decided by its program type alone. */
   type Value =
     | null

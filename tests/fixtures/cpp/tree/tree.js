@@ -9,8 +9,8 @@ const GAP = 34;
 const LEVEL = 46;
 const RADIUS = 13;
 
-uscope.draw(({ nodes, count, root }, { previous, paths, width }) => {
-  const theme = uscope.theme;
+microscope.draw(({ nodes, count, root }, { previous, paths, width }) => {
+  const theme = microscope.theme;
   if (count > nodes.length) throw new RangeError(`count is ${count}, past the ${nodes.length} nodes`);
   const order = [];
   const depth = new Map();
@@ -46,19 +46,19 @@ uscope.draw(({ nodes, count, root }, { previous, paths, width }) => {
     const from = /** @type {{x: number, y: number}} */ (place.get(node));
     for (const child of [nodes[node].left, nodes[node].right]) {
       const to = place.get(child);
-      if (to !== undefined) shapes.push(uscope.line({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, stroke: theme.ink3, strokeWidth: 1.5 }));
+      if (to !== undefined) shapes.push(microscope.line({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, stroke: theme.ink3, strokeWidth: 1.5 }));
     }
   }
   for (const node of order) {
     const { x, y } = /** @type {{x: number, y: number}} */ (place.get(node));
     const isNew = added.has(node);
-    shapes.push(uscope.group({
+    shapes.push(microscope.group({
       x, y,
       title: `${nodes[node].key}: node ${node}, depth ${depth.get(node)}`,
       select: paths.nodes === null ? undefined : `${paths.nodes}[${node}]`,
       shapes: [
-        uscope.circle({ x: 0, y: 0, r: RADIUS, fill: theme.surface, stroke: isNew ? theme.changed : theme.series[0], strokeWidth: isNew ? 3 : 2 }),
-        uscope.text({ x: 0, y: 0, text: String(nodes[node].key), size: 11, anchor: "middle", baseline: "central", fill: theme.ink }),
+        microscope.circle({ x: 0, y: 0, r: RADIUS, fill: theme.surface, stroke: isNew ? theme.changed : theme.series[0], strokeWidth: isNew ? 3 : 2 }),
+        microscope.text({ x: 0, y: 0, text: String(nodes[node].key), size: 11, anchor: "middle", baseline: "central", fill: theme.ink }),
       ],
     }));
   }
@@ -66,5 +66,5 @@ uscope.draw(({ nodes, count, root }, { previous, paths, width }) => {
   const caption = [`${count} nodes`, `depth ${deepest + 1}`];
   if (unreached > 0) caption.push(`${unreached} not reached from the root`);
   if (added.size > 0) caption.push(`${added.size} added since the stop before`);
-  return uscope.picture({ width: W, height: 24 + (deepest + 1) * LEVEL, shapes, caption: caption.join(" · ") });
+  return microscope.picture({ width: W, height: 24 + (deepest + 1) * LEVEL, shapes, caption: caption.join(" · ") });
 });

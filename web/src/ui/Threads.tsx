@@ -69,6 +69,6 @@ function emptyThreads(inferior: Inferior): string {
     case "exited":
       return "The program exited.";
     case "detached":
-      return "uscope let the process go.";
+      return "microscope let the process go.";
   }
 }

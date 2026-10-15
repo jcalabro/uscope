@@ -6,7 +6,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     ExceptionStops, ExitStatus, InferiorState, LanguageExceptionKind, LaunchOptions, StopReason,
     ThreadActivity,
 };
@@ -250,7 +250,7 @@ async fn a_panic_with_a_value_names_its_type() {
             .expect("an expression for the value");
         let held = evaluated(&launched.scenario, value).await;
         assert_eq!(
-            uscope::value_summary(held.type_info.as_ref(), &held.state),
+            microscope::value_summary(held.type_info.as_ref(), &held.state),
             "Some(42)",
             "{value}"
         );
@@ -371,7 +371,7 @@ async fn the_panic_machinery_is_marked() {
             roles
                 .iter()
                 .any(|(function, role)| function.as_deref() == Some(name)
-                    && *role == uscope::CodeRole::Panic),
+                    && *role == microscope::CodeRole::Panic),
             "{name}: {roles:?}"
         );
     }

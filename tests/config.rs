@@ -15,7 +15,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// A scratch project with a user settings file beside it, and a state
-/// directory for what uscope records.
+/// directory for what microscope records.
 struct Project {
     directory: support::ScratchDir,
 }
@@ -23,7 +23,7 @@ struct Project {
 impl Project {
     fn new(name: &str) -> Self {
         let directory = support::ScratchDir::new(name);
-        fs::create_dir_all(directory.path().join("project/.uscope")).expect("make the project");
+        fs::create_dir_all(directory.path().join("project/.microscope")).expect("make the project");
         fs::write(directory.path().join("user.toml"), "").expect("write the user's file");
         Self { directory }
     }
@@ -37,21 +37,22 @@ impl Project {
     }
 
     fn project(&self, text: &str) {
-        fs::write(self.root().join(".uscope/config.toml"), text).expect("write the project's file");
+        fs::write(self.root().join(".microscope/config.toml"), text)
+            .expect("write the project's file");
     }
 
     fn local(&self, text: &str) {
-        fs::write(self.root().join(".uscope/config.local.toml"), text)
+        fs::write(self.root().join(".microscope/config.local.toml"), text)
             .expect("write the local file");
     }
 
-    /// uscope run in the project, with its own user file and state.
+    /// microscope run in the project, with its own user file and state.
     fn command(&self, arguments: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
         command
             .args(arguments)
             .current_dir(self.root())
-            .env("USCOPE_CONFIG", self.directory.path().join("user.toml"))
+            .env("MICROSCOPE_CONFIG", self.directory.path().join("user.toml"))
             .env("XDG_STATE_HOME", self.directory.path().join("state"))
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR")
@@ -63,7 +64,7 @@ impl Project {
         self.command(arguments)
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope")
+            .expect("run microscope")
     }
 }
 
@@ -72,7 +73,7 @@ fn succeeded(output: &Output) -> (String, String) {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
-        "uscope failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "microscope failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     (stdout, stderr)
 }
@@ -81,7 +82,7 @@ fn failed(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         !output.status.success(),
-        "uscope succeeded:\nstdout:\n{}\nstderr:\n{stderr}",
+        "microscope succeeded:\nstdout:\n{}\nstderr:\n{stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
     stderr
@@ -144,7 +145,13 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
             command.env("NO_COLOR", "1");
         }
 
-        succeeded(&command.stdin(Stdio::null()).output().expect("run uscope")).0
+        succeeded(
+            &command
+                .stdin(Stdio::null())
+                .output()
+                .expect("run microscope"),
+        )
+        .0
     };
 
     // The local file's context, the project's hidden bytes, and the flag's
@@ -185,11 +192,14 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
     for (key, origin) in [
         (
             "source.context",
-            format!("local {}", root.join(".uscope/config.local.toml").display()),
+            format!(
+                "local {}",
+                root.join(".microscope/config.local.toml").display()
+            ),
         ),
         (
             "disassembly.show-bytes",
-            format!("project {}", root.join(".uscope/config.toml").display()),
+            format!("project {}", root.join(".microscope/config.toml").display()),
         ),
         ("print.max-depth", format!("user {}", user.display())),
         ("disassembly.syntax", format!("user {}", user.display())),
@@ -212,7 +222,7 @@ fn settings_layer_flags_environment_local_project_user_and_defaults() {
 fn invalid_settings_stop_startup_at_their_position_with_a_suggestion() {
     let project = Project::new("config-errors");
     project.project("[ui]\nprompt = \"> \"\ncolour = \"never\"\n");
-    let file = project.root().join(".uscope/config.toml");
+    let file = project.root().join(".microscope/config.toml");
     let expected = format!(
         "{}:3:1: unknown key 'colour' in [ui]; did you mean 'color'?",
         file.display()
@@ -239,7 +249,7 @@ fn invalid_settings_stop_startup_at_their_position_with_a_suggestion() {
 
 /// A launch configuration starts by name, with its arguments, environment,
 /// directory, and startup commands; the command line overrides them; and
-/// with several, uscope alone lists them rather than choosing.
+/// with several, microscope alone lists them rather than choosing.
 #[test]
 fn launch_configurations_start_by_name_and_are_never_guessed() {
     let project = Project::new("config-launch");
@@ -247,7 +257,7 @@ fn launch_configurations_start_by_name_and_are_never_guessed() {
     let program = fixture(ENVIRONMENT);
     project.project(&format!(
         "[[launch]]\nname = \"environment\"\nprogram = \"{}\"\n\
-         args = [\"--not-an-option\", \"two words\"]\nenv = {{ USCOPE_FIXTURE_VALUE = \"a=b\" }}\n\
+         args = [\"--not-an-option\", \"two words\"]\nenv = {{ MICROSCOPE_FIXTURE_VALUE = \"a=b\" }}\n\
          cwd = \"work\"\nstartup = [\"run\"]\n",
         program.display()
     ));
@@ -271,7 +281,7 @@ fn launch_configurations_start_by_name_and_are_never_guessed() {
         "--batch",
         "--trust-project",
         "--env",
-        "USCOPE_FIXTURE_VALUE=c",
+        "MICROSCOPE_FIXTURE_VALUE=c",
         "--",
         "one",
     ]));
@@ -343,7 +353,7 @@ fn a_project_acts_only_once_trusted() {
         "{stderr}"
     );
     assert!(stderr.contains("--trust-project"), "{stderr}");
-    assert!(stderr.contains("uscope config trust"), "{stderr}");
+    assert!(stderr.contains("microscope config trust"), "{stderr}");
 
     let (stdout, _) = succeeded(&project.run(&[&["--trust-project"][..], &session].concat()));
     assert!(stdout.contains("SIGUSR2"), "{stdout}");
@@ -405,11 +415,11 @@ fn an_interactive_session_asks_once_whether_to_trust_a_project() {
         .expect("the shown alias");
     session.expect("[y/o/N]: ").expect("the question");
     session.send_line("yes").expect("answer");
-    session.expect("(uscope) ").expect("the prompt");
+    session.expect("(microscope) ").expect("the prompt");
     session.send_line("quit").expect("quit");
     session.expect(expectrl::Eof).expect("exit");
 
-    let record = fs::read_to_string(project.directory.path().join("state/uscope/trust.toml"))
+    let record = fs::read_to_string(project.directory.path().join("state/microscope/trust.toml"))
         .expect("the trust record");
     assert!(
         record.contains("bm = \\\"break main\\\"") || record.contains("bm = \"break main\""),
@@ -417,7 +427,7 @@ fn an_interactive_session_asks_once_whether_to_trust_a_project() {
     );
     let mut session = start(&project);
     session
-        .expect("(uscope) ")
+        .expect("(microscope) ")
         .expect("the prompt, without asking");
     session.send_line("quit").expect("quit");
     session.expect(expectrl::Eof).expect("exit");

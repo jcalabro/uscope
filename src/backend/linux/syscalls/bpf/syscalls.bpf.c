@@ -1,7 +1,7 @@
 // The BPF engine's kernel side (plans/syscalls.html). It filters by
 // process, timestamps each chosen call's entry, and at its exit counts it,
 // copies the bytes behind its arguments as its spec says, and sends one
-// record. uscope decodes and interprets everything in Rust.
+// record. microscope decodes and interprets everything in Rust.
 //
 // The verifier proves these programs terminate and touch only what they
 // may; they keep to bounded loops, no tail calls, and per-CPU scratch for
@@ -65,7 +65,7 @@ struct {
 	__type(value, struct entry);
 } ENTRIES SEC(".maps");
 
-// Each chosen call's statistics, by its call_spec.stat; uscope sizes it
+// Each chosen call's statistics, by its call_spec.stat; microscope sizes it
 // to the calls it chooses.
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -185,7 +185,7 @@ static __always_inline u32 forget(struct scratch *buffer, u32 value, u32 mask)
 	return *spare & mask;
 }
 
-// Fixed as uscope loads the programs, so the verifier drops what they
+// Fixed as microscope loads the programs, so the verifier drops what they
 // leave unused: a cgroup's processes, by its id and depth, rather than
 // TARGETS'; and the pid namespace ids are shown in, by its inode and depth.
 const volatile u64 cgroup_id = 0;
@@ -628,7 +628,7 @@ static __always_inline void count(struct config *settings, struct call_spec *spe
 #define NAME_MAX 255
 
 // Describes what descriptor `fd` of the current task refers to, before
-// the call record that made it, so that uscope names it as the kernel
+// the call record that made it, so that microscope names it as the kernel
 // does without reading /proc after the fact.
 static __always_inline void send_file(u32 tid, u32 tgid, s32 fd)
 {
@@ -827,7 +827,7 @@ static __always_inline int on_exit(void *ctx, struct pt_regs *regs, s64 ret)
 		spec = bpf_map_lookup_elem(&CALLS, &slot);
 	} else {
 		// A call that is not chosen, or one that began before tracing
-		// did, which a launched program's never do but uscope's own.
+		// did, which a launched program's never do but microscope's own.
 		if (settings->flags & CONFIG_SKIP_UNSEEN)
 			return 0;
 		u64 id = BPF_CORE_READ(regs, orig_ax);
@@ -913,7 +913,7 @@ int process_fork(u64 *ctx)
 		u8 one = 1;
 		bpf_map_update_elem(&TARGETS, &child_tgid, &one, BPF_ANY);
 	}
-	// Sent in count mode too: uscope follows which processes live by them.
+	// Sent in count mode too: microscope follows which processes live by them.
 	struct spawn_record *record = bpf_ringbuf_reserve(&EVENTS, sizeof(*record), 0);
 	if (!record) {
 		lost();
@@ -1063,7 +1063,7 @@ int signal_deliver(u64 *ctx)
 	return 0;
 }
 
-// Lists every traced thread's call in progress, for uscope's in-flight
+// Lists every traced thread's call in progress, for microscope's in-flight
 // scan: one in_flight_record each.
 SEC("iter/task")
 int in_flight(struct bpf_iter__task *ctx)

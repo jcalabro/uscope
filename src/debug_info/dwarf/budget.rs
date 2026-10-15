@@ -28,7 +28,7 @@ pub struct LoadLimits {
 impl Default for LoadLimits {
     /// Programs of the corpus build at most 4.4 bytes of these records
     /// for each byte of their debug information (optimized Go), and
-    /// uscope's own debug build 2.1; the smallest build some 40 KB in all.
+    /// microscope's own debug build 2.1; the smallest build some 40 KB in all.
     /// Thirty-two leaves room for producers that repeat themselves more.
     fn default() -> Self {
         Self {

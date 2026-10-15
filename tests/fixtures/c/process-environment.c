@@ -14,9 +14,9 @@ int main(int argc, char **argv) {
     for (int index = 1; index < argc; ++index) {
         printf("argument %d: %s\n", index, argv[index]);
     }
-    const char *value = getenv("USCOPE_FIXTURE_VALUE");
+    const char *value = getenv("MICROSCOPE_FIXTURE_VALUE");
     printf("value: %s\n", value != NULL ? value : "(unset)");
-    printf("removed: %s\n", getenv("USCOPE_FIXTURE_REMOVED") != NULL ? "present" : "absent");
+    printf("removed: %s\n", getenv("MICROSCOPE_FIXTURE_REMOVED") != NULL ? "present" : "absent");
     if (getcwd(directory, sizeof directory) == NULL) {
         return 100;
     }

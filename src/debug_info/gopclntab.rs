@@ -1467,7 +1467,7 @@ mod tests {
                 .expect("a Go image has a function table");
             let oracle = String::from_utf8(fixture(&format!("{name}.gosym"))).expect("text");
             let mut lines = oracle.lines();
-            assert_eq!(lines.next(), Some("uscope-gosym-oracle-v1"));
+            assert_eq!(lines.next(), Some("microscope-gosym-oracle-v1"));
             let hex = |field: &str| {
                 u64::from_str_radix(field.trim_start_matches("0x"), 16).expect("hex address")
             };

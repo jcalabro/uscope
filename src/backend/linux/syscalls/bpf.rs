@@ -1,4 +1,4 @@
-//! The BPF engine for `uscope syscalls`, which never stops the traced
+//! The BPF engine for `microscope syscalls`, which never stops the traced
 //! program.
 //!
 //! Programs in the kernel filter by process, time each chosen call, copy
@@ -823,11 +823,12 @@ pub enum BpfError {
 }
 
 /// What to do if the engine is missing a privilege.
-const REMEDY: &str = "  uscope uses eBPF so it never stops or slows the traced program, and it will
+const REMEDY: &str =
+    "  microscope uses eBPF so it never stops or slows the traced program, and it will
   not fall back to ptrace on its own. To continue, one of:
     - run it from a unit with AmbientCapabilities=CAP_BPF CAP_PERFMON
-    - on NixOS or system-manager, import uscope's bpf module and run through
-      /run/wrappers/bin/uscope-bpf (docs/syscalls.md#give-uscope-the-bpf-privileges)
+    - on NixOS or system-manager, import microscope's bpf module and run through
+      /run/wrappers/bin/microscope-bpf (docs/syscalls.md#give-microscope-the-bpf-privileges)
     - trace a program you launch with --engine ptrace, which stops the
       program at each chosen call";
 
@@ -918,7 +919,7 @@ impl Probe {
     pub fn check(&self) -> Result<(), BpfError> {
         if self.version.is_none_or(|version| version < (5, 15)) {
             return Err(BpfError::Unavailable(format!(
-                "uscope syscalls' BPF engine needs Linux 5.15 or newer, and this kernel is {}.\n  \
+                "microscope syscalls' BPF engine needs Linux 5.15 or newer, and this kernel is {}.\n  \
                  Trace a program you launch with --engine ptrace instead.",
                 self.release
             )));
@@ -926,7 +927,7 @@ impl Probe {
 
         if !self.btf {
             return Err(BpfError::Unavailable(
-                "uscope syscalls' BPF engine needs the kernel's BTF, and /sys/kernel/btf/vmlinux \
+                "microscope syscalls' BPF engine needs the kernel's BTF, and /sys/kernel/btf/vmlinux \
                  is missing.\n  Build the kernel with CONFIG_DEBUG_INFO_BTF=y, or trace a program \
                  you launch with --engine ptrace."
                     .to_owned(),
@@ -945,13 +946,13 @@ impl Probe {
         if let Some(missing) = missing {
             let token = self.token.as_ref().map_or_else(String::new, |path| {
                 format!(
-                    "\n  {} offers a BPF token, which uscope cannot use: aya, which loads its \
+                    "\n  {} offers a BPF token, which microscope cannot use: aya, which loads its \
                      programs, has no way to pass one to the kernel.",
                     path.display()
                 )
             });
             return Err(BpfError::Unavailable(format!(
-                "uscope syscalls needs CAP_BPF and CAP_PERFMON, and this process {missing}.\n{REMEDY}{token}"
+                "microscope syscalls needs CAP_BPF and CAP_PERFMON, and this process {missing}.\n{REMEDY}{token}"
             )));
         }
 
@@ -2048,7 +2049,7 @@ impl Reader<'_> {
     }
 
     /// Once a second, gives up a step of detail if tracing cost more than
-    /// its budget: uscope's own CPU time, and the programs' when the kernel
+    /// its budget: microscope's own CPU time, and the programs' when the kernel
     /// times them.
     fn hold_budget(&mut self, loaded: &mut Loaded, now: u64) -> Result<(), BpfError> {
         let Some(budget) = &mut self.budget else {
@@ -2061,7 +2062,7 @@ impl Reader<'_> {
                 self.sink.budget(
                     now,
                     "the kernel does not time BPF programs (kernel.bpf_stats_enabled is 0), \
-                     so the budget holds uscope's own CPU time alone",
+                     so the budget holds microscope's own CPU time alone",
                 );
             }
 
@@ -2637,7 +2638,7 @@ mod tests {
 
         let message = offered.check().expect_err("unprivileged").to_string();
         assert!(
-            message.contains("/sys/fs/bpf offers a BPF token, which uscope cannot use"),
+            message.contains("/sys/fs/bpf offers a BPF token, which microscope cannot use"),
             "{message}"
         );
         let able = Probe {

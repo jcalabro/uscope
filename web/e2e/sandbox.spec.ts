@@ -9,13 +9,13 @@ import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { card, drawAt } from "./drawings";
-import { expect, expectErrors, fixture, join, test, type Uscope } from "./server";
+import { expect, expectErrors, fixture, join, type Microscope, test } from "./server";
 
 /** Runs hostile.js, as a picture or live, with listeners recording what
  * arrives; `outcomes` reads what each probe did from the card. */
 async function probe(
   page: Page,
-  uscope: Uscope,
+  microscope: Microscope,
   browserName: string,
   mode: "picture" | "live",
   outcomes: (drawn: Locator) => Promise<string[]>,
@@ -44,7 +44,7 @@ async function probe(
     const views = path.join(directory, "hostile.views");
     await writeFile(
       views,
-      'uscope-views 1\nextend c life {\n    visualize "hostile" { generation = generation }\n}\n',
+      'microscope-views 1\nextend c life {\n    visualize "hostile" { generation = generation }\n}\n',
     );
     const source = await readFile(path.join(import.meta.dirname, "visualizers/hostile.js"), "utf8");
     await writeFile(
@@ -54,7 +54,7 @@ async function probe(
         .replaceAll("UDP_PORT", String(ports.udp))
         .replaceAll("MODE", mode),
     );
-    const server = await uscope.start(["--views", views, fixture("life")]);
+    const server = await microscope.start(["--views", views, fixture("life")]);
     await join(page, server.link);
     await drawAt(page, "life.c:59");
     const found = await outcomes(card(page, "life"));
@@ -79,10 +79,10 @@ async function probe(
 
 test("a hostile renderer reaches nothing outside its sandbox", async ({
   page,
-  uscope,
+  microscope,
   browserName,
 }) => {
-  await probe(page, uscope, browserName, "picture", async (drawn) => {
+  await probe(page, microscope, browserName, "picture", async (drawn) => {
     await expect(drawn.locator(".drawing-caption")).toHaveText("probes done");
     return drawn.locator("svg text").allTextContents();
   });
@@ -90,10 +90,10 @@ test("a hostile renderer reaches nothing outside its sandbox", async ({
 
 test("a hostile live renderer reaches nothing, with WebGL in use", async ({
   page,
-  uscope,
+  microscope,
   browserName,
 }) => {
-  await probe(page, uscope, browserName, "live", async (drawn) => {
+  await probe(page, microscope, browserName, "live", async (drawn) => {
     const caption = drawn.locator(".drawing-caption");
     await expect(caption).toHaveText(/ · probes done$/);
     const [kind, ...found] = (await caption.textContent())?.split(" · ") ?? [];

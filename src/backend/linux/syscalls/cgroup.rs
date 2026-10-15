@@ -41,7 +41,7 @@ pub enum CgroupError {
     NotUnified,
 
     #[error(
-        "uscope runs in a cgroup namespace of its own, where it cannot tell how deep a cgroup \
+        "microscope runs in a cgroup namespace of its own, where it cannot tell how deep a cgroup \
          is; run it in the host's (with docker, --cgroupns=host)"
     )]
     Namespaced,
@@ -65,7 +65,7 @@ impl Cgroup {
     /// # Errors
     ///
     /// When `path` is no cgroup there, when the hierarchy is not unified,
-    /// or when uscope is in a cgroup namespace of its own.
+    /// or when microscope is in a cgroup namespace of its own.
     pub fn open(path: &Path) -> Result<Self, CgroupError> {
         let unified = nix::sys::statfs::statfs(ROOT)
             .is_ok_and(|fs| fs.filesystem_type() == nix::sys::statfs::CGROUP2_SUPER_MAGIC);
@@ -171,14 +171,14 @@ fn container(root: &Path, id: &str) -> Result<PathBuf, CgroupError> {
     }
 }
 
-/// The pid namespace `processes` share, when it is not uscope's own.
+/// The pid namespace `processes` share, when it is not microscope's own.
 ///
 /// # Errors
 ///
 /// Why ids must be shown as the host sees them: there are no processes to
 /// ask, they are in different namespaces, or theirs cannot be read.
 pub fn pid_namespace(processes: &[u32]) -> Result<Option<PidNamespace>, String> {
-    let own = namespace_of("self").map_err(|error| format!("uscope's own: {error}"))?;
+    let own = namespace_of("self").map_err(|error| format!("microscope's own: {error}"))?;
     let mut shared = None;
     for &process in processes {
         let theirs = match namespace_of(&process.to_string()) {
@@ -225,16 +225,16 @@ fn namespace_of(process: &str) -> Result<PidNamespace, std::io::Error> {
     })
 }
 
-/// How deep uscope's own pid namespace is, which `NSpid` lines count from.
+/// How deep microscope's own pid namespace is, which `NSpid` lines count from.
 fn own_level() -> Result<u32, std::io::Error> {
     // The initial namespace's inode number is fixed; any other one's depth
-    // cannot be read from inside it, so uscope assumes the host's.
+    // cannot be read from inside it, so microscope assumes the host's.
     let link = std::fs::read_link("/proc/self/ns/pid")?;
     if link == Path::new("pid:[4026531836]") {
         Ok(0)
     } else {
         Err(std::io::Error::other(
-            "uscope runs in a pid namespace of its own",
+            "microscope runs in a pid namespace of its own",
         ))
     }
 }
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_container_is_found_by_any_runtime_s_name_for_its_cgroup() {
-        let root = std::env::temp_dir().join(format!("uscope-cgroups-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("microscope-cgroups-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let a = "a".repeat(64);
         let b = format!("ab{}", "c".repeat(62));

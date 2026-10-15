@@ -1,12 +1,13 @@
 # Getting started
 
-This page takes you from a program with debug information to a stopped uscope
-session.
+This page takes you from a program with debug information to a stopped
+microscope session.
 
-## Install uscope
+## Install microscope
 
-> TODO: uscope does not have a supported installation method or stable release
-> artifact yet. Add installation instructions after the project publishes one.
+> TODO: microscope does not have a supported installation method or
+> stable release artifact yet. Add installation instructions after the project
+> publishes one.
 
 The repository contains a pinned environment for contributors. It is not an
 end-user installation method.
@@ -23,7 +24,7 @@ For example:
 cc -g -O0 -o hello hello.c
 ```
 
-uscope reads DWARF debug information from the executable or from a separate
+microscope reads DWARF debug information from the executable or from a separate
 debug file. A stripped program without available debug information can still
 be inspected by address and instruction, but source lines, types, and local
 variables may be missing.
@@ -33,13 +34,13 @@ variables may be missing.
 Launch a program by passing its executable and arguments:
 
 ```sh
-uscope ./hello -- first second
+microscope ./hello -- first second
 ```
 
-uscope loads the program and opens a prompt:
+microscope loads the program and opens a prompt:
 
 ```text
-(uscope)
+(microscope)
 ```
 
 Set a breakpoint and run:
@@ -72,10 +73,10 @@ lists exact invocation forms and REPL commands.
 Start the browser interface with:
 
 ```sh
-uscope web ./hello
+microscope web ./hello
 ```
 
 See [Browser](browser.md) for its views and sharing model.
 
-uscope also speaks the Debug Adapter Protocol. See [Editors](editors.md) for
+microscope also speaks the Debug Adapter Protocol. See [Editors](editors.md) for
 client setup and supported behavior.

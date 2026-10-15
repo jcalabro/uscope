@@ -10,15 +10,15 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
-use uscope::{
+use microscope::{
     Backtrace, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, Error,
     ExceptionDisposition, ExecutionContext, ExitStatus, HeldProcess, InferiorState, LaunchOptions,
     LineNumber, ModuleId, ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId,
     StepKind, StopContext, StopId, StopReason, ThreadId, VariableSnapshot, VirtualAddress,
 };
+use serde_json::{Value, json};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use super::breakpoints::{Breakpoints, Change, Entry, Group, Key, Placement, Slot, State, Want};
 use super::config::{self, Configuration, Start};
@@ -257,19 +257,22 @@ struct Target {
     handle: DebuggerHandle,
     start: Start,
     stop_on_entry: bool,
-    source_paths: uscope::SourcePathMap,
+    source_paths: microscope::SourcePathMap,
     signals: Vec<(u64, Vec<String>)>,
 
     /// The policy each signal had before the session changed it.
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
-    applied_exceptions: uscope::ExceptionStops,
+    applied_exceptions: microscope::ExceptionStops,
 
     /// The catchpoint the system-call filter made, and the calls it
     /// catches.
-    applied_syscalls: Option<(Arc<[uscope::syscalls::SyscallId]>, uscope::CatchpointId)>,
+    applied_syscalls: Option<(
+        Arc<[microscope::syscalls::SyscallId]>,
+        microscope::CatchpointId,
+    )>,
     console: Cli,
-    syntax: uscope::AssemblySyntax,
+    syntax: microscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
 
     /// Recorded source paths by the canonical local path they map to.
@@ -321,7 +324,7 @@ pub struct Session {
     events: Option<broadcast::Receiver<DebuggerEvent>>,
 
     /// The processes the program forked, held for child sessions.
-    held: Option<uscope::HeldChildren>,
+    held: Option<microscope::HeldChildren>,
 
     /// The requests for child sessions still waiting for the client.
     follows: Vec<JoinHandle<()>>,
@@ -340,13 +343,13 @@ pub struct Session {
     threads: BTreeMap<ThreadId, i64>,
 
     /// The tasks the client was told about, with their client ids.
-    pub(super) tasks: BTreeMap<uscope::TaskId, i64>,
+    pub(super) tasks: BTreeMap<microscope::TaskId, i64>,
 
     /// The modules the client was told are loaded.
-    pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
+    pub(super) modules: BTreeMap<ModuleId, microscope::LoadedModuleRecord>,
 
     /// The execution the client last started, whose resume it already knows.
-    resumed: Option<uscope::ExecutionId>,
+    resumed: Option<microscope::ExecutionId>,
 
     /// Whether the program is being restarted, so its end does not end the
     /// session.
@@ -564,7 +567,7 @@ impl Session {
             "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
             "disassemble" => self.disassemble(arguments).await?,
             "locations" => self.locations(arguments)?,
-            "uscope/setValueFormat" => self.set_value_format(arguments).await?,
+            "microscope/setValueFormat" => self.set_value_format(arguments).await?,
             "source" => {
                 return Err(ErrorBody::new(
                     "source contents are not available from the debugger; open the file locally",
@@ -680,7 +683,7 @@ impl Session {
                 attached.map_err(|error| {
                     // A held process this session cannot take runs on.
                     let released = held.is_some_and(|held| {
-                        uscope::release_held(&held).is_ok_and(|released| released)
+                        microscope::release_held(&held).is_ok_and(|released| released)
                     });
                     let released = if released { "; it runs on its own" } else { "" };
                     ErrorBody::shown(format!(
@@ -792,7 +795,7 @@ impl Session {
             LaunchSettings::default(),
         );
         let mut default_policies = HashMap::new();
-        for code in uscope::signal_codes() {
+        for code in microscope::signal_codes() {
             default_policies.insert(code, handle.signal_policy(code).await.map_err(error)?);
         }
 
@@ -809,7 +812,7 @@ impl Session {
             signals,
             applied_policies: default_policies.clone(),
             default_policies,
-            applied_exceptions: uscope::ExceptionStops::default(),
+            applied_exceptions: microscope::ExceptionStops::default(),
             applied_syscalls: None,
             console,
             syntax,
@@ -871,7 +874,7 @@ impl Session {
     }
 
     /// Asks the client to debug a forked process in a session of its own.
-    async fn follow(&mut self, child: uscope::HeldChild) -> Result<(), Closed> {
+    async fn follow(&mut self, child: microscope::HeldChild) -> Result<(), Closed> {
         let Some(target) = self.target.as_ref() else {
             return Ok(());
         };
@@ -1048,7 +1051,7 @@ impl Session {
         &mut self,
         method: &'static str,
         pipes: Vec<(OwnedFd, &'static str)>,
-    ) -> Result<Option<uscope::StateSnapshot>, Closed> {
+    ) -> Result<Option<microscope::StateSnapshot>, Closed> {
         let Some(target) = self.target.as_mut() else {
             self.client
                 .important("internal: the started target is gone")
@@ -1645,11 +1648,11 @@ impl Session {
     /// condition caused, naming it by the client's id where it has one.
     async fn condition_failed(
         &self,
-        owner: uscope::ConditionOwner,
+        owner: microscope::ConditionOwner,
         error: &str,
     ) -> Result<(), Closed> {
         let subject = match owner {
-            uscope::ConditionOwner::Breakpoint(breakpoint) => {
+            microscope::ConditionOwner::Breakpoint(breakpoint) => {
                 let id = self
                     .breakpoints
                     .entries()
@@ -1657,7 +1660,7 @@ impl Session {
                     .map_or_else(|| breakpoint.to_string(), |(_, entry)| entry.id.to_string());
                 format!("breakpoint {id}")
             }
-            uscope::ConditionOwner::Watchpoint(watchpoint) => self
+            microscope::ConditionOwner::Watchpoint(watchpoint) => self
                 .data
                 .entries
                 .iter()
@@ -1666,7 +1669,7 @@ impl Session {
                     || format!("watchpoint {watchpoint}"),
                     |entry| format!("data breakpoint {}", entry.id),
                 ),
-            uscope::ConditionOwner::Catchpoint(catchpoint) => {
+            microscope::ConditionOwner::Catchpoint(catchpoint) => {
                 format!("system-call catchpoint {catchpoint}")
             }
         };
@@ -1813,7 +1816,7 @@ impl Session {
     /// Tells the client which tasks it was told about have ended.
     pub(super) async fn forget_tasks(
         &mut self,
-        live: &[uscope::TaskSnapshot],
+        live: &[microscope::TaskSnapshot],
     ) -> Result<(), Closed> {
         let live = live.iter().map(|task| task.id).collect::<BTreeSet<_>>();
         let gone = self
@@ -1840,7 +1843,7 @@ impl Session {
     /// the client's threads are tasks and it runs one, or the thread.
     fn stopped_context(
         &self,
-        snapshot: Option<&uscope::StateSnapshot>,
+        snapshot: Option<&microscope::StateSnapshot>,
         thread: ThreadId,
     ) -> ExecutionContext {
         let lists_tasks = self
@@ -1855,7 +1858,7 @@ impl Session {
                     .iter()
                     .find(|listed| listed.id == thread)
                     .and_then(|listed| match listed.activity {
-                        Some(uscope::ThreadActivity::Task { task, .. }) => {
+                        Some(microscope::ThreadActivity::Task { task, .. }) => {
                             Some(ExecutionContext::Task(task))
                         }
                         _ => None,
@@ -1908,7 +1911,10 @@ impl Session {
 
     /// Announces the snapshot's threads not yet announced, and the exit of
     /// announced threads it no longer has.
-    async fn announce_threads(&mut self, snapshot: &uscope::StateSnapshot) -> Result<(), Closed> {
+    async fn announce_threads(
+        &mut self,
+        snapshot: &microscope::StateSnapshot,
+    ) -> Result<(), Closed> {
         let live = snapshot
             .threads
             .iter()
@@ -2285,7 +2291,7 @@ impl Session {
 
     /// The state a debugger breakpoint gives the client's breakpoint: where
     /// it resolved, or that it waits for a module with code for it.
-    async fn state_of(&mut self, breakpoint: &uscope::Breakpoint) -> State {
+    async fn state_of(&mut self, breakpoint: &microscope::Breakpoint) -> State {
         if !breakpoint.enabled {
             return State::Disabled {
                 breakpoint: breakpoint.id,
@@ -2310,7 +2316,7 @@ impl Session {
 
     /// Where a debugger breakpoint resolved: its first location's source
     /// line and address.
-    async fn placement(&mut self, breakpoint: &uscope::Breakpoint) -> Placement {
+    async fn placement(&mut self, breakpoint: &microscope::Breakpoint) -> Placement {
         let Some(handle) = self.handle().cloned() else {
             return Placement::default();
         };
@@ -2321,10 +2327,10 @@ impl Session {
 
         // A location's image, and its address there.
         let (image, address, virtual_address) = match (first.location, first.library) {
-            (uscope::BreakpointLocation::Image(address), _) => {
+            (microscope::BreakpointLocation::Image(address), _) => {
                 (Arc::clone(handle.module_image()), address, None)
             }
-            (uscope::BreakpointLocation::Virtual(address), Some(library)) => {
+            (microscope::BreakpointLocation::Virtual(address), Some(library)) => {
                 let bias = handle.loaded_modules().await.ok().and_then(|snapshot| {
                     snapshot
                         .modules
@@ -2344,7 +2350,7 @@ impl Session {
                     }
                 }
             }
-            (uscope::BreakpointLocation::Virtual(address), None) => {
+            (microscope::BreakpointLocation::Virtual(address), None) => {
                 return Placement {
                     source: None,
                     address: Some(address.get()),
@@ -2368,7 +2374,7 @@ impl Session {
         });
         Placement {
             source,
-            address: virtual_address.map(uscope::VirtualAddress::get),
+            address: virtual_address.map(microscope::VirtualAddress::get),
         }
     }
 
@@ -2454,14 +2460,14 @@ impl Session {
             if let Some(calls) = syscalls {
                 let catchpoint = target
                     .handle
-                    .add_catchpoint(Arc::clone(calls), uscope::CatchPhase::Both, None)
+                    .add_catchpoint(Arc::clone(calls), microscope::CatchPhase::Both, None)
                     .await
                     .map_err(error)?;
                 target.applied_syscalls = Some((Arc::clone(calls), catchpoint.id));
             }
         }
 
-        for code in uscope::signal_codes() {
+        for code in microscope::signal_codes() {
             let mut policy = target.default_policies[&code];
             policy.stop = self.exceptions.stops(code);
             policy.print |= policy.stop;
@@ -2588,7 +2594,7 @@ impl Session {
     async fn set_value_format(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<protocol::SetValueFormatArguments>(
             arguments,
-            "uscope/setValueFormat arguments",
+            "microscope/setValueFormat arguments",
         )?;
         if self.display.hex != arguments.hex {
             self.display.hex = arguments.hex;
@@ -2656,10 +2662,10 @@ impl Session {
     }
 
     /// The assembly syntax the configuration chose.
-    pub(super) fn syntax(&self) -> uscope::AssemblySyntax {
+    pub(super) fn syntax(&self) -> microscope::AssemblySyntax {
         self.target
             .as_ref()
-            .map_or_else(uscope::AssemblySyntax::default, |target| target.syntax)
+            .map_or_else(microscope::AssemblySyntax::default, |target| target.syntax)
     }
 
     pub(super) fn console(&self) -> Result<&Cli, ErrorBody> {
@@ -2744,10 +2750,10 @@ enum Input {
     Event(Result<DebuggerEvent, broadcast::error::RecvError>),
 
     /// A child the program forked, or none once the debugger is gone.
-    Held(Option<uscope::HeldChild>),
+    Held(Option<microscope::HeldChild>),
 }
 
-async fn next_held(held: &mut Option<uscope::HeldChildren>) -> Option<uscope::HeldChild> {
+async fn next_held(held: &mut Option<microscope::HeldChildren>) -> Option<microscope::HeldChild> {
     match held {
         Some(held) => held.recv().await,
         None => std::future::pending().await,
@@ -2764,22 +2770,22 @@ async fn next_event(
 }
 
 /// The debugger's options for a client breakpoint, or why it has none.
-fn breakpoint_options(want: &Want) -> uscope::Result<uscope::BreakpointOptions> {
-    Ok(uscope::BreakpointOptions {
+fn breakpoint_options(want: &Want) -> microscope::Result<microscope::BreakpointOptions> {
+    Ok(microscope::BreakpointOptions {
         hit_condition: want.hit_condition.as_deref().map(str::parse).transpose()?,
         condition: want
             .condition
             .as_deref()
-            .map(uscope::Condition::parse)
+            .map(microscope::Condition::parse)
             .transpose()?,
         log_message: want
             .log_message
             .as_deref()
-            .map(uscope::LogMessage::parse)
+            .map(microscope::LogMessage::parse)
             .transpose()?,
         // A library loaded later may have code for it.
         pending: true,
-        ..uscope::BreakpointOptions::default()
+        ..microscope::BreakpointOptions::default()
     })
 }
 
@@ -2831,8 +2837,8 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
         ),
         StopReason::TaskEnded { task, ending, .. } => {
             let ending = match ending {
-                uscope::TaskEnding::Finished => "finished",
-                uscope::TaskEnding::Cancelled => "was cancelled",
+                microscope::TaskEnding::Finished => "finished",
+                microscope::TaskEnding::Cancelled => "was cancelled",
             };
 
             (
@@ -2924,17 +2930,19 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
 }
 
 /// What a client shows for each kind of exception a runtime reports.
-pub(super) const fn language_exception_text(kind: uscope::LanguageExceptionKind) -> &'static str {
+pub(super) const fn language_exception_text(
+    kind: microscope::LanguageExceptionKind,
+) -> &'static str {
     match kind {
-        uscope::LanguageExceptionKind::Raised => "exception raised",
-        uscope::LanguageExceptionKind::Unhandled => "unhandled exception",
-        uscope::LanguageExceptionKind::Fatal => "fatal error",
+        microscope::LanguageExceptionKind::Raised => "exception raised",
+        microscope::LanguageExceptionKind::Unhandled => "unhandled exception",
+        microscope::LanguageExceptionKind::Fatal => "fatal error",
     }
 }
 
 /// A signal's name, or its number when it has none.
 pub(super) fn signal_text(code: u64) -> String {
-    uscope::signal_name(code).unwrap_or_else(|| format!("signal {code}"))
+    microscope::signal_name(code).unwrap_or_else(|| format!("signal {code}"))
 }
 
 #[cfg(test)]

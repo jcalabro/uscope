@@ -3,13 +3,13 @@
 
 #include <stddef.h>
 
-#include "uscope_views.h"
+#include "microscope_views.h"
 
-USCOPE_VIEWS_FILE("tests/fixtures/c/tutorial/tutorial.views");
+MICROSCOPE_VIEWS_FILE("tests/fixtures/c/tutorial/tutorial.views");
 
 // The kernel its tree's view calls, built from tree.c into a directory the
 // assembler is given with -Wa,-I.
-USCOPE_KERNEL("tree", "tests/fixtures/c/tutorial/tree.c", "tutorial-tree.wasm");
+MICROSCOPE_KERNEL("tree", "tests/fixtures/c/tutorial/tree.c", "tutorial-tree.wasm");
 
 // A vector of integers: `n` of them at `data`, with room for `cap`.
 typedef struct {
@@ -77,7 +77,7 @@ int main(void) {
     intvec numbers = {storage, 3, 4}; // VIEW: numbers => len=3 [10, 20, 30]
     intvec broken = {storage, 9, 4};  // VIEW: broken => problem: check `n <= cap` failed
     value count = {VAL_INT, {.i = 42}};                // VIEW: count => 42
-    value name = {VAL_STR, {.s = {"uscope", 6}}};      // VIEW: name => "uscope"
+    value name = {VAL_STR, {.s = {"microscope", 10}}}; // VIEW: name => "microscope"
     value nothing = {VAL_NIL, {.i = 0}};               // VIEW: nothing => nil
     struct run_queue queue = {{&queue.tasks, &queue.tasks}, 0}; // VIEW: queue => len=2 [7, 8]
     struct task first = {7, {0, 0}};

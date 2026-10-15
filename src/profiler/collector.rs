@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use foldhash::HashMap;
-use uscope_probes::abi;
+use microscope_probes::abi;
 
 use super::probes::{self, Anchors, Decoder, Event, RingHeader, Table};
 use super::record::Processor;
@@ -60,7 +60,7 @@ pub struct Found {
     pub table: Arc<Table>,
 }
 
-/// What uscope knows of one ring.
+/// What microscope knows of one ring.
 #[derive(Debug, Clone, Copy, Default)]
 struct Ring {
     /// The first position not yet read.
@@ -70,7 +70,7 @@ struct Ring {
     thread: Option<(Tid, u32)>,
     interrupted: u64,
 
-    /// Whether the thread wrote records before uscope began to read them.
+    /// Whether the thread wrote records before microscope began to read them.
     before: bool,
 
     /// Whether the ring broke the ABI, which is counted once.
@@ -107,7 +107,7 @@ pub struct Collector {
 
 impl Collector {
     /// Reads process `pid`'s instrumentation, which switches itself off
-    /// once uscope has not read it for `timeout`.
+    /// once microscope has not read it for `timeout`.
     pub fn new(pid: u32, selection: ProbeSelection, timeout: std::time::Duration) -> Self {
         Self {
             pid,
@@ -247,7 +247,7 @@ impl Collector {
         }
 
         // The sites are on before the control block says so, so that a
-        // program that asks whether uscope listens may rely on them.
+        // program that asks whether microscope listens may rely on them.
         let writes = [
             (control + 10, self.clock.to_le_bytes().to_vec()),
             (control + 24, monotonic().to_le_bytes().to_vec()),

@@ -104,7 +104,7 @@ async fn optimized_physical_parameters_materialize_supported_dwarf_locations() {
                 scenario.handle().variables(),
             )
             .await;
-        assert_eq!(snapshot.frame, uscope::PresentedFrame::Physical);
+        assert_eq!(snapshot.frame, microscope::PresentedFrame::Physical);
         assert_parameter_catalog(&snapshot, fixture);
         assert_optimized_parameter_values(&snapshot, fixture);
         assert_eq!(
@@ -297,22 +297,22 @@ async fn go_scalars_are_printable_at_a_user_breakpoint_without_stepping() {
         ("unsignedValue", ScalarValue::Unsigned(42)),
         (
             "single",
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary32(1.25_f32.to_bits())),
         ),
         (
             "doublePrecision",
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary64((-2.5_f64).to_bits())),
         ),
         ("localFlag", ScalarValue::Boolean(false)),
         ("localSigned", ScalarValue::Signed(-41)),
         ("localUnsigned", ScalarValue::Unsigned(44)),
         (
             "localSingle",
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary32(1.75_f32.to_bits())),
         ),
         (
             "localDouble",
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary64((-2.75_f64).to_bits())),
         ),
     ] {
         let variable = snapshot
@@ -397,11 +397,11 @@ async fn zig_scalars_cover_optimized_partial_locations() {
         ("unsigned_value", ScalarValue::Unsigned(42)),
         (
             "single",
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary32(1.25_f32.to_bits())),
         ),
         (
             "double_precision",
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary64((-2.5_f64).to_bits())),
         ),
         ("local_signed", ScalarValue::Signed(-41)),
     ] {
@@ -421,7 +421,7 @@ async fn zig_scalars_cover_optimized_partial_locations() {
             matches!(
                 variable.state,
                 VariableState::Unavailable(
-                    uscope::VariableUnavailableReason::UnavailableAtInstruction
+                    microscope::VariableUnavailableReason::UnavailableAtInstruction
                 )
             )
         })
@@ -524,7 +524,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
                 "Zig worker variables",
                 scenario
                     .handle()
-                    .at(uscope::StopContext {
+                    .at(microscope::StopContext {
                         stop,
                         execution: thread.id.into(),
                         frame: frame.id,
@@ -537,7 +537,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
             .iter()
             .find(|variable| &*variable.name == "value")
             .unwrap_or_else(|| panic!("no Zig worker value in {variables:?}"));
-        let uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) =
+        let microscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) =
             available_value(&value.state)
         else {
             panic!("Zig worker value was not available: {value:?}");
@@ -633,7 +633,11 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
         let listed = scenario
             .operation("caller-scope variables", scenario.handle().variables())
             .await;
-        assert_eq!(listed.frame, uscope::PresentedFrame::Physical, "{fixture}");
+        assert_eq!(
+            listed.frame,
+            microscope::PresentedFrame::Physical,
+            "{fixture}"
+        );
         let names = listed
             .variables
             .iter()
@@ -661,7 +665,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
                     .as_ref()
                     .expect("stopped presentation")
                     .frame,
-                uscope::PresentedFrame::Inline(_)
+                microscope::PresentedFrame::Inline(_)
             ),
             "{fixture} did not present the inline frame: {snapshot:?}"
         );
@@ -738,7 +742,7 @@ async fn optimized_inline_variables_preserve_scope_and_computed_values() {
                 .as_ref()
                 .expect("stopped presentation")
                 .frame,
-            uscope::PresentedFrame::Inline(_)
+            microscope::PresentedFrame::Inline(_)
         ));
 
         let listed = scenario
@@ -763,7 +767,7 @@ async fn optimized_inline_variables_preserve_scope_and_computed_values() {
             listed.variables.iter().all(|variable| matches!(
                 variable.state,
                 VariableState::Available {
-                    source: uscope::VariableValueSource::Computed,
+                    source: microscope::VariableValueSource::Computed,
                     ..
                 }
             )),
@@ -853,7 +857,7 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
             .await;
         match scenario.handle().variable("thread_value").await {
             Ok(variable) => {
-                let uscope::VariableValue::Scalar(ScalarValue::Signed(value)) =
+                let microscope::VariableValue::Scalar(ScalarValue::Signed(value)) =
                     available_value(&variable.state)
                 else {
                     panic!("thread_value was not a signed available scalar: {variable:?}");
@@ -889,8 +893,8 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
         matches!(
             nil_pointer.state,
             VariableState::Available {
-                dereference: uscope::DereferenceState::Unavailable {
-                    reason: uscope::DereferenceUnavailableReason::Null,
+                dereference: microscope::DereferenceState::Unavailable {
+                    reason: microscope::DereferenceUnavailableReason::Null,
                     ..
                 },
                 ..
@@ -956,17 +960,17 @@ const fn c_scalars() -> [(&'static str, ScalarValue, u64); 15] {
         ),
         (
             "single",
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary32(1.25_f32.to_bits())),
             4,
         ),
         (
             "double_precision",
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            ScalarValue::Floating(microscope::FloatValue::Binary64((-2.5_f64).to_bits())),
             8,
         ),
         (
             "extended",
-            ScalarValue::Floating(uscope::FloatValue::X87Extended {
+            ScalarValue::Floating(microscope::FloatValue::X87Extended {
                 significand: 0xc800_0000_0000_0000,
                 sign_exponent: 0x4000,
             }),
@@ -977,7 +981,7 @@ const fn c_scalars() -> [(&'static str, ScalarValue, u64); 15] {
 
 /// Checks that a variable holds `expected`, read whole from memory.
 fn assert_whole_in_memory(
-    variable: &uscope::Variable,
+    variable: &microscope::Variable,
     expected: ScalarValue,
     size: u64,
     fixture: &str,
@@ -992,7 +996,7 @@ fn assert_whole_in_memory(
         matches!(
             &variable.state,
             VariableState::Available {
-                source: uscope::VariableValueSource::Memory(address),
+                source: microscope::VariableValueSource::Memory(address),
                 raw: Some(raw),
                 ..
             } if address.get() != 0 && raw.len() == usize::try_from(size).unwrap()
@@ -1001,7 +1005,7 @@ fn assert_whole_in_memory(
     );
 }
 
-fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_all_parameter_values(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     assert_parameter_catalog(snapshot, fixture);
     for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
         assert_whole_in_memory(variable, value, size, fixture);
@@ -1010,7 +1014,7 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
     assert_whole_in_memory(&snapshot.variables[15], ScalarValue::Signed(99), 4, fixture);
 }
 
-fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_parameter_catalog(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     let names = snapshot
         .variables
         .iter()
@@ -1027,7 +1031,7 @@ fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) 
     assert_eq!(snapshot.variables[15].kind, VariableKind::Local);
 }
 
-fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_optimized_parameter_values(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     let expected = c_scalars().map(|(_, value, _)| value);
     match fixture {
         "variables-parameters-gcc-o2" => {
@@ -1068,7 +1072,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                 matches!(
                     snapshot.variables[0].state,
                     VariableState::Available {
-                        source: uscope::VariableValueSource::Computed,
+                        source: microscope::VariableValueSource::Computed,
                         ..
                     }
                 ),
@@ -1082,7 +1086,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                 assert_eq!(
                     snapshot.variables[index].state,
                     VariableState::Unavailable(VariableUnavailableReason::EntryValue(
-                        uscope::EntryValueUnavailableReason::NoParameter
+                        microscope::EntryValueUnavailableReason::NoParameter
                     )),
                     "{fixture}: {:?}",
                     snapshot.variables[index]
@@ -1105,7 +1109,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                 matches!(
                     &snapshot.variables[14].state,
                     VariableState::Available {
-                        source: uscope::VariableValueSource::Memory(_),
+                        source: microscope::VariableValueSource::Memory(_),
                         raw: Some(raw),
                         ..
                     } if raw.len() == 10
@@ -1122,7 +1126,7 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
         matches!(
             snapshot.variables[15].state,
             VariableState::Available {
-                source: uscope::VariableValueSource::Constant,
+                source: microscope::VariableValueSource::Constant,
                 ..
             }
         ),
@@ -1131,27 +1135,27 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
     );
 }
 
-fn assert_register_source(variable: &uscope::Variable, name: &str, fixture: &str) {
+fn assert_register_source(variable: &microscope::Variable, name: &str, fixture: &str) {
     assert!(
         matches!(&variable.state, VariableState::Available {
-        source: uscope::VariableValueSource::Register(register),
+        source: microscope::VariableValueSource::Register(register),
         ..
     } if register.name.as_ref() == name),
         "{fixture}: {variable:?}"
     );
 }
 
-fn assert_memory_source(variable: &uscope::Variable, fixture: &str) {
+fn assert_memory_source(variable: &microscope::Variable, fixture: &str) {
     assert!(
         matches!(variable.state, VariableState::Available {
-        source: uscope::VariableValueSource::Memory(address),
+        source: microscope::VariableValueSource::Memory(address),
         ..
     } if address.get() != 0),
         "{fixture}: {variable:?}"
     );
 }
 
-fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_language_scalar_values(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     assert_language_scalar_catalog(snapshot, fixture);
     let sizes = [1, 4, 8, 4, 8, 1, 4, 8, 4, 8];
     for ((variable, expected), size) in snapshot
@@ -1169,17 +1173,17 @@ const fn language_scalar_values() -> [ScalarValue; 10] {
         ScalarValue::Boolean(true),
         ScalarValue::Signed(-42),
         ScalarValue::Unsigned(42),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ScalarValue::Floating(microscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(microscope::FloatValue::Binary64((-2.5_f64).to_bits())),
         ScalarValue::Boolean(false),
         ScalarValue::Signed(-41),
         ScalarValue::Unsigned(44),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+        ScalarValue::Floating(microscope::FloatValue::Binary32(1.75_f32.to_bits())),
+        ScalarValue::Floating(microscope::FloatValue::Binary64((-2.75_f64).to_bits())),
     ]
 }
 
-fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_optimized_language_scalar_values(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     let expected = language_scalar_values();
     let available = match fixture {
         "variables-cpp-gcc-o2" => (0..10).collect::<Vec<_>>(),
@@ -1196,7 +1200,7 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
         assert_eq!(
             snapshot.variables[1].state,
             VariableState::Unavailable(VariableUnavailableReason::EntryValue(
-                uscope::EntryValueUnavailableReason::NoParameter
+                microscope::EntryValueUnavailableReason::NoParameter
             )),
             "{fixture}: {:?}",
             snapshot.variables[1]
@@ -1208,7 +1212,7 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
             assert_eq!(
                 snapshot.variables[index].state,
                 VariableState::Unavailable(
-                    uscope::VariableUnavailableReason::UnavailableAtInstruction
+                    microscope::VariableUnavailableReason::UnavailableAtInstruction
                 ),
                 "{fixture}: {:?}",
                 snapshot.variables[index]
@@ -1217,7 +1221,7 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
     }
 }
 
-fn assert_language_scalar_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+fn assert_language_scalar_catalog(snapshot: &microscope::VariableSnapshot, fixture: &str) {
     let names = snapshot
         .variables
         .iter()

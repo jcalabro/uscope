@@ -2,7 +2,7 @@
 //! where the debug information allows only one chain of tail calls between
 //! a call and the frame it entered.
 
-use uscope::{FrameKind, StackFrame};
+use microscope::{FrameKind, StackFrame};
 
 use super::*;
 
@@ -150,7 +150,7 @@ async fn a_tail_call_frame_knows_only_what_was_passed_to_it() {
                 assert_eq!(
                     variable.state,
                     VariableState::Unavailable(VariableUnavailableReason::EntryValue(
-                        uscope::EntryValueUnavailableReason::NoParameter
+                        microscope::EntryValueUnavailableReason::NoParameter
                     )),
                     "{variant}: {function}"
                 );
@@ -159,7 +159,7 @@ async fn a_tail_call_frame_knows_only_what_was_passed_to_it() {
 
             assert_eq!(
                 available_value(&variable.state),
-                &uscope::VariableValue::Scalar(ScalarValue::Signed(value)),
+                &microscope::VariableValue::Scalar(ScalarValue::Signed(value)),
                 "{variant}: {function}"
             );
         }

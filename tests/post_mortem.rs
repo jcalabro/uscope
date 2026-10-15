@@ -4,15 +4,15 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use object::read::elf::{FileHeader as _, ProgramHeader as _};
-use object::{Endianness, Object as _, elf};
-use uscope::{
+use microscope::{
     Backtrace, CoreDumpInfo, CoreDumpOptions, CoreModuleState, Debugger, Error,
     ExceptionDisposition, InferiorState, MemoryReadCompletion, ModuleIdentity, ProcessId,
     RegisterRole, ResumeScope, ScalarValue, StepKind, StopId, StopReason, ThreadState,
     UnwindTermination, Variable, VariableState, VariableUnavailableReason, VariableValue,
     VariableValueSource, VirtualAddress,
 };
+use object::read::elf::{FileHeader as _, ProgramHeader as _};
+use object::{Endianness, Object as _, elf};
 
 use support::{Scenario, ScratchDir, frame_modules, position_of, register_u64};
 
@@ -55,7 +55,7 @@ fn signed(variable: &Variable) -> i128 {
 
 fn binary64(variable: &Variable) -> f64 {
     match available(variable) {
-        VariableValue::Scalar(ScalarValue::Floating(uscope::FloatValue::Binary64(bits))) => {
+        VariableValue::Scalar(ScalarValue::Floating(microscope::FloatValue::Binary64(bits))) => {
             f64::from_bits(*bits)
         }
         value => panic!("{} was not a binary64 scalar: {value:?}", variable.name),
@@ -108,11 +108,11 @@ fn loaded_identity<'a>(info: &'a CoreDumpInfo, file_name: &str) -> &'a ModuleIde
 struct StoppedCore {
     process: ProcessId,
     stop: StopId,
-    thread: uscope::ThreadId,
+    thread: microscope::ThreadId,
     reason: StopReason,
 }
 
-async fn stopped(scenario: &mut Scenario) -> (StoppedCore, uscope::StateSnapshot) {
+async fn stopped(scenario: &mut Scenario) -> (StoppedCore, microscope::StateSnapshot) {
     let snapshot = scenario.snapshot().await;
     let InferiorState::Stopped {
         process_id,
@@ -165,7 +165,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         assert_eq!(
             snapshot
                 .selected
-                .and_then(uscope::ExecutionContext::as_thread),
+                .and_then(microscope::ExecutionContext::as_thread),
             Some(stop.thread)
         );
         assert_eq!(
@@ -281,7 +281,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
                 "record id",
                 scenario
                     .handle()
-                    .inspect(&uscope::Expression::parse("(*record).id").unwrap()),
+                    .inspect(&microscope::Expression::parse("(*record).id").unwrap()),
             )
             .await;
         if variant == "gcc-o2-nopie" {
@@ -291,7 +291,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
                 matches!(
                     &record.state,
                     VariableState::Unavailable(VariableUnavailableReason::EntryValue(
-                        uscope::EntryValueUnavailableReason::NoParameter
+                        microscope::EntryValueUnavailableReason::NoParameter
                     ))
                 ),
                 "{variant}: {record:?}"
@@ -410,7 +410,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
         assert_eq!(
             selected
                 .selected
-                .and_then(uscope::ExecutionContext::as_thread),
+                .and_then(microscope::ExecutionContext::as_thread),
             Some(thread.id)
         );
         assert_eq!(
@@ -479,7 +479,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
     assert!(matches!(
         scenario
             .handle()
-            .select_context(uscope::ThreadId::new(1))
+            .select_context(microscope::ThreadId::new(1))
             .await,
         Err(Error::UnknownThread(thread)) if thread.get() == 1
     ));
@@ -522,14 +522,14 @@ async fn post_mortem_targets_reject_execution_modification_and_breakpoints() {
         (
             "break",
             handle
-                .add_breakpoint(uscope::BreakpointSpec::Function("main".to_owned()))
+                .add_breakpoint(microscope::BreakpointSpec::Function("main".to_owned()))
                 .await
                 .map(drop),
         ),
         (
             "delete",
             handle
-                .remove_breakpoint(uscope::BreakpointId::new(1))
+                .remove_breakpoint(microscope::BreakpointId::new(1))
                 .await
                 .map(drop),
         ),
@@ -540,14 +540,14 @@ async fn post_mortem_targets_reject_execution_modification_and_breakpoints() {
         (
             "watch condition",
             handle
-                .set_watchpoint_condition(uscope::WatchpointId::new(1), None)
+                .set_watchpoint_condition(microscope::WatchpointId::new(1), None)
                 .await
                 .map(drop),
         ),
         (
             "watch hit condition",
             handle
-                .set_watchpoint_hit_condition(uscope::WatchpointId::new(1), None)
+                .set_watchpoint_hit_condition(microscope::WatchpointId::new(1), None)
                 .await
                 .map(drop),
         ),
@@ -1128,7 +1128,7 @@ async fn invalid_core_files_fail_with_typed_errors() {
     let scratch = ScratchDir::new("post-mortem-invalid");
     let directory = scratch.path();
     let open = |path: PathBuf| Debugger::open_core(&CoreDumpOptions::new(path));
-    let invalid = |result: uscope::Result<Debugger>, expected: &str| match result {
+    let invalid = |result: microscope::Result<Debugger>, expected: &str| match result {
         Err(Error::InvalidCoreDump(message)) => {
             assert!(message.contains(expected), "{message:?} lacks {expected:?}");
         }
@@ -1389,7 +1389,7 @@ async fn core_reads_keep_backed_bytes_that_end_inside_a_word() {
         past.completion,
         MemoryReadCompletion::Incomplete {
             next_address: VirtualAddress::new(end),
-            reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+            reason: microscope::MemoryReadUnavailableReason::Inaccessible,
         }
     );
     scenario.shutdown().await;
@@ -1448,7 +1448,7 @@ fn named(modules: &[(PathBuf, PathBuf)], prefix: &str) -> (PathBuf, PathBuf) {
 }
 
 /// The recorded images files back: all but the vDSO.
-fn file_images(info: &CoreDumpInfo) -> impl Iterator<Item = &uscope::CoreModule> {
+fn file_images(info: &CoreDumpInfo) -> impl Iterator<Item = &microscope::CoreModule> {
     info.modules
         .iter()
         .filter(|module| module.recorded_path.as_os_str() != support::VDSO)

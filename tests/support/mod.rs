@@ -23,16 +23,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use nix::sys::personality::{self, Persona};
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use tokio::time::timeout;
-use uscope::{
+use microscope::{
     Backtrace, Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, LineNumber,
     LoadedModuleSnapshot, ProcessId, Program, RegisterRole, RegisterSnapshot, Result, ResumeScope,
     StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
+use nix::sys::personality::{self, Persona};
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -61,7 +61,7 @@ impl ScratchDir {
     pub fn new(name: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "uscope-{name}-{}-{}",
+            "microscope-{name}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -285,7 +285,7 @@ fn loaded_fixture(path: &Path) -> Program {
         return program;
     }
 
-    let program = Program::load(path, &uscope::DebugFileOptions::default())
+    let program = Program::load(path, &microscope::DebugFileOptions::default())
         .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
     if loaded.len() == LOADED_FIXTURES {
         loaded.remove(0);
@@ -311,7 +311,7 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(name: impl Into<String>, fixture: impl AsRef<Path>) -> Self {
-        Self::with_debug_files(name, fixture, &uscope::DebugFileOptions::default())
+        Self::with_debug_files(name, fixture, &microscope::DebugFileOptions::default())
     }
 
     /// A scenario whose modules' separate debug files are found as
@@ -319,7 +319,7 @@ impl Scenario {
     pub fn with_debug_files(
         name: impl Into<String>,
         fixture: impl AsRef<Path>,
-        debug_files: &uscope::DebugFileOptions,
+        debug_files: &microscope::DebugFileOptions,
     ) -> Self {
         let name = name.into();
         let fixture = fixture.as_ref();
@@ -505,7 +505,7 @@ impl Scenario {
 
     /// Steps the selected thread into the call at `call` on its line,
     /// running its line's other calls to their returns.
-    pub async fn step_into_to_stop(&mut self, call: uscope::VirtualAddress) -> StopReason {
+    pub async fn step_into_to_stop(&mut self, call: microscope::VirtualAddress) -> StopReason {
         let task = self.spawn_request(&format!("step into {call}"), move |handle| async move {
             handle.step_into(call).await
         });
@@ -529,10 +529,10 @@ impl Scenario {
                 snapshot.stop_id,
                 snapshot
                     .selected
-                    .and_then(uscope::ExecutionContext::as_thread),
+                    .and_then(microscope::ExecutionContext::as_thread),
                 snapshot.selected_frame,
             ) else {
-                return Err(uscope::Error::NotStopped);
+                return Err(microscope::Error::NotStopped);
             };
 
             let frame = if kind == StepKind::Out {
@@ -567,7 +567,7 @@ impl Scenario {
                     .snapshot()
                     .await?
                     .stop_id
-                    .ok_or(uscope::Error::NotStopped)?;
+                    .ok_or(microscope::Error::NotStopped)?;
                 let mut events = handle.subscribe();
                 let execution = handle
                     .continue_execution(
@@ -865,7 +865,7 @@ pub fn wait_for_system_call(process: ProcessId, number: u64) {
 
 /// Sends `signal` to one thread of `process`, which takes it once it next
 /// runs, whatever its siblings do. `kill` would let any thread take it.
-pub fn signal_thread(process: ProcessId, thread: uscope::ThreadId, signal: nix::libc::c_int) {
+pub fn signal_thread(process: ProcessId, thread: microscope::ThreadId, signal: nix::libc::c_int) {
     let (Ok(process), Ok(thread)) = (
         nix::libc::pid_t::try_from(process.get()),
         nix::libc::pid_t::try_from(thread.get()),
@@ -1001,7 +1001,7 @@ async fn execution_end(
     }
 }
 
-/// The name `/proc/<pid>/maps` gives the vDSO, which uscope's module takes.
+/// The name `/proc/<pid>/maps` gives the vDSO, which microscope's module takes.
 pub const VDSO: &str = "[vdso]";
 
 /// Where the kernel mapped a process's vDSO, read from `/proc`.
@@ -1018,7 +1018,7 @@ pub fn vdso_mapping(process: ProcessId) -> std::ops::Range<u64> {
 }
 
 /// The process's loaded vDSO module.
-pub fn vdso_module(modules: &LoadedModuleSnapshot) -> uscope::LoadedModuleRecord {
+pub fn vdso_module(modules: &LoadedModuleSnapshot) -> microscope::LoadedModuleRecord {
     let mut found = modules
         .modules
         .iter()
@@ -1087,13 +1087,15 @@ pub async fn assert_tls_modules(
 /// The value of an expression in the selected frame.
 pub async fn evaluate_value(scenario: &Scenario, text: &str) -> EvaluatedValue {
     let expression =
-        uscope::Expression::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+        microscope::Expression::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
     match scenario
         .operation(text, scenario.handle().evaluate(&expression))
         .await
     {
-        uscope::Evaluation::Value { value, .. } => match value.state {
-            uscope::VariableState::Available { value, .. } => EvaluatedValue(text.into(), value),
+        microscope::Evaluation::Value { value, .. } => match value.state {
+            microscope::VariableState::Available { value, .. } => {
+                EvaluatedValue(text.into(), value)
+            }
             state => panic!("`{text}` is unavailable: {state:?}"),
         },
         other => panic!("`{text}` is not a value: {other:?}"),
@@ -1101,19 +1103,19 @@ pub async fn evaluate_value(scenario: &Scenario, text: &str) -> EvaluatedValue {
 }
 
 /// An available value and the expression it came from.
-pub struct EvaluatedValue(String, uscope::VariableValue);
+pub struct EvaluatedValue(String, microscope::VariableValue);
 
 impl EvaluatedValue {
     pub fn signed(&self) -> i128 {
         match &self.1 {
-            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            microscope::VariableValue::Scalar(microscope::ScalarValue::Signed(value)) => *value,
             value => panic!("`{}` is not a signed integer: {value:?}", self.0),
         }
     }
 
     pub fn address(&self) -> u64 {
         match &self.1 {
-            uscope::VariableValue::Address(address) => address.address.get(),
+            microscope::VariableValue::Address(address) => address.address.get(),
             value => panic!("`{}` is not an address: {value:?}", self.0),
         }
     }

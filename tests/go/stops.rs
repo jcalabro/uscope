@@ -1,6 +1,6 @@
 //! What a test reads at a stop of a Go program.
 
-use uscope::{Evaluation, Expression, ScalarValue, VariableState, VariableValue};
+use microscope::{Evaluation, Expression, ScalarValue, VariableState, VariableValue};
 
 use crate::support::Scenario;
 

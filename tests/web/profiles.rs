@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use microscope::profiler::{RecordOptions, SampleSource, Watch, record, record_watched};
 use serde_json::{Value, json};
-use uscope::profiler::{RecordOptions, SampleSource, Watch, record, record_watched};
 
 use crate::support::{Scenario, ScratchDir};
 use crate::web::{Client, Web};
@@ -243,7 +243,7 @@ async fn tree(tab: &mut Client, query: Value) -> Vec<(Vec<String>, u64, u64)> {
 #[tokio::test]
 async fn a_directory_of_segments_is_served_as_one_profile() {
     let scratch = ScratchDir::new("web-segments");
-    let calls = uscope::profiler::Profile::read(&record_calls(&scratch))
+    let calls = microscope::profiler::Profile::read(&record_calls(&scratch))
         .expect("read the profile")
         .profile;
     let directory = scratch.path().join("segments");
@@ -597,7 +597,7 @@ async fn a_recording_grows_live_stops_when_asked_and_downloads_whole() {
     ));
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert!(head.contains("filename=\"spin.usprof\""), "{head}");
-    let saved = uscope::profiler::Profile::from_bytes(&body).expect("a profile");
+    let saved = microscope::profiler::Profile::from_bytes(&body).expect("a profile");
     assert_eq!(
         Some(saved.profile.samples() as u64),
         summary["samples"].as_u64()

@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     Evaluation, Expression, InferiorState, PresentedCount, ScalarValue, StepKind, StopContext,
     StopReason, ValueChildQuery, ValueChildRelationship, ValueChildren, VariableState,
     VariableValue,
@@ -61,7 +61,7 @@ async fn check_map(scenario: &Scenario, step: usize) -> Result<bool, String> {
         .unwrap_or_else(|| panic!("step {step}: no fill: {trace:#?}"));
     let at = scenario.handle().at(StopContext {
         stop: stop_id,
-        execution: uscope::ExecutionContext::Thread(thread_id),
+        execution: microscope::ExecutionContext::Thread(thread_id),
         frame: fill.id,
     });
     let evaluate = async |text: &str| {

@@ -121,7 +121,7 @@ pub async fn run(cli: &Cli, confirm: bool) -> Result<()> {
     let history_size = cli.settings.config.history.size;
     let context = Arc::new(cli.completion_context().await);
     let editor = thread::Builder::new()
-        .name("uscope-line-editor".to_owned())
+        .name("microscope-line-editor".to_owned())
         .spawn(move || {
             line_editor(
                 &input_sender,
@@ -364,7 +364,7 @@ fn follow_replies(
 /// the current directory.
 fn history_path(state: Option<PathBuf>) -> PathBuf {
     state.map_or_else(
-        || PathBuf::from(".uscope_history"),
+        || PathBuf::from(".microscope_history"),
         |state| state.join("history"),
     )
 }

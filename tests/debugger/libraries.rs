@@ -1,7 +1,7 @@
 //! Breakpoints in shared libraries, which load after the program starts.
 
 use super::*;
-use uscope::{Breakpoint, DebuggerEvent, LoadedModuleSnapshot};
+use microscope::{Breakpoint, DebuggerEvent, LoadedModuleSnapshot};
 
 /// A function breakpoint kept while no loaded module defines the function.
 pub async fn pending_function(scenario: &Scenario, name: &str) -> Breakpoint {
@@ -10,9 +10,9 @@ pub async fn pending_function(scenario: &Scenario, name: &str) -> Breakpoint {
             "add pending breakpoint",
             scenario.handle().add_breakpoint_with(
                 BreakpointSpec::Function(name.to_owned()),
-                uscope::BreakpointOptions {
+                microscope::BreakpointOptions {
                     pending: true,
-                    ..uscope::BreakpointOptions::default()
+                    ..microscope::BreakpointOptions::default()
                 },
             ),
         )
@@ -39,7 +39,7 @@ fn library_addresses(breakpoint: &Breakpoint) -> Vec<u64> {
         .collect()
 }
 
-pub async fn breakpoint(scenario: &mut Scenario, id: uscope::BreakpointId) -> Breakpoint {
+pub async fn breakpoint(scenario: &mut Scenario, id: microscope::BreakpointId) -> Breakpoint {
     scenario
         .snapshot()
         .await
@@ -64,7 +64,10 @@ async fn breakpoints_in_a_library_the_program_links_resolve_before_it_runs() {
                 .add_breakpoint(BreakpointSpec::Function("dso_absent".to_owned())),
         )
         .await;
-    assert!(matches!(refused, Err(uscope::Error::FunctionNotFound(_))));
+    assert!(matches!(
+        refused,
+        Err(microscope::Error::FunctionNotFound(_))
+    ));
     let pending = scenario
         .operation(
             "add imported breakpoint",
@@ -191,11 +194,11 @@ async fn source_breakpoints_resolve_in_library_source_once_it_loads() {
             scenario.handle().add_breakpoint_with(
                 BreakpointSpec::Source {
                     path: path.clone(),
-                    line: uscope::LineNumber::new(line).expect("line"),
+                    line: microscope::LineNumber::new(line).expect("line"),
                 },
-                uscope::BreakpointOptions {
+                microscope::BreakpointOptions {
                     pending: true,
-                    ..uscope::BreakpointOptions::default()
+                    ..microscope::BreakpointOptions::default()
                 },
             ),
         )
@@ -252,7 +255,7 @@ async fn functions_without_debug_information_break_at_their_symbol() {
 }
 
 /// Runs to the first stop at `breakpoint`, past the hits of others.
-async fn run_to_breakpoint(scenario: &mut Scenario, breakpoint: uscope::BreakpointId) {
+async fn run_to_breakpoint(scenario: &mut Scenario, breakpoint: microscope::BreakpointId) {
     for stop in 0..64 {
         let reason = if stop == 0 {
             scenario.run_to_stop().await
@@ -275,7 +278,7 @@ async fn run_to_breakpoint(scenario: &mut Scenario, breakpoint: uscope::Breakpoi
 /// Continues to a stop in the C library's `strlen` from the fixture's
 /// `measure`, which clang calls by a tail call that leaves `main` its
 /// caller.
-async fn stop_in_strlen(scenario: &mut Scenario, strlen: uscope::BreakpointId) {
+async fn stop_in_strlen(scenario: &mut Scenario, strlen: microscope::BreakpointId) {
     let reason = scenario.resume_to_stop().await;
     let StopReason::Breakpoint { hits, .. } = &reason else {
         panic!("stopped for {reason:?}");
@@ -509,7 +512,7 @@ async fn breakpoints_and_the_vdso_module_follow_the_vdso_as_it_moves_and_goes() 
     assert!(
         matches!(
             available_value(&target.state),
-            uscope::VariableValue::Address(value) if value.address.get() == moved
+            microscope::VariableValue::Address(value) if value.address.get() == moved
         ),
         "{target:?}"
     );

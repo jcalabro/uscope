@@ -4,7 +4,7 @@
 
 use std::process::Stdio;
 
-use uscope::{ExitStatus, LaunchOptions, StopReason};
+use microscope::{ExitStatus, LaunchOptions, StopReason};
 
 use crate::invariants::checked;
 use crate::stops::{integer, place};

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::process::Stdio;
 
-use uscope::{LaunchOptions, StopReason, TaskPage, TaskState};
+use microscope::{LaunchOptions, StopReason, TaskPage, TaskState};
 
 use crate::support::{Scenario, ScratchDir};
 

@@ -137,7 +137,7 @@ pub fn plan(program: &Path, symbol: &str, bias: Option<LoadBias>) -> Result<Call
         ConditionCode::be => Branch::BelowOrEqual,
         _ => {
             return Err(uncountable(
-                "its stack check branches on a condition uscope does not read",
+                "its stack check branches on a condition microscope does not read",
             ));
         }
     };

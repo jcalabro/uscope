@@ -5,7 +5,7 @@
 
 use std::process::Stdio;
 
-use uscope::{BreakpointOptions, BreakpointSpec, LaunchOptions, StackSegment, StopReason};
+use microscope::{BreakpointOptions, BreakpointSpec, LaunchOptions, StackSegment, StopReason};
 
 use crate::cgo::{names, segments};
 use crate::invariants::checked;
@@ -82,7 +82,7 @@ async fn a_hosted_go_library_shows_the_goroutines_of_its_runtime() {
 
     assert_eq!(
         scenario.resume_to_stop().await,
-        StopReason::Exited(uscope::ExitStatus::Code(0))
+        StopReason::Exited(microscope::ExitStatus::Code(0))
     );
     scenario.shutdown().await;
 }

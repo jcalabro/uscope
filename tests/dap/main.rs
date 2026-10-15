@@ -1,4 +1,4 @@
-//! Debug Adapter Protocol scenarios: the real `uscope dap` driven over
+//! Debug Adapter Protocol scenarios: the real `microscope dap` driven over
 //! stdio the way editors drive it.
 
 #[path = "../support/dap.rs"]

@@ -371,10 +371,10 @@ td.na { color: var(--ink-3); }
         <article class="decision">
           <header><span class="id">D7</span><h3>JavaScript or TypeScript?</h3></header>
           <div class="meta"><span class="chip">Decided 2026-10-10: JavaScript, typed by a .d.ts</span></div>
-          <p>Editors are better with types, and uscope must not grow a compiler.</p>
+          <p>Editors are better with types, and microscope must not grow a compiler.</p>
           <div class="options">
-            <div class="option rec"><span class="tag">Chosen</span><b>JavaScript, typed by <code>sdk/web/uscope-visualizer.d.ts</code></b><span class="why"><code>// @ts-check</code> gives full checking in any editor with no build step. People who prefer TS compile it to one <code>.js</code> themselves.</span></div>
-            <div class="option alt"><span class="tag">Alt</span><b>Accept <code>.ts</code> too</b><span class="why">uscope would need a TypeScript stripper (oxc or swc), a heavy dependency for a convenience.</span></div>
+            <div class="option rec"><span class="tag">Chosen</span><b>JavaScript, typed by <code>sdk/web/microscope-visualizer.d.ts</code></b><span class="why"><code>// @ts-check</code> gives full checking in any editor with no build step. People who prefer TS compile it to one <code>.js</code> themselves.</span></div>
+            <div class="option alt"><span class="tag">Alt</span><b>Accept <code>.ts</code> too</b><span class="why">microscope would need a TypeScript stripper (oxc or swc), a heavy dependency for a convenience.</span></div>
           </div>
         </article>
         <article class="decision">
@@ -419,8 +419,8 @@ td.na { color: var(--ink-3); }
       </div>
       <div class="twocol">
         <div class="file">
-          <div class="name">.uscope/views/chess.views</div>
-          <pre class="codeblock">uscope-views 1
+          <div class="name">.microscope/views/chess.views</div>
+          <pre class="codeblock">microscope-views 1
 
 <span class="c"># Draw a board in the web UI.</span>
 <span class="k">extend</span> rust chess::Board {
@@ -444,7 +444,7 @@ td.na { color: var(--ink-3); }
         </div>
       </div>
       <div class="file">
-        <div class="name">.uscope/views/chess-board.js</div>
+        <div class="name">.microscope/views/chess-board.js</div>
         <pre class="codeblock" id="chess-source">// @ts-check
 // Draws a chess position: 64 squares from a1 to h8, each empty or holding a piece.
 
@@ -454,7 +454,7 @@ const GLYPHS = {
 };
 const SIZE = 40;
 
-uscope.draw(({ squares, turn }, { previous }) =&gt; {
+microscope.draw(({ squares, turn }, { previous }) =&gt; {
   const shapes = [];
   for (let square = 0; square &lt; 64; square++) {
     const file = square % 8;
@@ -463,11 +463,11 @@ uscope.draw(({ squares, turn }, { previous }) =&gt; {
     const y = (7 - rank) * SIZE;
     const name = "abcdefgh"[file] + (rank + 1);
     const piece = squares[square];
-    const moved = previous !== null &amp;&amp; !uscope.same(previous.squares[square], piece);
-    shapes.push(uscope.rect({
+    const moved = previous !== null &amp;&amp; !microscope.same(previous.squares[square], piece);
+    shapes.push(microscope.rect({
       x, y, width: SIZE, height: SIZE,
       fill: (file + rank) % 2 === 1 ? "#f0d9b5" : "#b58863",
-      stroke: moved ? uscope.theme.changed : undefined,
+      stroke: moved ? microscope.theme.changed : undefined,
       strokeWidth: 3,
       title: piece.variant === "Some"
         ? `${name}: ${piece.value.color.name} ${piece.value.kind.name}`
@@ -476,13 +476,13 @@ uscope.draw(({ squares, turn }, { previous }) =&gt; {
     }));
     if (piece.variant === "Some") {
       const { color, kind } = piece.value;
-      shapes.push(uscope.text({
+      shapes.push(microscope.text({
         x: x + SIZE / 2, y: y + SIZE / 2, size: 32, anchor: "middle", baseline: "central",
         fill: "#111", text: GLYPHS[color.name][kind.name],
       }));
     }
   }
-  return uscope.picture({ width: 8 * SIZE, height: 8 * SIZE, shapes, caption: `${turn.name} to move` });
+  return microscope.picture({ width: 8 * SIZE, height: 8 * SIZE, shapes, caption: `${turn.name} to move` });
 });</pre>
       </div>
       <div class="prose">
@@ -494,7 +494,7 @@ uscope.draw(({ squares, turn }, { previous }) =&gt; {
             stop, so the renderer can mark what moved.</li>
           <li><code>title</code> is hover text. <code>select</code> names a part of the value: clicking the
             square shows <code>board.mailbox[21]</code> as a row of the value tree.</li>
-          <li><code>uscope.theme.changed</code> is the page's own "changed" color in light and dark.</li>
+          <li><code>microscope.theme.changed</code> is the page's own "changed" color in light and dark.</li>
         </ul>
         <p>The mockup below is drawn by running that exact source against an imitation of the API,
           after <code>1. e4 e5 2. Nf3</code>. The page would do the same.</p>
@@ -619,7 +619,7 @@ visualize "NAME" {
         <ul>
           <li><b>Where.</b> In a <code>view</code> or an <code>extend</code>, any number of times. Every
             <code>visualize</code> that binds offers its drawing, in the order the files and views give
-            them. The file version stays <code>uscope-views 1</code>: an older uscope reports the unknown
+            them. The file version stays <code>microscope-views 1</code>: an older microscope reports the unknown
             statement and skips only that view, as it does today for any view with an error
             (<code>src/view/syntax.rs</code> <code>parse</code>).</li>
           <li><b>Inputs.</b> Each is evaluated like a <code>field</code>: with <code>self</code>, the view's
@@ -640,15 +640,15 @@ visualize "NAME" {
               <li>built-ins live in <code>views/visualizers/NAME.js</code>, compiled in.</li>
             </ul>
           </li>
-          <li><b>Carried by a program.</b> A new record kind 3 in <code>.debug_uscope_views</code>: a
-            16-bit length and the renderer's name, then its JavaScript. An older uscope already
+          <li><b>Carried by a program.</b> A new record kind 3 in <code>.debug_microscope_views</code>: a
+            16-bit length and the renderer's name, then its JavaScript. An older microscope already
             reports an unknown kind and reads on (<code>src/view/embedded.rs</code>). The SDKs gain
-            <code>USCOPE_VISUALIZER("chess-board", "views/chess-board.js");</code> and
-            <code>uscope_views::uscope_visualizer!(…)</code>.</li>
+            <code>MICROSCOPE_VISUALIZER("chess-board", "views/chess-board.js");</code> and
+            <code>microscope_views::microscope_visualizer!(…)</code>.</li>
           <li><b>Tools.</b> <code>views check</code> lists every renderer with its source and fails on a
             <code>visualize</code> naming a renderer nobody provides. <code>info view EXPR</code> and
             <code>views explain</code> list a value's visualizers, marked <em>web only</em>. Neither
-            runs JavaScript: uscope has no JS engine, so syntax errors surface in the page with
+            runs JavaScript: microscope has no JS engine, so syntax errors surface in the page with
             file:line.</li>
           <li><b>Never in the terminal or DAP.</b> <code>print</code>, summaries, children, and DAP
             variables are unaffected. Visualizers add nothing to a presentation's children.</li>
@@ -656,7 +656,7 @@ visualize "NAME" {
       </div>
       <div class="file">
         <div class="name">docs/views.md example (runs as a test, as every example there does)</div>
-        <pre class="codeblock">uscope-views 1
+        <pre class="codeblock">microscope-views 1
 view c intvec {
     show sequence(n) for i in range(n) => data[i]
     visualize "line-plot" { values = self }
@@ -721,15 +721,15 @@ v => unbound visualizers: `nowhere`: no renderer has that name; `line-plot`: `el
 
     <!-- ===================================================== api -->
     <section id="api">
-      <span class="eyebrow">sdk/web/uscope-visualizer.d.ts</span>
+      <span class="eyebrow">sdk/web/microscope-visualizer.d.ts</span>
       <h2>The renderer API</h2>
       <div class="prose">
-        <p>A renderer is one classic script that calls <code>uscope.draw</code> once (or
-          <code>uscope.live</code>, for <a href="#three-d">3-D and other live drawings</a>). Its function
+        <p>A renderer is one classic script that calls <code>microscope.draw</code> once (or
+          <code>microscope.live</code>, for <a href="#three-d">3-D and other live drawings</a>). Its function
           gets the inputs and a context, and returns a picture. It may be <code>async</code>. The only
-          global it can use beyond the language is <code>uscope</code>.</p>
+          global it can use beyond the language is <code>microscope</code>.</p>
       </div>
-      <div class="codeblock"><span class="k">uscope.draw</span>((input, context) =&gt; Picture | Promise&lt;Picture&gt;)
+      <div class="codeblock"><span class="k">microscope.draw</span>((input, context) =&gt; Picture | Promise&lt;Picture&gt;)
 
 context = {
   previous,     <span class="c">// the inputs drawn for this value at the tab's previous stop, or null</span>
@@ -737,30 +737,30 @@ context = {
   theme,        <span class="c">// "light" | "dark"</span>
 }
 
-<span class="k">uscope.picture</span>({ width, height, shapes, caption? })   <span class="c">// viewBox 0 0 width height</span>
+<span class="k">microscope.picture</span>({ width, height, shapes, caption? })   <span class="c">// viewBox 0 0 width height</span>
 
 <span class="c">// Shapes. Each also takes the common style and interaction properties below.</span>
-uscope.rect({ x, y, width, height, radius? })
-uscope.circle({ x, y, r })
-uscope.line({ x1, y1, x2, y2 })
-uscope.polyline({ points })               <span class="c">// [x0, y0, x1, y1, …]</span>
-uscope.polygon({ points })
-uscope.path({ d })                        <span class="c">// SVG path data, checked against its grammar</span>
-uscope.text({ x, y, text, size?, weight?, family?: "sans" | "mono", anchor?, baseline? })
-uscope.group({ shapes, x?, y?, scale?, rotate? })
-uscope.image({ x, y, width, height, pixels, columns, rows, smooth? })  <span class="c">// RGBA Uint8ClampedArray</span>
-uscope.image({ x, y, width, height, canvas })                          <span class="c">// an OffscreenCanvas you drew</span>
+microscope.rect({ x, y, width, height, radius? })
+microscope.circle({ x, y, r })
+microscope.line({ x1, y1, x2, y2 })
+microscope.polyline({ points })               <span class="c">// [x0, y0, x1, y1, …]</span>
+microscope.polygon({ points })
+microscope.path({ d })                        <span class="c">// SVG path data, checked against its grammar</span>
+microscope.text({ x, y, text, size?, weight?, family?: "sans" | "mono", anchor?, baseline? })
+microscope.group({ shapes, x?, y?, scale?, rotate? })
+microscope.image({ x, y, width, height, pixels, columns, rows, smooth? })  <span class="c">// RGBA Uint8ClampedArray</span>
+microscope.image({ x, y, width, height, canvas })                          <span class="c">// an OffscreenCanvas you drew</span>
 
 <span class="c">// Common properties</span>
-fill, stroke, strokeWidth, opacity, dash   <span class="c">// colors: CSS hex/rgb()/hsl()/names, or uscope.theme.*</span>
+fill, stroke, strokeWidth, opacity, dash   <span class="c">// colors: CSS hex/rgb()/hsl()/names, or microscope.theme.*</span>
 title                                      <span class="c">// hover text and accessible name</span>
 select                                     <span class="c">// a part of the drawn value: `member`, `[3]`, `a.b[2].c`</span>
 
 <span class="c">// Helpers</span>
-uscope.theme.{ink, ink2, ink3, paper, surface, line, accent, changed, good, bad}  <span class="c">// follow light/dark</span>
-uscope.theme.series          <span class="c">// eight categorical colors, in their validated order</span>
-uscope.same(a, b)            <span class="c">// deep equality over input values, for marking what changed</span>
-uscope.color.scale(t, from, to)  <span class="c">// blend for heatmaps; t in [0, 1]</span></div>
+microscope.theme.{ink, ink2, ink3, paper, surface, line, accent, changed, good, bad}  <span class="c">// follow light/dark</span>
+microscope.theme.series          <span class="c">// eight categorical colors, in their validated order</span>
+microscope.same(a, b)            <span class="c">// deep equality over input values, for marking what changed</span>
+microscope.color.scale(t, from, to)  <span class="c">// blend for heatmaps; t in [0, 1]</span></div>
       <div class="prose">
         <ul>
           <li><b>Errors are the author's friend.</b> The source is evaluated with
@@ -788,7 +788,7 @@ uscope.color.scale(t, from, to)  <span class="c">// blend for heatmaps; t in [0,
         <div class="name">A pixel-grid renderer (Conway's life fixture), for comparison</div>
         <pre class="codeblock">// @ts-check
 // Draws a life board: one byte a cell, 1 for alive, row by row.
-uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
+microscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
   const rows = cells.length / columns;
   const pixels = new Uint8ClampedArray(cells.length * 4);
   for (let i = 0; i &lt; cells.length; i++) {
@@ -796,9 +796,9 @@ uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
     const [r, g, b] = cells[i] !== 1 ? [238, 241, 245] : born ? [176, 80, 10] : [26, 34, 48];
     pixels.set([r, g, b, 255], i * 4);
   }
-  return uscope.picture({
+  return microscope.picture({
     width: columns * 6, height: rows * 6, caption: `generation ${generation}`,
-    shapes: [uscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows })],
+    shapes: [microscope.image({ x: 0, y: 0, width: columns * 6, height: rows * 6, pixels, columns, rows })],
   });
 });</pre>
       </div>
@@ -817,8 +817,8 @@ uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
       </div>
       <div class="twocol">
         <div class="file">
-          <div class="name">.uscope/views/engine.views</div>
-          <pre class="codeblock">uscope-views 1
+          <div class="name">.microscope/views/engine.views</div>
+          <pre class="codeblock">microscope-views 1
 
 <span class="c"># Draw meshes in 3-D with the built-in viewer.</span>
 <span class="k">extend</span> c++ engine::Mesh {
@@ -842,7 +842,7 @@ uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
           </div>
           <figcaption>Drag it. This page draws the torus with WebGL2 the way the built-in viewer
             would: orbit by dragging, zoom with the wheel, and press <kbd>W</kbd> for wireframe.
-            In uscope the same code runs in the sandboxed worker, and the page shows each
+            In microscope the same code runs in the sandboxed worker, and the page shows each
             frame it draws.</figcaption>
         </figure>
       </div>
@@ -872,11 +872,11 @@ uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
           voxel world, a navmesh over its level, a skeleton's bones, a particle system, or anything
           else you want to move through:</p>
       </div>
-      <div class="codeblock"><span class="k">uscope.live</span>((canvas, input, context) =&gt; {
+      <div class="codeblock"><span class="k">microscope.live</span>((canvas, input, context) =&gt; {
   const gl = canvas.getContext("webgl2");    <span class="c">// or "2d"; the worker's own canvas, sized to the card</span>
   <span class="c">// … compile shaders, upload input's buffers …</span>
   return {
-    frame(time) { <span class="c">/* draw; uscope shows the canvas when this returns */</span> },
+    frame(time) { <span class="c">/* draw; microscope shows the canvas when this returns */</span> },
     update(input, { previous }) { <span class="c">/* a new stop: upload; a frame follows */</span> },
     pointer(e) { <span class="c">/* {type, x, y, dx, dy, buttons, wheel, shift, ctrl, alt}: only numbers and flags */</span> },
     key(e) { <span class="c">/* {key, shift, ctrl, alt}, only while the canvas has focus */</span> },
@@ -884,11 +884,11 @@ uscope.draw(({ cells, columns, generation }, { previous }) =&gt; {
   };
 });
 
-uscope.redraw()          <span class="c">// ask for one more frame, say after a drag</span>
-uscope.animate(on)       <span class="c">// ask for every frame while visible, for motion</span>
-uscope.caption(text)     <span class="c">// the card's caption: counts, problems, the camera</span>
-uscope.hint(text)        <span class="c">// the tooltip under the pointer</span>
-uscope.select(path)      <span class="c">// open part of the value, as a picture's `select` does (same path grammar)</span></div>
+microscope.redraw()          <span class="c">// ask for one more frame, say after a drag</span>
+microscope.animate(on)       <span class="c">// ask for every frame while visible, for motion</span>
+microscope.caption(text)     <span class="c">// the card's caption: counts, problems, the camera</span>
+microscope.hint(text)        <span class="c">// the tooltip under the pointer</span>
+microscope.select(path)      <span class="c">// open part of the value, as a picture's `select` does (same path grammar)</span></div>
       <div class="prose">
         <ul>
           <li><b>How frames get there.</b> The worker draws into an <code>OffscreenCanvas</code> of its
@@ -900,8 +900,8 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
             so CI can run it.</li>
           <li><b>The page drives frames.</b> The page calls <code>frame</code> from its own
             <code>requestAnimationFrame</code>, but only while the card is visible and only after the
-            renderer asked with <code>uscope.redraw()</code>, or continuously after
-            <code>uscope.animate(true)</code>. A hidden tab or a card scrolled away costs nothing. This
+            renderer asked with <code>microscope.redraw()</code>, or continuously after
+            <code>microscope.animate(true)</code>. A hidden tab or a card scrolled away costs nothing. This
             is not just tidiness. Measured in your Chrome, <code>requestAnimationFrame</code> never
             fires in a worker started by an opaque-origin frame. A canvas whose control was transferred
             from the page blocks the worker forever on its first draw, because the sandboxed frame runs
@@ -922,14 +922,14 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
       <h3>What it cannot see</h3>
       <div class="prose">
         <ul>
-          <li><b>GPU memory.</b> uscope reads the process's memory. A mesh whose vertices were uploaded
+          <li><b>GPU memory.</b> microscope reads the process's memory. A mesh whose vertices were uploaded
             and freed exists only in VRAM, so it cannot be drawn. Draw the CPU copy the asset loader
             keeps, or a staging buffer. Persistently mapped, host-visible Vulkan or GL buffers are
             mapped into the process and can be read like any memory.</li>
           <li><b>Size.</b> A drawing may read up to 64 MiB through <code>bytes()</code>. That is about
             two million 32-byte vertices. Bytes travel as binary WebSocket frames, never as base64
             JSON. Bigger models fail with the size, not a truncated mesh.</li>
-          <li><b>WebGPU.</b> Not offered (D8). WebGL2 runs everywhere uscope's page runs with a
+          <li><b>WebGPU.</b> Not offered (D8). WebGL2 runs everywhere microscope's page runs with a
             GPU.</li>
           <li><b>Browsers without WebGL.</b> The card says WebGL is unavailable. Measured: headless
             Firefox has no WebGL at all, even on its main thread, so the 3-D e2e test runs in Chromium
@@ -946,20 +946,20 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
         <div class="scroller">
           <div class="flowwrap">
             <div class="lane">
-              <span class="lbl">uscope (controller thread)</span>
+              <span class="lbl">microscope (controller thread)</span>
               <div class="box"><b>Bind</b><span><code>visualize</code> binds with its view; its inputs bind like fields. Renderer names resolve to a source and digest.</span></div>
               <div class="box"><b>Present</b><span><code>Presentation.visualizers</code> lists each drawing: name, renderer digest, source, and an inputs reference whose children are the named inputs.</span></div>
             </div>
             <div class="arrow">children,<br>budgeted</div>
             <div class="lane">
-              <span class="lbl">uscope web server</span>
+              <span class="lbl">microscope web server</span>
               <div class="box"><b>Rows</b><span>Each row says which visualizers its value offers.</span></div>
               <div class="box"><b><code>draw</code></b><span>Walks the inputs into tagged data (<code>src/web/draw.rs</code>). Answers are cached per stop like every answer.</span></div>
               <div class="box"><b><code>renderer</code></b><span>Returns a renderer's source by digest, cached forever.</span></div>
             </div>
             <div class="arrow">WebSocket</div>
             <div class="lane">
-              <span class="lbl">page (uscope origin)</span>
+              <span class="lbl">page (microscope origin)</span>
               <div class="box"><b>Drawings view</b><span>Decodes data, keeps <code>previous</code>, posts {source, input, context} to the sandbox frame.</span></div>
               <div class="box"><b>Picture validator</b><span>Checks every shape against the schema and limits, then builds SVG and canvases itself. Text goes through <code>textContent</code> only.</span></div>
             </div>
@@ -1125,9 +1125,9 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
 
       <h3>The gallery</h3>
       <div class="prose"><p>Each mockup below is drawn by this page from sample data, following the rules
-        above. The colors are the dataviz reference palette, validated against uscope's own surfaces:
+        above. The colors are the dataviz reference palette, validated against microscope's own surfaces:
         all eight hues pass in both themes. Light mode warns for three hues under 3:1 contrast, which
-        the always-present labels and Table view answer. Renderers get the eight hues as <code>uscope.theme.series</code>.</p></div>
+        the always-present labels and Table view answer. Renderers get the eight hues as <code>microscope.theme.series</code>.</p></div>
       <div class="gallery" id="gallery"></div>
 
       <h3>What each one takes and does</h3>
@@ -1260,7 +1260,7 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
         <table>
           <thead><tr><th>Fixture</th><th>Data</th><th>Visualizer</th><th>Exercises</th></tr></thead>
           <tbody>
-            <tr><td><code>tests/fixtures/rust/chess/</code></td><td><code>Board</code> as bitboards plus <code>[Option&lt;Piece&gt;; 64]</code>, <code>Color</code>, <code>CastlingRights(u8)</code>, <code>Option&lt;Square&gt;</code>. It plays a short scripted game through <code>make_move</code>.</td><td><code>chess-board</code>, carried in the binary by <code>uscope_visualizer!</code>; <code>bits</code> on the bitboards</td><td>Sums, enumerations, and bigints. Embedded kind 3. <code>previous</code> changes. <code>select</code>.</td></tr>
+            <tr><td><code>tests/fixtures/rust/chess/</code></td><td><code>Board</code> as bitboards plus <code>[Option&lt;Piece&gt;; 64]</code>, <code>Color</code>, <code>CastlingRights(u8)</code>, <code>Option&lt;Square&gt;</code>. It plays a short scripted game through <code>make_move</code>.</td><td><code>chess-board</code>, carried in the binary by <code>microscope_visualizer!</code>; <code>bits</code> on the bitboards</td><td>Sums, enumerations, and bigints. Embedded kind 3. <code>previous</code> changes. <code>select</code>.</td></tr>
             <tr><td><code>tests/fixtures/c/life.c</code></td><td><code>struct life { int generation; uint8_t cells[48][64]; }</code> stepping generations</td><td><code>life</code>, a session <code>--views</code> file</td><td><code>bytes()</code>, pixel images, and session sources.</td></tr>
             <tr><td><code>tests/fixtures/cpp/tree.cpp</code></td><td>A red-black <code>std::map</code> and a hand-rolled binary tree</td><td><code>tree</code>, which does a tidy tree layout in JS</td><td>Real layout code, views feeding visualizers (<code>std::map</code> through its built-in view), and groups and paths.</td></tr>
             <tr><td><code>tests/fixtures/c/metrics.c</code></td><td>A small server simulation that changes its data every iteration. It holds:
@@ -1380,7 +1380,7 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
             <code>d=</code>), <code>previous</code>, the <code>select</code> popover, stale dimming,
             failure cards, and Reload views. <code>visualizers.spec.ts</code> on chess and life. The
             <code>docs/visualizers.md</code> tutorial and reference, and
-            <code>sdk/web/uscope-visualizer.d.ts</code>.</p></div></li>
+            <code>sdk/web/microscope-visualizer.d.ts</code>.</p></div></li>
         <li><div><h3>Built-ins and the remaining fixtures</h3>
           <p>The ten built-ins as plain renderers on the public API, with previous-stop marks.
             The page's Table and Copy CSV of inputs, image hover, canvas drawing for big pictures,
@@ -1392,7 +1392,7 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
             <code>just stress</code>, and <code>just sim 600</code> once, at the end. The simulator is
             untouched: this is view and page work.</p></div></li>
         <li><div><h3>Live renderers and 3-D</h3>
-          <p><code>uscope.live</code>: page-driven frames as <code>ImageBitmap</code>s, the worker's
+          <p><code>microscope.live</code>: page-driven frames as <code>ImageBitmap</code>s, the worker's
             lifetime, event forwarding, the watchdog, and context loss. Binary frames for
             <code>bytes()</code> up to 64 MiB. The built-in <code>mesh</code> viewer. The mesh fixture
             and <code>mesh.spec.ts</code>, so a 3-D model is part of the e2e suite beside the chess
@@ -1459,11 +1459,11 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
     themeButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
   };
   let saved = "system";
-  try { saved = localStorage.getItem("uscope-plan-theme") || "system"; } catch (_) {}
+  try { saved = localStorage.getItem("microscope-plan-theme") || "system"; } catch (_) {}
   applyTheme(saved);
   themeButtons.forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.themeChoice);
-    try { localStorage.setItem("uscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
+    try { localStorage.setItem("microscope-plan-theme", b.dataset.themeChoice); } catch (_) {}
   }));
 
   // An imitation of the renderer API, enough to run the chess example above
@@ -1473,13 +1473,13 @@ uscope.select(path)      <span class="c">// open part of the value, as a picture
   const shape = (type) => (props) => ({ type, ...props });
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   let drawn = null;
-  const uscope = {
+  const microscope = {
     draw: (f) => { drawn = f; },
     picture: (p) => ({ type: "picture", ...p }),
     rect: shape("rect"), text: shape("text"), theme, same,
   };
   try {
-    new Function("uscope", document.getElementById("chess-source").textContent)(uscope);
+    new Function("microscope", document.getElementById("chess-source").textContent)(microscope);
   } catch (e) { console.error(e); return; }
 
   const kinds = ["Rook", "Knight", "Bishop", "Queen", "King", "Bishop", "Knight", "Rook"];

@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Zig's standard library. Verified against zig 0.16.0 with the LLVM
 # backend and Zig's own, by tests/fixtures/zig/containers.zig.

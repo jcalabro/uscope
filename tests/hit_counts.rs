@@ -3,12 +3,12 @@ mod support;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointSpec,
     ExceptionDisposition, ExitStatus, HitCondition, InferiorState, ResumeScope, StepKind,
     StopReason, ThreadId, ThreadState, VirtualAddress,
 };
+use support::Scenario;
 
 /// The compiler and linker variants of `hit-counts.c`.
 const MATRIX: [&str; 4] = [
@@ -492,9 +492,9 @@ async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
         .join("build/golden/stores/stores-clang-O2");
     let mut scenario = Scenario::new("skipped hit before an epilogue", program);
     scenario.add_breakpoint("rt_start").await;
-    let options = uscope::LaunchOptions {
+    let options = microscope::LaunchOptions {
         arguments: vec!["1".into(), "0".into()],
-        ..uscope::LaunchOptions::default()
+        ..microscope::LaunchOptions::default()
     };
 
     assert!(matches!(
@@ -527,7 +527,7 @@ async fn a_step_onto_a_skipped_site_stops_there_and_counts_the_hit_once() {
         let body = scenario
             .add_breakpoint_spec(BreakpointSpec::Source {
                 path: "hit-counts.c".into(),
-                line: uscope::LineNumber::new(source_line("shared_total += value;"))
+                line: microscope::LineNumber::new(source_line("shared_total += value;"))
                     .expect("one-based"),
             })
             .await;
@@ -596,7 +596,7 @@ async fn a_next_ending_on_a_skipped_site_steps_over_it_before_running_on() {
         let skipped = scenario
             .add_breakpoint_spec(BreakpointSpec::Source {
                 path: "hit-counts.c".into(),
-                line: uscope::LineNumber::new(destination).expect("one-based"),
+                line: microscope::LineNumber::new(destination).expect("one-based"),
             })
             .await;
         scenario
@@ -869,7 +869,7 @@ async fn hit_condition_requests_reject_unknown_breakpoints_and_keep_definitions(
         .await;
     assert!(matches!(
         missing,
-        Err(uscope::Error::BreakpointNotFound(99))
+        Err(microscope::Error::BreakpointNotFound(99))
     ));
 
     scenario.run_to_stop().await;
@@ -966,7 +966,7 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
         for line in 1..=31 {
             let spec = BreakpointSpec::Source {
                 path: "hit-counts.c".into(),
-                line: uscope::LineNumber::new(line).expect("one-based"),
+                line: microscope::LineNumber::new(line).expect("one-based"),
             };
 
             match scenario
@@ -978,7 +978,7 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
             {
                 Ok(added) => skipped.push(added.id),
                 // Lines outside every function have no code.
-                Err(uscope::Error::SourceLineUnavailable { .. }) => {}
+                Err(microscope::Error::SourceLineUnavailable { .. }) => {}
                 Err(error) => panic!("{fixture}: line {line}: {error}"),
             }
         }

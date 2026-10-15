@@ -1,4 +1,4 @@
-// Recorded traffic between real `uscope web` servers and the Rust test
+// Recorded traffic between real `microscope web` servers and the Rust test
 // clients (tests/web): `just web-transcripts` refreshes it.
 
 import { readdirSync, readFileSync } from "node:fs";

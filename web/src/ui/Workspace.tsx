@@ -84,8 +84,8 @@ export function Workspace() {
   useEffect(() => {
     tab.setState({ frames });
   }, [frames]);
-  const left = useSplit("uscope-split-left", 270, { min: 180, max: 520 });
-  const right = useSplit("uscope-split-right", 340, { min: 220, max: 720, reversed: true });
+  const left = useSplit("microscope-split-left", 270, { min: 180, max: 520 });
+  const right = useSplit("microscope-split-right", 340, { min: 220, max: 720, reversed: true });
 
   const focus = useMemo((): Focus | null => {
     if (!state) {

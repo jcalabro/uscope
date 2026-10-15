@@ -1,6 +1,6 @@
 //! Child processes the Go runtime starts with a vfork-style clone.
 
-use uscope::{ExitStatus, StopReason};
+use microscope::{ExitStatus, StopReason};
 
 use crate::invariants;
 

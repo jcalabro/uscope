@@ -1,10 +1,10 @@
 //! A Rust program that carries views for its own types in its
-//! `.debug_uscope_views` section, and a kernel one of them calls, through
+//! `.debug_microscope_views` section, and a kernel one of them calls, through
 //! the SDK's macros.
 
 use std::hint::black_box;
 
-uscope_views::uscope_views_file!("tests/fixtures/rust/embedded-views/main.views");
+microscope_views::microscope_views_file!("tests/fixtures/rust/embedded-views/main.views");
 
 /// Tags, which their view presents as the names they hold.
 pub struct Tags {
@@ -29,10 +29,10 @@ pub struct Node {
 }
 
 // The kernel, built from kernel/ into the file the build names.
-uscope_views::uscope_kernel!(
+microscope_views::microscope_kernel!(
     "tree",
     "tests/fixtures/rust/embedded-views/kernel/src/lib.rs",
-    env!("USCOPE_TREE_KERNEL")
+    env!("MICROSCOPE_TREE_KERNEL")
 );
 
 fn node(value: i32, child: Option<Node>, sibling: Option<Node>) -> Node {

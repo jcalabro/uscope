@@ -20,9 +20,9 @@ stay in `plans/`.
 
 ## Audience
 
-Public pages explain how to use uscope. They may explain a design choice when
-it affects a user's result, but they do not describe internal module structure,
-test machinery, or implementation plans.
+Public pages explain how to use microscope. They may explain a design choice
+when it affects a user's result, but they do not describe internal module
+structure, test machinery, or implementation plans.
 
 Developer pages explain how to change and verify the project. `AGENTS.md` is a
 short router and a list of rules that apply to almost every change. Put
@@ -55,7 +55,7 @@ If the product has no answer yet, say so and record what must exist before the
 page can be completed:
 
 ```markdown
-> TODO: uscope does not have a supported installation method yet. Document
+> TODO: microscope does not have a supported installation method yet. Document
 > installation here after release artifacts or packages are available.
 ```
 
@@ -86,7 +86,7 @@ It builds the static site and catches broken internal links.
 
 The public site has four kinds of page:
 
-- **Start and workflow pages** explain how to complete a task with uscope.
+- **Start and workflow pages** explain how to complete a task with microscope.
 - **Concept pages** explain expressions, views, languages, and other models a
   user must understand.
 - **Reference pages** list exact options, settings, commands, and limits.
@@ -97,8 +97,8 @@ only when readers can find an item more easily in the smaller page. File count
 is not a goal by itself; clear ownership is.
 
 The public site must not depend on `dev/` or `plans/` links. A person using an
-installed uscope may not have the repository. Repository links are acceptable
-only when the repository artifact itself is the subject, such as an
+installed microscope may not have the repository. Repository links are
+acceptable only when the repository artifact itself is the subject, such as an
 unpublished editor extension, and should use a full GitHub URL.
 
 ## Developer information architecture
@@ -176,15 +176,16 @@ instead of stub Markdown pages.
 
 ## Code fences used by tests
 
-Custom fences beginning with `uscope-` are parsed by repository tests.
+Custom fences beginning with `microscope-` are parsed by repository tests.
 VitePress's Markdown configuration renders them as plain text without changing
 their source marker.
 
 The important forms are:
 
-- `uscope-example` for expression rows;
-- `uscope-view-example` for a view definition and expected rows;
-- `uscope-renderer-example` and `uscope-live-example` for sandboxed JavaScript;
+- `microscope-example` for expression rows;
+- `microscope-view-example` for a view definition and expected rows;
+- `microscope-renderer-example` and `microscope-live-example` for sandboxed
+  JavaScript;
 - language-plus-path fences in the writing-views tutorial, which must quote a
   real fixture fragment.
 
@@ -249,7 +250,7 @@ Read the page once as a new user and once as a maintainer. Check:
 
 - Can the reader tell whether the page is public, developer, or historical?
 - Does the first ordinary task appear before edge cases?
-- Does each claim say what uscope actually does?
+- Does each claim say what microscope actually does?
 - Are unsupported cases and partial results explicit?
 - Are terms defined before their detailed use?
 - Can a paragraph be shortened without losing a rule or reason?

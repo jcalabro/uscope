@@ -1,4 +1,4 @@
-//! The system calls uscope makes with no safe wrapper: what a launched
+//! The system calls microscope makes with no safe wrapper: what a launched
 //! child does between fork and exec, the ptrace requests nix cannot make,
 //! and `tgkill`. The rest of the backend reaches them through the safe
 //! functions here.

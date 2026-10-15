@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # The program's own vector of integers.
 view c intvec {

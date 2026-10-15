@@ -1,4 +1,4 @@
-//! `uscope web` in a terminal, where pressing `o` opens the page.
+//! `microscope web` in a terminal, where pressing `o` opens the page.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -39,12 +39,12 @@ fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_termin
     let mut command = Command::new("sh");
     command
         .args(["-c", r#"stty echo icanon && exec "$0" "$@""#])
-        .arg(env!("CARGO_BIN_EXE_uscope"))
+        .arg(env!("CARGO_BIN_EXE_microscope"))
         .args(["web", "--port", "0", "--run"])
         .arg(Scenario::fixture("spin"))
         .env("BROWSER", &browser)
-        .env("USCOPE_FLIGHT_RECORDING", "");
-    let mut session = Session::spawn(command).expect("spawn uscope web in a PTY");
+        .env("MICROSCOPE_FLIGHT_RECORDING", "");
+    let mut session = Session::spawn(command).expect("spawn microscope web in a PTY");
     session.set_expect_timeout(Some(DEADLINE));
     let server = session.get_process().pid();
 
@@ -84,13 +84,13 @@ fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_termin
     // would otherwise reap it as one of the program's threads.
     assert_ne!(helper_parent, server.to_string());
 
-    // The terminal's settings outlive uscope only while something has it
-    // open, as the shell that ran uscope would.
+    // The terminal's settings outlive microscope only while something has it
+    // open, as the shell that ran microscope would.
     let terminal = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(std::fs::read_link(format!("/proc/{server}/fd/0")).expect("uscope's terminal"))
-        .expect("open uscope's terminal");
+        .open(std::fs::read_link(format!("/proc/{server}/fd/0")).expect("microscope's terminal"))
+        .expect("open microscope's terminal");
     session.send(ControlCode::EndOfText).expect("press Ctrl+C");
     assert_eq!(
         session.get_process().wait().expect("exit status"),
@@ -104,6 +104,6 @@ fn pressing_o_opens_the_join_link_in_the_browser_and_exiting_restores_the_termin
         "the terminal echoes lines again"
     );
 
-    // The helper leaves with uscope.
+    // The helper leaves with microscope.
     crate::web::wait_gone(helper.parse().expect("a pid"));
 }

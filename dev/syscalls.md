@@ -1,10 +1,10 @@
 # System call tracing
 
-uscope sees system calls in three places: `uscope syscalls`, which prints
-them as strace does; `record --syscalls`, which saves them beside a profile;
-and debugger catchpoints, which stop at them. Two engines produce the calls,
-and both turn what they see into one neutral model before anything formats,
-counts, or saves it.
+microscope sees system calls in three places: `microscope syscalls`, which
+prints them as strace does; `record --syscalls`, which saves them beside a
+profile; and debugger catchpoints, which stop at them. Two engines produce the
+calls, and both turn what they see into one neutral model before anything
+formats, counts, or saves it.
 
 ## Code map
 
@@ -16,7 +16,7 @@ counts, or saves it.
 | `src/backend/linux/syscalls/bpf.rs`, `bpf/syscalls.bpf.c`, `bpf/records.h` | The BPF engine: its loader and its kernel programs |
 | `src/backend/linux/syscalls/budget.rs`, `cgroup.rs`, `continuous.rs`, `stacks.rs`, `capture.rs` | Budgets, cgroup targets, continuous traces, stacks, and captures |
 | `src/backend/linux/catchpoints.rs` | Debugger catchpoints |
-| `src/cli/syscalls.rs` | The `uscope syscalls` command |
+| `src/cli/syscalls.rs` | The `microscope syscalls` command |
 | `src/profiler/syscalls.rs`, `src/profiler/session.rs` | Captures read back, and `record --syscalls` |
 | `src/web/syscalls.rs`, `web/src/profile/syscalls.ts`, `web/src/ui/profile/SyscallsView.tsx` | The browser's Syscalls view |
 | `src/sim/tracing.rs`, `src/sim/catches.rs` | The simulator's models of the tracepoint stream and of catchpoints |
@@ -37,7 +37,7 @@ program with each and require the same output.
 
 `src/syscalls/table.gen.rs` holds call names and numbers for x86-64, i386,
 and x32, generated from the kernel's UAPI headers. A test fails when it is
-stale; regenerate it with `USCOPE_UPDATE_SYSCALLS=1`. `entries.gen.rs` names
+stale; regenerate it with `MICROSCOPE_UPDATE_SYSCALLS=1`. `entries.gen.rs` names
 the kernel function each call enters through. `scripts/syscall-entries.sh`
 writes it from a kernel tree.
 
@@ -60,15 +60,15 @@ always announces a tracee before anything it does.
 ## The BPF engine
 
 The kernel programs are C in `src/backend/linux/syscalls/bpf/`. `build.rs`
-compiles them with the clang that the dev shell names in `USCOPE_BPF_CLANG`,
-against the headers in `USCOPE_BPF_INCLUDE`, and embeds the objects. aya
+compiles them with the clang that the dev shell names in `MICROSCOPE_BPF_CLANG`,
+against the headers in `MICROSCOPE_BPF_INCLUDE`, and embeds the objects. aya
 loads them. `records.h` is the record layout shared with the Rust decoders,
 and a test compares the two through the object's BTF.
 
 Rules the engine keeps:
 
 - **It never falls back.** If BPF cannot run, the probe in `bpf.rs` names the
-  one missing piece and its fix. uscope never switches to ptrace by itself.
+  one missing piece and its fix. microscope never switches to ptrace by itself.
 - **It never traces the whole host.** Every program filters by process or by
   cgroup before doing any work.
 - **Loss is reported.** Ring overflows, sampling, and calls whose return was
@@ -82,7 +82,7 @@ How it attaches:
   functions instead, which costs other processes nothing. `--attach` chooses.
   A call that BTF does not describe, a call with no arguments (whose wrapper
   pahole leaves out), or an x32 call on a kernel without x32 makes the list
-  use tracepoints. uscope says why.
+  use tracepoints. microscope says why.
 - When any tracer attaches to or detaches from a kernel function, the kernel
   skips the old trampoline's `fexit` programs for calls in progress, and
   counts nothing. The engine sees a call that entered and never returned and
@@ -97,13 +97,13 @@ How it reads calls:
 - Calls in progress live in task storage. An `iter/task` program lists them
   every 100 ms tick, for `--in-flight`.
 - Statistics are a per-CPU array with a row per chosen call. For continuous
-  traces the kernel counts into one half of the rows while uscope reads the
+  traces the kernel counts into one half of the rows while microscope reads the
   other. Switching halves updates an array-of-maps (`FENCE`), which waits for
   running programs, so counted segments sum exactly.
 - Settings fixed at load, such as the cgroup and PID namespace, are `.rodata`
   globals, so the verifier drops the code they turn off.
 
-`--budget` measures uscope's own CPU time, plus the programs' run time when
+`--budget` measures microscope's own CPU time, plus the programs' run time when
 `kernel.bpf_stats_enabled` is on, and steps down: drop stacks, cut strings,
 sample, then only count. Sampled-out calls are still counted in the kernel.
 The steps never go back up and never cut paths.
@@ -111,15 +111,15 @@ The steps never go back up and never cut paths.
 ## Privileges in development
 
 Only the BPF tests need privilege. They live in `mod bpf` in
-`tests/syscalls.rs`, are ignored by the normal suite, and start uscope
+`tests/syscalls.rs`, are ignored by the normal suite, and start microscope
 through a launcher that grants `CAP_BPF` and `CAP_PERFMON`:
 
 ```sh
-just test-bpf                       # through /run/wrappers/bin/uscope-bpf
+just test-bpf                       # through /run/wrappers/bin/microscope-bpf
 just test-bpf LAUNCHER -E 'test(/cgroup/)'
 ```
 
-The default launcher is the wrapper that `nixosModules.uscope-bpf` installs.
+The default launcher is the wrapper that `nixosModules.microscope-bpf` installs.
 Nothing else in the suite runs with privilege, and no test uses sudo.
 
 ## Catchpoints
@@ -143,7 +143,7 @@ The simulator models catch stops with rules K-SYS-1 to K-SYS-6 in
 
 `-o FILE.usprof` writes a capture, the profiler's file format, at revision 8.
 `capture.rs` writes the calls; `src/profiler/syscalls.rs` reads them back into
-events, so the browser and `uscope report` reuse the same presentation.
+events, so the browser and `microscope report` reuse the same presentation.
 
 `record --syscalls` starts a BPF trace at the profiler's launch gate, so it
 sees the program's first call, and merges it with the samples on one clock.

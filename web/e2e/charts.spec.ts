@@ -7,12 +7,17 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { card, copyCsv, drawAt, showTab, stubClipboard, titles } from "./drawings";
-import { expect, fixture, join, root, test, type Uscope } from "./server";
+import { expect, fixture, join, type Microscope, root, test } from "./server";
 
-/** Starts uscope on a fixture with its views file, and joins it. */
-async function open(page: Page, uscope: Uscope, program: string, views: string): Promise<void> {
+/** Starts microscope on a fixture with its views file, and joins it. */
+async function open(
+  page: Page,
+  microscope: Microscope,
+  program: string,
+  views: string,
+): Promise<void> {
   await stubClipboard(page);
-  const server = await uscope.start([
+  const server = await microscope.start([
     "--views",
     path.join(root, "tests/fixtures", views),
     fixture(program),
@@ -45,14 +50,14 @@ async function step(page: Page, board: Locator, stop: string): Promise<void> {
 }
 
 test.describe("a C program's metrics", () => {
-  const metrics = (page: Page, uscope: Uscope) =>
-    open(page, uscope, "metrics", "c/metrics/metrics.views");
+  const metrics = (page: Page, microscope: Microscope) =>
+    open(page, microscope, "metrics", "c/metrics/metrics.views");
 
   test("line-plot keeps a one-sample spike and gaps for NaN, against a ghost of the stop before", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await metrics(page, uscope);
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "line-plot");
@@ -78,8 +83,8 @@ test.describe("a C program's metrics", () => {
     await expect(board.locator("svg text", { hasText: "stop before" })).toHaveCount(1);
   });
 
-  test("histogram bins every sample and marks exact percentiles", async ({ page, uscope }) => {
-    await metrics(page, uscope);
+  test("histogram bins every sample and marks exact percentiles", async ({ page, microscope }) => {
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "histogram");
@@ -115,9 +120,9 @@ test.describe("a C program's metrics", () => {
 
   test("box-plot gives each endpoint's exact quartiles and error bars, and opens its samples", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await metrics(page, uscope);
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "box-plot");
@@ -163,9 +168,9 @@ test.describe("a C program's metrics", () => {
 
   test("scatter-plot names each point exactly and trails those that moved", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await metrics(page, uscope);
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "scatter-plot");
@@ -185,8 +190,11 @@ test.describe("a C program's metrics", () => {
     await expect(board.locator(".drawing-body svg line")).toHaveCount(lines + 700);
   });
 
-  test("heatmap diverges around zero, hatches NaN, and opens a cell", async ({ page, uscope }) => {
-    await metrics(page, uscope);
+  test("heatmap diverges around zero, hatches NaN, and opens a cell", async ({
+    page,
+    microscope,
+  }) => {
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "heatmap");
@@ -214,9 +222,9 @@ test.describe("a C program's metrics", () => {
 
   test("bitmap shows each byte as a pixel, names it on hover, and outlines what changed", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await metrics(page, uscope);
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "bitmap");
@@ -257,9 +265,9 @@ test.describe("a C program's metrics", () => {
 
   test("bits draws a 64-bit word's bits and outlines those that flipped", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await metrics(page, uscope);
+    await metrics(page, microscope);
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     await showTab(board, "bits");
@@ -290,10 +298,10 @@ test.describe("a C program's metrics", () => {
 test.describe("a card's header", () => {
   test("keeps its tabs whole, inside the card, and in place in a narrow page", async ({
     page,
-    uscope,
+    microscope,
   }) => {
     await page.setViewportSize({ width: 1024, height: 700 });
-    await open(page, uscope, "metrics", "c/metrics/metrics.views");
+    await open(page, microscope, "metrics", "c/metrics/metrics.views");
     await drawAt(page, "metrics.c:119");
     const board = card(page, "m");
     const tabs = board.getByRole("group", { name: "Drawings of m" }).getByRole("button");
@@ -326,9 +334,9 @@ test.describe("a card's header", () => {
 test.describe("a Go program's counters", () => {
   test("bar-chart sorts a map by value and folds the rest into Other; a vertical one opens a bar", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await open(page, uscope, "charts", "go/charts/charts.views");
+    await open(page, microscope, "charts", "go/charts/charts.views");
     await drawAt(page, "main.go:44");
     const hits = card(page, "hits");
     const rows = await copyCsv(page, hits);
@@ -370,9 +378,9 @@ test.describe("a Go program's counters", () => {
 
   test("donut-chart shows the seven largest shares and Other, summing to the whole", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await open(page, uscope, "charts", "go/charts/charts.views");
+    await open(page, microscope, "charts", "go/charts/charts.views");
     await drawAt(page, "main.go:44");
     const bytes = card(page, "bytes");
     const rows = await copyCsv(page, bytes);
@@ -402,9 +410,9 @@ test.describe("a Go program's counters", () => {
 test.describe("a Rust program's profile", () => {
   test("flame-graph sizes frames by total, the same from nodes and from folded stacks", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await open(page, uscope, "profile", "rust/profile/profile.views");
+    await open(page, microscope, "profile", "rust/profile/profile.views");
     await drawAt(page, "main.rs:71");
     const profile = card(page, "profile");
     const rows = await copyCsv(page, profile);
@@ -460,9 +468,9 @@ test.describe("a Rust program's profile", () => {
 });
 
 test.describe("Draw as…", () => {
-  test("draws a Zig slice of f32 as a line and as a histogram", async ({ page, uscope }) => {
+  test("draws a Zig slice of f32 as a line and as a histogram", async ({ page, microscope }) => {
     await stubClipboard(page);
-    const server = await uscope.start([fixture("samples")]);
+    const server = await microscope.start([fixture("samples")]);
     await join(page, server.link);
     await drawAt(page, "samples.zig:22");
     for (const stop of ["#3", "#4", "#5", "#6"]) {
@@ -498,9 +506,9 @@ test.describe("Draw as…", () => {
 test.describe("a C++ program's own renderer", () => {
   test("draws a search tree in key order, marks a new node, and draws a std::map as bars", async ({
     page,
-    uscope,
+    microscope,
   }) => {
-    await open(page, uscope, "tree", "cpp/tree/tree.views");
+    await open(page, microscope, "tree", "cpp/tree/tree.views");
     await drawAt(page, "tree.cpp:48");
     const tree = card(page, "tree");
     await expect(tree.locator(".drawing-caption")).toHaveText("1 nodes · depth 1");
@@ -539,7 +547,10 @@ test.describe("a C++ program's own renderer", () => {
 });
 
 test.describe("a built-in renderer", () => {
-  test("draws the same picture when a views file names a copy of it", async ({ page, uscope }) => {
+  test("draws the same picture when a views file names a copy of it", async ({
+    page,
+    microscope,
+  }) => {
     const directory = test.info().outputPath("views");
     await mkdir(directory, { recursive: true });
     await copyFile(
@@ -549,7 +560,7 @@ test.describe("a built-in renderer", () => {
     const views = path.join(directory, "hours.views");
     await writeFile(
       views,
-      `uscope-views 1
+      `microscope-views 1
 extend go main.Hours {
     visualize "bar-chart" {
         values = self
@@ -562,8 +573,8 @@ extend go main.Hours {
 }
 `,
     );
-    expect(await readFile(path.join(directory, "bars.js"), "utf8")).toContain("uscope.draw(");
-    const server = await uscope.start(["--views", views, fixture("charts")]);
+    expect(await readFile(path.join(directory, "bars.js"), "utf8")).toContain("microscope.draw(");
+    const server = await microscope.start(["--views", views, fixture("charts")]);
     await join(page, server.link);
     await drawAt(page, "main.go:44");
     const hours = card(page, "hours");

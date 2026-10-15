@@ -1,9 +1,9 @@
 # Architecture
 
-uscope separates target-specific facts from its public debugger model. Linux,
-x86-64, ELF, DWARF, ptrace, and native registers stay at the edges. Clients
-talk to the same model whether they are the terminal, browser, DAP server, or a
-future interface.
+microscope separates target-specific facts from its public debugger model.
+Linux, x86-64, ELF, DWARF, ptrace, and native registers stay at the edges.
+Clients talk to the same model whether they are the terminal, browser, DAP
+server, or a future interface.
 
 ## Code map
 
@@ -81,7 +81,7 @@ typed partial results.
 
 ## Library and binary boundaries
 
-The `uscope` library owns the debugger model and behavior. `src/main.rs` and
+The `microscope` library owns the debugger model and behavior. `src/main.rs` and
 the modules compiled by the binary (`src/cli`, `src/dap`, `src/present`, and
 `src/web`) adapt that library to user interfaces.
 
@@ -93,9 +93,9 @@ it.
 
 Feature-gated binaries have narrower purposes:
 
-- `uscope-tools` contains image, timing, benchmark, and overhead tools used by
-  repository recipes.
-- `uscope-sim` sweeps and replays deterministic simulated sessions.
+- `microscope-tools` contains image, timing, benchmark, and overhead tools used
+  by repository recipes.
+- `microscope-sim` sweeps and replays deterministic simulated sessions.
 - `fuzz/` builds structured fuzz entry points exposed only by the `fuzzing`
   feature.
 
@@ -216,7 +216,7 @@ Use the distinction that helps a caller act:
   fact.
 - A malformed value means available facts contradict their format.
 - A partial result contains useful data and a typed reason it ended.
-- An unsupported result names a feature uscope deliberately does not handle.
+- An unsupported result names a feature microscope deliberately does not handle.
 
 Do not collapse these into an empty vector, zero address, short read, or
 generic string when the public model has a typed representation. Strings are

@@ -1,7 +1,7 @@
 # Profiling
 
-uscope records where a native program spends CPU time, where its threads wait,
-and where supported runtime tasks are suspended. Recording happens from
+microscope records where a native program spends CPU time, where its threads
+wait, and where supported runtime tasks are suspended. Recording happens from
 outside the target process.
 
 ## Record a program
@@ -9,13 +9,13 @@ outside the target process.
 Start a program under the recorder:
 
 ```sh
-uscope record -o server.usprof -- ./server --port 8080
+microscope record -o server.usprof -- ./server --port 8080
 ```
 
 Or attach to a running process:
 
 ```sh
-uscope record --pid 1842 -o server.usprof
+microscope record --pid 1842 -o server.usprof
 ```
 
 Stop an attached recording with Ctrl-C. Use `--duration SECONDS` when the
@@ -24,7 +24,7 @@ recording should stop on its own.
 ## Choose a preset
 
 `--preset` controls sample rate, stack copying, blocked-time recording, and
-uscope's CPU budget:
+microscope's CPU budget:
 
 | Preset | Intended use |
 |---|---|
@@ -44,7 +44,7 @@ copied memory end. A truncated stack records its reason.
 List the most expensive functions:
 
 ```sh
-uscope report server.usprof
+microscope report server.usprof
 ```
 
 Use `--tree` for a call tree, `--limit N` to change the function count, and
@@ -55,7 +55,7 @@ Open the profile in the browser for flame views, timelines, source costs,
 disassembly, tasks, blocked time, and instrumentation zones:
 
 ```sh
-uscope web server.usprof
+microscope web server.usprof
 ```
 
 Pass a second profile to compare it with the first.
@@ -88,21 +88,21 @@ continues. The main output file receives the final window.
 For continuous recording, write independent segments to a directory:
 
 ```sh
-uscope record --continuous profiles --segment 60 --keep 24h --pid 1842
+microscope record --continuous profiles --segment 60 --keep 24h --pid 1842
 ```
 
-`uscope report profiles` and `uscope web profiles` read the retained segments
-as one profile. Old segments are deleted after the `--keep` duration.
+`microscope report profiles` and `microscope web profiles` read the retained
+segments as one profile. Old segments are deleted after the `--keep` duration.
 
 ## Record system calls too
 
 `--syscalls SET` traces system calls beside the samples, with their stacks:
 
 ```sh
-uscope record --syscalls %file,%net -o server.usprof -- ./server
+microscope record --syscalls %file,%net -o server.usprof -- ./server
 ```
 
-`SET` is `all`, or calls and classes as `uscope syscalls -e trace=` takes
+`SET` is `all`, or calls and classes as `microscope syscalls -e trace=` takes
 them. The browser shows the calls on the timeline with the samples. A rolling
 window or continuous recording keeps each saved file's own calls.
 
@@ -116,7 +116,7 @@ recording host. `--symbols later` stores module build IDs and addresses so a
 different host can add source lines later:
 
 ```sh
-uscope symbolize --debug-dir /srv/debug server.usprof
+microscope symbolize --debug-dir /srv/debug server.usprof
 ```
 
 Pass `--debuginfod` to fetch missing debug files from the servers listed by
@@ -124,13 +124,14 @@ Pass `--debuginfod` to fetch missing debug files from the servers listed by
 
 ## Convert profile formats
 
-`uscope convert` reads uscope profiles, pprof files, and folded stacks. The
-output extension chooses uscope, pprof, folded-stack, or Chrome-trace output:
+`microscope convert` reads microscope profiles, pprof files, and folded stacks.
+The output extension chooses microscope, pprof, folded-stack, or Chrome-trace
+output:
 
 ```sh
-uscope convert server.usprof server.pb.gz
-uscope convert server.usprof server.folded
-uscope convert server.usprof server.json
+microscope convert server.usprof server.pb.gz
+microscope convert server.usprof server.folded
+microscope convert server.usprof server.json
 ```
 
 Formats have different data models. Converting can lose tasks, blocked-time

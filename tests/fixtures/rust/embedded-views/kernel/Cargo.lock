@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
+name = "microscope-views"
+version = "0.1.0"
+
+[[package]]
 name = "tree"
 version = "0.1.0"
 dependencies = [
- "uscope-views",
+ "microscope-views",
 ]
-
-[[package]]
-name = "uscope-views"
-version = "0.1.0"

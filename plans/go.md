@@ -5,15 +5,15 @@ Status: built, 2026-10-07; each item says where it is tested. Decisions marked
 small: Go support is as simple as it can be while staying rigorous, and
 anything that is not needed for that waits.
 
-Go should be as good to debug in uscope as C, C++, and Rust: every command
+Go should be as good to debug in microscope as C, C++, and Rust: every command
 in `docs/cli.md` and every request in `docs/dap.md` works on Go programs and
 says what it cannot show, and the things Go programmers expect from Delve
-are there too. This record sets out where uscope stands, what Go's runtime
+are there too. This record sets out where microscope stands, what Go's runtime
 demands, what Delve does, the decisions that follow, the order of the work,
 and how it is tested. It closes the TODO item "Go: source stepping,
 goroutines, split-stack backtraces, and composite values".
 
-## Where uscope stands
+## Where microscope stands
 
 **What works today.** Every Go fixture is built `-buildmode=pie` with
 `CGO_ENABLED=0`, using the pinned Go 1.26.5. Within that, these work:
@@ -66,7 +66,7 @@ recordings).
     `asmcgocall`.
   - A Go callback from C skips the C frames between `cgocallback` and
     `asmcgocall`.
-- **Parked goroutines are invisible.** Attached to an HTTP server, uscope
+- **Parked goroutines are invisible.** Attached to an HTTP server, microscope
   showed 6 OS threads. Four were in `futex` or `epoll_wait` under
   `runtime.schedule`. One of the program's roughly 14 goroutines was
   visible.
@@ -182,7 +182,7 @@ Range-over-func bodies are stitched to their parent frame (`rangeFrames`).
 on `throw`, `fatal`, and `fatalsignal`, report unrecovered panics and fatal
 errors. Every other signal is passed straight through.
 
-**Delve's known weaknesses** are uscope's openings:
+**Delve's known weaknesses** are microscope's openings:
 
 - **DAP threads.** DAP shows at most 1024 goroutines, filtering after
   truncating. It reports one goroutine per stop even when several stopped.
@@ -255,14 +255,14 @@ traits, types, and tests that keep this separation.
   - the meaning of `_Gscan`;
   - `DW_AT_go_runtime_type` as an offset from `moduledata.types`;
   - `TFlag` against `Kind_`.
-- A **runtime contract** lists every name uscope reads.
+- A **runtime contract** lists every name microscope reads.
   - A test checks the contract against every pinned toolchain, as Delve's
     rtype check does.
   - A missing name makes the feature that needs it unavailable, with a
     reason that names the field.
   - A missing name never produces a guessed offset.
 
-**Support the pinned toolchain only** *(settled)*, as uscope does for
+**Support the pinned toolchain only** *(settled)*, as microscope does for
 every other language.
 
 - `flake.nix` pins one Go, and every Go fixture builds with it.
@@ -373,7 +373,7 @@ belongs to a task when one is known.
   and the plan's breakpoints catch the task wherever it resumes.
 - Another task's breakpoint, watchpoint, or signal still ends the step
   where it happened, as today for threads. This deliberately differs from
-  Delve's "next while nexting"; uscope's step is never left pending.
+  Delve's "next while nexting"; microscope's step is never left pending.
 
 **SIGURG never interrupts a single step.** A preemption signal that arrives
 during a single step or a breakpoint repair is held, and delivered with the
@@ -385,7 +385,7 @@ next resume.
   resume elsewhere.
 - Continuing still passes SIGURG at once, so the program's own
   `signal.Notify(SIGURG)` still sees every one (`preempt-go`).
-- uscope does not change the program's environment: no
+- microscope does not change the program's environment: no
   `GODEBUG=asyncpreemptoff`. Delve does not either, on linux/amd64.
 
 **`step` skips what the user did not write.** For Go, a step does not stop
@@ -446,7 +446,7 @@ is the one that panicked, below `gopanic`, or the faulting frame below
 **Faults are handled as Delve handles them, not as gdb does**
 *(settled)*. In a Go process, SIGSEGV, SIGBUS, and SIGFPE are passed to
 the program without stopping or printing. The runtime's handler decides
-what they mean, and uscope stops at its verdict.
+what they mean, and microscope stops at its verdict.
 
 - A fault in Go code becomes a panic. If it is recovered, nothing
   happened. If it is not, the unrecovered-panic stop reports it, with the
@@ -459,7 +459,7 @@ what they mean, and uscope stops at its verdict.
   stop` still makes the raw signal stop.
 
 **`runtime.Breakpoint()` is a breakpoint.** An `int3` in the program's
-own text that uscope did not plant stops as a *program breakpoint*, and
+own text that microscope did not plant stops as a *program breakpoint*, and
 resumes past it. Its SIGTRAP is never delivered, since SIGTRAP is fatal to
 a Go program. C's `__builtin_debugtrap` gets the same.
 
@@ -539,11 +539,11 @@ following:
 - Debug registers are already armed on every thread, so the watch follows
   the goroutine across threads.
 
-**uscope never calls functions in the program** *(settled)*. Calling
+**microscope never calls functions in the program** *(settled)*. Calling
 through `runtime.debugCallV2` is neither implemented nor planned. It
 would need the other threads running during the call, which breaks the
 all-stop model; the expression language excludes calls for every
-language; and uscope calls into no C or Rust program either. Values that
+language; and microscope calls into no C or Rust program either. Values that
 Delve users get from `String()` and `Error()` come from views and from
 the message the runtime has already formatted for a panic. If calls are
 ever wanted, that is a redesign of its own.
@@ -563,7 +563,7 @@ ever wanted, that is a redesign of its own.
 
 ## Architecture
 
-Go is the first language whose runtime uscope has to understand, and
+Go is the first language whose runtime microscope has to understand, and
 it will not be the last. Tokio is next on the TODO list. C++ coroutines,
 fibers, and Zig's `std.Io` would follow. This section fixes where
 runtime knowledge lives, so that supporting Go leaves the codebase
@@ -829,7 +829,7 @@ built.
     "chan receive".
 
   Its `TaskState` is `Running`, `Runnable`, `Blocked`, or `Exited`, plus
-  `Unknown(reason)` for a state uscope cannot read. A stackless runtime
+  `Unknown(reason)` for a state microscope cannot read. A stackless runtime
   adds `Suspended`. There is no stack in it, by principle 4.
 - **`TaskContext`,** where a task's frames begin:
   - `OnThread(ThreadId)` — running; unwind from the thread.
@@ -914,7 +914,7 @@ built.
   Rust panics and C++ throws can use it later.
 - **`StopReason::ProgramBreakpoint`** reports a trap the program planted
   itself. It is classified in `classify_stop_evidence` from evidence: an
-  `int3` uscope did not plant, at an address in executable code.
+  `int3` microscope did not plant, at an address in executable code.
 
 ### Language-specific presentation and evaluation
 
@@ -1147,8 +1147,8 @@ A test earns its place when all of these hold:
 1. **It drives real compiler output through the public request path.** It
    uses `tests/support::Scenario` or the DAP harness, not internal
    functions.
-2. **It checks against an oracle uscope did not compute.** Comparing
-   uscope with itself proves nothing.
+2. **It checks against an oracle microscope did not compute.** Comparing
+   microscope with itself proves nothing.
 3. **It fails for a bug a user would see.**
 4. **It is deterministic,** waiting only for what it can observe
    (AGENTS.md).
@@ -1158,7 +1158,7 @@ one.
 
 ### Oracles
 
-Truth comes from outside uscope, in this order of preference:
+Truth comes from outside microscope, in this order of preference:
 
 - **The program reports its own state.**
   - Fixtures print tab-separated `TRUTH` lines, the generalization of the
@@ -1179,9 +1179,9 @@ Truth comes from outside uscope, in this order of preference:
   - Variables a fixture keeps for the test's sake: `me`, the goroutine's
     own id, and sink counters that prove which callees ran, as
     `stepping-boundaries` does for C.
-  - These carry identity across a step without trusting uscope's task
+  - These carry identity across a step without trusting microscope's task
     model. A step that ends with `me` changed has ended in the wrong
-    goroutine, whatever uscope believes.
+    goroutine, whatever microscope believes.
 - **The native run.**
   - At build time every fixture also runs without a debugger, and its
     exit status and standard error are recorded beside it, as the gdb
@@ -1203,7 +1203,7 @@ Truth comes from outside uscope, in this order of preference:
     marker (`source_line`), never by number.
 - **The frame-pointer chain.**
   - Test support walks rbp through memory on a goroutine stack, reading
-    nothing uscope computed.
+    nothing microscope computed.
   - It is an independent check of physical frames below a stack switch,
     and it catches errors from the `pcsp` table.
 
@@ -1223,7 +1223,7 @@ dump, and `me` to the tests whose fixtures report them)*. Most
 bugs surface here, in whichever test happens to reach them, without a test
 written for them.
 
-- **Never wrong.** Every value uscope shows as available equals the truth
+- **Never wrong.** Every value microscope shows as available equals the truth
   the program reported. A value it cannot show is unavailable with a
   typed reason. In optimized builds unavailable is allowed; wrong never
   is.
@@ -1555,7 +1555,7 @@ These remain after the plan.
 - Goroutines cannot be frozen or resumed individually. Neither the runtime
   nor any debugger supports that (go#31132).
 - Optimized Go loses values to its own DWARF gaps (go#67130, go#72053).
-  uscope reports them unavailable, but cannot recover them.
+  microscope reports them unavailable, but cannot recover them.
 - No functions or methods are called, so a value is never shown through
   its `String()` or `Error()` method unless a view or the runtime provides
   the text.

@@ -1,6 +1,6 @@
 // Prints one line per expression the debugger must agree with, then calls
 // barrier(): `EXPECT\t<expression>\t<kind>\t<value>`, the value computed
-// here by the compiler. Expressions are chosen where C and uscope's exact
+// here by the compiler. Expressions are chosen where C and microscope's exact
 // language agree, or the native side computes the exact answer itself.
 
 #include <stdbool.h>

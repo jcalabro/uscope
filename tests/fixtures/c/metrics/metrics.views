@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # A run of doubles at a pointer, read at once.
 view c samples {

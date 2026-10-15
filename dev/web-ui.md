@@ -1,7 +1,7 @@
 # Web UI
 
-`uscope web` serves the React application in `web/` and connects every tab to
-one debugger session over WebSocket. The server is a `DebuggerHandle` client,
+`microscope web` serves the React application in `web/` and connects every tab
+to one debugger session over WebSocket. The server is a `DebuggerHandle` client,
 like the CLI and DAP server.
 
 ## Code map
@@ -36,7 +36,7 @@ Formatting shared with other clients belongs in `src/present`.
 A test detects stale output. Regenerate it with:
 
 ```sh
-USCOPE_UPDATE_PROTOCOL=1 just test protocol
+MICROSCOPE_UPDATE_PROTOCOL=1 just test protocol
 ```
 
 ## Building and testing
@@ -96,7 +96,7 @@ After a Rust protocol change, run the generator through the test path and
 inspect both sides:
 
 ```sh
-USCOPE_UPDATE_PROTOCOL=1 just test protocol
+MICROSCOPE_UPDATE_PROTOCOL=1 just test protocol
 git diff -- web/src/protocol.gen.ts
 ```
 
@@ -174,7 +174,7 @@ request key and stop, then discard on invalidation.
 ## Visualizer sandbox
 
 Renderer JavaScript is program-provided input. It runs in a worker sandbox
-with a narrow `uscope` drawing API. It receives only inputs evaluated by the
+with a narrow `microscope` drawing API. It receives only inputs evaluated by the
 debugger and cannot fetch arbitrary memory or access page state.
 
 The host enforces time, concurrency, shape, byte, image, and message limits.
@@ -186,8 +186,9 @@ Live renderers receive bounded pointer and key events. The debugger's function
 keys remain reserved, and Escape returns focus. Stop worker and graphics
 resources when a card leaves its lifetime.
 
-`sdk/web/uscope-visualizer.d.ts` is the public renderer API. Type-check built-in
-renderers against it and update public visualizer docs with any API change.
+`sdk/web/microscope-visualizer.d.ts` is the public renderer API. Type-check
+built-in renderers against it and update public visualizer docs with any API
+change.
 
 ## Profiles in the browser
 
@@ -223,7 +224,7 @@ screenshots under the target output directory, and prints console messages.
 Use it after layout, theme, panel, focus, or responsive changes even when DOM
 tests pass.
 
-`just web-dev` serves Vite on its development port and uscope on a separate
+`just web-dev` serves Vite on its development port and microscope on a separate
 port with the allowed origin configured. It drives a host browser and is one
 of the recipes that deliberately leaves the pure build boundary where needed.
 

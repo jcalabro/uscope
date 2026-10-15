@@ -10,7 +10,7 @@
 //! stored` when no view presents it. Each expression is evaluated in the
 //! frame that calls `barrier`.
 
-use uscope::{
+use microscope::{
     Evaluation, ExceptionStops, Expression, InspectedValue, PresentedCount, PresentedShape,
     StackFrameId, ValueChildQuery, ValueChildRelationship, ValueChildren,
 };
@@ -211,7 +211,7 @@ fn sorted_items(summary: &str) -> String {
     format!("{head}{}{}{close}", &body[..1], items.join(", "))
 }
 
-fn presentation(value: &InspectedValue) -> Option<&uscope::Presentation> {
+fn presentation(value: &InspectedValue) -> Option<&microscope::Presentation> {
     match &value.state {
         VariableState::Available { presentation, .. } => presentation.as_deref(),
         _ => None,
@@ -241,10 +241,10 @@ const fn is_item(relationship: &ValueChildRelationship) -> bool {
 async fn first_children(
     scenario: &Scenario,
     marker: &Marker,
-    reference: &Arc<uscope::ValueChildrenReference>,
+    reference: &Arc<microscope::ValueChildrenReference>,
     wanted: u64,
     failures: &mut Vec<String>,
-) -> Option<Vec<uscope::ValueChild>> {
+) -> Option<Vec<microscope::ValueChild>> {
     let mut children = Vec::new();
     while (children.len() as u64) < wanted {
         let page = scenario
@@ -256,9 +256,9 @@ async fn first_children(
                         offset: children.len() as u64,
                         limit: u32::try_from(wanted - children.len() as u64).expect("small"),
                     },
-                    uscope::InspectionLimits {
+                    microscope::InspectionLimits {
                         memory_reads: 1024,
-                        ..uscope::InspectionLimits::default()
+                        ..microscope::InspectionLimits::default()
                     },
                 ),
             )
@@ -295,7 +295,7 @@ async fn first_children(
 async fn check_children(
     scenario: &Scenario,
     marker: &Marker,
-    presentation: &uscope::Presentation,
+    presentation: &microscope::Presentation,
     failures: &mut Vec<String>,
 ) {
     let ValueChildren::Available(reference) = &presentation.children else {
@@ -323,7 +323,7 @@ async fn check_children(
     let raw = whole.last();
     if !matches!(
         raw,
-        Some(uscope::ValueChild {
+        Some(microscope::ValueChild {
             relationship: ValueChildRelationship::Raw,
             state: VariableState::Available {
                 presentation: None,
@@ -378,7 +378,7 @@ async fn check_name(
     scenario: &Scenario,
     marker: &Marker,
     index: u64,
-    child: &uscope::ValueChild,
+    child: &microscope::ValueChild,
     failures: &mut Vec<String>,
 ) {
     let name = match (&child.relationship, &child.state) {
@@ -387,7 +387,7 @@ async fn check_name(
         (
             ValueChildRelationship::Element { .. },
             VariableState::Available {
-                source: uscope::VariableValueSource::Computed,
+                source: microscope::VariableValueSource::Computed,
                 ..
             },
         ) => return,
@@ -398,10 +398,10 @@ async fn check_name(
         (
             ValueChildRelationship::Entry { .. },
             VariableState::Available {
-                source: uscope::VariableValueSource::Memory(address),
+                source: microscope::VariableValueSource::Memory(address),
                 ..
             },
-        ) => uscope::Expression::at(&child.type_info.name, address.get())
+        ) => microscope::Expression::at(&child.type_info.name, address.get())
             .expect("an entry's place")
             .to_string(),
         other => {
@@ -435,7 +435,7 @@ async fn check_name(
 async fn check_listed_children(
     scenario: &Scenario,
     marker: &Marker,
-    presentation: &uscope::Presentation,
+    presentation: &microscope::Presentation,
     expected: &str,
     seen: &mut BTreeSet<String>,
     failures: &mut Vec<String>,
@@ -461,12 +461,12 @@ async fn check_listed_children(
     let rendered = children
         .iter()
         .map(|child| {
-            let value = uscope::value_summary(Some(&child.type_info), &child.state);
+            let value = microscope::value_summary(Some(&child.type_info), &child.state);
             match &child.relationship {
                 ValueChildRelationship::Element { index } => format!("[{index}] = {value}"),
                 ValueChildRelationship::Entry { key, .. } => format!(
                     "{}: {value}",
-                    uscope::value_summary(Some(&key.type_info), &key.state)
+                    microscope::value_summary(Some(&key.type_info), &key.state)
                 ),
                 ValueChildRelationship::Field { name } => format!("{name} = {value}"),
                 ValueChildRelationship::Member(member) => format!(
@@ -524,7 +524,7 @@ async fn check_marker(
         Expected::Summary(expected) | Expected::Unordered(expected),
     ) = (&value.state, &marker.expected)
     {
-        if &uscope::quoted_text(text) != expected {
+        if &microscope::quoted_text(text) != expected {
             failures.push(format!("line {}: the text is {text:?}", marker.line));
         }
 
@@ -676,7 +676,7 @@ async fn check_markers(
         let view_unavailable = matches!(
             &value.state,
             VariableState::Available { presentation: Some(presentation), .. }
-                if matches!(presentation.problem, Some(uscope::ViewProblem::Unavailable(_)))
+                if matches!(presentation.problem, Some(microscope::ViewProblem::Unavailable(_)))
         );
         if optimized && (matches!(value.state, VariableState::Unavailable(_)) || view_unavailable) {
             continue;
@@ -688,7 +688,10 @@ async fn check_markers(
                 presentation: Some(presentation),
                 ..
             } = &value.state
-            && matches!(presentation.problem, Some(uscope::ViewProblem::Refused(_)))
+            && matches!(
+                presentation.problem,
+                Some(microscope::ViewProblem::Refused(_))
+            )
         {
             continue;
         }
@@ -771,7 +774,7 @@ async fn check_printed_markers(
 
 /// Every built-in view of `library` presented some marked value.
 fn assert_every_view_binds(library: &str, seen: &BTreeSet<String>) {
-    let missing = uscope::built_in_views()
+    let missing = microscope::built_in_views()
         .into_iter()
         .filter(|view| &*view.source == library)
         .map(|view| view.to_string())
@@ -950,7 +953,7 @@ async fn tokio_values_present_as_their_views_say() {
     for fixture in ["tokio-values-o0", "tokio-values-1.52-o0"] {
         let mut seen = check_printed_markers(fixture, "barrier", MarkedFrame::Caller, false).await;
         seen.extend(
-            uscope::built_in_views()
+            microscope::built_in_views()
                 .into_iter()
                 .filter(|view| {
                     [
@@ -990,7 +993,7 @@ async fn tokio_values_in_a_core_present_as_their_views_say() {
             fs::read_to_string(Scenario::fixture(&format!("{core}.log"))).expect("the core's log");
         let scenario = Scenario::open_core(
             &core,
-            &uscope::CoreDumpOptions::new(Scenario::fixture(&core)),
+            &microscope::CoreDumpOptions::new(Scenario::fixture(&core)),
         );
         let trace = scenario
             .operation("backtrace", scenario.handle().backtrace())
@@ -1042,7 +1045,7 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
             panic!("round {round}: not stopped: {:?}", snapshot.inferior);
         };
 
-        let context = uscope::StopContext {
+        let context = microscope::StopContext {
             stop: stop_id,
             execution: thread_id.into(),
             frame: caller,
@@ -1057,8 +1060,8 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
             view.evaluate(&many),
             handle.continue_execution(
                 stop_id,
-                uscope::ResumeScope::Process(process_id),
-                uscope::ExceptionDisposition::Pass,
+                microscope::ResumeScope::Process(process_id),
+                microscope::ExceptionDisposition::Pass,
             ),
         );
         resumed.unwrap_or_else(|error| panic!("round {round}: continue failed: {error}"));
@@ -1071,11 +1074,11 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
                             ..
                         } => presentation.summary.to_string(),
                         VariableState::Available {
-                            value: uscope::VariableValue::Scalar(ScalarValue::Signed(number)),
+                            value: microscope::VariableValue::Scalar(ScalarValue::Signed(number)),
                             ..
                         } => number.to_string(),
                         VariableState::Available {
-                            value: uscope::VariableValue::Scalar(ScalarValue::Unsigned(number)),
+                            value: microscope::VariableValue::Scalar(ScalarValue::Unsigned(number)),
                             ..
                         } => number.to_string(),
                         state => format!("{state:?}"),
@@ -1111,7 +1114,7 @@ async fn an_assignment_sent_before_run_control_answers_with_its_value() {
     let sum = vec!["n"; 16].join(" + ");
     let checks = format!("    check {sum} >= 0\n").repeat(5);
     let views = format!(
-        "uscope-views 1
+        "microscope-views 1
 view rust alloc::vec::Vec<T, _> {{
     let data = inner(inner(buf).ptr) as *T
     let n = len
@@ -1140,7 +1143,7 @@ view rust alloc::vec::Vec<T, _> {{
     };
 
     let handle = scenario.handle().clone();
-    let frame = handle.at(uscope::StopContext {
+    let frame = handle.at(microscope::StopContext {
         stop: stop_id,
         execution: thread_id.into(),
         frame: caller,
@@ -1151,13 +1154,13 @@ view rust alloc::vec::Vec<T, _> {{
     let (assigned, resumed) = tokio::join!(
         frame.evaluate_with(
             &assignment,
-            uscope::EvaluationMode::Assign,
-            uscope::InspectionLimits::default(),
+            microscope::EvaluationMode::Assign,
+            microscope::InspectionLimits::default(),
         ),
         handle.continue_execution(
             stop_id,
-            uscope::ResumeScope::Process(process_id),
-            uscope::ExceptionDisposition::Pass,
+            microscope::ResumeScope::Process(process_id),
+            microscope::ExceptionDisposition::Pass,
         ),
     );
     resumed.expect("continue");
@@ -1166,7 +1169,7 @@ view rust alloc::vec::Vec<T, _> {{
             matches!(
                 value.state,
                 VariableState::Available {
-                    value: uscope::VariableValue::Scalar(ScalarValue::Signed(7)),
+                    value: microscope::VariableValue::Scalar(ScalarValue::Signed(7)),
                     ..
                 }
             ),
@@ -1201,7 +1204,7 @@ async fn session_views_come_first_and_present_values_as_others() {
             scenario.handle().load_views(
                 &[(
                     "session.views",
-                    "uscope-views 1
+                    "microscope-views 1
 view rust std::**::PathBuf {
     show value(inner(self))
     field length = inner(self).len
@@ -1270,7 +1273,7 @@ view rust nowhere {
         matches!(
             length.state,
             VariableState::Available {
-                value: uscope::VariableValue::Scalar(ScalarValue::Unsigned(11)),
+                value: microscope::VariableValue::Scalar(ScalarValue::Unsigned(15)),
                 ..
             }
         ),
@@ -1288,7 +1291,7 @@ view rust nowhere {
     scenario.shutdown().await;
 }
 
-/// Views a module carries in its `.debug_uscope_views` section present
+/// Views a module carries in its `.debug_microscope_views` section present
 /// that module's own types, and never another module's type of the same
 /// name.
 #[tokio::test]

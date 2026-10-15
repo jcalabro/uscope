@@ -139,7 +139,7 @@ interface FormProps {
 
 function LaunchForm({ working, submit }: FormProps) {
   const connection = useConnection();
-  const [recent, setRecent] = useState(() => read("uscope-recent", [], isRecentLaunches));
+  const [recent, setRecent] = useState(() => read("microscope-recent", [], isRecentLaunches));
   const [form, setForm] = useState<RecentLaunch>(
     () => recent[0] ?? { program: "", arguments: "", cwd: "", environment: "" },
   );
@@ -174,7 +174,7 @@ function LaunchForm({ working, submit }: FormProps) {
 
   return (
     <form className="card-body" style={{ padding: 0 }} onSubmit={launch(false)}>
-      <Field label="Program" note="A path on the machine uscope runs on. Tab completes it.">
+      <Field label="Program" note="A path on the machine microscope runs on. Tab completes it.">
         {(id) => (
           <PathInput
             id={id}
@@ -200,7 +200,7 @@ function LaunchForm({ working, submit }: FormProps) {
         )}
       </Field>
       <div className="two">
-        <Field label="Working directory" note="Empty runs it where uscope runs.">
+        <Field label="Working directory" note="Empty runs it where microscope runs.">
           {(id) => (
             <PathInput
               id={id}
@@ -377,7 +377,7 @@ function RecordForm() {
         )}
       </Field>
       <div className="two">
-        <Field label="Working directory" note="Empty runs it where uscope runs.">
+        <Field label="Working directory" note="Empty runs it where microscope runs.">
           {(id) => (
             <PathInput
               id={id}
@@ -531,8 +531,8 @@ function AttachForm({ working, submit }: FormProps) {
     <div className="card-body" style={{ padding: 0 }}>
       {scope !== null && scope > 0 && (
         <div className="banner">
-          The kernel's <code>ptrace_scope</code> is {scope}, so attaching to a process that uscope
-          did not start may be refused. A program can allow it with{" "}
+          The kernel's <code>ptrace_scope</code> is {scope}, so attaching to a process that
+          microscope did not start may be refused. A program can allow it with{" "}
           <code>prctl(PR_SET_PTRACER, …)</code>, or{" "}
           <code>sudo sysctl kernel.yama.ptrace_scope=0</code> allows it until reboot.
         </div>

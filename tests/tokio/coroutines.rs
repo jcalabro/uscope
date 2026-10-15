@@ -1,10 +1,10 @@
-//! uscope's reading of each coroutine's debug information, compared with
+//! microscope's reading of each coroutine's debug information, compared with
 //! readelf's: the build reduces readelf's dump of each fixture to one line
 //! per coroutine state, beside the fixture as `<fixture>.coroutines`.
 
 use std::collections::BTreeSet;
 
-use uscope::{CoroutineStateKind, ModuleImage, RecordMemberLayout, TypeNode};
+use microscope::{CoroutineStateKind, ModuleImage, RecordMemberLayout, TypeNode};
 
 use crate::support::Scenario;
 
@@ -42,7 +42,7 @@ fn readelf_record(fixture: &str) -> BTreeSet<StateLine> {
         .collect()
 }
 
-/// The same lines from uscope's normalization of every coroutine type.
+/// The same lines from microscope's normalization of every coroutine type.
 fn normalized(image: &ModuleImage) -> BTreeSet<StateLine> {
     let mut lines = BTreeSet::new();
     for node in image.types() {
@@ -116,7 +116,7 @@ async fn coroutines_read_as_readelf_reads_them() {
         let extra = actual.difference(&expected).collect::<Vec<_>>();
         assert!(
             missing.is_empty() && extra.is_empty(),
-            "{fixture}: readelf only: {missing:#?}\nuscope only: {extra:#?}"
+            "{fixture}: readelf only: {missing:#?}\nmicroscope only: {extra:#?}"
         );
         scenario.shutdown().await;
     }

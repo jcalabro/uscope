@@ -1,6 +1,6 @@
 # Coding style
 
-This page describes how uscope code is shaped. Read it before adding a data
+This page describes how microscope code is shaped. Read it before adding a data
 structure or a function that takes several numbers. It is a starting point and
 will grow.
 

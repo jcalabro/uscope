@@ -5,7 +5,7 @@ language than a single location: values split across registers and memory
 (`DW_OP_piece`, `DW_OP_bit_piece`), values recovered from the caller's call
 site (`DW_OP_entry_value`, `DW_OP_GNU_parameter_ref`), pointers to objects
 with no address (`DW_OP_implicit_pointer`), and subroutine calls
-(`DW_OP_call2`, `DW_OP_call4`, `DW_OP_call_ref`). This records how uscope
+(`DW_OP_call2`, `DW_OP_call4`, `DW_OP_call_ref`). This records how microscope
 evaluates them, why, and the producer facts the design depends on.
 
 ## Producer facts

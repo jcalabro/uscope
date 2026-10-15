@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     CodeRole, CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition,
     ExitStatus, FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame,
     StackFrameId, StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable,
     VariableState, VariableUnavailableReason, VariableValue, WatchAccess, WatchScope,
     WatchpointInvalidation,
 };
+use support::Scenario;
 
 /// The frames fixture across compilers, optimization, and PIE.
 const VARIANTS: [&str; 5] = ["gcc-o0", "gcc-o2", "gcc-o2-nopie", "clang-o0", "clang-o2"];
@@ -462,7 +462,7 @@ fn parse_oracle(path: &Path) -> BTreeMap<u64, Vec<OracleFrame>> {
         )
     });
     let mut lines = text.lines();
-    assert_eq!(lines.next(), Some("uscope-frame-variables-oracle-v2"));
+    assert_eq!(lines.next(), Some("microscope-frame-variables-oracle-v2"));
     let mut threads: BTreeMap<u64, Vec<OracleFrame>> = BTreeMap::new();
     let mut thread = None;
     for line in lines {
@@ -603,7 +603,7 @@ async fn compare_frame(
     our_names.sort();
     gdb_names.sort();
 
-    // gdb shows a Go local before the line declaring it has run; uscope,
+    // gdb shows a Go local before the line declaring it has run; microscope,
     // like Delve, only past it.
     if go {
         gdb_names.retain(|name| our_names.contains(name));
@@ -641,7 +641,7 @@ async fn compare_frame(
                     path,
                     scenario
                         .handle()
-                        .inspect(&uscope::Expression::parse(path).expect("member path")),
+                        .inspect(&microscope::Expression::parse(path).expect("member path")),
                 )
                 .await;
             compare_value(
@@ -884,14 +884,14 @@ async fn frame_selection_lasts_until_the_next_stop() {
 
 #[tokio::test]
 async fn explicit_contexts_inspect_any_frame_without_selecting_it() {
-    use uscope::StopContext;
+    use microscope::StopContext;
 
     let mut scenario = stop_in_leaf("gcc-o0").await;
     let snapshot = scenario.snapshot().await;
     let stop = snapshot.stop_id.expect("stopped");
     let thread = snapshot
         .selected
-        .and_then(uscope::ExecutionContext::as_thread)
+        .and_then(microscope::ExecutionContext::as_thread)
         .expect("selected thread");
     let frames = backtrace(&scenario).await;
     let recursion = level_of(&frames, "frames_recurse", 0);
@@ -989,7 +989,7 @@ async fn each_thread_keeps_its_own_selected_frame() {
     let snapshot = scenario.snapshot().await;
     let crashing = snapshot
         .selected
-        .and_then(uscope::ExecutionContext::as_thread)
+        .and_then(microscope::ExecutionContext::as_thread)
         .expect("selected thread");
     let worker = snapshot
         .threads
@@ -1249,7 +1249,7 @@ async fn stepping_from_a_selected_outer_frame_is_explicit() {
         snapshot.stop_id.expect("stopped"),
         snapshot
             .selected
-            .and_then(uscope::ExecutionContext::as_thread)
+            .and_then(microscope::ExecutionContext::as_thread)
             .expect("selected thread"),
     );
     for kind in [
@@ -1328,7 +1328,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     ));
     let depth_one = level_of(&frames, "frames_recurse", 1);
     select(&mut scenario, depth_one).await;
-    let below = uscope::Expression::parse("below").expect("expression");
+    let below = microscope::Expression::parse("below").expect("expression");
     let target = scenario
         .operation(
             "resolve below",

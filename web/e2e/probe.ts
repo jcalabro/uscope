@@ -1,13 +1,13 @@
-// Drives a real `uscope web` through a few steps and saves a screenshot after
-// each, printing the page's errors: the quickest look at one interaction.
-// `node e2e/probe.ts PROGRAM STEP...`, where a step is `key:F5`,
-// `click:TEXT`, `type:TEXT`, `wait:TEXT`, `goto:PATH`, `eval:JS`, or `sleep:MS`;
-// `views:PATH` and `arg:TEXT`, wherever they are, start uscope with that
-// views file or hand the program that argument.
+// Drives a real `microscope web` through a few steps and saves a screenshot
+// after each, printing the page's errors: the quickest look at one interaction.
+// `node e2e/probe.ts PROGRAM STEP...`, where a step is `key:F5`, `click:TEXT`,
+// `type:TEXT`, `wait:TEXT`, `goto:PATH`, `eval:JS`, or `sleep:MS`; `views:PATH`
+// and `arg:TEXT`, wherever they are, start microscope with that views file or
+// hand the program that argument.
 
 import * as path from "node:path";
 import { chromium } from "@playwright/test";
-import { root, startUscope } from "./server.ts";
+import { root, startMicroscope } from "./server.ts";
 
 const [program, ...given] = process.argv.slice(2);
 if (!program) {
@@ -22,7 +22,7 @@ const args = starting.flatMap((step) =>
   step.startsWith("arg:") ? [step.slice("arg:".length)] : [],
 );
 const out = path.join(root, "target", "web-shots");
-const server = await startUscope([...views, program, ...args], "");
+const server = await startMicroscope([...views, program, ...args], "");
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 800 } });

@@ -78,7 +78,7 @@ pub fn random_hex(bytes: usize) -> std::io::Result<String> {
 /// The cookie that carries a token. Browsers share cookies between the
 /// ports of one host, so the name includes this server's port.
 pub fn cookie_name(port: u16) -> String {
-    format!("uscope-{port}")
+    format!("microscope-{port}")
 }
 
 /// The `Set-Cookie` value that stores a token for this server, sent only
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn the_cookie_is_found_by_this_servers_name() {
-        let header = "theme=dark; uscope-9000=v-other; uscope-7341=c-abc ; x=y";
+        let header = "theme=dark; microscope-9000=v-other; microscope-7341=c-abc ; x=y";
         assert_eq!(cookie(header, 7341), Some("c-abc"));
         assert_eq!(cookie(header, 9000), Some("v-other"));
         assert_eq!(cookie(header, 1), None);

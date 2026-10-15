@@ -1,4 +1,4 @@
-//! The `uscope` command-line debugger.
+//! The `microscope` command-line debugger.
 
 // Production code returns errors instead of panicking; see dev/assertions.md.
 // Tests may unwrap.
@@ -27,10 +27,11 @@ use anyhow::{Context, Result};
 
 // Each thread counts its allocations for `--timings`.
 #[global_allocator]
-static ALLOCATOR: uscope::timings::alloc::Counting<uscope::timings::alloc::Selected> =
-    uscope::timings::alloc::selected();
+static ALLOCATOR: microscope::timings::alloc::Counting<microscope::timings::alloc::Selected> =
+    microscope::timings::alloc::selected();
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use uscope::Debugger;
+use microscope::Debugger;
+use microscope::timings;
 
 use cli::session::{Session, Target};
 use cli::terminal::{ColorChoice, Role};
@@ -38,12 +39,12 @@ use cli::{Cli, DisassemblySyntax, LaunchSettings, Renderers};
 
 const COMMON_FORMS: &str = "\
 Common forms:
-  uscope EXECUTABLE [-- ARGS...]
-  uscope --attach PID|NAME [EXECUTABLE]
-  uscope --core CORE [EXECUTABLE]
-  uscope --launch NAME              a launch configuration of the project
+  microscope EXECUTABLE [-- ARGS...]
+  microscope --attach PID|NAME [EXECUTABLE]
+  microscope --core CORE [EXECUTABLE]
+  microscope --launch NAME              a launch configuration of the project
 
-Use `uscope --help` for every option, and `uscope config` for settings.";
+Use `microscope --help` for every option, and `microscope config` for settings.";
 
 #[derive(Parser)]
 #[expect(clippy::struct_excessive_bools, reason = "each is a flag")]
@@ -84,7 +85,7 @@ struct Args {
     core: Option<PathBuf>,
 
     /// Start the project's launch configuration NAME, from its
-    /// .uscope/config.toml. A project with one starts it by default.
+    /// .microscope/config.toml. A project with one starts it by default.
     #[arg(
         short = 'l',
         long,
@@ -197,7 +198,7 @@ struct Args {
     debuginfod: bool,
 
     /// Read debug information afresh, neither reading nor writing the image
-    /// cache in `USCOPE_CACHE_DIR` or `~/.cache/uscope/images`.
+    /// cache in `MICROSCOPE_CACHE_DIR` or `~/.cache/microscope/images`.
     #[arg(long, hide_short_help = true, help_heading = "Debug information")]
     no_cache: bool,
 
@@ -306,7 +307,7 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
 }
 
 fn main() -> ExitCode {
-    uscope::timings::alloc::return_freed_memory_promptly();
+    microscope::timings::alloc::return_freed_memory_promptly();
 
     // The terminal launcher must stay single-threaded, so it runs before the
     // runtime starts its threads.
@@ -325,8 +326,8 @@ fn main() -> ExitCode {
         return web::terminal::run_helper(std::env::args_os().skip(2));
     }
 
-    // Both of uscope's own variables are removed from the environment here,
-    // before uscope starts any other thread, so every program it starts
+    // Both of microscope's own variables are removed from the environment here,
+    // before microscope starts any other thread, so every program it starts
     // goes without them. Removing them is unsafe only while another thread
     // may read the environment, and none exists yet.
     #[cfg(debug_assertions)]
@@ -348,7 +349,7 @@ fn main() -> ExitCode {
 }
 
 /// Streams a development build's flight recording to the file named by
-/// `USCOPE_FLIGHT_RECORDING`, or to a new file under the recorder's `runs`
+/// `MICROSCOPE_FLIGHT_RECORDING`, or to a new file under the recorder's `runs`
 /// directory. An empty variable turns recording off, as does running under
 /// nextest without the variable, so test runs do not crowd out recordings of
 /// development runs.
@@ -358,12 +359,12 @@ fn main() -> ExitCode {
 #[cfg(debug_assertions)]
 #[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
 fn start_flight_recording() {
-    use uscope::flight_recorder;
+    use microscope::flight_recorder;
 
-    const VARIABLE: &str = "USCOPE_FLIGHT_RECORDING";
+    const VARIABLE: &str = "MICROSCOPE_FLIGHT_RECORDING";
     let path = std::env::var_os(VARIABLE);
 
-    // SAFETY: `main` calls this before uscope starts any other thread, so
+    // SAFETY: `main` calls this before microscope starts any other thread, so
     // none can read the environment meanwhile.
     unsafe { std::env::remove_var(VARIABLE) };
     let started = match path {
@@ -381,7 +382,7 @@ fn start_flight_recording() {
 async fn async_main() -> ExitCode {
     let args = parse_args();
     if let Err(error) =
-        uscope::cache::configure(args.no_cache.then_some(uscope::cache::Setting::Off))
+        microscope::cache::configure(args.no_cache.then_some(microscope::cache::Setting::Off))
     {
         eprintln!("warning: {error}; loading debug information without it");
     }
@@ -441,16 +442,13 @@ async fn async_main() -> ExitCode {
     }
 
     let recording = match &args.timings {
-        Some(_) => {
-            match uscope::timings::Recording::start(uscope::timings::Options { instructions: true })
-            {
-                Ok(recording) => Some(recording),
-                Err(error) => {
-                    eprintln!("error: {error}");
-                    return ExitCode::FAILURE;
-                }
+        Some(_) => match timings::Recording::start(timings::Options { instructions: true }) {
+            Ok(recording) => Some(recording),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
             }
-        }
+        },
         None => None,
     };
 
@@ -479,7 +477,8 @@ async fn async_main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
+        // A closed stdout pipe, such as `microscope ... | head`, is a normal
+        // end.
         Err(error) if cli::is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!(
@@ -494,7 +493,7 @@ async fn async_main() -> ExitCode {
 fn parse_args() -> Args {
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
 
-    // Alone, uscope starts the project's launch configuration, or, with
+    // Alone, microscope starts the project's launch configuration, or, with
     // none, shows its short help.
     if arguments.len() == 1 && !project_launches() {
         arguments.push("-h".into());
@@ -507,7 +506,7 @@ fn parse_args() -> Args {
 }
 
 /// Whether the project of the working directory describes how to start
-/// its program, so that `uscope` alone starts it. Settings that cannot be
+/// its program, so that `microscope` alone starts it. Settings that cannot be
 /// read describe nothing here; starting reports why.
 fn project_launches() -> bool {
     let Ok(start) = std::env::current_dir() else {
@@ -521,7 +520,7 @@ fn project_launches() -> bool {
 }
 
 /// Ends `recording` and writes what it collected to `path`.
-fn write_timings(recording: uscope::timings::Recording, path: &std::path::Path) -> Result<()> {
+fn write_timings(recording: microscope::timings::Recording, path: &std::path::Path) -> Result<()> {
     std::fs::write(path, recording.finish()?.to_json()?)?;
     Ok(())
 }
@@ -599,7 +598,7 @@ enum ViewsCommand {
     },
 }
 
-/// The largest recording `uscope views replay` reads: far more than the
+/// The largest recording `microscope views replay` reads: far more than the
 /// largest inspection's runs record.
 const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -622,7 +621,7 @@ fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
         })
         .transpose()?;
-    let runs = uscope::replay_kernel_runs(&text, wasm.as_deref())
+    let runs = microscope::replay_kernel_runs(&text, wasm.as_deref())
         .map_err(|error| anyhow::anyhow!("{}: {error}", recording.display()))?;
     let mut reproduced = true;
     for (index, run) in runs.iter().enumerate() {
@@ -647,7 +646,7 @@ fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -
     Ok(reproduced && !runs.is_empty())
 }
 
-/// Runs `uscope views check`, `explain`, or `replay`.
+/// Runs `microscope views check`, `explain`, or `replay`.
 async fn run_views(args: &ViewsArgs) -> Result<bool> {
     let (program, views) = match &args.command {
         ViewsCommand::Check { program, views } | ViewsCommand::Explain { program, views, .. } => {
@@ -704,11 +703,11 @@ async fn run_views(args: &ViewsArgs) -> Result<bool> {
 
 async fn open_debugger(
     target: &Target,
-    debug_files: &uscope::DebugFileOptions,
+    debug_files: &microscope::DebugFileOptions,
 ) -> Result<Debugger> {
     match target {
         Target::Core(options) => {
-            let options = uscope::CoreDumpOptions {
+            let options = microscope::CoreDumpOptions {
                 debug_files: debug_files.clone(),
                 ..options.clone()
             };
@@ -786,14 +785,17 @@ fn print_config_paths(start: &std::path::Path, user: Option<&std::path::Path>) {
     println!("project root: {}", root.display());
     match user {
         Some(path) => println!("user:         {}{}", path.display(), exists(path)),
-        None => println!("user:         none (USCOPE_CONFIG is empty)"),
+        None => println!("user:         none (MICROSCOPE_CONFIG is empty)"),
     }
 
     let mut files = vec![
-        ("project:", root.join(".uscope/config.toml")),
-        ("local:", root.join(".uscope/config.local.toml")),
-        ("views:", root.join(".uscope/views")),
-        ("breakpoints:", root.join(".uscope/state/breakpoints.toml")),
+        ("project:", root.join(".microscope/config.toml")),
+        ("local:", root.join(".microscope/config.local.toml")),
+        ("views:", root.join(".microscope/views")),
+        (
+            "breakpoints:",
+            root.join(".microscope/state/breakpoints.toml"),
+        ),
     ];
     if let Some(state) = cli::config::state_directory() {
         files.push(("trust:", state.join("trust.toml")));
@@ -805,7 +807,7 @@ fn print_config_paths(start: &std::path::Path, user: Option<&std::path::Path>) {
     }
 }
 
-/// Runs `uscope config` and returns whether it succeeded.
+/// Runs `microscope config` and returns whether it succeeded.
 fn run_config(args: &ConfigArgs) -> Result<bool> {
     use cli::config::{self, Files, TrustStore, UserFile};
     let start = std::env::current_dir().context("cannot read the working directory")?;

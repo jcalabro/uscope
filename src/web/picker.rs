@@ -134,8 +134,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("uscope-picker-{name}-{}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("microscope-picker-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("create scratch");
             Self(path)

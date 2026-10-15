@@ -405,7 +405,7 @@ impl Filter {
                 }
                 "inject" | "fault" => {
                     return error(format!(
-                        "-e {qualifier}= is not supported: uscope never changes what a system call does"
+                        "-e {qualifier}= is not supported: microscope never changes what a system call does"
                     ));
                 }
                 other => return error(format!("unknown qualifier {other:?}")),

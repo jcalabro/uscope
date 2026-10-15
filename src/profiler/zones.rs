@@ -63,7 +63,7 @@ pub struct ProgramMarker {
 pub struct ProbeCounts {
     pub events: u64,
 
-    /// Records threads wrote over before uscope read them.
+    /// Records threads wrote over before microscope read them.
     pub overwritten: u64,
 
     /// Events no ring could take.
@@ -178,7 +178,7 @@ impl Profile {
             .collect()
     }
 
-    /// Why uscope could not read a module's instrumentation.
+    /// Why microscope could not read a module's instrumentation.
     #[must_use]
     pub fn probe_problems(&self) -> Vec<(i64, String)> {
         self.markers(MarkerKind::Probes)
@@ -225,7 +225,7 @@ impl Profile {
         for zone in &capture.zones {
             let site = &capture.sites[zone.site.get() as usize];
             let name = capture.string(site.name.get());
-            let label = site.kind == uscope_probes::abi::SITE_LABEL;
+            let label = site.kind == microscope_probes::abi::SITE_LABEL;
             let position = sites
                 .iter()
                 .position(|known| known.name == name && known.label == label)

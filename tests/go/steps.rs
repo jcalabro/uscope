@@ -4,7 +4,7 @@
 
 use std::process::Stdio;
 
-use uscope::{BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason};
+use microscope::{BreakpointSpec, LaunchOptions, LineNumber, StepKind, StopReason};
 
 use crate::stops::{integer, place};
 use crate::support::{self, Scenario};

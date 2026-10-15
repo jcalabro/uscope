@@ -1,11 +1,11 @@
 //! Breakpoints an interactive session keeps for the next one, in the
-//! project's `.uscope/state/breakpoints.toml`.
+//! project's `.microscope/state/breakpoints.toml`.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use microscope::{Breakpoint, BreakpointSpec};
 use serde::{Deserialize, Serialize};
-use uscope::{Breakpoint, BreakpointSpec};
 
 /// The version of the file's layout this build reads and writes.
 const VERSION: u32 = 1;
@@ -79,7 +79,7 @@ struct File {
 
 /// Where a project keeps its saved state.
 pub fn state_directory(root: &Path) -> PathBuf {
-    root.join(".uscope/state")
+    root.join(".microscope/state")
 }
 
 /// Where a project keeps its breakpoints and displays.
@@ -97,7 +97,7 @@ pub fn read(path: &Path) -> Result<Contents, String> {
     let file: File = toml::from_str(&text).map_err(|error| error.to_string().trim().to_owned())?;
     if file.version != VERSION {
         return Err(format!(
-            "version {} is not one this uscope reads, which is {VERSION}",
+            "version {} is not one this microscope reads, which is {VERSION}",
             file.version
         ));
     }
@@ -217,7 +217,7 @@ pub struct Kept {
     pub line_texts: std::collections::BTreeMap<String, String>,
 
     /// Where the session finds source files, which line texts are read from.
-    pub source_paths: uscope::SourcePathMap,
+    pub source_paths: microscope::SourcePathMap,
 }
 
 /// The commands that recreate `breakpoints`, one per line, temporary and
@@ -256,7 +256,11 @@ pub fn commands(breakpoints: &[Breakpoint], root: &Path) -> String {
 
 /// The text of line `line` of the source file recorded at `path`, read
 /// where `source_paths` finds it, without its line ending.
-pub fn line_text(source_paths: &uscope::SourcePathMap, path: &Path, line: u64) -> Option<String> {
+pub fn line_text(
+    source_paths: &microscope::SourcePathMap,
+    path: &Path,
+    line: u64,
+) -> Option<String> {
     let text = source_paths
         .candidates(path)
         .iter()

@@ -51,7 +51,7 @@ pub async fn frame(State(app): State<Arc<App>>, headers: HeaderMap) -> Response 
 /// The frame's page: its script, with the worker's as a string before it.
 fn page(nonce: &str) -> String {
     format!(
-        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>uscope renderers</title>\n\
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>microscope renderers</title>\n\
          <script nonce=\"{nonce}\">\nconst WORKER_SOURCE = {};\n{FRAME}</script>\n",
         script_string(WORKER)
     )

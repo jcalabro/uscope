@@ -64,7 +64,7 @@ mod recording {
             });
             path
         });
-        command.env("USCOPE_FLIGHT_RECORDING", &path);
+        command.env("MICROSCOPE_FLIGHT_RECORDING", &path);
         Some(path)
     }
 
@@ -139,7 +139,7 @@ mod recording {
             let mut kept = Vec::new();
             if self.scenarios {
                 let path = self.path("");
-                match uscope::flight_recorder::dump(&path) {
+                match microscope::flight_recorder::dump(&path) {
                     Ok(()) => kept.push(path),
                     Err(error) => eprintln!("cannot keep {}: {error}", path.display()),
                 }
@@ -182,7 +182,7 @@ mod recording {
     fn start() -> Recordings {
         let thread = std::thread::current();
         let test = thread.name().unwrap_or("unnamed");
-        let directory = uscope::flight_recorder::directory()
+        let directory = microscope::flight_recorder::directory()
             .join("tests")
             .join(env!("CARGO_CRATE_NAME"));
         for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {

@@ -4,8 +4,8 @@ Status: proposed, 2026-10-07. Decisions marked *(settled)* were made with
 the maintainer. Like Go's, this plan keeps tokio support as simple as it can
 be while staying rigorous, and defers anything that is not needed for that.
 
-Debugging a tokio program in uscope should feel like debugging ordinary Rust.
-That means:
+Debugging a tokio program in microscope should feel like debugging ordinary
+Rust. That means:
 
 - A task is something you can list, select, and inspect, as a goroutine is.
 - A suspended task shows a backtrace: the chain of `async fn`s it is awaiting
@@ -22,7 +22,7 @@ That means:
 
 This record sets out:
 
-- where uscope stands;
+- where microscope stands;
 - what tokio and rustc's async lowering demand;
 - what the prior art does;
 - the decisions that follow and the architecture they need;
@@ -32,7 +32,7 @@ It closes the TODO item "First-class tokio support". It builds on the seams
 `plans/go.md` built for Go, and changes them only where a runtime whose tasks
 have no stacks needs it.
 
-## Where uscope stands
+## Where microscope stands
 
 **What works today.** These were run on 2026-10-07 against tokio 1.52.3,
 compiled by the pinned rustc (1.99 nightly, 2026-07-10). Each build was
@@ -58,7 +58,7 @@ debug (`opt-level=0`, `debuginfo=2`), release with `debuginfo=2`, or
 - **Tasks are invisible.**
   - `tasks`, `task`, and `$task` say "the program has no tasks", and
     `step task` silently behaves as `next`.
-  - Attached to a server with 7 parked tasks, uscope showed 26 threads, all
+  - Attached to a server with 7 parked tasks, microscope showed 26 threads, all
     named `tokio-rt-worker`, in `futex_wait` or `epoll_wait`. The only frame
     of the program's own code on any of them was inside a `spawn_blocking`
     closure.
@@ -77,10 +77,10 @@ debug (`opt-level=0`, `debuginfo=2`), release with `debuginfo=2`, or
     "no function named 'leaf'".
   - Line breakpoints also bind a second location in the future's drop glue,
     up to 13 locations in release.
-- **A breakpoint on an `.await` line fires only on resumption.** uscope binds
-  the lowest-addressed row of a line. rustc places each await's resume path
-  first, so the breakpoint fires when the task is re-polled after that await
-  was pending, never when execution first arrives there.
+- **A breakpoint on an `.await` line fires only on resumption.** microscope
+  binds the lowest-addressed row of a line. rustc places each await's resume
+  path first, so the breakpoint fires when the task is re-polled after that
+  await was pending, never when execution first arrives there.
   - `break server.rs:13` on a `write_all(..).await` that never pends had 0
     hits over hundreds of echoes.
   - In release, `break steps.rs:18` on a `sleep(..).await` had 0 hits over
@@ -118,7 +118,7 @@ debug (`opt-level=0`, `debuginfo=2`), release with `debuginfo=2`, or
   - In release, merged identical functions name `current_thread::Handle` on
     a multi-thread runtime.
 - **Simultaneous breakpoint hits are lost from view.** When several workers
-  hit a breakpoint at once, uscope makes one stop. The other hits show only
+  hit a breakpoint at once, microscope makes one stop. The other hits show only
   in `threads` (`stopped at breakpoint 2 (hit 1)`), and no later stop
   reports them. Two of three runs lost a `spawn_blocking` breakpoint this
   way. This is existing all-stop policy, but tokio meets it constantly: four
@@ -131,7 +131,7 @@ debug (`opt-level=0`, `debuginfo=2`), release with `debuginfo=2`, or
   - `break rust_panic` works around it. The program's frame is then #7.
 - **Values.**
   - A future's state prints as `3 {…}` rather than `Suspend0 {…}`. rustc
-    names the state on the variant's type, and uscope prints the member
+    names the state on the variant's type, and microscope prints the member
     name.
   - `ptype` shows only `{async_fn_env#0}`, which cannot be written in an
     expression.
@@ -148,8 +148,8 @@ debug (`opt-level=0`, `debuginfo=2`), release with `debuginfo=2`, or
     is named `mine`").
   - The parent's saved locals show as `optimized out`, though they are in
     memory.
-- **Loading is slow.** A debug uscope spends 10–12 s of CPU loading a 20 MB
-  tokio binary; a release uscope takes 1.8 s and 230 MB. This is the
+- **Loading is slow.** A debug microscope spends 10–12 s of CPU loading a 20 MB
+  tokio binary; a release microscope takes 1.8 s and 230 MB. This is the
   existing TODO item "Loading binaries and debug info performance
   improvements"; tokio programs make it pressing.
 
@@ -324,7 +324,7 @@ It re-polls every task in a tracing mode, which needs the runtime running.
   Stacks and hansei's census both do this.
 - **A creation site** (Kotlin) and a **reason for each wait** (hansei).
 
-**Where uscope can do better than all of them:**
+**Where microscope can do better than all of them:**
 
 - live processes and cores, by the same code;
 - both runtime flavors, and blocking tasks;
@@ -406,7 +406,7 @@ Go)*.
 
 **Support one pinned tokio** *(settled)*.
 
-- The fixture workspace's lockfile pins tokio 1.52.3, the release uscope
+- The fixture workspace's lockfile pins tokio 1.52.3, the release microscope
   itself locks today.
 - Moving the pin is a change of its own: contract, conventions, views, and
   fixture expectations move together.
@@ -592,7 +592,7 @@ address. The object's address is stable: futures are pinned.
   - If the ancestor goes on to a new line without polling the object, the
     step ends there and says the awaited future was dropped.
 - **Another task's breakpoint, watchpoint, or signal ends the step where it
-  happened,** as for Go. uscope's step is never left pending.
+  happened,** as for Go. microscope's step is never left pending.
 - **A step that cannot name its object** (no `self` location, no committed
   chain) degrades to task identity, which is exact except when the same
   function appears twice in the chain. It says when that happened.
@@ -668,7 +668,7 @@ already records each hit in its thread's state.
 
 **What stays out.**
 
-- **uscope never calls the program's functions**, as for Go. tokio's
+- **microscope never calls the program's functions**, as for Go. tokio's
   `Handle::dump`, `Debug` impls, and `JoinHandle::is_finished` are never run.
   Views stand in for them.
 - **Watching a local of an async frame** is refused, with a reason, until a
@@ -1136,7 +1136,7 @@ fail (see Testing).
      - tokio's views gained sockets, their halves and buffers, and the I/O
        futures, since the server walkthrough found every connection's task
        listed only as suspended.
-     - Not built: a forked child's runtime, since uscope cannot attach to a
+     - Not built: a forked child's runtime, since microscope cannot attach to a
        stopped child; `corrupt`'s out-of-range `__state`, which needs a
        program to damage a live future; `step task` in DAP and the web
        page.
@@ -1257,8 +1257,8 @@ A test earns its place when all of these hold:
 1. **It drives real compiler output through the public request path:**
    `tests/support::Scenario`, the DAP harness, or the web server. Pure
    layers are the exception, tested below their callers only where noted.
-2. **It checks against an oracle uscope did not compute.** Comparing uscope
-   with itself proves nothing.
+2. **It checks against an oracle microscope did not compute.** Comparing
+   microscope with itself proves nothing.
 3. **It fails for a bug a user would see.**
 4. **It is deterministic,** waiting only for what it can observe (AGENTS.md):
    an event, a debugger state, a `/proc` fact, or a line the fixture prints.
@@ -1278,7 +1278,7 @@ are shared: one checkpoint of the worker pool verifies dozens of them.
 | Property tests | Pure algorithms whose correctness is a law over many inputs | The future walker, the task-list walker, paging, state decoding, activations |
 | Fuzzing | Code that reads untrusted memory or machine code | The walkers, coroutine normalization, the dispatch decoder, the panic payload |
 | Hardware oracle | A static analysis checked against what the CPU actually does | Resume points |
-| Independent parsers | Static facts checked against a reader uscope did not write | `readelf` for coroutine DWARF; std's own panic output |
+| Independent parsers | Static facts checked against a reader microscope did not write | `readelf` for coroutine DWARF; std's own panic output |
 | Stress | Races that appear one run in hundreds | `just stress` over `tests/tokio` |
 | Soak | Leaks, drift, and rare tears that need minutes of real load | `just soak`, one recipe, at the end of phases 3, 5, and 7 |
 | User acceptance | The whole experience in real editors | `just uat-vscode`, `just uat-nvim`, and a written walkthrough |
@@ -1290,7 +1290,7 @@ cover the oracles instead.
 
 ### Oracles
 
-Truth comes from outside uscope, in this order of preference.
+Truth comes from outside microscope, in this order of preference.
 
 - **The program reports its own truth.** A small `truth` library in the
   fixture workspace gives every fixture the same tab-separated `TRUTH`
@@ -1311,7 +1311,7 @@ Truth comes from outside uscope, in this order of preference.
     - Each task records the values of the locals its checkpoint names:
       integers exactly, floats as bits, strings and collections by
       contents.
-    - These are the values uscope must show for the saved locals of each
+    - These are the values microscope must show for the saved locals of each
       async frame.
   - **Threads.** A task records `gettid()` each time it resumes, which proves
     migrations happened and names the thread a running task should be on.
@@ -1321,7 +1321,7 @@ Truth comes from outside uscope, in this order of preference.
     Breakpoint hit counts are checked against these counts.
   - **The program's state at a stop.** Every fixture task keeps `me`, its
     own id, in a local saved across its awaits. A step that ends with `me`
-    changed ended in the wrong task, whatever uscope believes.
+    changed ended in the wrong task, whatever microscope believes.
 - **The native run.**
   - Every fixture also runs without a debugger at build time. Its exit
     status, standard output, and standard error are recorded beside it, as
@@ -1337,7 +1337,7 @@ Truth comes from outside uscope, in this order of preference.
   - At build time, `readelf --debug-dump=info` output is reduced to every
     coroutine type's states, their `decl_line`s, and their awaitee types,
     and recorded beside the fixture, as the `gosym` oracle is for Go.
-  - uscope's normalization must agree for every coroutine in every fixture.
+  - microscope's normalization must agree for every coroutine in every fixture.
     The macro-pairing rule is the one documented exception, and it must
     agree with the `// AWAIT:` markers.
 - **The CPU, for resume points.**
@@ -1419,7 +1419,7 @@ Every tokio scenario is built `checked`, which runs `check_tokio_stop`
 Go. Most bugs surface here, in whichever test happens to reach them.
 
 - **Never wrong.** Every value shown as available equals the truth the
-  program recorded for it. A value uscope cannot show is unavailable, with a
+  program recorded for it. A value microscope cannot show is unavailable, with a
   typed reason. In optimized builds unavailable is allowed; wrong never is.
   This is where stale stack slots after a resume are caught.
 - **Tasks agree with the program** at a quiescent checkpoint:
@@ -1749,7 +1749,7 @@ The simulator does not run tokio, and this plan adds nothing to it:
 - **Soak.** One new recipe, `just soak MINUTES`, runs inside the
   memory-capped scope and is not part of `just all`. It runs at the end of
   phases 3, 5, and 7, and before any release that touches tokio support.
-  - **Setup.** It attaches uscope to the `server` fixture under a client
+  - **Setup.** It attaches microscope to the `server` fixture under a client
     sending steady load, and to `scale` in churn mode.
   - **The loop, until the time is up:**
     - pause;
@@ -1767,7 +1767,7 @@ The simulator does not run tokio, and this plan adds nothing to it:
       it marks in transition;
     - the server answers every request, and the client's error count stays
       at zero;
-    - uscope's resident memory after warm-up stays within a fixed margin of
+    - microscope's resident memory after warm-up stays within a fixed margin of
       its first sample, with no steady growth;
     - no inferior or thread outlives the soak.
   - **Failure.** A failure keeps the flight recordings and the round
@@ -1902,9 +1902,9 @@ since one process can trace only one live session.
 - Spawn locations and task names need `tokio_unstable`, and names need
   tracing as well. Without them, a task is named by its future's function.
 - Poll counts, durations, and waker histories need tokio-console's
-  instrumentation. uscope reads state, not history.
+  instrumentation. microscope reads state, not history.
 - Time keeps running while the program is stopped, so timeouts fire after a
-  long stop. uscope never changes the program to prevent it.
+  long stop. microscope never changes the program to prevent it.
 - No function in the program is called, so `Debug` output is only what views
   provide.
 

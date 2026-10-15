@@ -6,7 +6,7 @@
 {"message":{"id":1,"method":"sources"},"to":"server"}
 {"message":{"id":1,"result":{"entry":{"column":null,"line":9,"path":"<root>/tests/fixtures/c/basic.c"},"files":["<root>/tests/fixtures/c/basic.c"]},"type":"result"},"to":"page"}
 {"message":{"id":2,"method":"source","params":{"path":"<root>/tests/fixtures/c/basic.c"}},"to":"server"}
-{"message":{"id":2,"result":{"breakable":[5,6,7,9,10,11,12,13],"path":"<root>/tests/fixtures/c/basic.c","read":"<root>/tests/fixtures/c/basic.c","text":"#include <stdint.h>\n\nvolatile uint64_t uscope_value = UINT64_C(0x1122334455667788);\n\n__attribute__((noinline)) uint64_t breakpoint_target(void) {\n    return uscope_value;\n}\n\nint main(void) {\n    uint64_t first = breakpoint_target();\n    uint64_t second = breakpoint_target();\n    return first == uscope_value && second == uscope_value ? 0 : 1;\n}\n"},"type":"result"},"to":"page"}
+{"message":{"id":2,"result":{"breakable":[5,6,7,9,10,11,12,13],"path":"<root>/tests/fixtures/c/basic.c","read":"<root>/tests/fixtures/c/basic.c","text":"#include <stdint.h>\n\nvolatile uint64_t microscope_value = UINT64_C(0x1122334455667788);\n\n__attribute__((noinline)) uint64_t breakpoint_target(void) {\n    return microscope_value;\n}\n\nint main(void) {\n    uint64_t first = breakpoint_target();\n    uint64_t second = breakpoint_target();\n    return first == microscope_value && second == microscope_value ? 0 : 1;\n}\n"},"type":"result"},"to":"page"}
 {"message":{"id":3,"method":"addBreakpoint","params":{"location":"<root>/tests/fixtures/c/basic.c:10"}},"to":"server"}
 {"message":{"id":3,"result":{"id":1},"type":"result"},"to":"page"}
 {"message":{"connection":1,"name":"tester","text":"set breakpoint 1","type":"notice"},"to":"page"}

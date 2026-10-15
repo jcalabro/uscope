@@ -1,7 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
-  title: "uscope",
+  title: "microscope",
   description: "Debug and profile native programs on Linux",
   cleanUrls: true,
   lastUpdated: true,
@@ -13,7 +13,7 @@ export default defineConfig({
     ["meta", { name: "theme-color", content: "#3157c8" }],
   ],
   themeConfig: {
-    siteTitle: "uscope",
+    siteTitle: "microscope",
     search: { provider: "local" },
     nav: [
       { text: "Debug", link: "/debugging" },
@@ -53,10 +53,10 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: "github", link: "https://github.com/jcalabro/uscope" },
+      { icon: "github", link: "https://github.com/microscope-dev/microscope" },
     ],
     editLink: {
-      pattern: "https://github.com/jcalabro/uscope/edit/main/docs/:path",
+      pattern: "https://github.com/microscope-dev/microscope/edit/main/docs/:path",
       text: "Edit this page on GitHub",
     },
     outline: { level: [2, 3] },
@@ -74,7 +74,7 @@ export default defineConfig({
         const token = tokens[index];
         const info = token.info;
         const language = info.split(/\s+/, 1)[0];
-        if (language.startsWith("uscope-")) {
+        if (language.startsWith("microscope-")) {
           token.info = `text${info.slice(language.length)}`;
         }
         const rendered = renderFence!(tokens, index, options, env, self);

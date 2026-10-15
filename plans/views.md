@@ -46,10 +46,10 @@ Three layers:
 
 ## Decisions
 
-**A declarative language on uscope's own expressions.** natvis is the
+**A declarative language on microscope's own expressions.** natvis is the
 richest vocabulary but not portable (its hosts' evaluators disagree), LLDB's
 compiled formatters lag the libraries they describe, and Python printers
-and GPL sources are excluded outright: uscope does not run, read, port, or
+and GPL sources are excluded outright: microscope does not run, read, port, or
 test against them, and embeds no interpreter. Native Rust views are allowed
 only with a stated reason; none exist.
 
@@ -98,7 +98,7 @@ costs only its own values.
 **The embedded section is not `ALLOC`.** A C `section` attribute and a Rust
 `#[link_section]` static both make a section that is loaded at run time and
 survives `strip --strip-debug`. The C header and Rust macro emit
-`.pushsection .debug_uscope_views,"",@progbits` with `.incbin` in assembly
+`.pushsection .debug_microscope_views,"",@progbits` with `.incbin` in assembly
 instead, as gdb documents for `.debug_gdb_scripts`: a C string cannot carry
 view text into `asm`, and Rust's `global_asm!` reads braces. Their labels
 avoid `0` and `1`, which Intel syntax reads as binary. A module's views
@@ -106,7 +106,7 @@ present only its own types, so one library cannot restyle another's.
 
 **Kernels are core WebAssembly with two imports.** Algorithms the language
 cannot express (a `BTreeMap`'s walk) call a kernel that imports only `read`
-and `yield` from `uscope_kernel_v1`. Two imports are trivial to keep
+and `yield` from `microscope_kernel_v1`. Two imports are trivial to keep
 stable and to host anywhere; the Component Model is unfinished and only
 wasmtime implements it; and whole views in WebAssembly would freeze the
 entire view contract as a binary ABI. `read` and `yield` stop the kernel as
@@ -217,7 +217,7 @@ value in every build of the `containers` fixtures.
 
 ## Later
 
-If views prove out, the ideas worth taking beyond uscope are: producers
+If views prove out, the ideas worth taking beyond microscope are: producers
 emitting more semantics in DWARF (C's `counted_by` as a `DW_AT_count`
 expression, GCC template parameters on every instance, a complete libc++
 `shared_ptr` control block by default, `DW_TAG_variant_part` from Zig's

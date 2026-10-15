@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use uscope::{
+use microscope::{
     ArrayDimension, BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion,
     InspectionLimit, InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount,
     PresentedShape, ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery,
@@ -255,7 +255,7 @@ fn state_summary(type_info: &TypeInfo, state: &VariableState) -> String {
 }
 
 /// The text a view gave a value, which the value as stored does not show.
-fn stored_text(state: &VariableState) -> Option<&Arc<uscope::TextSummary>> {
+fn stored_text(state: &VariableState) -> Option<&Arc<microscope::TextSummary>> {
     let VariableState::Available {
         text, presentation, ..
     } = state
@@ -289,9 +289,9 @@ fn rendered_summary(type_info: &TypeInfo, state: &VariableState, raw: bool) -> S
                 (None, _) => summary,
                 // A pointer keeps its address; the text follows it.
                 (Some(text), VariableValue::Address(_)) => {
-                    format!("{summary} {}", uscope::quoted_text(text))
+                    format!("{summary} {}", microscope::quoted_text(text))
                 }
-                (Some(text), _) => uscope::quoted_text(text),
+                (Some(text), _) => microscope::quoted_text(text),
             };
 
             match presentation.as_ref().filter(|_| !raw) {
@@ -351,10 +351,10 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
 
     match value {
         VariableValue::Scalar(value) => {
-            uscope::scalar_text(value, uscope::characters_of(type_info))
+            microscope::scalar_text(value, microscope::characters_of(type_info))
         }
         VariableValue::Enumeration { value, matches } => {
-            let raw = uscope::integer_text(*value);
+            let raw = microscope::integer_text(*value);
             match matches.as_ref() {
                 [] => raw,
                 [enumerator] => format!("{} ({raw})", enumerator.name),
@@ -362,7 +362,7 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
                 flags if flags.iter().all(|flag| flag.value != *value) => {
                     format!(
                         "{} ({raw})",
-                        uscope::symbol_text(*value, flags).unwrap_or_default()
+                        microscope::symbol_text(*value, flags).unwrap_or_default()
                     )
                 }
                 aliases => format!(
@@ -390,7 +390,7 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
         VariableValue::NotAllocated => "<not allocated>".to_owned(),
         VariableValue::NotAssociated => "<not associated>".to_owned(),
         VariableValue::Function { code, function } => {
-            uscope::function_text(*code, function.as_deref())
+            microscope::function_text(*code, function.as_deref())
         }
         VariableValue::Array { .. } => format!("[<{total} elements>]"),
         VariableValue::Slice { length, capacity } => capacity.map_or_else(
@@ -419,7 +419,7 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
                 |value| {
                     format!(
                         "{{<{active} = {}; {total} fields>}}",
-                        uscope::integer_text(value)
+                        microscope::integer_text(value)
                     )
                 },
             )
@@ -710,7 +710,7 @@ pub async fn expanded(
     mut remaining: InspectionLimits,
     layout: Layout,
     renderer: Renderer,
-) -> uscope::Result<String> {
+) -> microscope::Result<String> {
     let raw = layout.raw;
     let mut output = Builder::default();
     let mut work = vec![Work::State(Box::new((type_info.clone(), state.clone())), 0)];
@@ -849,7 +849,10 @@ pub async fn expanded(
 
             // A closure is its function and what it captured.
             VariableValue::Function { code, function } => (
-                format!("{} {{", uscope::function_text(*code, function.as_deref())),
+                format!(
+                    "{} {{",
+                    microscope::function_text(*code, function.as_deref())
+                ),
                 "}".to_owned(),
             ),
             VariableValue::Variant { active, .. } => (
@@ -906,7 +909,7 @@ async fn first_children(
     count: u64,
     layout: Layout,
     remaining: &mut InspectionLimits,
-) -> uscope::Result<Option<ValueChildPage>> {
+) -> microscope::Result<Option<ValueChildPage>> {
     let requested = count.min(layout.max_elements).min(remaining.value_nodes);
     if requested == 0 {
         return Ok(None);
@@ -918,7 +921,7 @@ async fn first_children(
             ValueChildQuery {
                 offset: 0,
                 limit: u32::try_from(requested)
-                    .map_err(|_| uscope::Error::InvalidValueChildPageLimit(u32::MAX))?,
+                    .map_err(|_| microscope::Error::InvalidValueChildPageLimit(u32::MAX))?,
             },
             *remaining,
         )
@@ -1075,11 +1078,15 @@ pub fn watched_bytes(
         (Some(WatchedScalar::Boolean), 1) => (bytes[0] != 0).to_string(),
         (Some(WatchedScalar::Float), 4) => bytes.first_chunk::<4>().map_or_else(
             || register_bytes(bytes, ByteOrder::Little),
-            |chunk| uscope::float_text(uscope::FloatValue::Binary32(u32::from_le_bytes(*chunk))),
+            |chunk| {
+                microscope::float_text(microscope::FloatValue::Binary32(u32::from_le_bytes(*chunk)))
+            },
         ),
         (Some(WatchedScalar::Float), 8) => bytes.first_chunk::<8>().map_or_else(
             || register_bytes(bytes, ByteOrder::Little),
-            |chunk| uscope::float_text(uscope::FloatValue::Binary64(u64::from_le_bytes(*chunk))),
+            |chunk| {
+                microscope::float_text(microscope::FloatValue::Binary64(u64::from_le_bytes(*chunk)))
+            },
         ),
         (Some(WatchedScalar::Address), 8) => format!("{:#x}", little_endian(bytes)),
         _ => register_bytes(bytes, ByteOrder::Little),
@@ -1135,20 +1142,22 @@ pub fn type_definition(
     images: &[std::sync::Arc<ModuleImage>],
     renderer: Renderer,
 ) -> String {
-    let info_of = |reference: uscope::TypeReference| {
+    let info_of = |reference: microscope::TypeReference| {
         images.iter().find_map(|image| image.type_info(reference))
     };
 
-    let name_of = |reference: uscope::TypeReference| {
+    let name_of = |reference: microscope::TypeReference| {
         info_of(reference).map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
     };
 
     let name = type_info.qualified_name();
-    let members = |keyword: &str, members: &[uscope::RecordMember]| {
+    let members = |keyword: &str, members: &[microscope::RecordMember]| {
         let mut output = format!("type = {keyword} {name} {{\n");
         for member in members {
             let bits = match member.layout {
-                uscope::RecordMemberLayout::BitRange { bit_size, .. } => format!(" : {bit_size}"),
+                microscope::RecordMemberLayout::BitRange { bit_size, .. } => {
+                    format!(" : {bit_size}")
+                }
                 _ => String::new(),
             };
 
@@ -1170,7 +1179,7 @@ pub fn type_definition(
             members: fields,
             ..
         } => members(
-            if *kind == uscope::RecordKind::Class {
+            if *kind == microscope::RecordKind::Class {
                 "class"
             } else {
                 "struct"
@@ -1206,11 +1215,13 @@ pub fn type_definition(
             .arguments
             .iter()
             .map(|argument| match argument {
-                uscope::TypeArgument::Type(reference) => info_of(*reference)
-                    .map_or_else(|| "<unknown>".to_owned(), uscope::TypeInfo::qualified_name),
-                uscope::TypeArgument::Value(IntegerValue::Signed(value)) => value.to_string(),
-                uscope::TypeArgument::Value(IntegerValue::Unsigned(value)) => value.to_string(),
-                uscope::TypeArgument::Unknown(text) => text.to_string(),
+                microscope::TypeArgument::Type(reference) => info_of(*reference).map_or_else(
+                    || "<unknown>".to_owned(),
+                    microscope::TypeInfo::qualified_name,
+                ),
+                microscope::TypeArgument::Value(IntegerValue::Signed(value)) => value.to_string(),
+                microscope::TypeArgument::Value(IntegerValue::Unsigned(value)) => value.to_string(),
+                microscope::TypeArgument::Unknown(text) => text.to_string(),
                 _ => "?".to_owned(),
             })
             .map(|argument| renderer.paint(Role::Type, argument).to_string())
@@ -1255,16 +1266,16 @@ mod tests {
     #[test]
     fn range_and_untyped_rendering_bound_the_complete_emitted_value() {
         let page = ValueChildPage {
-            stop_id: uscope::StopId::new(1),
+            stop_id: microscope::StopId::new(1),
             offset: 0,
             total: 0,
             children: [].into(),
-            completion: uscope::InspectionCompletion::Complete,
-            usage: uscope::InspectionUsage::default(),
+            completion: microscope::InspectionCompletion::Complete,
+            usage: microscope::InspectionUsage::default(),
         };
 
-        let state = VariableState::Malformed(uscope::VariableMalformedReason {
-            kind: uscope::VariableMalformedKind::InvalidAttribute,
+        let state = VariableState::Malformed(microscope::VariableMalformedReason {
+            kind: microscope::VariableMalformedKind::InvalidAttribute,
             description: "x".repeat(OUTPUT_LIMIT).into(),
         });
         for rendered in [
@@ -1282,9 +1293,9 @@ mod tests {
 
     #[test]
     fn scalars_render_characters_and_special_floats() {
-        use uscope::Characters;
+        use microscope::Characters;
         let character =
-            |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), Characters::Bytes);
+            |value: i128| microscope::scalar_text(&ScalarValue::Signed(value), Characters::Bytes);
         assert_eq!(character(65), "65 'A'");
         assert_eq!(character(39), r"39 '\''");
         assert_eq!(character(92), r"92 '\\'");
@@ -1293,30 +1304,31 @@ mod tests {
         // A byte above ASCII is part of a character in some encoding.
         assert_eq!(character(233), "233");
         assert_eq!(
-            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::Bytes),
+            microscope::scalar_text(&ScalarValue::Unsigned(66), Characters::Bytes),
             "66 'B'"
         );
         assert_eq!(
-            uscope::scalar_text(&ScalarValue::Unsigned(66), Characters::None),
+            microscope::scalar_text(&ScalarValue::Unsigned(66), Characters::None),
             "66"
         );
-        let unicode =
-            |value: u128| uscope::scalar_text(&ScalarValue::Unsigned(value), Characters::Unicode);
+        let unicode = |value: u128| {
+            microscope::scalar_text(&ScalarValue::Unsigned(value), Characters::Unicode)
+        };
         assert_eq!(unicode(233), "233 'é'");
         assert_eq!(unicode(10), "10");
         assert_eq!(unicode(0xd800), "55296");
 
-        let float = uscope::float_text;
+        let float = microscope::float_text;
         assert_eq!(
-            float(uscope::FloatValue::Binary32(f32::INFINITY.to_bits())),
+            float(microscope::FloatValue::Binary32(f32::INFINITY.to_bits())),
             "inf"
         );
         assert_eq!(
-            float(uscope::FloatValue::Binary64((-0.0_f64).to_bits())),
+            float(microscope::FloatValue::Binary64((-0.0_f64).to_bits())),
             "-0"
         );
         assert_eq!(
-            float(uscope::FloatValue::X87Extended {
+            float(microscope::FloatValue::X87Extended {
                 significand: 0xc800_0000_0000_0000,
                 sign_exponent: 0x4000,
             }),
@@ -1325,7 +1337,7 @@ mod tests {
 
         // Shortest round-trip digits, with an exponent where plain digits
         // would run to hundreds of zeros.
-        let double = |value: f64| float(uscope::FloatValue::Binary64(value.to_bits()));
+        let double = |value: f64| float(microscope::FloatValue::Binary64(value.to_bits()));
         assert_eq!(double(3e300), "3e300");
         assert_eq!(double(1e21), "1e21");
         assert_eq!(
@@ -1336,7 +1348,7 @@ mod tests {
         assert_eq!(double(-1.5e-7), "-1.5e-7");
         assert_eq!(double(0.1), "0.1");
         assert_eq!(
-            float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
+            float(microscope::FloatValue::Binary32(f32::MAX.to_bits())),
             "3.4028235e38"
         );
 
@@ -1349,7 +1361,7 @@ mod tests {
             )
             .expect("a number")
             .value;
-            float(uscope::FloatValue::Binary128(value.to_bits()))
+            float(microscope::FloatValue::Binary128(value.to_bits()))
         };
 
         assert_eq!(quad("0.1"), "0.1");
@@ -1357,25 +1369,25 @@ mod tests {
         assert_eq!(quad("-1e30"), "-1e30");
         assert_eq!(quad("1e-9"), "1e-9");
         assert_eq!(quad("0.000001"), "0.000001");
-        assert_eq!(float(uscope::FloatValue::Binary16(0x3e00)), "1.5");
+        assert_eq!(float(microscope::FloatValue::Binary16(0x3e00)), "1.5");
 
         // The largest half is 65504, but 65500 reads back as it.
-        assert_eq!(float(uscope::FloatValue::Binary16(0x7bff)), "65500");
-        assert_eq!(float(uscope::FloatValue::Binary16(1)), "6e-8");
-        assert_eq!(float(uscope::FloatValue::Binary16(0x7c00)), "inf");
-        assert_eq!(float(uscope::FloatValue::BFloat16(0xc049)), "-3.14");
+        assert_eq!(float(microscope::FloatValue::Binary16(0x7bff)), "65500");
+        assert_eq!(float(microscope::FloatValue::Binary16(1)), "6e-8");
+        assert_eq!(float(microscope::FloatValue::Binary16(0x7c00)), "inf");
+        assert_eq!(float(microscope::FloatValue::BFloat16(0xc049)), "-3.14");
         assert_eq!(
-            float(uscope::FloatValue::X87Extended {
+            float(microscope::FloatValue::X87Extended {
                 significand: 0xcccc_cccc_cccc_cccd,
                 sign_exponent: 0x3ffb,
             }),
             "0.1"
         );
         assert_eq!(
-            uscope::scalar_text(
+            microscope::scalar_text(
                 &ScalarValue::Complex {
-                    real: uscope::FloatValue::Binary64(1.5_f64.to_bits()),
-                    imaginary: uscope::FloatValue::Binary64((-2.0_f64).to_bits()),
+                    real: microscope::FloatValue::Binary64(1.5_f64.to_bits()),
+                    imaginary: microscope::FloatValue::Binary64((-2.0_f64).to_bits()),
                 },
                 Characters::None
             ),

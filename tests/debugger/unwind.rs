@@ -279,12 +279,16 @@ fn go_truth_frames(output: &str) -> Vec<(String, String, u64)> {
 /// Every caller's frame pointer is recovered, and is where its prologue
 /// pointed it: just below the return address its own caller's frame holds,
 /// which the stack table places independently of the saved word.
-async fn check_go_frame_pointers(scenario: &Scenario, trace: &uscope::Backtrace, fixture: &str) {
+async fn check_go_frame_pointers(
+    scenario: &Scenario,
+    trace: &microscope::Backtrace,
+    fixture: &str,
+) {
     let mut physical = Vec::new();
     for frame in trace
         .frames
         .iter()
-        .filter(|frame| frame.kind == uscope::FrameKind::Physical)
+        .filter(|frame| frame.kind == microscope::FrameKind::Physical)
     {
         scenario
             .operation("select frame", scenario.handle().select_frame(frame.id))
@@ -583,7 +587,7 @@ async fn backtraces_unwind_through_a_signal_handler() {
     // The trampoline and the interrupted frame are where they are, not
     // after a call.
     for frame in &trace.frames[trampoline..=trampoline + 1] {
-        assert_eq!(frame.kind, uscope::FrameKind::Signal, "{trace:#?}");
+        assert_eq!(frame.kind, microscope::FrameKind::Signal, "{trace:#?}");
     }
 
     let raise = position("raise");
@@ -627,7 +631,7 @@ async fn backtraces_unwind_through_a_handler_on_an_alternate_stack() {
     assert_eq!(names[1].as_deref(), Some("__restore_rt"), "{trace:#?}");
     assert_eq!(
         trace.frames[1].kind,
-        uscope::FrameKind::Signal,
+        microscope::FrameKind::Signal,
         "{trace:#?}"
     );
     let raise = names
@@ -696,7 +700,7 @@ async fn backtraces_unwind_through_frames_described_by_expressions() {
             .await;
         assert_eq!(
             available_value(&local.state),
-            &uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(41)),
+            &microscope::VariableValue::Scalar(microscope::ScalarValue::Signed(41)),
             "{fixture}: {local:?}"
         );
         scenario.shutdown().await;

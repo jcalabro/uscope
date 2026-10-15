@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (openat(AT_FDCWD, "/nonexistent/uscope-catch", O_RDONLY) != -1) {
+    if (openat(AT_FDCWD, "/nonexistent/microscope-catch", O_RDONLY) != -1) {
         return 1;
     }
     if (write(2, "to stderr\n", 10) != 10 || write(1, "to stdout\n", 10) != 10) {

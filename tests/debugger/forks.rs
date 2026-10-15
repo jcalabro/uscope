@@ -2,7 +2,7 @@
 
 use super::*;
 
-use uscope::{HeldChild, HeldProcess};
+use microscope::{HeldChild, HeldProcess};
 
 /// Attaches a session to a fixture that forks once released, holds the
 /// child, and ends the session, returning the parent and the child.
@@ -23,7 +23,7 @@ async fn hold_one_child(name: &str) -> (support::ExternalProcess, HeldChild) {
         .expect("the parent forks");
     assert_eq!(child.parent(), parent.process_id());
     assert!(
-        uscope::still_held(&child.process()).expect("read the child's state"),
+        microscope::still_held(&child.process()).expect("read the child's state"),
         "the child waits, untraced, for a session"
     );
 
@@ -40,7 +40,7 @@ async fn attach_held(child: HeldChild) -> Scenario {
         .expect("attach in time")
         .expect("attach the held child");
     let _ = child.hand_over();
-    assert!(!uscope::still_held(&held).expect("read the child's state"));
+    assert!(!microscope::still_held(&held).expect("read the child's state"));
     Scenario::attached("held child", debugger)
 }
 
@@ -96,14 +96,14 @@ async fn a_held_fork_child_no_session_takes_runs_on_and_is_never_mistaken() {
         Debugger::attach_held(stale).await,
         Err(Error::HeldProcessGone(process)) if process == held.process_id.get()
     ));
-    assert!(uscope::still_held(&held).expect("read the child's state"));
+    assert!(microscope::still_held(&held).expect("read the child's state"));
 
     // Dropping the child lets it run, with the SIGCONT a shell's `fg`
     // would send.
     drop(child);
     assert_eq!(child_exit(parent), Some(17));
     assert!(
-        !uscope::release_held(&held).expect("release"),
+        !microscope::release_held(&held).expect("release"),
         "a child no longer held is left alone"
     );
 }

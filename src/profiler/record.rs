@@ -824,7 +824,7 @@ impl Processor {
 
     /// Applies one of a thread's instrumentation events, in its order.
     pub fn probe_event(&mut self, thread: u32, event: &Event<'_>) {
-        self.triggered |= event.kind == uscope_probes::abi::TRIGGER;
+        self.triggered |= event.kind == microscope_probes::abi::TRIGGER;
         self.stacks.apply(&mut self.builder, thread, event);
     }
 

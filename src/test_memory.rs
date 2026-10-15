@@ -6,7 +6,7 @@ use std::process::Command;
 #[path = "../tests/support/memory_cap.rs"]
 pub mod memory_cap;
 
-const OVER_ALLOCATE: &str = "USCOPE_TEST_OVER_ALLOCATE";
+const OVER_ALLOCATE: &str = "MICROSCOPE_TEST_OVER_ALLOCATE";
 
 #[test]
 fn an_allocation_past_the_cap_aborts_the_test_process() {

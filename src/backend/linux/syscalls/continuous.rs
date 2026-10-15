@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn segments_hold_their_span_s_counts_and_triggers_write_the_last_calls() {
         let directory =
-            std::env::temp_dir().join(format!("uscope-continuous-{}", std::process::id()));
+            std::env::temp_dir().join(format!("microscope-continuous-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a directory");
         let second = 1_000_000_000;

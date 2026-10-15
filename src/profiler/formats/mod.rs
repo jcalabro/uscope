@@ -17,7 +17,7 @@ use crate::analysis::Granularity;
 /// A file format a profile can be read from or written to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// uscope's own, which keeps everything.
+    /// microscope's own, which keeps everything.
     Usprof,
 
     /// pprof's `profile.proto`, gzipped.
@@ -64,7 +64,7 @@ impl Format {
 
 impl Format {
     /// The format a file is in, by its first bytes or else its name, if
-    /// uscope reads it: `None` for a program, say.
+    /// microscope reads it: `None` for a program, say.
     #[must_use]
     pub fn of_file(path: &Path, head: &[u8]) -> Option<Self> {
         if Profile::is_profile(head) {
@@ -99,8 +99,9 @@ impl Profile {
         }
 
         let capture = match std::str::from_utf8(bytes) {
-            Ok(text) if !pprof::is_gzip(bytes) => folded::import(text)
-                .map_err(|error| format!("not a profile uscope reads as folded stacks: {error}")),
+            Ok(text) if !pprof::is_gzip(bytes) => folded::import(text).map_err(|error| {
+                format!("not a profile microscope reads as folded stacks: {error}")
+            }),
             _ => pprof::import(bytes).map_err(|error| format!("not a pprof profile: {error}")),
         }
         .map_err(ProfileFileError::Invalid)?;

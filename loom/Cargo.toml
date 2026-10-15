@@ -1,9 +1,9 @@
 [package]
-name = "uscope-loom"
+name = "microscope-loom"
 version = "0.0.0"
 publish = false
 edition = "2024"
-description = "Loom models of uscope's concurrent protocols, built from uscope's own source"
+description = "Loom models of microscope's concurrent protocols, built from microscope's own source"
 
 [lints.rust]
 unsafe_code = "deny"

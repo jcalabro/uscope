@@ -1,4 +1,4 @@
-//! Holding uscope's own CPU time to a budget.
+//! Holding microscope's own CPU time to a budget.
 //!
 //! Once a period, the controller reads how much CPU time recording took
 //! and how long sampling was on, and chooses how much of the next period
@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-/// How much CPU time uscope may spend recording.
+/// How much CPU time microscope may spend recording.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
     /// A share of one CPU: 0.01 is 1%.

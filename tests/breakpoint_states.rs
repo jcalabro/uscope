@@ -6,12 +6,12 @@ mod support;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointOptions, BreakpointSpec,
     DebuggerEvent, ExitStatus, HitCondition, LineNumber, StepKind, StopReason, ThreadState,
     VirtualAddress, WatchAccess, Watchpoint, WatchpointId, WatchpointOptions,
 };
+use support::Scenario;
 
 const HIT_COUNTS: &str = "tests/fixtures/c/hit-counts.c";
 
@@ -98,7 +98,7 @@ async fn wait_for_watch_hits(scenario: &Scenario, id: WatchpointId, count: u64) 
 async fn wait_for(
     scenario: &Scenario,
     count: u64,
-    hit_count: impl Fn(&uscope::StateSnapshot) -> u64,
+    hit_count: impl Fn(&microscope::StateSnapshot) -> u64,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -207,7 +207,7 @@ async fn enabling_a_breakpoint_resolves_it_where_its_code_moved() {
     )
     .await;
     let reason = scenario.run_to_stop().await;
-    let library = |modules: &uscope::LoadedModuleSnapshot| {
+    let library = |modules: &microscope::LoadedModuleSnapshot| {
         modules
             .modules
             .iter()
@@ -274,7 +274,7 @@ async fn a_watchpoint_enabled_again_reports_no_change_made_while_disabled() {
     scenario.remove_all_breakpoints().await;
     let handle = scenario.handle().clone();
     let watch = |access, options| {
-        let expression = uscope::Expression::parse("steady").expect("expression");
+        let expression = microscope::Expression::parse("steady").expect("expression");
         let handle = handle.clone();
         async move { handle.watch_with(&expression, access, options).await }
     };
@@ -286,7 +286,9 @@ async fn a_watchpoint_enabled_again_reports_no_change_made_while_disabled() {
             watch(
                 WatchAccess::Write,
                 WatchpointOptions {
-                    condition: Some(uscope::Condition::parse("steady != 7").expect("condition")),
+                    condition: Some(
+                        microscope::Condition::parse("steady != 7").expect("condition"),
+                    ),
                     ..WatchpointOptions::default()
                 },
             ),
@@ -497,7 +499,7 @@ async fn advance_from_a_new_breakpoint_counts_the_arrival_it_stands_at() {
         &scenario,
         source(HIT_COUNTS, "caller(call);"),
         BreakpointOptions {
-            condition: Some(uscope::Condition::parse("call > 3").expect("condition")),
+            condition: Some(microscope::Condition::parse("call > 3").expect("condition")),
             ..BreakpointOptions::default()
         },
     )

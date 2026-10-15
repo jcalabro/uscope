@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # D's associative arrays and Phobos. Verified against LDC 1.41 by
 # tests/fixtures/d/containers.d. D's slices and strings need no view.

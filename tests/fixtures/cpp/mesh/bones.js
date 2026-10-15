@@ -3,7 +3,7 @@
 // joint to its own. Hover names the nearest joint, a click opens its bone,
 // and the wheel zooms.
 
-uscope.live((canvas, input) => {
+microscope.live((canvas, input) => {
   const context = canvas.getContext("2d");
   if (context === null) {
     throw new Error("no 2-D context");
@@ -35,13 +35,13 @@ uscope.live((canvas, input) => {
   }
 
   function caption() {
-    uscope.caption(`${bones.length} bones · zoom ${zoom.toFixed(2)}`);
+    microscope.caption(`${bones.length} bones · zoom ${zoom.toFixed(2)}`);
   }
   caption();
 
   return {
     frame() {
-      const theme = uscope.theme;
+      const theme = microscope.theme;
       draw.fillStyle = theme.surface;
       draw.fillRect(0, 0, canvas.width, canvas.height);
       draw.lineWidth = Math.max(2, canvas.width / 300);
@@ -73,18 +73,18 @@ uscope.live((canvas, input) => {
       if (event.type === "wheel") {
         zoom = Math.min(8, Math.max(0.25, zoom * Math.exp(-event.wheel * 0.001)));
         caption();
-        uscope.redraw();
+        microscope.redraw();
         return;
       }
       const found = event.type === "leave" ? null : nearest(event.x, event.y);
       if (found !== hovered) {
         hovered = found;
-        uscope.redraw();
+        microscope.redraw();
       }
       const bone = found === null ? undefined : bones[found];
-      uscope.hint(bone === undefined ? null : `${bone.name}: (${bone.x}, ${bone.y})`);
+      microscope.hint(bone === undefined ? null : `${bone.name}: (${bone.x}, ${bone.y})`);
       if (event.type === "down" && found !== null) {
-        uscope.select(`bones[${found}]`);
+        microscope.select(`bones[${found}]`);
       }
     },
   };

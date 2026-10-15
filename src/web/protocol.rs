@@ -1,4 +1,4 @@
-//! The messages the web UI and `uscope web` exchange over the WebSocket.
+//! The messages the web UI and `microscope web` exchange over the WebSocket.
 //!
 //! Every message is one JSON text frame. A tab sends [`Envelope`]s; the
 //! server answers each with a [`ServerMessage::Result`] or
@@ -133,7 +133,7 @@ pub enum Request {
     Complete(Complete),
 
     /// Runs a console line: an expression, which may assign, or one of
-    /// uscope's commands, in the tab's frame.
+    /// microscope's commands, in the tab's frame.
     Console(ConsoleLine),
 
     /// The instructions of the function holding an address, or around it.
@@ -430,19 +430,19 @@ pub struct TaskKey {
 }
 
 impl TaskKey {
-    pub const fn id(self) -> uscope::TaskId {
-        uscope::TaskId {
-            runtime: uscope::RuntimeId::new(self.runtime),
+    pub const fn id(self) -> microscope::TaskId {
+        microscope::TaskId {
+            runtime: microscope::RuntimeId::new(self.runtime),
             number: self.number,
         }
     }
 }
 
 /// What runs code: a task when one is named, else the thread.
-pub const fn execution(thread: u64, task: Option<TaskKey>) -> uscope::ExecutionContext {
+pub const fn execution(thread: u64, task: Option<TaskKey>) -> microscope::ExecutionContext {
     match task {
-        Some(task) => uscope::ExecutionContext::Task(task.id()),
-        None => uscope::ExecutionContext::Thread(uscope::ThreadId::new(thread)),
+        Some(task) => microscope::ExecutionContext::Task(task.id()),
+        None => microscope::ExecutionContext::Thread(microscope::ThreadId::new(thread)),
     }
 }
 
@@ -473,13 +473,13 @@ pub struct FrameAt {
 }
 
 impl ThreadAt {
-    pub const fn execution(self) -> uscope::ExecutionContext {
+    pub const fn execution(self) -> microscope::ExecutionContext {
         execution(self.thread, self.task)
     }
 }
 
 impl FrameAt {
-    pub const fn execution(self) -> uscope::ExecutionContext {
+    pub const fn execution(self) -> microscope::ExecutionContext {
         execution(self.thread, self.task)
     }
 }
@@ -1180,7 +1180,7 @@ pub struct ProfileSummary {
     /// How the profile was recorded, by setting.
     pub settings: Vec<ProfileSetting>,
 
-    /// Nanoseconds of CPU time uscope spent recording, and the part of it
+    /// Nanoseconds of CPU time microscope spent recording, and the part of it
     /// spent reading debug information.
     pub recorder_cpu: u64,
     pub recorder_loading: u64,
@@ -1225,7 +1225,7 @@ pub struct ProfileSummary {
 pub struct ProfileProbes {
     pub events: u64,
 
-    /// Records threads overwrote before uscope read them.
+    /// Records threads overwrote before microscope read them.
     pub overwritten: u64,
 
     /// Events no ring could take.
@@ -2719,11 +2719,11 @@ mod tests {
     }
 
     /// Fails when the checked-in TypeScript is stale. Set
-    /// `USCOPE_UPDATE_PROTOCOL=1` to rewrite it.
+    /// `MICROSCOPE_UPDATE_PROTOCOL=1` to rewrite it.
     #[test]
     fn typescript_matches_the_protocol() {
         let expected = typescript();
-        if std::env::var_os("USCOPE_UPDATE_PROTOCOL").is_some() {
+        if std::env::var_os("MICROSCOPE_UPDATE_PROTOCOL").is_some() {
             std::fs::write(GENERATED, &expected).expect("write the generated protocol");
             return;
         }
@@ -2731,7 +2731,7 @@ mod tests {
         let actual = std::fs::read_to_string(GENERATED).unwrap_or_default();
         assert!(
             actual == expected,
-            "web/src/protocol.gen.ts is stale; rerun with USCOPE_UPDATE_PROTOCOL=1"
+            "web/src/protocol.gen.ts is stale; rerun with MICROSCOPE_UPDATE_PROTOCOL=1"
         );
     }
 

@@ -3,7 +3,7 @@
 //! against what simulated memory holds.
 //!
 //! The oracle knows the program's containers from its C source, never from
-//! uscope's reading of the debug information: their layouts are fixed by
+//! microscope's reading of the debug information: their layouts are fixed by
 //! the x86-64 C ABI whichever compiler built them. It walks memory as the
 //! program's own views say (`tests/golden/containers/containers.views`),
 //! exactly, so it can say which elements the debugger must show, where each

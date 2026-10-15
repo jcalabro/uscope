@@ -2,8 +2,8 @@
 //! front end ([`crate::present`]); how it is named and expanded later is the
 //! adapter's.
 
+use microscope::{RegisterValue, StopContext};
 use serde_json::{Map, Value, json};
-use uscope::{RegisterValue, StopContext};
 
 use super::handles::{Exhausted, Location, References, Variables};
 use crate::cli::format::register_bytes;
@@ -137,7 +137,7 @@ pub fn variable(
 /// thread's own; a caller's is what unwinding recovered.
 pub fn register(
     value: &RegisterValue,
-    byte_order: uscope::ByteOrder,
+    byte_order: microscope::ByteOrder,
     innermost: bool,
 ) -> Map<String, Value> {
     let mut variable = Map::new();

@@ -11,18 +11,18 @@ test.use({ program: [] });
 
 test("a trace is explored from its costs to one call's arguments and stack", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("files.usprof");
   // The program runs in the output directory, where it makes its files,
   // and exits with 3.
   const traced = spawnSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["syscalls", "--engine", "ptrace", "-f", "-k", "-o", file, "--", fixture("syscalls"), "files"],
     { cwd: info.outputDir, stdio: "ignore" },
   );
   expect(traced.status).toBe(3);
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
 
   // A trace alone opens in its own view, without sampling's controls.
@@ -131,15 +131,15 @@ test("a trace is explored from its costs to one call's arguments and stack", asy
 
 test("a family's processes are listed parents first, each with how it ended", async ({
   page,
-  uscope,
+  microscope,
 }, info) => {
   const file = info.outputPath("family.usprof");
   spawnSync(
-    path.join(root, "target", "debug", "uscope"),
+    path.join(root, "target", "debug", "microscope"),
     ["syscalls", "--engine", "ptrace", "-f", "-o", file, "--", fixture("syscalls"), "family"],
     { cwd: info.outputDir, stdio: "ignore" },
   );
-  const served = await uscope.start([file]);
+  const served = await microscope.start([file]);
   await join(page, served.link);
   await page.getByTestId("syscalls").getByRole("button", { name: "Processes" }).click();
   const rows = page.getByTestId("syscall-processes").locator("tbody tr");
@@ -149,10 +149,10 @@ test("a family's processes are listed parents first, each with how it ended", as
 
 test("a trace recorded from the page shows what its program is blocked in, until stopped", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
-  await page.goto(new URL("/pick?tab=profile", uscope.origin).href);
+  await join(page, microscope.link);
+  await page.goto(new URL("/pick?tab=profile", microscope.origin).href);
   await page.getByRole("button", { name: "System calls" }).click();
   await page.getByLabel("Program").fill(fixture("syscalls"));
   await page.getByLabel("Arguments").fill("pause");

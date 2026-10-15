@@ -6,7 +6,7 @@
 // and then calls reached(checkpoint); the tests read the values in
 // reached's caller. A path names a variable and then its members and
 // elements. Floats are their bits in hexadecimal; kind `summary` is how
-// uscope writes the value.
+// microscope writes the value.
 package values
 
 import "base:intrinsics"

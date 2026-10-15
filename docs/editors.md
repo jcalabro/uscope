@@ -1,10 +1,10 @@
 # Editors
 
-uscope can serve the Debug Adapter Protocol (DAP) over standard input and
+microscope can serve the Debug Adapter Protocol (DAP) over standard input and
 output:
 
 ```sh
-uscope dap
+microscope dap
 ```
 
 The adapter uses the same debugger as the terminal and browser clients. It can
@@ -19,13 +19,14 @@ The repository contains an extension under `editors/vscode`.
 > end-user installation path.
 
 For repository development, follow the extension's
-[README on GitHub](https://github.com/jcalabro/uscope/tree/main/editors/vscode).
+[README on
+GitHub](https://github.com/microscope-dev/microscope/tree/main/editors/vscode).
 
 A launch entry has this shape:
 
 ```json
 {
-  "type": "uscope",
+  "type": "microscope",
   "request": "launch",
   "name": "Debug program",
   "program": "${workspaceFolder}/build/program",
@@ -34,37 +35,38 @@ A launch entry has this shape:
 ```
 
 Use `"request": "attach"` with a process ID to attach. Core-dump sessions use
-the uscope-specific core setting described by the extension when installed.
+the microscope-specific core setting described by the extension when installed.
 
 ## Neovim
 
 The repository contains a tested `nvim-dap` setup in `editors/nvim/uat.lua`.
-A minimal adapter definition starts `uscope dap` as an executable adapter:
+A minimal adapter definition starts `microscope dap` as an executable adapter:
 
 ```lua
 local dap = require("dap")
 
-dap.adapters.uscope = {
+dap.adapters.microscope = {
   type = "executable",
-  command = "uscope",
+  command = "microscope",
   args = { "dap" },
 }
 ```
 
-Create launch and attach configurations with `type = "uscope"` and the usual
+Create launch and attach configurations with `type = "microscope"` and the usual
 DAP `request`, `program`, `args`, and `cwd` fields.
 
 ## Other DAP clients
 
 Helix, Zed, and Emacs dape can start an executable DAP adapter. Configure the
-adapter command as `uscope dap` and use the standard launch or attach request.
+adapter command as `microscope dap` and use the standard launch or attach
+request.
 
 > TODO: add tested, versioned setup examples for Helix, Zed, and Emacs after
 > they are part of the client acceptance suite.
 
 ## Behavior to expect
 
-uscope presents native threads through the standard DAP thread and stack
+microscope presents native threads through the standard DAP thread and stack
 requests. Supported language runtimes can also appear as logical tasks. The
 adapter reports optimized-out values and partial stacks as explicit failures or
 unavailable values.

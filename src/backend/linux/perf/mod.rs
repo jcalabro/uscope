@@ -520,7 +520,7 @@ pub fn launch(
     gate(&mut command, [&pid_write, &go_read, &go_write], launch);
     let (executing, executed) = std::sync::mpsc::channel();
     let spawner = std::thread::Builder::new()
-        .name("uscope-record-child".into())
+        .name("microscope-record-child".into())
         .spawn(move || {
             // Spawning returns once the program executes, or has failed to.
             let spawned = command.spawn();

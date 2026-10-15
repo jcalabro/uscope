@@ -35,8 +35,11 @@ async function hoverWord(page: Page, line: string, word: string) {
   await page.mouse.move(point.x, point.y);
 }
 
-test("the value tree stays open across stops and marks what changed", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("the value tree stays open across stops and marks what changed", async ({
+  page,
+  microscope,
+}) => {
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const variables = page.getByTestId("variables");
   await expect(variables).toContainText("Arguments");
@@ -64,9 +67,9 @@ test("the value tree stays open across stops and marks what changed", async ({ p
 test("watches travel in the link, and a changed value reaches every tab", async ({
   page,
   context,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   const add = page.getByRole("textbox", { name: "Add a watch", exact: true });
   await add.fill("s->stats.puts + 100");
@@ -91,9 +94,9 @@ test("watches travel in the link, and a changed value reaches every tab", async 
 
 test("the console evaluates, runs commands, and completes in the frame shown", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await stopInHandleRequest(page);
   await page.getByRole("tab", { name: "Console" }).click();
   const line = page.getByRole("textbox", { name: "Console" });

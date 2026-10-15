@@ -1,14 +1,14 @@
-//! Instrumentation that uscope records: zones, frames, plots, messages,
+//! Instrumentation that microscope records: zones, frames, plots, messages,
 //! labels, and triggers.
 //!
-//! Each macro's site is static data in the `uscope_sites` section, which
-//! uscope reads from the program's file, so the program never sends a
-//! name. A site is off until uscope switches it on by writing its state
+//! Each macro's site is static data in the `microscope_sites` section, which
+//! microscope reads from the program's file, so the program never sends a
+//! name. A site is off until microscope switches it on by writing its state
 //! byte, and an off site costs a load and a branch. An on site writes a
 //! 16-byte record, or a few, into its thread's ring in the program's own
-//! memory, which uscope reads from outside. The writer never waits: it
-//! overwrites the oldest records when uscope falls behind, and uscope
-//! counts every one. Nothing breaks if uscope goes away; once it stops
+//! memory, which microscope reads from outside. The writer never waits: it
+//! overwrites the oldest records when microscope falls behind, and microscope
+//! counts every one. Nothing breaks if microscope goes away; once it stops
 //! saying it is there, every site switches itself off.
 //!
 //! Without the `enabled` feature every macro expands to nothing, and its
@@ -19,12 +19,15 @@
 //!
 //! ```ignore
 //! fn handle(request: &Request) -> Response {
-//!     let _zone = uscope_probes::zone!("handle");
-//!     let _route = uscope_probes::label!("route", request.route());
-//!     let rows = { let _zone = uscope_probes::zone!("query"); query(request) };
-//!     uscope_probes::plot!("rows", rows.len() as f64);
+//!     let _zone = microscope_probes::zone!("handle");
+//!     let _route = microscope_probes::label!("route", request.route());
+//!     let rows = {
+//!         let _zone = microscope_probes::zone!("query");
+//!         query(request)
+//!     };
+//!     microscope_probes::plot!("rows", rows.len() as f64);
 //!     if rows.is_empty() {
-//!         uscope_probes::message!("no rows for {}", request.id());
+//!         microscope_probes::message!("no rows for {}", request.id());
 //!     }
 //!     render(rows)
 //! }
@@ -48,31 +51,31 @@
 )]
 #![cfg_attr(not(feature = "enabled"), no_std)]
 
-/// The records uscope reads, by their byte layout. Every field is little
+/// The records microscope reads, by their byte layout. Every field is little
 /// endian.
 pub mod abi {
-    /// The control block, one per program, in `uscope_probe_control`:
+    /// The control block, one per program, in `microscope_probe_control`:
     ///
     /// | Offset | Field |
     /// | --- | --- |
     /// | 0 | magic `USCOPEPR` |
     /// | 8 | ABI version, `u16` |
-    /// | 10 | clock, `u16`: a `CLOCK_` constant, set by uscope |
-    /// | 12 | enable, `u32`: set by uscope |
-    /// | 16 | ring size, `u32`, as a power of two of records: set by uscope |
+    /// | 10 | clock, `u16`: a `CLOCK_` constant, set by microscope |
+    /// | 12 | enable, `u32`: set by microscope |
+    /// | 16 | ring size, `u32`, as a power of two of records: set by microscope |
     /// | 20 | rings, `u32`: how many of the registry's slots threads took |
-    /// | 24 | heartbeat, `u64`: uscope's `CLOCK_MONOTONIC`, written as it reads |
+    /// | 24 | heartbeat, `u64`: microscope's `CLOCK_MONOTONIC`, written as it reads |
     /// | 32 | events no ring could take, `u64` |
     /// | 40 | the registry's length, `u32`: [`MOST_RINGS`] |
     /// | 44 | exiting, `u32`: set as the program exits |
-    /// | 48 | flushed, `u32`: set by uscope once it has read every ring since |
-    /// | 52 | timeout, `u32`: milliseconds without a heartbeat before every site switches itself off, set by uscope; zero is [`STALE_NANOSECONDS`] |
+    /// | 48 | flushed, `u32`: set by microscope once it has read every ring since |
+    /// | 52 | timeout, `u32`: milliseconds without a heartbeat before every site switches itself off, set by microscope; zero is [`STALE_NANOSECONDS`] |
     /// | 64 | the registry: each ring's address, `u64`, or zero |
     ///
     /// A thread sets a ring's slot after it counts it in `rings`, so a slot
-    /// below `rings` may still be zero. A program that exits while uscope
-    /// reads it waits, up to [`EXIT_WAIT_NANOSECONDS`], for uscope to say it
-    /// has read every ring, so that the last records are not lost with it.
+    /// below `rings` may still be zero. A program that exits while microscope
+    /// reads it waits, up to [`EXIT_WAIT_NANOSECONDS`], for microscope to say
+    /// it has read every ring, so that the last records are not lost with it.
     pub const MAGIC: [u8; 8] = *b"USCOPEPR";
 
     pub const ABI: u16 = 1;
@@ -85,7 +88,7 @@ pub mod abi {
 
     pub const CONTROL_SIZE: usize = 64;
 
-    /// A site, 32 bytes, in `uscope_sites`; its offsets are from the
+    /// A site, 32 bytes, in `microscope_sites`; its offsets are from the
     /// field that holds them:
     ///
     /// | Offset | Field |
@@ -138,7 +141,7 @@ pub mod abi {
 
     pub const RING_ACTIVE: u32 = 1;
 
-    /// Its thread exited: once uscope has read it, uscope frees it.
+    /// Its thread exited: once microscope has read it, microscope frees it.
     pub const RING_RETIRED: u32 = 2;
 
     /// A thread is taking it.
@@ -184,12 +187,12 @@ pub mod abi {
     /// The longest message or label value.
     pub const MOST_TEXT: usize = 256;
 
-    /// How long uscope may go without a heartbeat before every site
+    /// How long microscope may go without a heartbeat before every site
     /// switches itself off, unless it says otherwise.
     pub const STALE_NANOSECONDS: u64 = 10_000_000_000;
 
     /// How old a heartbeat may be for an exiting program to wait for
-    /// uscope, and how long it waits at most.
+    /// microscope, and how long it waits at most.
     pub const FRESH_NANOSECONDS: u64 = 1_000_000_000;
 
     pub const EXIT_WAIT_NANOSECONDS: u64 = 1_000_000_000;
@@ -198,7 +201,7 @@ pub mod abi {
 #[cfg(feature = "enabled")]
 mod probes;
 
-/// Whether uscope is recording the program's instrumentation: every site
+/// Whether microscope is recording the program's instrumentation: every site
 /// it chose is on.
 #[cfg(not(feature = "enabled"))]
 #[must_use]
@@ -358,7 +361,7 @@ macro_rules! label {
     }};
 }
 
-/// Asks uscope to save the recording's window around this moment, when it
+/// Asks microscope to save the recording's window around this moment, when it
 /// keeps one.
 #[cfg(feature = "enabled")]
 #[macro_export]
@@ -371,7 +374,7 @@ macro_rules! trigger {
     };
 }
 
-/// Asks uscope to save the recording's window around this moment.
+/// Asks microscope to save the recording's window around this moment.
 #[cfg(not(feature = "enabled"))]
 #[macro_export]
 macro_rules! trigger {
@@ -381,7 +384,7 @@ macro_rules! trigger {
 }
 
 /// A site of `kind` named `name`, here: its record goes into the
-/// `uscope_sites` section, and the expression is its state byte.
+/// `microscope_sites` section, and the expression is its state byte.
 #[cfg(feature = "enabled")]
 #[doc(hidden)]
 #[macro_export]
@@ -394,7 +397,7 @@ macro_rules! __site {
             static NAME: [u8; $name.len()] = $crate::__bytes($name);
             static FILE: [u8; ::core::file!().len()] = $crate::__bytes(::core::file!());
             ::core::arch::global_asm!(
-                ".pushsection uscope_sites,\"aR\",@progbits",
+                ".pushsection microscope_sites,\"aR\",@progbits",
                 ".balign 8",
                 ".byte {version}, {kind}",
                 ".short 0",

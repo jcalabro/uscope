@@ -1,25 +1,26 @@
 # Configuration
 
-uscope reads TOML settings from up to three files:
+microscope reads TOML settings from up to three files:
 
-1. `$XDG_CONFIG_HOME/uscope/config.toml`, or `~/.config/uscope/config.toml`
-2. `.uscope/config.toml` in the project root
-3. `.uscope/config.local.toml` in the project root
+1. `$XDG_CONFIG_HOME/microscope/config.toml`, or
+   `~/.config/microscope/config.toml`
+2. `.microscope/config.toml` in the project root
+3. `.microscope/config.local.toml` in the project root
 
 The local file is intended for settings that should not be committed. Add it
 to the project's `.gitignore`.
 
-The project root is the nearest parent containing `.uscope` or `.git`, or else
-the current directory. A repository inside another project, such as a git
+The project root is the nearest parent containing `.microscope` or `.git`, or
+else the current directory. A repository inside another project, such as a git
 worktree, is a project of its own.
 
 ## Inspect configuration
 
 ```sh
-uscope config path
-uscope config show
-uscope config check
-uscope config init
+microscope config path
+microscope config show
+microscope config check
+microscope config init
 ```
 
 `path` prints the project root and files a session would read. `show` prints
@@ -59,9 +60,9 @@ launch configuration, `-c` files, then `-e` commands.
 | `[[source-map]]` | Source-prefix remapping |
 | `[[launch]]` | Named launch, attach, and core-dump sessions |
 
-Run `uscope config init` to produce a file containing every setting, its type,
-and its default. That generated file is the exact reference for the installed
-version.
+Run `microscope config init` to produce a file containing every setting, its
+type, and its default. That generated file is the exact reference for the
+installed version.
 
 ## Launch configurations
 
@@ -75,10 +76,10 @@ cwd = "."
 startup = ["break handle_request", "run"]
 ```
 
-Paths are relative to the project root. Start it with `uscope --launch server`.
-When a project has exactly one launch configuration, `uscope` with no target
-uses it. Arguments after `--` replace its arguments; command-line environment
-and working-directory options override its values.
+Paths are relative to the project root. Start it with `microscope --launch
+server`. When a project has exactly one launch configuration, `microscope` with
+no target uses it. Arguments after `--` replace its arguments; command-line
+environment and working-directory options override its values.
 
 A launch entry may use `attach` or `core` instead of `program` to describe
 another kind of target.
@@ -91,9 +92,9 @@ using them and remembers approval until the files change. A non-interactive
 session must use `--trust-project` or previously recorded trust.
 
 ```sh
-uscope config trust
-uscope config untrust
-uscope config trusted
+microscope config trust
+microscope config untrust
+microscope config trusted
 ```
 
 The user setting `[projects] trust` can be `ask`, `always`, or `never`.

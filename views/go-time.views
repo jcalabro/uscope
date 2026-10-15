@@ -1,4 +1,4 @@
-uscope-views 1
+microscope-views 1
 
 # Go's time package. Verified against Go 1.27.1, by tests/fixtures/go/stdlib.
 

@@ -988,7 +988,7 @@ truncations: Array<ProfileCount>,
  */
 settings: Array<ProfileSetting>, 
 /**
- * Nanoseconds of CPU time uscope spent recording, and the part of it
+ * Nanoseconds of CPU time microscope spent recording, and the part of it
  * spent reading debug information.
  */
 recorderCpu: number, recorderLoading: number, 
@@ -1120,7 +1120,7 @@ time: number, text: string, };
 
 export type ProfileProbes = { events: number, 
 /**
- * Records threads overwrote before uscope read them.
+ * Records threads overwrote before microscope read them.
  */
 overwritten: number, 
 /**

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the VS Code user acceptance test against the uscope on PATH, in a
+# Runs the VS Code user acceptance test against the microscope on PATH, in a
 # throwaway profile, and records each session's traffic in $1.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ if [[ -z ${VSCODE_EXECUTABLE:-} ]]; then
     done
 fi
 
-USCOPE_UAT_ROOT=$root USCOPE_UAT_RECORD=$(realpath -m "$record") "${VSCODE_EXECUTABLE:?set VSCODE_EXECUTABLE to the Electron executable of VS Code}" \
+MICROSCOPE_UAT_ROOT=$root MICROSCOPE_UAT_RECORD=$(realpath -m "$record") "${VSCODE_EXECUTABLE:?set VSCODE_EXECUTABLE to the Electron executable of VS Code}" \
     --user-data-dir "$profile/data" \
     --extensions-dir "$profile/extensions" \
     --disable-extensions \

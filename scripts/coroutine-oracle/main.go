@@ -1,5 +1,5 @@
 // Reduces `readelf --debug-dump=info` output to the coroutines rustc
-// describes, an oracle uscope's own reading of them is compared with. It
+// describes, an oracle microscope's own reading of them is compared with. It
 // reads the dump twice: the first pass names each entry by offset, the
 // second writes one tab-separated line per state:
 //

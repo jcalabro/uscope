@@ -7,12 +7,12 @@ mod support;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     Condition, ConditionOwner, DebuggerEvent, Error, Evaluation, ExitStatus, HitCondition,
     ScalarValue, StopReason, ThreadState, VariableState, VariableValue, WatchAccess, Watchpoint,
     WatchpointHit, WatchpointId, WatchpointOptions,
 };
+use support::Scenario;
 
 /// The single-threaded hit-count program across the compiler,
 /// optimization, and PIE matrix: what the compiler decides is where the
@@ -24,8 +24,8 @@ const COUNTING: [&str; 4] = [
     "hit-counts-gcc-o2-nopie",
 ];
 
-fn expression(text: &str) -> uscope::Expression {
-    uscope::Expression::parse(text).expect("valid test expression")
+fn expression(text: &str) -> microscope::Expression {
+    microscope::Expression::parse(text).expect("valid test expression")
 }
 
 fn hit_condition(text: &str) -> HitCondition {
@@ -566,7 +566,7 @@ async fn run_to(scenario: &mut Scenario, function: &str) {
 /// whose declined hit completes the step over as if unwatched.
 #[tokio::test]
 async fn a_declined_store_stepped_over_at_a_breakpoint_is_transparent() {
-    for kind in [None, Some(uscope::StepKind::Instruction)] {
+    for kind in [None, Some(microscope::StepKind::Instruction)] {
         let mut scenario = Scenario::launch("watch-gcc-o0");
         run_to(&mut scenario, "store_then_breakpoint").await;
         let site = scenario
@@ -576,7 +576,7 @@ async fn a_declined_store_stepped_over_at_a_breakpoint_is_transparent() {
             )
             .await;
         scenario
-            .add_breakpoint_spec(uscope::BreakpointSpec::Address(site))
+            .add_breakpoint_spec(microscope::BreakpointSpec::Address(site))
             .await;
         assert_eq!(
             support::breakpoint_address(&scenario.resume_to_stop().await),

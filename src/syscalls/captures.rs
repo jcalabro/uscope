@@ -265,7 +265,7 @@ pub enum CopyKind {
 
 /// How to copy the memory behind one argument. Both engines follow the
 /// same list: the ptrace engine here, the BPF engine's programs from the
-/// table uscope fills with it.
+/// table microscope fills with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArgCopy {
     pub arg: u8,

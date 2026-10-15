@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     InferiorState, LaunchOptions, StepKind, StopReason, TaskState, ThreadActivity, ThreadId,
 };
 

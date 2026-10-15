@@ -287,7 +287,7 @@ impl<A> Counting<A> {
     }
 }
 
-/// The allocator uscope's programs count.
+/// The allocator microscope's programs count.
 ///
 /// mimalloc serves the many small blocks reading debug information takes far
 /// faster than the C library's; `system-alloc` selects the C library's

@@ -5,10 +5,10 @@
 //! next continue. A stripped build waits too: its runtime's data is not
 //! described, but its use of signals is the same.
 
-use tokio::sync::broadcast::{Receiver, error::TryRecvError};
-use uscope::{
+use microscope::{
     BreakpointSpec, DebuggerEvent, LineNumber, SignalPolicy, StepKind, StopReason, VirtualAddress,
 };
+use tokio::sync::broadcast::{Receiver, error::TryRecvError};
 
 use crate::support::{self, Scenario};
 
@@ -58,7 +58,7 @@ async fn spinning(fixture: &str) -> (Scenario, Receiver<DebuggerEvent>, VirtualA
 }
 
 fn urgent() -> u64 {
-    uscope::signal_named("SIGURG").expect("SIGURG")
+    microscope::signal_named("SIGURG").expect("SIGURG")
 }
 
 /// How many SIGURG signals were reported since the last count.

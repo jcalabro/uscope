@@ -8,9 +8,9 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use uscope::{
-    Backtrace, CodeRole, ExecutionContext, FrameKind, InferiorState, LaunchOptions, StackSegment,
-    StopContext, StopReason, ThreadId,
+use microscope::{
+    Backtrace, CodeRole, ExecutionContext, FrameKind, InferiorState, LaunchOptions, StackFrameId,
+    StackSegment, StopContext, StopReason, ThreadId,
 };
 
 use crate::invariants::checked;
@@ -51,7 +51,7 @@ impl Driven {
         let output: PathBuf = scratch.path().join("stdout");
         let mut scenario = checked(fixture);
         scenario
-            .add_breakpoint_spec(uscope::BreakpointSpec::Function("truth_reached".into()))
+            .add_breakpoint_spec(microscope::BreakpointSpec::Function("truth_reached".into()))
             .await;
         let arguments = match mode {
             Mode::Main => Vec::new(),
@@ -140,7 +140,7 @@ fn listing(trace: &Backtrace) -> String {
 }
 
 /// The frames of the future a frame drives, and the frame after them.
-fn spliced(trace: &Backtrace) -> Option<(&[uscope::StackFrame], &uscope::StackFrame)> {
+fn spliced(trace: &Backtrace) -> Option<(&[microscope::StackFrame], &microscope::StackFrame)> {
     let start = trace
         .frames
         .iter()
@@ -181,7 +181,7 @@ async fn driven_futures_show_their_awaits(mode: Mode) {
             .scenario
             .operation(
                 "driver backtrace",
-                handle.at(view(uscope::StackFrameId::INNERMOST)).backtrace(),
+                handle.at(view(StackFrameId::INNERMOST)).backtrace(),
             )
             .await;
         let Some((future, driver)) = spliced(&trace) else {

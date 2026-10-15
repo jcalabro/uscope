@@ -2,8 +2,8 @@
 // and exit through raw system calls, so that a program's behavior depends on
 // nothing but its own code and its arguments.
 
-#ifndef USCOPE_GOLDEN_RT_H
-#define USCOPE_GOLDEN_RT_H
+#ifndef MICROSCOPE_GOLDEN_RT_H
+#define MICROSCOPE_GOLDEN_RT_H
 
 typedef unsigned long u64;
 typedef long i64;

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use uscope::{
+use microscope::{
     DebuggerHandle, DereferenceReference, Evaluation, EvaluationMode, Expression, InspectionLimits,
     StopContext, StopId, ValueChildrenReference, VariableKind, VariableState,
 };
@@ -270,7 +270,7 @@ impl Reader<'_> {
                     });
                 }
             }
-            Err(error @ uscope::Error::StaleStop) => return Err(error.into()),
+            Err(error @ microscope::Error::StaleStop) => return Err(error.into()),
             Err(error) => scopes.push(Scope {
                 key: ScopeKey::Locals,
                 name: "Locals".to_owned(),
@@ -550,6 +550,6 @@ fn list_failure(failure: ListError) -> Failure {
 }
 
 /// A malformed expression, said on one line.
-pub fn expression_failure(failure: uscope::ExpressionError) -> Failure {
-    uscope::Error::Expression(failure).into()
+pub fn expression_failure(failure: microscope::ExpressionError) -> Failure {
+    microscope::Error::Expression(failure).into()
 }

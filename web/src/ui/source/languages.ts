@@ -1,4 +1,4 @@
-// Syntax for the languages uscope debugs, chosen by file extension.
+// Syntax for the languages microscope debugs, chosen by file extension.
 
 import { cpp } from "@codemirror/lang-cpp";
 import { go } from "@codemirror/lang-go";

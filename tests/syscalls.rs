@@ -1,4 +1,4 @@
-//! `uscope syscalls`: what it prints, held to strace's own output where
+//! `microscope syscalls`: what it prints, held to strace's own output where
 //! strace prints the same thing.
 
 mod support;
@@ -20,23 +20,23 @@ fn fixture() -> PathBuf {
     Scenario::fixture("syscalls")
 }
 
-fn uscope(arguments: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+fn microscope(arguments: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_microscope"));
     command.arg("syscalls").args(arguments);
     command.stdin(Stdio::null());
     command
 }
 
-/// Runs the fixture in `mode` under `uscope syscalls --engine ptrace`.
+/// Runs the fixture in `mode` under `microscope syscalls --engine ptrace`.
 fn trace(directory: &Path, arguments: &[&str], mode: &str) -> Output {
-    uscope(&["--engine", "ptrace"])
+    microscope(&["--engine", "ptrace"])
         .args(arguments)
         .arg("--")
         .arg(fixture())
         .arg(mode)
         .current_dir(directory)
         .output()
-        .expect("run uscope")
+        .expect("run microscope")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -114,12 +114,12 @@ fn assert_same(ours: &str, theirs: &str, context: &str) {
     );
 }
 
-/// The fixture's trace by strace and by uscope, each with `arguments`, in
+/// The fixture's trace by strace and by microscope, each with `arguments`, in
 /// one directory.
 fn both(arguments: &[&str], mode: &str) -> (String, String) {
     let directory = ScratchDir::new("syscalls-strace");
     let theirs = directory.path().join("strace.out");
-    let ours = directory.path().join("uscope.out");
+    let ours = directory.path().join("microscope.out");
     let strace = Command::new("strace")
         .args(arguments)
         .arg("-o")
@@ -138,7 +138,7 @@ fn both(arguments: &[&str], mode: &str) -> (String, String) {
     assert_eq!(
         strace.status.code(),
         traced.status.code(),
-        "exit codes differ; uscope said {}",
+        "exit codes differ; microscope said {}",
         text(&traced.stderr)
     );
     let read = |path: &Path| std::fs::read_to_string(path).expect("read trace");
@@ -227,7 +227,7 @@ fn ff_writes_each_threads_calls_to_its_own_file() {
     };
 
     let theirs = run("strace", &mut Command::new("strace"));
-    let ours = run("uscope", &mut uscope(&["--engine", "ptrace"]));
+    let ours = run("microscope", &mut microscope(&["--engine", "ptrace"]));
     assert_eq!(ours.len(), theirs.len(), "{ours:#?}\n---\n{theirs:#?}");
     for (ours, theirs) in ours.iter().zip(&theirs) {
         assert_same(ours, theirs, "in one thread's file");
@@ -344,7 +344,7 @@ fn stacks_unwind_to_the_frames_strace_finds() {
             assert_eq!(field(&our, 6), field(&their, 6), "{}", context());
             let (our_file, their_file) = (field(&our, 5), field(&their, 5));
 
-            // strace names a file as its debug information does; uscope
+            // strace names a file as its debug information does; microscope
             // resolves it against the compilation's directory.
             assert!(
                 match (our_file.as_deref(), their_file.as_deref()) {
@@ -385,9 +385,9 @@ fn signals_and_compat_calls_trace_as_strace_prints_them() {
 /// tracing one class; calls that ignore their arguments are left out.
 #[test]
 fn classes_name_the_calls_strace_names() {
+    use microscope::syscalls::filter::Filter;
+    use microscope::syscalls::{Abi, table};
     use std::collections::BTreeSet;
-    use uscope::syscalls::filter::Filter;
-    use uscope::syscalls::{Abi, table};
 
     const UNSAFE: [&str; 7] = [
         "exit",
@@ -438,7 +438,7 @@ fn classes_name_the_calls_strace_names() {
             .filter(|&&(number, _)| {
                 filter
                     .calls
-                    .contains(uscope::syscalls::SyscallId::new(Abi::X86_64, number))
+                    .contains(microscope::syscalls::SyscallId::new(Abi::X86_64, number))
             })
             .map(|&(_, name)| name)
             .collect();
@@ -454,7 +454,7 @@ fn classes_name_the_calls_strace_names() {
         let extra: Vec<_> = ours.difference(&theirs).collect();
         if !missing.is_empty() || !extra.is_empty() {
             wrong.push(format!(
-                "%{class}: strace also names {missing:?}; uscope also names {extra:?}"
+                "%{class}: strace also names {missing:?}; microscope also names {extra:?}"
             ));
         }
     }
@@ -482,7 +482,7 @@ fn children_and_threads_are_followed_unless_asked_not_to() {
     for expected in [
         format!(r#"[pid {child:>5}] write(1, "child\n", 6)"#),
         format!("[pid {child:>5}] +++ exited with 4 +++"),
-        format!("uscope: Process {child} attached"),
+        format!("microscope: Process {child} attached"),
     ] {
         assert!(lines.contains(&expected), "no {expected:?} in\n{lines}");
     }
@@ -566,7 +566,7 @@ fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
     assert_eq!(text(&captured.stderr), "", "a capture says nothing more");
 
     let path = directory.path().join("trace.usprof");
-    let profile = uscope::profiler::Profile::read(&path)
+    let profile = microscope::profiler::Profile::read(&path)
         .expect("the capture reads")
         .profile;
     let syscalls = profile.syscalls();
@@ -574,7 +574,7 @@ fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
         .events
         .iter()
         .filter_map(|event| match &event.event {
-            uscope::syscalls::TraceEvent::Call(call) => Some((call, event.stack)),
+            microscope::syscalls::TraceEvent::Call(call) => Some((call, event.stack)),
             _ => None,
         })
         .collect();
@@ -599,15 +599,15 @@ fn a_capture_holds_what_the_trace_shows_and_report_summarizes_it() {
         syscalls
             .events
             .iter()
-            .any(|event| matches!(&event.event, uscope::syscalls::TraceEvent::Exit { .. })),
+            .any(|event| matches!(&event.event, microscope::syscalls::TraceEvent::Exit { .. })),
         "the process's end is noted"
     );
 
-    let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+    let report = Command::new(env!("CARGO_BIN_EXE_microscope"))
         .args(["report", "trace.usprof"])
         .current_dir(directory.path())
         .output()
-        .expect("run uscope report");
+        .expect("run microscope report");
     let lines = text(&report.stdout);
     assert!(report.status.success(), "{}", text(&report.stderr));
     assert!(
@@ -689,7 +689,7 @@ fn ndjson_carries_names_paths_errnos_and_stacks() {
 /// reported, not lost.
 #[test]
 fn a_leaders_blocked_call_ends_when_another_thread_executes() {
-    let traced = uscope(&[
+    let traced = microscope(&[
         "--engine",
         "ptrace",
         "-f",
@@ -703,7 +703,7 @@ fn a_leaders_blocked_call_ends_when_another_thread_executes() {
     ])
     .arg(Scenario::fixture("thread-exec"))
     .output()
-    .expect("run uscope");
+    .expect("run microscope");
     assert_eq!(traced.status.code(), Some(0), "{}", text(&traced.stderr));
     let records: Vec<serde_json::Value> = text(&traced.stdout)
         .lines()
@@ -754,7 +754,7 @@ impl Drop for TestCgroup {
     }
 }
 
-/// A uscope run killed and reaped when dropped, whose standard error the
+/// A microscope run killed and reaped when dropped, whose standard error the
 /// test reads line by line.
 struct Running {
     child: Child,
@@ -767,7 +767,7 @@ impl Running {
         let mut child = command
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn uscope");
+            .expect("spawn microscope");
         let stderr = child.stderr.take().expect("stderr");
         let (sender, lines) = mpsc::channel();
         std::thread::spawn(move || {
@@ -804,7 +804,7 @@ impl Running {
         }
     }
 
-    /// Waits for uscope to exit, failing at the deadline.
+    /// Waits for microscope to exit, failing at the deadline.
     fn finish(mut self) -> (Option<i32>, Vec<String>) {
         let end = Instant::now() + DEADLINE;
         loop {
@@ -816,7 +816,7 @@ impl Running {
 
             assert!(
                 Instant::now() < end,
-                "uscope did not exit; saw:\n{}",
+                "microscope did not exit; saw:\n{}",
                 self.seen.join("\n")
             );
 
@@ -835,7 +835,7 @@ impl Drop for Running {
 
 #[test]
 fn a_blocked_call_is_reported_in_flight_until_it_returns() {
-    let mut command = uscope(&[
+    let mut command = microscope(&[
         "--engine",
         "ptrace",
         "-e",
@@ -870,30 +870,30 @@ fn attaching_needs_consent_and_detaching_leaves_the_process_running() {
     let mut target = ExternalProcess::spawn(&Scenario::fixture("attach"));
     let pid = target.process_id().get().to_string();
 
-    let refused = uscope(&["--engine", "ptrace", "-p", &pid])
+    let refused = microscope(&["--engine", "ptrace", "-p", &pid])
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     assert!(!refused.status.success());
     let message = text(&refused.stderr);
     assert!(message.contains("--stop-every-call"), "{message}");
 
-    let mut running = Running::spawn(&mut uscope(&[
+    let mut running = Running::spawn(&mut microscope(&[
         "--engine",
         "ptrace",
         "--stop-every-call",
         "-p",
         &pid,
     ]));
-    running.line(|line| line == format!("uscope: Process {pid} attached"));
+    running.line(|line| line == format!("microscope: Process {pid} attached"));
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(running.child.id()).expect("pid")),
         nix::sys::signal::Signal::SIGINT,
     )
-    .expect("interrupt uscope");
+    .expect("interrupt microscope");
     let (code, lines) = running.finish();
     assert_eq!(code, Some(0), "{lines:?}");
     assert!(
-        lines.contains(&format!("uscope: Process {pid} detached")),
+        lines.contains(&format!("microscope: Process {pid} detached")),
         "{lines:?}"
     );
 
@@ -906,12 +906,12 @@ fn attaching_needs_consent_and_detaching_leaves_the_process_running() {
 #[test]
 fn the_bpf_engine_is_the_default_and_never_falls_back() {
     let directory = ScratchDir::new("syscalls-bpf");
-    let output = uscope(&["--"])
+    let output = microscope(&["--"])
         .arg(fixture())
         .arg("files")
         .current_dir(directory.path())
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     let message = text(&output.stderr);
     assert!(!output.status.success(), "{message}");
     assert!(
@@ -923,9 +923,9 @@ fn the_bpf_engine_is_the_default_and_never_falls_back() {
         "the program never ran"
     );
 
-    let nothing = uscope(&["--engine", "ptrace"])
+    let nothing = microscope(&["--engine", "ptrace"])
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     assert!(text(&nothing.stderr).contains("never traces the whole host"));
     let _ = std::io::stdout().flush();
 }
@@ -952,7 +952,7 @@ fn a_cgroup_target_is_one_and_named_rightly() {
             "-k cannot unwind a cgroup",
         ),
     ] {
-        let output = uscope(arguments).output().expect("run uscope");
+        let output = microscope(arguments).output().expect("run microscope");
         let message = text(&output.stderr);
         assert!(!output.status.success(), "{arguments:?}: {message}");
         assert!(message.contains(wanted), "{arguments:?}: {message}");
@@ -961,29 +961,29 @@ fn a_cgroup_target_is_one_and_named_rightly() {
 
 /// The BPF engine, held to the ptrace engine's output for the same
 /// program. It needs `CAP_BPF` and `CAP_PERFMON`, so these run only
-/// through `just test-bpf`, which starts uscope with the `uscope-bpf`
-/// wrapper that `nixosModules.uscope-bpf` installs.
+/// through `just test-bpf`, which starts microscope with the `microscope-bpf`
+/// wrapper that `nixosModules.microscope-bpf` installs.
 mod bpf {
     use std::collections::BTreeSet;
 
     use super::*;
 
     fn launcher() -> PathBuf {
-        std::env::var_os("USCOPE_BPF_LAUNCHER").map_or_else(
+        std::env::var_os("MICROSCOPE_BPF_LAUNCHER").map_or_else(
             || {
                 panic!(
-                    "USCOPE_BPF_LAUNCHER names no launcher: run these with `just test-bpf`, \
-                     which starts uscope through the uscope-bpf wrapper"
+                    "MICROSCOPE_BPF_LAUNCHER names no launcher: run these with `just test-bpf`, \
+                     which starts microscope through the microscope-bpf wrapper"
                 )
             },
             PathBuf::from,
         )
     }
 
-    fn uscope(arguments: &[&str]) -> Command {
+    fn microscope(arguments: &[&str]) -> Command {
         let mut command = Command::new(launcher());
         command
-            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .arg(env!("CARGO_BIN_EXE_microscope"))
             .arg("syscalls")
             .args(arguments)
             .stdin(Stdio::null());
@@ -1021,7 +1021,7 @@ mod bpf {
             .arg(mode)
             .current_dir(directory)
             .output()
-            .expect("run uscope");
+            .expect("run microscope");
         let read = std::fs::read_to_string(&out).unwrap_or_default();
         (output.status.code(), text(&output.stderr), read)
     }
@@ -1033,11 +1033,11 @@ mod bpf {
         let directory = directory.path();
         let (ptrace_code, ptrace_errors, ptrace) = traced(
             directory,
-            super::uscope(&["--engine", "ptrace"]),
+            super::microscope(&["--engine", "ptrace"]),
             arguments,
             mode,
         );
-        let (bpf_code, bpf_errors, bpf) = traced(directory, uscope(&[]), arguments, mode);
+        let (bpf_code, bpf_errors, bpf) = traced(directory, microscope(&[]), arguments, mode);
         assert_eq!(
             ptrace_code, bpf_code,
             "exit codes differ: ptrace said {ptrace_errors}, BPF said {bpf_errors}"
@@ -1112,8 +1112,12 @@ mod bpf {
         let directory = directory.path();
         let chosen = ["-e", "trace=openat,read,write,close,unlink"];
         let by = |attach: &str| {
-            let (code, errors, trace) =
-                traced(directory, uscope(&["--attach", attach]), &chosen, "files");
+            let (code, errors, trace) = traced(
+                directory,
+                microscope(&["--attach", attach]),
+                &chosen,
+                "files",
+            );
             assert_eq!(code, Some(3), "{errors}");
             (errors, trace)
         };
@@ -1130,7 +1134,7 @@ mod bpf {
         // A call no function describes cannot be had through functions.
         let (code, errors, _) = traced(
             directory,
-            uscope(&["--attach", "fentry"]),
+            microscope(&["--attach", "fentry"]),
             &["-e", "trace=getpid@32"],
             "compat",
         );
@@ -1197,12 +1201,12 @@ mod bpf {
 
         // Each call by number, and whether it failed: what two runs share.
         let calls = |file: &str| {
-            let profile = uscope::profiler::Profile::read(&directory.join(file))
+            let profile = microscope::profiler::Profile::read(&directory.join(file))
                 .expect("the capture reads")
                 .profile;
             let mut calls = BTreeMap::new();
             for event in profile.syscalls().events {
-                if let uscope::syscalls::TraceEvent::Call(call) = &event.event {
+                if let microscope::syscalls::TraceEvent::Call(call) = &event.event {
                     assert!(event.stack.is_some(), "{call:?} has no stack");
                     let failed = call.outcome.raw().is_some_and(|ret| ret < 0);
                     *calls.entry((call.call.number, failed)).or_insert(0) += 1;
@@ -1212,13 +1216,13 @@ mod bpf {
             calls
         };
 
-        let traced = super::uscope(&["--engine", "ptrace", "-f", "-k"])
+        let traced = super::microscope(&["--engine", "ptrace", "-f", "-k"])
             .args(["-e", "trace=write,getppid", "-o", "traced.usprof", "--"])
             .arg(fixture())
             .arg("family")
             .current_dir(directory)
             .output()
-            .expect("run uscope syscalls");
+            .expect("run microscope syscalls");
         assert!(
             directory.join("traced.usprof").exists(),
             "{}",
@@ -1226,7 +1230,7 @@ mod bpf {
         );
         let recorded = Command::new(launcher())
             .env_clear()
-            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .arg(env!("CARGO_BIN_EXE_microscope"))
             .args([
                 "record",
                 "--syscalls",
@@ -1240,7 +1244,7 @@ mod bpf {
             .current_dir(directory)
             .stdin(Stdio::null())
             .output()
-            .expect("run uscope record");
+            .expect("run microscope record");
         assert_eq!(
             recorded.status.code(),
             traced.status.code(),
@@ -1249,11 +1253,11 @@ mod bpf {
         );
         assert_eq!(calls("recorded.usprof"), calls("traced.usprof"));
 
-        let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let report = Command::new(env!("CARGO_BIN_EXE_microscope"))
             .args(["report", "recorded.usprof"])
             .current_dir(directory)
             .output()
-            .expect("run uscope report");
+            .expect("run microscope report");
         let lines = text(&report.stdout);
         assert!(lines.contains(" samples, "), "{lines}");
         assert!(lines.contains(" system calls, "), "{lines}");
@@ -1277,13 +1281,13 @@ mod bpf {
             let directory = directory.path();
             let (_, errors, ptrace) = traced(
                 directory,
-                super::uscope(&["--engine", "ptrace", "-kk"]),
+                super::microscope(&["--engine", "ptrace", "-kk"]),
                 &arguments,
                 mode,
             );
             assert!(ptrace.contains(" > "), "{errors}{ptrace}");
             let (_, errors, copied) =
-                traced(directory, uscope(&["-k=dwarf", "-k"]), &arguments, mode);
+                traced(directory, microscope(&["-k=dwarf", "-k"]), &arguments, mode);
             let (ours, theirs) = (threads(&copied), threads(&ptrace));
             assert_eq!(
                 ours,
@@ -1293,7 +1297,7 @@ mod bpf {
                 theirs.difference(&ours).collect::<Vec<_>>()
             );
 
-            let (_, errors, walked) = traced(directory, uscope(&["-kk"]), &arguments, mode);
+            let (_, errors, walked) = traced(directory, microscope(&["-kk"]), &arguments, mode);
             let (walked, whole) = (stacks(&walked), stacks(&ptrace));
             assert_eq!(walked.len(), whole.len(), "walked in {mode}: {errors}");
             for ((call, frames), (whole_call, whole_frames)) in walked.iter().zip(&whole) {
@@ -1349,7 +1353,7 @@ mod bpf {
     #[test]
     #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
     fn a_blocked_call_is_reported_in_flight_while_the_program_runs() {
-        let mut command = uscope(&["-e", "trace=read", "--in-flight", "50ms", "--"]);
+        let mut command = microscope(&["-e", "trace=read", "--in-flight", "50ms", "--"]);
         command
             .arg(fixture())
             .arg("block")
@@ -1396,13 +1400,17 @@ mod bpf {
             .strip_prefix("child ")
             .expect("a pid")
             .to_owned();
-        let cgroup = TestCgroup::new("uscope-traced");
+        let cgroup = TestCgroup::new("microscope-traced");
         std::fs::write(cgroup.0.join("cgroup.procs"), &child).expect("move the child");
 
         let path = cgroup.0.to_str().expect("a path").to_owned();
-        let mut running =
-            Running::spawn(&mut uscope(&["--cgroup", &path, "-e", "trace=read,getpid"]));
-        running.line(|line| line == format!("uscope: Tracing cgroup {path}"));
+        let mut running = Running::spawn(&mut microscope(&[
+            "--cgroup",
+            &path,
+            "-e",
+            "trace=read,getpid",
+        ]));
+        running.line(|line| line == format!("microscope: Tracing cgroup {path}"));
         let mut input = fixture.stdin.take().expect("stdin");
         input.write_all(b"x").expect("write a byte");
         drop(input);
@@ -1438,7 +1446,7 @@ mod bpf {
     #[test]
     #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
     fn over_budget_a_trace_samples_and_still_counts_every_call() {
-        let mut command = uscope(&[
+        let mut command = microscope(&[
             "--budget",
             "0.0001",
             "-e",
@@ -1508,7 +1516,7 @@ mod bpf {
     }
 
     /// Counted continuously, every segment holds its own span's calls: the
-    /// kernel counts into one half of its statistics while uscope reads and
+    /// kernel counts into one half of its statistics while microscope reads and
     /// clears the other, so the segments together count every call.
     #[test]
     #[ignore = "needs CAP_BPF and CAP_PERFMON; run with just test-bpf"]
@@ -1521,7 +1529,7 @@ mod bpf {
         std::fs::create_dir(&segments).expect("make the directory");
 
         // Relative to the working directory, which a launcher shares.
-        let mut command = uscope(&[
+        let mut command = microscope(&[
             "-c",
             "--continuous",
             "segments",
@@ -1574,11 +1582,11 @@ mod bpf {
         let (code, lines) = running.finish();
         assert_eq!(code, Some(0), "{lines:?}");
 
-        let report = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let report = Command::new(env!("CARGO_BIN_EXE_microscope"))
             .arg("report")
             .arg(&segments)
             .output()
-            .expect("run uscope report");
+            .expect("run microscope report");
         let table = text(&report.stdout);
         assert!(
             table
@@ -1596,7 +1604,7 @@ mod bpf {
         let directory = ScratchDir::new("syscalls-trigger");
         std::fs::create_dir_all(directory.path().join("segments/windows"))
             .expect("make the directories");
-        let output = uscope(&[
+        let output = microscope(&[
             "--continuous",
             "segments",
             "--trigger-errno",
@@ -1609,21 +1617,21 @@ mod bpf {
         .arg("fails")
         .current_dir(directory.path())
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
         let message = text(&output.stderr);
         assert_eq!(output.status.code(), Some(0), "{message}");
         let saved = message
             .lines()
             .find_map(|line| {
-                line.strip_prefix("uscope: close failed with errno 9: saved the last ")?
+                line.strip_prefix("microscope: close failed with errno 9: saved the last ")?
                     .split_once(" calls to ")
             })
             .unwrap_or_else(|| panic!("{message}"));
-        let window = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let window = Command::new(env!("CARGO_BIN_EXE_microscope"))
             .arg("report")
             .arg(directory.path().join(saved.1))
             .output()
-            .expect("run uscope report");
+            .expect("run microscope report");
         let table = text(&window.stdout);
         let calls = |name: &str| {
             table.lines().find_map(|line| {
@@ -1647,7 +1655,7 @@ mod bpf {
         std::fs::create_dir(&segments).expect("make the directory");
         let mut recording = Command::new(launcher())
             .env_clear()
-            .arg(env!("CARGO_BIN_EXE_uscope"))
+            .arg(env!("CARGO_BIN_EXE_microscope"))
             .args([
                 "record",
                 "--syscalls",
@@ -1665,7 +1673,7 @@ mod bpf {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("run uscope record");
+            .expect("run microscope record");
         let mut stdout = BufReader::new(recording.stdout.take().expect("stdout"));
         let mut ready = String::new();
         stdout.read_line(&mut ready).expect("ready");
@@ -1700,7 +1708,7 @@ mod bpf {
             .expect("the segments")
             .flatten()
         {
-            let profile = uscope::profiler::Profile::read(&entry.path())
+            let profile = microscope::profiler::Profile::read(&entry.path())
                 .expect("a segment reads")
                 .profile;
             let syscalls = profile.syscalls();
@@ -1708,9 +1716,9 @@ mod bpf {
                 .events
                 .iter()
                 .filter(|event| {
-                    matches!(&event.event, uscope::syscalls::TraceEvent::Call(call)
+                    matches!(&event.event, microscope::syscalls::TraceEvent::Call(call)
                         if call.call.name() == Some("read")
-                            && call.outcome == uscope::syscalls::Outcome::Returned(1)
+                            && call.outcome == microscope::syscalls::Outcome::Returned(1)
                             && call.args[0] == 0)
                 })
                 .count();
@@ -1733,8 +1741,8 @@ mod bpf {
     fn an_attached_process_runs_on_traced_to_its_end() {
         let mut target = ExternalProcess::spawn(&Scenario::fixture("attach"));
         let pid = target.process_id().get().to_string();
-        let mut running = Running::spawn(&mut uscope(&["-p", &pid]));
-        running.line(|line| line == format!("uscope: Process {pid} attached"));
+        let mut running = Running::spawn(&mut microscope(&["-p", &pid]));
+        running.line(|line| line == format!("microscope: Process {pid} attached"));
         target.release();
 
         // The read began before the trace did.
@@ -1755,18 +1763,18 @@ mod bpf {
 /// that made it, and a short life can end before that event is handled.
 #[test]
 fn threads_and_children_are_announced_before_what_they_do() {
-    use uscope::syscalls::TraceEvent;
+    use microscope::syscalls::TraceEvent;
 
     let scratch = ScratchDir::new("syscalls-churn");
     let count = 300;
-    let output = uscope(&["--engine", "ptrace", "-f", "-o", "churn.usprof", "--"])
+    let output = microscope(&["--engine", "ptrace", "-f", "-o", "churn.usprof", "--"])
         .arg(fixture())
         .args(["churn", &count.to_string()])
         .current_dir(scratch.path())
         .output()
-        .expect("run uscope");
+        .expect("run microscope");
     assert!(output.status.success(), "{}", text(&output.stderr));
-    let read = uscope::profiler::Profile::read(&scratch.path().join("churn.usprof"))
+    let read = microscope::profiler::Profile::read(&scratch.path().join("churn.usprof"))
         .expect("read the trace");
     let events = read.profile.syscalls().events;
     let mut announced = BTreeMap::new();
@@ -1809,11 +1817,11 @@ fn threads_and_children_are_announced_before_what_they_do() {
 }
 
 /// The first process the trace saw: the one launched.
-fn events_first(events: &[uscope::profiler::RecordedEvent]) -> uscope::syscalls::Pid {
+fn events_first(events: &[microscope::profiler::RecordedEvent]) -> microscope::syscalls::Pid {
     events
         .iter()
         .find_map(|recorded| match &recorded.event {
-            uscope::syscalls::TraceEvent::Call(call) => Some(call.process),
+            microscope::syscalls::TraceEvent::Call(call) => Some(call.process),
             _ => None,
         })
         .expect("a call")

@@ -36,7 +36,7 @@ pub struct Context {
 /// loaded.
 #[derive(Clone, Debug)]
 pub struct Code {
-    modules: Vec<uscope::ModuleId>,
+    modules: Vec<microscope::ModuleId>,
     functions: Arc<[String]>,
     files: Arc<[String]>,
     globals: Arc<[String]>,
@@ -45,7 +45,7 @@ pub struct Code {
 /// The selected frame's variables, kept for one stop and frame.
 #[derive(Clone, Debug)]
 pub struct Names {
-    frame: (uscope::StopId, Option<uscope::StackFrameId>),
+    frame: (microscope::StopId, Option<microscope::StackFrameId>),
     names: Arc<[String]>,
 }
 
@@ -130,7 +130,7 @@ impl Cli {
     /// The variables of the selected frame, `frame` at its stop.
     async fn frame_names(
         &self,
-        frame: (uscope::StopId, Option<uscope::StackFrameId>),
+        frame: (microscope::StopId, Option<microscope::StackFrameId>),
     ) -> Arc<[String]> {
         let cached = self
             .completion_names
@@ -164,7 +164,7 @@ impl Cli {
 
     /// The functions, source file names, and globals of the loaded
     /// modules, or of the program before it runs.
-    async fn code_names(&self, modules: Vec<uscope::ModuleId>) -> Code {
+    async fn code_names(&self, modules: Vec<microscope::ModuleId>) -> Code {
         let mut functions = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();
         let mut globals = std::collections::BTreeSet::new();
@@ -174,7 +174,7 @@ impl Cli {
             }
 
             for symbol in image.symbols() {
-                if symbol.kind() == uscope::SymbolKind::Function && symbol.extent().is_some() {
+                if symbol.kind() == microscope::SymbolKind::Function && symbol.extent().is_some() {
                     functions.insert(symbol.name().to_string());
                 }
             }
@@ -201,19 +201,20 @@ impl Cli {
     /// The names of the members of the value `base` names, or of what it
     /// points to; none when it names no aggregate.
     pub async fn member_names(&self, base: &str) -> Vec<String> {
-        let Ok(expression) = uscope::Expression::parse(base) else {
+        let Ok(expression) = microscope::Expression::parse(base) else {
             return Vec::new();
         };
 
-        let Ok(uscope::Evaluation::Value { value, .. }) = self.debugger.evaluate(&expression).await
+        let Ok(microscope::Evaluation::Value { value, .. }) =
+            self.debugger.evaluate(&expression).await
         else {
             return Vec::new();
         };
 
         let mut state = value.state;
-        if let uscope::VariableState::Available {
-            children: uscope::ValueChildren::NotApplicable,
-            dereference: uscope::DereferenceState::Available(reference),
+        if let microscope::VariableState::Available {
+            children: microscope::ValueChildren::NotApplicable,
+            dereference: microscope::DereferenceState::Available(reference),
             ..
         } = &state
             && let Ok(pointee) = self.debugger.dereference(reference.clone()).await
@@ -221,8 +222,8 @@ impl Cli {
             state = pointee.state;
         }
 
-        let uscope::VariableState::Available {
-            children: uscope::ValueChildren::Available(children),
+        let microscope::VariableState::Available {
+            children: microscope::ValueChildren::Available(children),
             ..
         } = state
         else {
@@ -233,7 +234,7 @@ impl Cli {
             .debugger
             .value_children(
                 children,
-                uscope::ValueChildQuery {
+                microscope::ValueChildQuery {
                     offset: 0,
                     limit: 256,
                 },
@@ -246,10 +247,10 @@ impl Cli {
         page.children
             .iter()
             .filter_map(|child| match &child.relationship {
-                uscope::ValueChildRelationship::Member(member) if !member.artificial => {
+                microscope::ValueChildRelationship::Member(member) if !member.artificial => {
                     member.name.as_deref().map(str::to_owned)
                 }
-                uscope::ValueChildRelationship::Field { name } => Some(name.to_string()),
+                microscope::ValueChildRelationship::Field { name } => Some(name.to_string()),
                 _ => None,
             })
             .collect()
@@ -266,7 +267,7 @@ const SIGNAL_ACTIONS: &[&str] = &["stop", "nostop", "print", "noprint", "pass", 
 /// whether it stops.
 fn exception_words(argument: usize, first: Option<&str>) -> Vec<String> {
     if argument == 0 {
-        let mut words: Vec<String> = uscope::ExceptionStops::filters()
+        let mut words: Vec<String> = microscope::ExceptionStops::filters()
             .iter()
             .map(|filter| filter.id.to_owned())
             .collect();
@@ -275,7 +276,7 @@ fn exception_words(argument: usize, first: Option<&str>) -> Vec<String> {
     } else if first == Some("syscall") {
         let mut words = words_of(&["entry", "exit", "if"]);
         words.extend(
-            uscope::syscalls::table::calls(uscope::syscalls::Abi::X86_64)
+            microscope::syscalls::table::calls(microscope::syscalls::Abi::X86_64)
                 .iter()
                 .map(|&(_, name)| name.to_owned()),
         );
@@ -361,8 +362,8 @@ pub fn complete(
         Command::Views if argument == 0 => {
             words_of(&["load", "clear", "check", "explain", "record"])
         }
-        Command::Handle if argument == 0 => uscope::signal_codes()
-            .filter_map(uscope::signal_name)
+        Command::Handle if argument == 0 => microscope::signal_codes()
+            .filter_map(microscope::signal_name)
             .collect(),
         Command::Handle => words_of(SIGNAL_ACTIONS),
         Command::Catch => exception_words(argument, words.get(1).copied()),

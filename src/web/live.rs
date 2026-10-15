@@ -6,14 +6,14 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use microscope::syscall_engines::capture::SyscallCapture;
+use microscope::syscall_engines::stacks::SharedStacks;
+use microscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic, ptrace};
+use microscope::syscalls::captures::Limits;
+use microscope::syscalls::fds::{self, FdTable};
+use microscope::syscalls::filter::Filter;
+use microscope::syscalls::{InFlight, TraceEvent};
 use tokio::sync::oneshot;
-use uscope::syscall_engines::capture::SyscallCapture;
-use uscope::syscall_engines::stacks::SharedStacks;
-use uscope::syscall_engines::{Finished, Sink, Target, TraceOptions, monotonic, ptrace};
-use uscope::syscalls::captures::Limits;
-use uscope::syscalls::fds::{self, FdTable};
-use uscope::syscalls::filter::Filter;
-use uscope::syscalls::{InFlight, TraceEvent};
 
 use super::profiles::{LIVE_EVERY, Profiles};
 use super::protocol::{ErrorKind, ProfileInfo, RecordSyscalls};

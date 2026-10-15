@@ -4,9 +4,9 @@ import { expect, fixture, join, test } from "./server";
 
 test("F5, F6, and Shift+F5 run, pause, and kill without the browser acting", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   const status = page.getByTestId("status");
   // A reload would lose this marker.
   await page.evaluate(() => {
@@ -25,9 +25,9 @@ test("F5, F6, and Shift+F5 run, pause, and kill without the browser acting", asy
   expect(await page.evaluate(() => (window as { marker?: boolean }).marker)).toBe(true);
 });
 
-test("reloading keeps the session and its output", async ({ page, uscope }) => {
-  await uscope.stop();
-  const server = await uscope.start([fixture("output-streams")]);
+test("reloading keeps the session and its output", async ({ page, microscope }) => {
+  await microscope.stop();
+  const server = await microscope.start([fixture("output-streams")]);
   await join(page, server.link);
   await page.keyboard.press("F5");
   // It reads its input to the end, which Ctrl+D closes.
@@ -44,9 +44,9 @@ test("reloading keeps the session and its output", async ({ page, uscope }) => {
 
 test("the picker completes a path and loads it in place of the program", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   const first = page.url();
   const watcher = await page.context().newPage();
   await watcher.goto(first);
@@ -83,9 +83,9 @@ test("the picker completes a path and loads it in place of the program", async (
 
 test("a program chosen in the picker keeps nothing of the one it replaced", async ({
   page,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await page.keyboard.press("F5");
   await expect(page.getByTestId("status")).toContainText("Running");
   await page.keyboard.press("F6");
@@ -113,8 +113,8 @@ test("a program chosen in the picker keeps nothing of the one it replaced", asyn
   await expect(page.getByTestId("console")).not.toContainText("spin_value");
 });
 
-test("a replacement that fails says the old session ended", async ({ page, uscope }) => {
-  await join(page, uscope.link);
+test("a replacement that fails says the old session ended", async ({ page, microscope }) => {
+  await join(page, microscope.link);
   const first = page.url();
   const watcher = await page.context().newPage();
   await watcher.goto(first);

@@ -27,7 +27,7 @@ over those layers. The browser reads the same profile and analysis results.
 | `src/analysis/` | Queries, call trees, diffs, costs, and zones |
 | `src/cli/profile.rs` | `record`, `report`, `convert`, and `symbolize` command adapters |
 | `src/web/profiles.rs`, `web/src/profile/`, `web/src/ui/profile/` | Profile transport, browser model, and profile pages |
-| `sdk/c/uscope_kernel.h`, `sdk/rust-probes/`, `sdk/zig/uscope_kernel.zig` | Target-side profiling and instrumentation interfaces |
+| `sdk/c/microscope_kernel.h`, `sdk/rust-probes/`, `sdk/zig/microscope_kernel.zig` | Target-side profiling and instrumentation interfaces |
 | `tests/profiler.rs`, `src/capture/tests.rs`, `src/analysis/tests.rs` | End-to-end and format/analysis tests |
 
 ## Recording model
@@ -54,7 +54,7 @@ value before recording begins.
 
 The budget controller measures recorder work and lowers sampling duty when it
 would exceed its share of one CPU. Keep that feedback deterministic for the
-same observations. A budget is about uscope's own cost, not a claim that the
+same observations. A budget is about microscope's own cost, not a claim that the
 target's total overhead is exactly that percentage.
 
 Do not add work to the sample hot path without measuring it under each preset.
@@ -85,9 +85,9 @@ Immediate symbolization loads module debug information on the recording host
 and stores normalized frame information in the capture.
 
 Deferred symbolization stores module identities, build IDs, mappings, and
-addresses. `uscope symbolize` later finds matching debug files and adds source
-facts. The later host must prove module identity; a matching path alone is not
-enough.
+addresses. `microscope symbolize` later finds matching debug files and adds
+source facts. The later host must prove module identity; a matching path alone
+is not enough.
 
 Keep capture identity independent of local paths so a profile can move between
 machines. Record symbolization failures with enough module and address context
@@ -170,7 +170,7 @@ Format changes need:
 Do not let an external format dictate the internal model. Conversion may lose
 facts; make that loss a property of the converter.
 
-A capture can also hold system calls, from `uscope syscalls -o` or
+A capture can also hold system calls, from `microscope syscalls -o` or
 `record --syscalls`. Their tables, and how a recording merges a trace with its
 samples, are described in [system call tracing](syscalls.md#captures).
 

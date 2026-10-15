@@ -6,16 +6,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{Value, json};
-use uscope::profiler::{Profile, RecordedEvent, StackEnding};
-use uscope::syscalls::fds::{FdTable, Kind as FdKind};
-use uscope::syscalls::filter::{self, Filter};
-use uscope::syscalls::procs::ProcessTree;
-use uscope::syscalls::specs::{self, Class};
-use uscope::syscalls::stats::{self, Folded, SyscallStats, bytes_moved};
-use uscope::syscalls::{
+use microscope::profiler::{Profile, RecordedEvent, StackEnding};
+use microscope::syscalls::fds::{FdTable, Kind as FdKind};
+use microscope::syscalls::filter::{self, Filter};
+use microscope::syscalls::procs::ProcessTree;
+use microscope::syscalls::specs::{self, Class};
+use microscope::syscalls::stats::{self, Folded, SyscallStats, bytes_moved};
+use microscope::syscalls::{
     Errno, EventFlags, InFlight, Outcome, Pid, ProcessEnd, SyscallEvent, Tid, TraceEvent,
 };
+use serde_json::{Value, json};
 
 use super::protocol::{
     ErrorKind, Request, SyscallArgument, SyscallBlocked, SyscallCall, SyscallCallQuery,

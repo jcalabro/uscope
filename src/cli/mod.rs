@@ -27,8 +27,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::ValueEnum;
+use microscope::{AssemblySyntax, DebuggerHandle, Error, LaunchOptions, StopReason};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use uscope::{AssemblySyntax, DebuggerHandle, Error, LaunchOptions, StopReason};
 
 use config::{Settings, Toggle};
 use session::Session;
@@ -238,7 +238,7 @@ pub struct Cli {
     rows: std::sync::atomic::AtomicUsize,
 
     /// The exceptions that stop, as `catch` last chose them.
-    exceptions: std::sync::Mutex<uscope::ExceptionStops>,
+    exceptions: std::sync::Mutex<microscope::ExceptionStops>,
 
     /// The expressions every stop prints.
     displays: std::sync::Mutex<stops::Displays>,
@@ -270,8 +270,8 @@ type Highlights =
 /// recent first, then the project's and the user's.
 #[derive(Default)]
 struct ViewSources {
-    session: Vec<uscope::view_files::ViewFile>,
-    discovered: Vec<uscope::view_files::ViewFile>,
+    session: Vec<microscope::view_files::ViewFile>,
+    discovered: Vec<microscope::view_files::ViewFile>,
 }
 
 impl Cli {
@@ -305,11 +305,11 @@ impl Cli {
     }
 
     /// The process the session launched, while it is alive.
-    pub async fn live_process(&self) -> Option<uscope::ProcessId> {
+    pub async fn live_process(&self) -> Option<microscope::ProcessId> {
         match self.debugger.snapshot().await.ok()?.inferior {
-            uscope::InferiorState::Running { process_id, .. }
-            | uscope::InferiorState::Stopped { process_id, .. } => Some(process_id),
-            uscope::InferiorState::NotRunning => None,
+            microscope::InferiorState::Running { process_id, .. }
+            | microscope::InferiorState::Stopped { process_id, .. } => Some(process_id),
+            microscope::InferiorState::NotRunning => None,
         }
     }
 
@@ -379,10 +379,10 @@ impl Cli {
         project_root: &std::path::Path,
         paths: &[PathBuf],
     ) -> Vec<String> {
-        let (discovered, mut warnings) = uscope::view_files::discover(project_root);
+        let (discovered, mut warnings) = microscope::view_files::discover(project_root);
         let mut session = Vec::new();
         for path in paths {
-            match uscope::view_files::read(path) {
+            match microscope::view_files::read(path) {
                 Ok(file) => session.insert(0, file),
                 Err(error) => warnings.push(error),
             }
@@ -457,7 +457,7 @@ impl Cli {
                 .collect::<Vec<_>>()
         };
 
-        let mut kernels = Vec::<uscope::view_files::KernelFile>::new();
+        let mut kernels = Vec::<microscope::view_files::KernelFile>::new();
 
         // Files in one directory share the kernels beside them.
         for kernel in sources.iter().flat_map(|file| &file.kernels) {
@@ -470,7 +470,7 @@ impl Cli {
             .iter()
             .map(|file| (file.name.as_str(), file.text.as_str()))
             .collect::<Vec<_>>();
-        let mut renderers = Vec::<uscope::view_files::RendererFile>::new();
+        let mut renderers = Vec::<microscope::view_files::RendererFile>::new();
         for renderer in sources.iter().flat_map(|file| &file.renderers) {
             if !renderers.iter().any(|loaded| loaded.path == renderer.path) {
                 renderers.push(renderer.clone());
@@ -510,7 +510,7 @@ impl Cli {
 
     async fn run_inputs(&self, args: &Session) -> Result<()> {
         // The program is loaded and the session can take its first command.
-        uscope::timings::mark("ready");
+        microscope::timings::mark("ready");
         self.announce(args)?;
         for warning in self.debug_information_warnings().await {
             self.warn(&warning);
@@ -583,7 +583,7 @@ impl Cli {
     /// Applies the settings' `[signals]`, as `handle` would.
     async fn apply_signal_settings(&self) -> Result<()> {
         for (name, actions) in &self.settings.config.signals {
-            let Some(code) = uscope::signal_named(name) else {
+            let Some(code) = microscope::signal_named(name) else {
                 bail!("unknown signal '{name}' in [signals]");
             };
 
@@ -719,7 +719,7 @@ impl Cli {
     /// Restores the breakpoints the project's last interactive session
     /// kept, each pending until code for it loads, and starts keeping this
     /// session's.
-    async fn restore_breakpoints(&self, source_paths: &uscope::SourcePathMap) {
+    async fn restore_breakpoints(&self, source_paths: &microscope::SourcePathMap) {
         let path = saved::path(&self.settings.root);
         let shown = self.renderers.stderr.path(&path);
         let mut kept = saved::Kept {
@@ -803,25 +803,25 @@ impl Cli {
     async fn restore_breakpoint(
         &self,
         entry: &saved::Saved,
-        source_paths: &uscope::SourcePathMap,
+        source_paths: &microscope::SourcePathMap,
     ) -> Result<bool> {
         let spec = commands::parse_breakpoint_location(&entry.location)?
             .ok_or_else(|| anyhow!("'{}' is no location", entry.location))?;
-        let options = uscope::BreakpointOptions {
+        let options = microscope::BreakpointOptions {
             hit_condition: entry.hits.as_deref().map(str::parse).transpose()?,
             condition: entry
                 .condition
                 .as_deref()
-                .map(uscope::Condition::parse)
+                .map(microscope::Condition::parse)
                 .transpose()?,
             log_message: entry
                 .log
                 .as_deref()
-                .map(uscope::LogMessage::parse)
+                .map(microscope::LogMessage::parse)
                 .transpose()?,
             enabled: entry.enabled,
             pending: true,
-            ..uscope::BreakpointOptions::default()
+            ..microscope::BreakpointOptions::default()
         };
 
         let breakpoint = self.debugger.add_breakpoint_with(spec, options).await?;
@@ -838,10 +838,10 @@ impl Cli {
     /// The line a source breakpoint's first location is at, as it reads now.
     async fn current_line_text(
         &self,
-        breakpoint: &uscope::Breakpoint,
-        source_paths: &uscope::SourcePathMap,
+        breakpoint: &microscope::Breakpoint,
+        source_paths: &microscope::SourcePathMap,
     ) -> Option<String> {
-        if !matches!(breakpoint.spec, uscope::BreakpointSpec::Source { .. }) {
+        if !matches!(breakpoint.spec, microscope::BreakpointSpec::Source { .. }) {
             return None;
         }
 

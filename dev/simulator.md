@@ -17,7 +17,7 @@ compare debugger state with the world's ground truth.
 | `src/sim/catches.rs`, `tracing.rs` | Catchpoint accounting and the BPF engine's tracepoint stream |
 | `src/sim/conformance/` | Dual-run probes against the real Linux kernel and CPU |
 | `src/backend/linux/sim_edge.rs` | Adapter from the real controller to simulated native operations |
-| `src/bin/uscope-sim.rs`, `src/sim/report.rs` | Sweep/replay command and failure reports |
+| `src/bin/microscope-sim.rs`, `src/sim/report.rs` | Sweep/replay command and failure reports |
 | `tests/golden/`, `scripts/golden.sh` | Reproducible native programs and manifest management |
 | `plans/simulator.md` | Numbered model rules and design record |
 

@@ -5,14 +5,14 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use support::Scenario;
-use uscope::profiler::budget::Budget;
-use uscope::profiler::{
+use microscope::profiler::budget::Budget;
+use microscope::profiler::{
     Attachment, CallNode, DEEP_STACK_COPY, GapReason, Granularity, MarkerKind, Preset,
     ProbeSelection, Profile, Query, RecordError, RecordOptions, SMALL_STACK_COPY, SampleSource,
     SampledStack, Save, StackCopy, StackEnding, StackView, Watch, record, record_attached,
     record_watched,
 };
+use support::Scenario;
 
 /// The profile-stacks fixture across languages, compilers, optimization,
 /// frame pointers, PIE, and linkers, and whether the build keeps frame
@@ -566,7 +566,7 @@ fn a_threads_time_off_its_cpu_is_each_sleep_and_each_preemption() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // Small samples, so that a ring holds the whole run though uscope,
+    // Small samples, so that a ring holds the whole run though microscope,
     // under load, reads none of it: a full ring drops the switches that
     // say when a thread came back.
     let options = RecordOptions {
@@ -851,14 +851,14 @@ fn segments_tile_a_recording_and_read_back_as_one() {
                 && interval.time + i64::try_from(interval.duration).expect("short") <= end
         }));
 
-        // uscope records on one thread, which runs no longer than a span,
+        // microscope records on one thread, which runs no longer than a span,
         // give or take where the cut fell between drains; the first also
         // holds what came before the program's first record.
         let span = u64::try_from(end - start).expect("ordered");
         let (recorder, _) = segment.recorder_cpu();
         assert!(
             number == 0 || recorder <= span + 20_000_000,
-            "segment {number} took {recorder} ns of uscope's CPU time in {span}"
+            "segment {number} took {recorder} ns of microscope's CPU time in {span}"
         );
         segment
             .write_segment(scratch.path(), Duration::from_hours(1))
@@ -1294,7 +1294,7 @@ fn clock_samples_are_valid_stacks_and_survive_a_file() {
 
         let path = scratch.path().join(format!("{variant}.usprof"));
         profile.write(&path).expect("write");
-        let read = uscope::profiler::Profile::read(&path).expect("read");
+        let read = microscope::profiler::Profile::read(&path).expect("read");
         assert!(!read.truncated);
         assert_eq!(
             read.profile, profile,
@@ -1428,7 +1428,7 @@ fn a_program_that_cannot_start_fails_the_recording() {
     let missing = Command::new("/nonexistent/program");
     let error = record(missing, &RecordOptions::default()).expect_err("no program");
     assert!(
-        matches!(&error, uscope::profiler::RecordError::Start(error) if error.kind() == std::io::ErrorKind::NotFound),
+        matches!(&error, microscope::profiler::RecordError::Start(error) if error.kind() == std::io::ErrorKind::NotFound),
         "{error:?}"
     );
 }
@@ -1947,7 +1947,7 @@ fn instrumented_zones_nest_exactly_as_the_program_ran_them() {
     assert!(markers.iter().all(|marker| marker.tid == tid("outer")));
 }
 
-/// A thread that writes faster than uscope reads overwrites its oldest
+/// A thread that writes faster than microscope reads overwrites its oldest
 /// records. Every record is read or counted lost, and every event read is
 /// in a zone: a whole one, or one flagged for the end it lost.
 #[test]
@@ -2116,7 +2116,7 @@ fn symbols_left_for_later_come_from_a_debug_file_with_the_build_id() {
         named(&profile)
     );
 
-    let basic = |found: &[uscope::profiler::ModuleSymbols]| {
+    let basic = |found: &[microscope::profiler::ModuleSymbols]| {
         found
             .iter()
             .find(|module| module.module.ends_with("/basic"))
@@ -2124,16 +2124,16 @@ fn symbols_left_for_later_come_from_a_debug_file_with_the_build_id() {
             .expect("the program's module")
     };
 
-    let found = profile.symbolize(&uscope::DebugFileOptions::default());
+    let found = profile.symbolize(&microscope::DebugFileOptions::default());
     assert_eq!(
         basic(&found).source,
         Err("its file is gone, and no debug directory or server has its build id".to_owned())
     );
 
     let root = Scenario::fixture("split/debug-root");
-    let found = profile.symbolize(&uscope::DebugFileOptions {
+    let found = profile.symbolize(&microscope::DebugFileOptions {
         directories: vec![root.clone()],
-        ..uscope::DebugFileOptions::default()
+        ..microscope::DebugFileOptions::default()
     });
     let module = basic(&found);
     assert!(

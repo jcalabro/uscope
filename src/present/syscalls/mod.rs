@@ -13,15 +13,15 @@ mod tests;
 
 use std::fmt::Write as _;
 
-use nix::libc;
-use uscope::syscalls::blobs;
-use uscope::syscalls::fds::{FdTable, Kind as FdKind};
-use uscope::syscalls::filter::fd_value;
-use uscope::syscalls::specs::{self, Arg, Count, Direction, MemKind, Ret, Spec};
-use uscope::syscalls::{
+use microscope::syscalls::blobs;
+use microscope::syscalls::fds::{FdTable, Kind as FdKind};
+use microscope::syscalls::filter::fd_value;
+use microscope::syscalls::specs::{self, Arg, Count, Direction, MemKind, Ret, Spec};
+use microscope::syscalls::{
     Abi, Capture, CaptureState, Errno, EventFlags, Outcome, Pid, ProcessEnd, SyscallEvent, Tid,
     TraceEvent,
 };
+use nix::libc;
 
 use sets::Shape;
 
@@ -299,7 +299,7 @@ pub struct Context<'a> {
 /// The call a catchpoint stopped at, as strace prints it: its arguments,
 /// with the path it names, and at its exit what it returned.
 #[must_use]
-pub fn caught(stop: &uscope::SyscallStop) -> String {
+pub fn caught(stop: &microscope::SyscallStop) -> String {
     let event = SyscallEvent {
         thread: Tid::new(0),
         process: Pid::new(0),
@@ -312,7 +312,7 @@ pub fn caught(stop: &uscope::SyscallStop) -> String {
         entered: None,
         exited: None,
         stack: None,
-        flags: uscope::syscalls::EventFlags::default(),
+        flags: microscope::syscalls::EventFlags::default(),
     };
 
     let style = Style::default();

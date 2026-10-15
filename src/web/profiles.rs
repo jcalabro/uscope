@@ -1,7 +1,7 @@
 //! Profiles the server serves to every tab, whatever it debugs. Each is
 //! named by a digest of its bytes, so a link to one opens the same profile
 //! whenever a server serves it. Every answer is a query of
-//! [`uscope::profiler`], which the CLI's reports read too.
+//! [`microscope::profiler`], which the CLI's reports read too.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,15 +11,15 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use serde_json::{Value, json};
-use tokio::sync::{oneshot, watch};
-use uscope::profiler::{
+use microscope::profiler::{
     DiffCost, GapReason, Granularity, KeyKind, Keys, Lanes, MarkerKind, NO_KEY, NO_TASK, Preset,
     Profile, Query, RecordOptions, SampleSource, Side, Source, Transform, Watch, diff_costs,
     diff_trees, record_watched,
 };
+use serde_json::{Value, json};
+use tokio::sync::{oneshot, watch};
 
-use uscope::syscalls::InFlight;
+use microscope::syscalls::InFlight;
 
 use super::protocol::{
     self, ErrorKind, ProfileBaseWeight, ProfileCost, ProfileFunctions, ProfileGranularity,
@@ -97,7 +97,12 @@ impl Profiles {
         Ok(self.add_read(directory, read, id))
     }
 
-    fn add_read(&self, path: &Path, mut read: uscope::profiler::ReadProfile, id: String) -> String {
+    fn add_read(
+        &self,
+        path: &Path,
+        mut read: microscope::profiler::ReadProfile,
+        id: String,
+    ) -> String {
         if read.truncated {
             eprintln!(
                 "warning: {} was cut short; serving the part that was complete",
@@ -107,7 +112,10 @@ impl Profiles {
 
         // A profile recorded with its symbols left for later gets those
         // this host's files and debug directories hold.
-        for module in read.profile.symbolize(&uscope::DebugFileOptions::default()) {
+        for module in read
+            .profile
+            .symbolize(&microscope::DebugFileOptions::default())
+        {
             if let Err(why) = &module.source {
                 eprintln!("note: {} keeps its addresses: {why}", module.module);
             }
@@ -307,7 +315,7 @@ impl Profiles {
         let unlisted = self
             .start_recorder(&id, stop, run, |run| {
                 std::thread::Builder::new()
-                    .name("uscope-web-record".into())
+                    .name("microscope-web-record".into())
                     .spawn(run)
             })
             .map_err(|error| Failure::new(ErrorKind::Failed, error.to_string()))?;
@@ -1169,7 +1177,7 @@ fn zones(profile: &Profile, query: &protocol::ProfileZonesQuery) -> (Value, Vec<
         bytes.extend_from_slice(&exact_time(block.end - start).to_le_bytes());
     }
 
-    let columns: [&dyn Fn(&uscope::profiler::ZoneBlock) -> u32; 2] =
+    let columns: [&dyn Fn(&microscope::profiler::ZoneBlock) -> u32; 2] =
         [&|block| block.thread, &|block| block.depth];
     for column in columns {
         for block in &blocks {

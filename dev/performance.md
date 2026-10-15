@@ -12,16 +12,16 @@ timing prints.
 | `bench/baseline.json` | Expected load-allocation counts for smoke checks |
 | `bench/overhead.json` | Flight-recorder overhead baseline |
 | `bench/reports/` | Checked-in comparison reports used during performance work |
-| `src/bin/uscope-tools.rs`, `src/tools/` | Benchmark and overhead helper commands |
+| `src/bin/microscope-tools.rs`, `src/tools/` | Benchmark and overhead helper commands |
 | `justfile` | `timings`, `bench-*`, and `profile-*` recipes |
-| `dev/profiling.md` | Architecture of uscope's user-facing profiler |
+| `dev/profiling.md` | Architecture of microscope's user-facing profiler |
 
 ## Timings
 
 Give a new phase one `span!` and count repeated work with `count!` from
 `src/timings`. Do not create a span for every row or entry.
 
-Run uscope with `--timings FILE`, then summarize or compare reports:
+Run microscope with `--timings FILE`, then summarize or compare reports:
 
 ```sh
 just timings FILE
@@ -118,7 +118,7 @@ module. Compare the phase that changed rather than only total wall time.
 
 Test a cold load when changing the loader. Test a cache hit when changing the
 container, validation, or mapping. A warm operating-system page cache is not
-the same as a uscope image-cache hit; record which one a report measured.
+the same as a microscope image-cache hit; record which one a report measured.
 
 `just bench --compare BASE` gives a larger before/after comparison. Keep the
 baseline checkout, toolchain, CPU policy, and fixture set fixed.
@@ -127,7 +127,7 @@ baseline checkout, toolchain, CPU policy, and fixture set fixed.
 
 `just profile-overhead` interleaves bare and recorded runs of reference
 workloads. It measures target work, service latency where applicable, and
-uscope resource use under each preset.
+microscope resource use under each preset.
 
 Run it on an otherwise quiet machine with the pinned environment. Look at the
 distribution and noise, not only one ratio. A change smaller than observed
@@ -137,7 +137,7 @@ The production preset has a strict CPU budget, but changes can still affect
 target cache behavior, memory bandwidth, file I/O, and latency. Keep those
 measurements in the report.
 
-## Profiling uscope
+## Profiling microscope
 
 Use the profiler that answers the current question:
 

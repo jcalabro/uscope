@@ -843,10 +843,10 @@ pub fn hostile(data: &[u8]) {
     let work = u64::from(budget) * 256 + 16;
     let (mut world, variables) = containers(&mut input);
     let text = String::from_utf8_lossy(text).into_owned();
-    let text = if text.starts_with("uscope-views") {
+    let text = if text.starts_with("microscope-views") {
         text
     } else {
-        format!("uscope-views 1\n{text}")
+        format!("microscope-views 1\n{text}")
     };
 
     let fuzzed = ViewSet::new([("fuzz.views", text.as_str())]);

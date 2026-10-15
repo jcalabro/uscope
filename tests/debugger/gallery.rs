@@ -1,13 +1,13 @@
 //! Values agree with what their programs say they are. Each gallery prints
 //! a tab-separated `TRUTH` line per value before it calls `reached()`, and
 //! the values are read from `reached`'s caller, or from the stopped frame
-//! at another breakpoint. A value uscope shows as available must equal the
+//! at another breakpoint. A value microscope shows as available must equal the
 //! truth; in optimized builds it may instead be unavailable for a typed
 //! reason, unless the test requires it.
 
 use std::process::Stdio;
 
-use uscope::{
+use microscope::{
     FloatValue, IntegerValue, LaunchOptions, StackFrameId, TypeInfo, ValueChildRelationship,
     Variable, VariableKind, VariableValue, VariableValueSource,
 };
@@ -65,7 +65,7 @@ struct Gallery<'a> {
 }
 
 /// Runs a gallery through every checkpoint and checks every truth it
-/// printed against what uscope shows there.
+/// printed against what microscope shows there.
 async fn check_gallery(gallery: &Gallery<'_>) {
     let fixture = gallery.fixture;
     let scratch = ScratchDir::new("gallery");
@@ -274,8 +274,8 @@ fn check_unknown(variables: &[Variable], truth: &Truth) -> Result<(), String> {
         .find(|variable| variable.name.as_ref() == name)
         .ok_or("is not listed")?;
     match &variable.state {
-        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(
-            uscope::UnsupportedVariableFeature::ReturnPlace,
+        VariableState::Unavailable(microscope::VariableUnavailableReason::Unsupported(
+            microscope::UnsupportedVariableFeature::ReturnPlace,
         )) => Ok(()),
         state => Err(format!(
             "is not unknown for its calling convention: {state:?}"
@@ -376,10 +376,12 @@ async fn check_truth(
         };
     };
 
-    // A value uscope cannot show yet must say so.
+    // A value microscope cannot show yet must say so.
     if truth.kind == "unsupported" {
         return match &variable.state {
-            VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(_)) => Ok(()),
+            VariableState::Unavailable(microscope::VariableUnavailableReason::Unsupported(_)) => {
+                Ok(())
+            }
             state => Err(format!("is not unsupported: {state:?}")),
         };
     }
@@ -442,7 +444,7 @@ async fn child_named(
     scenario: &Scenario,
     state: &VariableState,
     segment: &str,
-) -> Result<uscope::ValueChild, String> {
+) -> Result<microscope::ValueChild, String> {
     let VariableState::Available {
         children,
         presentation,
@@ -454,11 +456,11 @@ async fn child_named(
 
     let presented = presentation
         .as_deref()
-        .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
+        .filter(|presentation| presentation.shape != microscope::PresentedShape::Raw)
         .map(|presentation| &presentation.children);
     let mut child = Err(format!("has no child {segment}"));
     for children in std::iter::once(children).chain(presented) {
-        let uscope::ValueChildren::Available(reference) = children else {
+        let microscope::ValueChildren::Available(reference) = children else {
             continue;
         };
 
@@ -467,7 +469,7 @@ async fn child_named(
                 "value children",
                 scenario.handle().value_children(
                     reference.clone(),
-                    uscope::ValueChildQuery {
+                    microscope::ValueChildQuery {
                         offset: 0,
                         limit: 256,
                     },
@@ -490,7 +492,7 @@ async fn child_named(
 /// Whether a path's segment names `child`: a member by its name, an
 /// element by its zero-based index or by its source indices in
 /// parentheses.
-fn named(child: &uscope::ValueChild, segment: &str) -> bool {
+fn named(child: &microscope::ValueChild, segment: &str) -> bool {
     match &child.relationship {
         ValueChildRelationship::Member(member) => member.name.as_deref() == Some(segment),
         ValueChildRelationship::SliceElement { index }
@@ -512,7 +514,7 @@ fn named(child: &uscope::ValueChild, segment: &str) -> bool {
     }
 }
 
-/// What uscope shows of an available value, written as a truth of `kind`
+/// What microscope shows of an available value, written as a truth of `kind`
 /// writes it.
 fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> String {
     let VariableState::Available { value, text, .. } = state else {
@@ -554,7 +556,7 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
                 imaginary: FloatValue::Binary64(imaginary),
             }),
         ) => format!("{real:#x}:{imaginary:#x}"),
-        ("summary", _) => uscope::value_summary(type_info, state),
+        ("summary", _) => microscope::value_summary(type_info, state),
         ("addressable", _) => match state {
             VariableState::Available {
                 source: VariableValueSource::Memory(_),
@@ -564,15 +566,16 @@ fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> Str
             _ => unreachable!("only available values are shown"),
         },
         ("func", VariableValue::Function { code, function }) => {
-            uscope::function_text(*code, function.as_deref())
+            microscope::function_text(*code, function.as_deref())
         }
         ("len", VariableValue::Slice { length, .. }) => length.to_string(),
         ("symbol", VariableValue::Enumeration { value, matches }) => {
-            uscope::symbol_text(*value, matches).unwrap_or_else(|| format!("{value:?}"))
+            microscope::symbol_text(*value, matches).unwrap_or_else(|| format!("{value:?}"))
         }
-        ("string", _) => text
-            .as_ref()
-            .map_or_else(|| format!("{value:?}"), |text| uscope::quoted_text(text)),
+        ("string", _) => text.as_ref().map_or_else(
+            || format!("{value:?}"),
+            |text| microscope::quoted_text(text),
+        ),
         ("type", _) => type_info.map_or("?", |info| &info.name).to_owned(),
         _ => format!("{value:?}"),
     }

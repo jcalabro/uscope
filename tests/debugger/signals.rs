@@ -1,10 +1,10 @@
 //! Signal policy: which signals stop, are reported, and are delivered.
 
 use super::*;
-use uscope::{DebuggerEvent, SignalPolicy};
+use microscope::{DebuggerEvent, SignalPolicy};
 
 fn code(name: &str) -> u64 {
-    uscope::signal_named(name).unwrap_or_else(|| panic!("unknown signal {name}"))
+    microscope::signal_named(name).unwrap_or_else(|| panic!("unknown signal {name}"))
 }
 
 const QUIET: SignalPolicy = SignalPolicy {
@@ -15,15 +15,15 @@ const QUIET: SignalPolicy = SignalPolicy {
 
 #[tokio::test]
 async fn signals_are_named_and_follow_gdbs_default_policy() {
-    assert_eq!(uscope::signal_named("usr1"), Some(10));
+    assert_eq!(microscope::signal_named("usr1"), Some(10));
     assert_eq!(
-        uscope::signal_named("SIGPOLL"),
-        uscope::signal_named("SIGIO")
+        microscope::signal_named("SIGPOLL"),
+        microscope::signal_named("SIGIO")
     );
-    assert_eq!(uscope::signal_name(35).as_deref(), Some("SIG35"));
-    assert_eq!(uscope::signal_name(0), None);
-    assert_eq!(uscope::signal_named("SIGNOPE"), None);
-    assert_eq!(uscope::signal_codes().count(), 64);
+    assert_eq!(microscope::signal_name(35).as_deref(), Some("SIG35"));
+    assert_eq!(microscope::signal_name(0), None);
+    assert_eq!(microscope::signal_named("SIGNOPE"), None);
+    assert_eq!(microscope::signal_codes().count(), 64);
 
     let mut scenario = Scenario::launch("signal-policy");
     let mut events = scenario.handle().subscribe();
@@ -203,11 +203,11 @@ async fn a_step_ends_at_a_declined_breakpoint_a_signal_reached_first() {
         .operation(
             "a declined breakpoint",
             scenario.handle().add_breakpoint_with_hit_condition(
-                uscope::BreakpointSpec::Source {
+                microscope::BreakpointSpec::Source {
                     path: "signal-steps.c".into(),
-                    line: uscope::LineNumber::new(line).expect("a line"),
+                    line: microscope::LineNumber::new(line).expect("a line"),
                 },
-                uscope::HitCondition::new(uscope::HitComparison::Equal, 100)
+                microscope::HitCondition::new(microscope::HitComparison::Equal, 100)
                     .expect("a hit condition"),
             ),
         )
@@ -234,8 +234,8 @@ async fn a_step_ends_at_a_declined_breakpoint_a_signal_reached_first() {
     assert!(
         declined.locations.iter().any(|resolved| {
             [
-                uscope::BreakpointLocation::Image(location.image.address),
-                uscope::BreakpointLocation::Virtual(location.address),
+                microscope::BreakpointLocation::Image(location.image.address),
+                microscope::BreakpointLocation::Virtual(location.address),
             ]
             .contains(&resolved.location)
         }),
@@ -251,7 +251,7 @@ async fn handled(scenario: &Scenario) -> i128 {
         .operation("handled", scenario.handle().variable("handled"))
         .await;
     match available_value(&variable.state) {
-        uscope::VariableValue::Scalar(ScalarValue::Signed(value)) => *value,
+        microscope::VariableValue::Scalar(ScalarValue::Signed(value)) => *value,
         value => panic!("handled is {value:?}"),
     }
 }

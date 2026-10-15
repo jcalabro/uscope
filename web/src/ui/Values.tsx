@@ -25,7 +25,7 @@ export function hidden(focus: Focus, what = "Values"): string | null {
     case "passed":
       return `${what} hidden: they belong to stop #${at.stop}, which has passed.`;
     case "disconnected":
-      return "Reconnecting to uscope…";
+      return "Reconnecting to microscope…";
     default:
       return null;
   }

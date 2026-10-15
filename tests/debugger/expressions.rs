@@ -7,7 +7,7 @@
 
 use std::process::Stdio;
 
-use uscope::{Evaluation, Expression, FloatValue, IntegerValue, StackFrameId, VariableValue};
+use microscope::{Evaluation, Expression, FloatValue, IntegerValue, StackFrameId, VariableValue};
 
 use super::*;
 use crate::support::ScratchDir;
@@ -155,7 +155,7 @@ fn disagreement(
         ("text", Ok(Evaluation::Value { value, cause })) => match &value.state {
             VariableState::Available {
                 text: Some(text), ..
-            } if text.completion == uscope::TextCompletion::Complete
+            } if text.completion == microscope::TextCompletion::Complete
                 && text.bytes.as_ref() == expectation.value.as_bytes() =>
             {
                 return None;
@@ -185,7 +185,7 @@ fn disagreement(
             },
             // An optimized value may be kept where it has no address.
             Err(Error::Expression(error))
-                if optimized && error.kind == uscope::ExpressionErrorKind::NotAnLvalue =>
+                if optimized && error.kind == microscope::ExpressionErrorKind::NotAnLvalue =>
             {
                 return None;
             }

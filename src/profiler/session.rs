@@ -417,7 +417,7 @@ fn drive(
             marked = std::time::Instant::now();
         }
 
-        // A program's trigger saves the window as uscope's does.
+        // A program's trigger saves the window as microscope's does.
         let triggered = processor.take_triggered();
         if let Some(save) = &mut watch.save {
             let due = segment.is_some_and(|every| segmented.elapsed() >= every);
@@ -480,7 +480,7 @@ impl Snapshots {
         // Read beside the recording, which drains on meanwhile.
         let program = PathBuf::from(format!("/proc/{pid}/exe"));
         let loading = std::thread::Builder::new()
-            .name("uscope-snapshot-load".into())
+            .name("microscope-snapshot-load".into())
             .spawn(move || Snapshotter::new(pid, &program, &debug_files))
             .ok();
         Self {
@@ -938,7 +938,7 @@ impl SyscallTrace {
         };
 
         let thread = std::thread::Builder::new()
-            .name("uscope-record-syscalls".into())
+            .name("microscope-record-syscalls".into())
             .spawn(move || {
                 bpf::trace_held(pid, &options, BpfOptions::default(), &stopped, &mut sink)
                     .map(|_| ())

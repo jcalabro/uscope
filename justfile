@@ -31,7 +31,7 @@ dev *ARGS="":
 # Installs the vscode extension as a symlink for fast local development.
 [script("bash")]
 install-vscode-symlink:
-    ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
+    ln -s "$PWD/editors/vscode" ~/.vscode/extensions/microscope.microscope-0.1.0
 
 # Builds the native test fixtures and the simulator's golden programs
 # without running Rust tests.
@@ -43,37 +43,38 @@ build-test-programs: golden
 golden:
     ./scripts/golden.sh build
 
-# Builds the native test fixtures and uscope. uscope builds with the test
-# profile, as the tests do, whose optimization loads debug information five
+# Builds the native test fixtures and microscope. microscope builds with the
+# test profile, as the tests do, whose optimization loads debug information five
 # times as fast as an unoptimized build, and which shares the tests' artifacts.
 build *ARGS="": build-test-programs
     cargo build --profile test {{ARGS}}
 
-# Builds uscope as `build` does but with its own debug information, for
-# debugging uscope with uscope. The next `build` rebuilds the crate without it.
+# Builds microscope as `build` does but with its own debug information, for
+# debugging microscope with microscope. The next `build` rebuilds the crate
+# without it.
 build-debug *ARGS="":
-    cargo build --profile test --config 'profile.test.package.uscope.debug=2' {{ARGS}}
+    cargo build --profile test --config 'profile.test.package.microscope.debug=2' {{ARGS}}
 
-# Builds a fully static uscope, which runs on any x86-64 Linux, linked
-# against the flake's musl: PROFILE is debug, release, or another Cargo
-# profile, and the binary is target/x86_64-unknown-linux-musl/PROFILE/uscope.
-# Release builds embed the web page. Fails unless the binary is static.
+# Builds a fully static microscope, which runs on any x86-64 Linux, linked
+# against the flake's musl: PROFILE is debug, release, or another Cargo profile,
+# and the binary is target/x86_64-unknown-linux-musl/PROFILE/microscope. Release
+# builds embed the web page. Fails unless the binary is static.
 [script]
 build-static PROFILE="debug" *ARGS: web
     # Unset, the musl target's own flags apply instead of the glibc ones.
     unset RUSTFLAGS
-    cargo build --target x86_64-unknown-linux-musl --bin uscope \
+    cargo build --target x86_64-unknown-linux-musl --bin microscope \
         --profile "$([[ "$1" == debug ]] && echo dev || echo "$1")" "${@:2}"
-    binary="target/x86_64-unknown-linux-musl/$1/uscope"
+    binary="target/x86_64-unknown-linux-musl/$1/microscope"
     if readelf -lW "$binary" | grep -q INTERP || readelf -dW "$binary" | grep -q NEEDED; then
         echo "error: $binary links dynamically" >&2
         exit 1
     fi
-    echo "$binary (static, musl $USCOPE_MUSL_VERSION)"
+    echo "$binary (static, musl $MICROSCOPE_MUSL_VERSION)"
 
-# Builds uscope and runs it with the supplied arguments.
+# Builds microscope and runs it with the supplied arguments.
 run *ARGS: build
-    ./target/debug/uscope "$@"
+    ./target/debug/microscope "$@"
 
 # Checks formatting and runs Clippy on development and release builds, which
 # differ in what the flight recorder compiles. Incremental checking halves the
@@ -101,31 +102,31 @@ lint:
 # which took the machine's core handler most of a second each.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: cache-warm
-    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
+    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; MICROSCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; CARGO_TARGET_DIR="$PWD/target/sdk-probes" cargo test --quiet --manifest-path sdk/rust-probes/Cargo.toml --features enabled; fi
 
 # Runs the BPF engine's tests, which need CAP_BPF and CAP_PERFMON, starting
-# uscope through LAUNCHER: the uscope-bpf wrapper nixosModules.uscope-bpf
-# installs (dev/syscalls.md). Nothing else in the suite runs with privilege.
-# Arguments go to nextest.
-[doc("Runs the BPF engine's tests through the uscope-bpf wrapper.")]
+# microscope through LAUNCHER: the microscope-bpf wrapper
+# nixosModules.microscope-bpf installs (dev/syscalls.md). Nothing else in the
+# suite runs with privilege. Arguments go to nextest.
+[doc("Runs the BPF engine's tests through the microscope-bpf wrapper.")]
 [script]
-test-bpf LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
+test-bpf LAUNCHER="/run/wrappers/bin/microscope-bpf" *ARGS: build-test-programs
     if [[ ! -x "$1" ]]; then
         echo "error: $1 is missing. The BPF engine's tests need CAP_BPF and CAP_PERFMON:" >&2
-        echo "  import uscope's nixosModules.uscope-bpf, rebuild, and run this again;" >&2
+        echo "  import microscope's nixosModules.microscope-bpf, rebuild, and run this again;" >&2
         echo "  or pass a launcher that grants them: just test-bpf LAUNCHER" >&2
         exit 1
     fi
     ulimit -c 0
-    USCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
+    MICROSCOPE_BPF_LAUNCHER="$1" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --run-ignored only --test syscalls -E 'test(/^bpf::/)' "${@:2}"
 
 # How many seeds `just miri` tries its concurrent tests under: about as many
 # as run at once. Try more with `just miri_seeds=0..256 miri`, or
 # `just miri-seeds 0..256`.
 miri_seeds := "0..8"
 
-# Runs tests/miri.rs, the tests of uscope's unsafe code, and the Rust probe
+# Runs tests/miri.rs, the tests of microscope's unsafe code, and the Rust probe
 # SDK's tests under Miri, which stops at undefined behavior: an access out of
 # bounds, misaligned, or after a free, a block freed with the wrong layout, a
 # data race, a pointer made from an integer. Tests named `concurrent` then
@@ -159,7 +160,7 @@ miri-seeds SEEDS *ARGS:
 # preemption allowed multiplies the schedules about tenfold: 3 takes about a
 # second, 4 a few, and 5 half a minute. The models build the protocols' own
 # source files against loom's types in a crate and target directory of their
-# own, so uscope is not rebuilt. Arguments go to the test harness.
+# own, so microscope is not rebuilt. Arguments go to the test harness.
 loom BOUND="3" *ARGS:
     CARGO_TARGET_DIR="$PWD/target/loom" LOOM_MAX_PREEMPTIONS="$1" cargo test --quiet --manifest-path loom/Cargo.toml --lib -- "${@:2}"
 
@@ -223,15 +224,15 @@ loom-mutants BOUND="3" *ARGS:
 # checkout's loader: entries name the sources that built them, so an edit
 # leaves the old ones to eviction.
 cache-warm: build-test-programs
-    cargo build --quiet --profile test --features tools --bin uscope-tools
-    ./scripts/contained.sh ./target/debug/uscope-tools --cache target/image-cache warm build/test-programs build/golden
+    cargo build --quiet --profile test --features tools --bin microscope-tools
+    ./scripts/contained.sh ./target/debug/microscope-tools --cache target/image-cache warm build/test-programs build/golden
 
 # Builds the tokio fixtures where their sources changed and runs the tokio
 # suite: the quick loop for work on tokio support. Arguments go to nextest,
 # e.g. `just tokio workers::`.
 tokio *ARGS:
     ./scripts/build-test-programs.sh tokio
-    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; USCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
+    ulimit -c 0; test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; MICROSCOPE_CACHE_DIR="$PWD/target/image-cache" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$test_threads" --test tokio "$@"
 
 # Races in process control fail far more often when the debugger competes for
 # the CPUs, so this oversubscribes the test threads and keeps busy loops
@@ -257,7 +258,7 @@ stress COUNT="3" *ARGS: build-test-programs
     ulimit -c 0
     XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
     if (( ${SOAK_MINUTES:-0} > 0 )); then
-        USCOPE_SOAK_SECONDS="$(( SOAK_MINUTES * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
+        MICROSCOPE_SOAK_SECONDS="$(( SOAK_MINUTES * 60 ))" XDG_CONFIG_HOME="$PWD/target/test-config" ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --features tools --profile soak --no-capture --run-ignored only --test tokio -E 'test(=soak::soak)'
     fi
 
 # Installs the web page's locked dependencies.
@@ -276,8 +277,8 @@ docs: docs-deps
 docs-dev: docs-deps
     cd docs && ./node_modules/.bin/vitepress dev .
 
-# Builds the web page into build/web, where `uscope web` serves it from.
-# Development builds of uscope read it from disk, so rebuilding the page
+# Builds the web page into build/web, where `microscope web` serves it from.
+# Development builds of microscope read it from disk, so rebuilding the page
 # needs no Rust rebuild.
 web: web-deps
     cd web && ./node_modules/.bin/vite build --logLevel warn
@@ -288,25 +289,25 @@ web: web-deps
 web-test *ARGS: web-deps
     cd web && ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/tsc -p ../sdk/web && biome check src test e2e && ./node_modules/.bin/vitest run "$@"
 
-# Drives the built page and real `uscope web` servers in Chromium and
+# Drives the built page and real `microscope web` servers in Chromium and
 # Firefox. Arguments go to Playwright, e.g. `just web-e2e --project=chromium`.
 web-e2e *ARGS: web build-test-programs
     cargo build --quiet --profile test
-    cd web && USCOPE_CACHE_DIR="$PWD/../target/image-cache" ./node_modules/.bin/playwright test "$@"
+    cd web && MICROSCOPE_CACHE_DIR="$PWD/../target/image-cache" ./node_modules/.bin/playwright test "$@"
 
 # Serves PROGRAM on port 7342 with the page from Vite, which reloads on every
-# save: open the join link uscope prints, with 5173 in place of 7342.
+# save: open the join link microscope prints, with 5173 in place of 7342.
 [script]
 web-dev *ARGS: web-deps
     cargo build --quiet --profile test
-    ./target/debug/uscope web --port 7342 --allow-origin http://127.0.0.1:5173 "$@" &
+    ./target/debug/microscope web --port 7342 --allow-origin http://127.0.0.1:5173 "$@" &
     trap 'kill %1 2>/dev/null || true' EXIT
     cd web && ./node_modules/.bin/vite
 
 # Rerecords the server traffic the page's replay tests read
 # (web/test/transcripts) from the Rust web tests.
 web-transcripts: build-test-programs
-    USCOPE_WEB_TRANSCRIPTS="$PWD/web/test/transcripts" cargo nextest run --features tools --test web
+    MICROSCOPE_WEB_TRANSCRIPTS="$PWD/web/test/transcripts" cargo nextest run --features tools --test web
 
 # Rebuilds one golden program and rewrites its manifest, after a deliberate
 # change to its sources or the toolchain. Commit a new manifest on its own.
@@ -316,60 +317,60 @@ golden-record NAME:
 # Simulates random sessions on every core for SECONDS, inside a memory cap,
 # and reports each kind of failure with its smallest seed.
 sim SECONDS="30": golden
-    cargo build --profile sim --features sim --bin uscope-sim
-    USCOPE_CACHE_DIR="$PWD/target/image-cache" ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
+    cargo build --profile sim --features sim --bin microscope-sim
+    MICROSCOPE_CACHE_DIR="$PWD/target/image-cache" ./scripts/contained.sh ./target/sim/microscope-sim sweep --seconds "$1"
 
 # Replays one simulated session and prints its trace. Pass `--at STEP` to
 # stop there and print the state, or the `--fingerprint` a report gave.
 sim-seed SEED *ARGS: golden
-    cargo build --profile sim --features sim --bin uscope-sim
-    USCOPE_CACHE_DIR="$PWD/target/image-cache" ./target/sim/uscope-sim replay "$1" "${@:2}"
+    cargo build --profile sim --features sim --bin microscope-sim
+    MICROSCOPE_CACHE_DIR="$PWD/target/image-cache" ./target/sim/microscope-sim replay "$1" "${@:2}"
 
 # Summarizes a `--timings` report, or what changed between two:
 # `just timings BASE NEW`. Pass --threads for each thread's work, and --all
 # for every phase.
 timings *ARGS:
-    cargo run --quiet --profile test --features tools --bin uscope-tools -- timings "$@"
+    cargo run --quiet --profile test --features tools --bin microscope-tools -- timings "$@"
 
 # Prints every answer PROGRAM's debug information gives, in a canonical form
 # that compares with `diff`. Pass --sections to dump only some.
 dump PROGRAM *ARGS:
-    cargo run --quiet --profile test --features tools --bin uscope-tools -- dump "$@"
+    cargo run --quiet --profile test --features tools --bin microscope-tools -- dump "$@"
 
 # Loads every program of the pinned corpus in processes of their own and
 # reports what each load costs. Pass --out FILE to save the report and
 # --compare BASE to compare it with a saved one; `just bench-large` builds
 # the large program first.
 bench *ARGS: build-test-programs
-    cargo build --quiet --release --features tools --bin uscope-tools
-    ./scripts/contained.sh ./target/release/uscope-tools bench "$@"
+    cargo build --quiet --release --features tools --bin microscope-tools
+    ./scripts/contained.sh ./target/release/microscope-tools bench "$@"
 
 # Runs reference workloads bare and under each preset, interleaved, and
 # prints what recording cost each, in minutes. Compare with the recorded
 # baseline with `--compare bench/overhead.json`, record one with `--out`,
 # and fail unless prod costs every workload under 1% with `--check 1`.
 profile-overhead *ARGS: build-test-programs
-    cargo build --quiet --release --features tools --bin uscope-tools
-    ./scripts/contained.sh ./target/release/uscope-tools overhead "$@"
+    cargo build --quiet --release --features tools --bin microscope-tools
+    ./scripts/contained.sh ./target/release/microscope-tools overhead "$@"
 
 # Times a getppid loop bare, under each syscall-tracing engine, and untraced
 # beside a BPF trace of another program, and prints what each adds a call.
-# The BPF setups start uscope through LAUNCHER. Compare with the recorded
+# The BPF setups start microscope through LAUNCHER. Compare with the recorded
 # baseline with `--compare bench/syscalls-overhead.json`, record one with
 # `--out`.
-syscall-overhead LAUNCHER="/run/wrappers/bin/uscope-bpf" *ARGS: build-test-programs
-    cargo build --quiet --release --bin uscope
-    cargo build --quiet --release --features tools --bin uscope-tools
-    ./scripts/contained.sh ./target/release/uscope-tools syscall-overhead --launcher "$1" "${@:2}"
+syscall-overhead LAUNCHER="/run/wrappers/bin/microscope-bpf" *ARGS: build-test-programs
+    cargo build --quiet --release --bin microscope
+    cargo build --quiet --release --features tools --bin microscope-tools
+    ./scripts/contained.sh ./target/release/microscope-tools syscall-overhead --launcher "$1" "${@:2}"
 
 # The seconds-long benchmark `just all` runs: it fails when loading the
 # small programs allocates more than bench/baseline.json records. Record a
 # deliberate change with `just bench-smoke --record bench/baseline.json`.
 bench-smoke *ARGS: build-test-programs
-    cargo build --quiet --profile test --features tools --bin uscope-tools
-    ./scripts/contained.sh ./target/debug/uscope-tools bench --corpus smoke --repeat 1 --check bench/baseline.json "$@"
+    cargo build --quiet --profile test --features tools --bin microscope-tools
+    ./scripts/contained.sh ./target/debug/microscope-tools bench --corpus smoke --repeat 1 --check bench/baseline.json "$@"
 
-# Builds the full benchmark's large program: uscope's own development build
+# Builds the full benchmark's large program: microscope's own development build
 # at a pinned commit, in a worktree, with its paths remapped so that its
 # bytes do not depend on the checkout. Fails unless they match the digest.
 large_commit := "d089093868eba621d618c059b9bb7374dd61c9fe"
@@ -379,48 +380,48 @@ bench-large:
     dir="$PWD/target/bench/large"
     [[ -d "$dir/src" ]] || git worktree add --quiet --detach "$dir/src" {{large_commit}}
     git -C "$dir/src" checkout --quiet --detach {{large_commit}}
-    (cd "$dir/src" && RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$dir/src=/uscope" CARGO_TARGET_DIR="$dir/target" cargo build --quiet --bin uscope)
-    cp "$dir/target/debug/uscope" "$dir/uscope"
-    digest="$(sha256sum "$dir/uscope" | cut -d' ' -f1)"
+    (cd "$dir/src" && RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$dir/src=/microscope" CARGO_TARGET_DIR="$dir/target" cargo build --quiet --bin microscope)
+    cp "$dir/target/debug/microscope" "$dir/microscope"
+    digest="$(sha256sum "$dir/microscope" | cut -d' ' -f1)"
     if [[ -n "{{large_digest}}" && "$digest" != "{{large_digest}}" ]]; then
         echo "error: the large program's digest is $digest, not {{large_digest}}" >&2
         exit 1
     fi
-    echo "$dir/uscope $digest"
+    echo "$dir/microscope $digest"
 
 # Prints where loading PROGRAM spends its instructions: Callgrind's
-# inclusive costs, trimmed to uscope's functions.
+# inclusive costs, trimmed to microscope's functions.
 [script]
 profile-instructions PROGRAM:
-    cargo build --quiet --profile profiling --features tools --bin uscope-tools
+    cargo build --quiet --profile profiling --features tools --bin microscope-tools
     out="$(mktemp)"
     trap 'rm -f "$out"' EXIT
-    valgrind --tool=callgrind --callgrind-out-file="$out" ./target/profiling/uscope-tools load "$1" >/dev/null 2>&1
-    callgrind_annotate --inclusive=yes "$out" | grep -E 'PROGRAM TOTALS|uscope' | head -80
+    valgrind --tool=callgrind --callgrind-out-file="$out" ./target/profiling/microscope-tools load "$1" >/dev/null 2>&1
+    callgrind_annotate --inclusive=yes "$out" | grep -E 'PROGRAM TOTALS|microscope' | head -80
 
-# Prints which uscope functions allocate when loading PROGRAM, by blocks
+# Prints which microscope functions allocate when loading PROGRAM, by blocks
 # and by bytes live at the heap's peak, under DHAT with the C library's
 # allocator, which Valgrind can see.
 [script]
 profile-heap PROGRAM:
-    cargo build --quiet --profile profiling --features tools,system-alloc --bin uscope-tools
+    cargo build --quiet --profile profiling --features tools,system-alloc --bin microscope-tools
     out="$(mktemp)"
     trap 'rm -f "$out"' EXIT
-    valgrind --tool=dhat --dhat-out-file="$out" ./target/profiling/uscope-tools load "$1" >/dev/null 2>&1
-    ./target/profiling/uscope-tools heap "$out"
+    valgrind --tool=dhat --dhat-out-file="$out" ./target/profiling/microscope-tools load "$1" >/dev/null 2>&1
+    ./target/profiling/microscope-tools heap "$out"
 
 # Counts user-mode instructions, cycles, and cache and branch misses while
 # loading PROGRAM.
 profile-counters PROGRAM:
-    cargo build --quiet --profile profiling --features tools --bin uscope-tools
-    perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/uscope-tools load "$1" >/dev/null
+    cargo build --quiet --profile profiling --features tools --bin microscope-tools
+    perf stat -e instructions:u,cycles:u,cache-references:u,cache-misses:u,branch-misses:u ./target/profiling/microscope-tools load "$1" >/dev/null
 
-# Times one instrumented zone in a release build of uscope: with its site
-# off, as when nothing records, and on, as uscope reads it.
+# Times one instrumented zone in a release build of microscope: with its site
+# off, as when nothing records, and on, as microscope reads it.
 probe-cost COUNT="100000000": build-test-programs
-    cargo build --quiet --release --bin uscope
+    cargo build --quiet --release --bin microscope
     ./build/test-programs/probes cost {{COUNT}}
-    ./target/release/uscope record -o /dev/null -- ./build/test-programs/probes cost-on {{COUNT}} | grep 'a zone'
+    ./target/release/microscope record -o /dev/null -- ./build/test-programs/probes cost-on {{COUNT}} | grep 'a zone'
 
 # Runs one fuzz target: expression-parse, dwarf-expression, core-dump, dispatch,
 # elf-symbols, gopclntab, disassembly, debug-register-plan, dap-transport,
@@ -461,11 +462,11 @@ web-shot *PROGRAM: web build-test-programs
 # build. Not part of the gate: the times depend on the machine.
 web-bench ROUNDS="5": web build-test-programs
     cargo build --quiet --release
-    cd web && USCOPE_WEB_BINARY="$PWD/../target/release/uscope" USCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/bench.ts "{{ROUNDS}}"
+    cd web && MICROSCOPE_WEB_BINARY="$PWD/../target/release/microscope" MICROSCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/bench.ts "{{ROUNDS}}"
 
 # Drives PROGRAM through STEPS in headless Chromium, saving a screenshot after
 # each and printing the page's console: `just web-probe build/test-programs/basic
 # key:F9 key:F5 wait:Stopped`. See web/e2e/probe.ts for the steps.
 web-probe PROGRAM *STEPS: web
     cargo build --quiet --profile test
-    cd web && USCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/probe.ts "$(realpath "../$1")" "${@:2}"
+    cd web && MICROSCOPE_CACHE_DIR="$PWD/../target/image-cache" node e2e/probe.ts "$(realpath "../$1")" "${@:2}"

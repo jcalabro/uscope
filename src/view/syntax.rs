@@ -811,14 +811,14 @@ impl<'a> Parser<'a> {
         word.map(str::to_owned).ok_or_else(|| self.unexpected(what))
     }
 
-    /// `uscope-views 1`.
+    /// `microscope-views 1`.
     fn header(&mut self) -> Parsed<()> {
         self.skip_blank();
         let start = self.position;
-        if !self.eat("uscope-views") {
+        if !self.eat("microscope-views") {
             return Err(self.error_at(
                 start,
-                format!("a view file begins with `uscope-views {VERSION}`"),
+                format!("a view file begins with `microscope-views {VERSION}`"),
             ));
         }
 
@@ -829,7 +829,7 @@ impl<'a> Parser<'a> {
         if version != Some(VERSION) {
             return Err(self.error_at(
                 start,
-                format!("this uscope reads views of version {VERSION}"),
+                format!("this microscope reads views of version {VERSION}"),
             ));
         }
 

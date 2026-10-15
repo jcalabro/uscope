@@ -25,20 +25,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use microscope::timings::Report;
+use microscope::tools::Measured;
+use microscope::tools::dump::{Options as DumpOptions, Section};
 use serde::{Deserialize, Serialize};
-use uscope::timings::Report;
-use uscope::tools::Measured;
-use uscope::tools::dump::{Options as DumpOptions, Section};
 
-// Allocates as uscope does, so that loads cost what they cost there.
+// Allocates as microscope does, so that loads cost what they cost there.
 #[global_allocator]
-static ALLOCATOR: uscope::timings::alloc::Counting<uscope::timings::alloc::Selected> =
-    uscope::timings::alloc::selected();
+static ALLOCATOR: microscope::timings::alloc::Counting<microscope::timings::alloc::Selected> =
+    microscope::timings::alloc::selected();
 
 #[derive(Parser)]
-#[command(about = "uscope's developer tools")]
+#[command(about = "microscope's developer tools")]
 struct Args {
-    /// How many threads load debug information; otherwise `USCOPE_JOBS`,
+    /// How many threads load debug information; otherwise `MICROSCOPE_JOBS`,
     /// or one per CPU up to 16.
     #[arg(long, global = true)]
     jobs: Option<std::num::NonZeroUsize>,
@@ -119,7 +119,7 @@ enum Tool {
     /// report what tracing cost each call.
     SyscallOverhead(SyscallOverheadArgs),
 
-    /// Group the blocks a DHAT profile records by the first uscope function
+    /// Group the blocks a DHAT profile records by the first microscope function
     /// that allocated them.
     Heap {
         /// The `dhat.out` file DHAT wrote.
@@ -173,13 +173,13 @@ struct SyscallOverheadArgs {
     #[arg(long, default_value = "build/test-programs")]
     programs: PathBuf,
 
-    /// The uscope executable to trace with.
-    #[arg(long, default_value = "target/release/uscope")]
-    uscope: PathBuf,
+    /// The microscope executable to trace with.
+    #[arg(long, default_value = "target/release/microscope")]
+    microscope: PathBuf,
 
-    /// Starts uscope with `CAP_BPF` and `CAP_PERFMON`, given its path and
+    /// Starts microscope with `CAP_BPF` and `CAP_PERFMON`, given its path and
     /// arguments.
-    #[arg(long, default_value = "/run/wrappers/bin/uscope-bpf")]
+    #[arg(long, default_value = "/run/wrappers/bin/microscope-bpf")]
     launcher: PathBuf,
 
     /// Runs of each setup.
@@ -244,7 +244,7 @@ enum Corpus {
 }
 
 fn main() -> ExitCode {
-    uscope::timings::alloc::return_freed_memory_promptly();
+    microscope::timings::alloc::return_freed_memory_promptly();
     match run(Args::parse()) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
@@ -256,10 +256,10 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> Result<bool> {
-    let jobs = uscope::pool::configure(args.jobs, None)?;
-    uscope::cache::configure(Some(args.cache.clone().map_or(
-        uscope::cache::Setting::Off,
-        uscope::cache::Setting::Directory,
+    let jobs = microscope::pool::configure(args.jobs, None)?;
+    microscope::cache::configure(Some(args.cache.clone().map_or(
+        microscope::cache::Setting::Off,
+        microscope::cache::Setting::Directory,
     )))?;
     match args.command {
         Tool::Dump {
@@ -285,7 +285,7 @@ fn run(args: Args) -> Result<bool> {
                 None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
             };
 
-            uscope::tools::dump::dump(&program, &options, &mut out)?;
+            microscope::tools::dump::dump(&program, &options, &mut out)?;
             out.flush()?;
             Ok(true)
         }
@@ -294,7 +294,7 @@ fn run(args: Args) -> Result<bool> {
             program,
             instructions,
         } => {
-            let measured = uscope::tools::measure_load(&program, instructions)?;
+            let measured = microscope::tools::measure_load(&program, instructions)?;
             println!("{}", serde_json::to_string(&measured)?);
             Ok(true)
         }
@@ -303,7 +303,7 @@ fn run(args: Args) -> Result<bool> {
                 bail!("warm needs --cache DIR");
             }
 
-            let warmed = uscope::tools::warm(&paths)?;
+            let warmed = microscope::tools::warm(&paths)?;
             for (path, error) in &warmed.failed {
                 println!("{}: {error}", path.display());
             }
@@ -366,7 +366,7 @@ fn run(args: Args) -> Result<bool> {
 }
 
 fn run_overhead(args: &OverheadArgs) -> Result<bool> {
-    use uscope::tools::overhead;
+    use microscope::tools::overhead;
     let options = overhead::Options {
         programs: args.programs.clone(),
         runs: args.runs,
@@ -410,11 +410,11 @@ fn run_overhead(args: &OverheadArgs) -> Result<bool> {
 }
 
 fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
+    use microscope::tools::syscall_overhead;
     use std::fmt::Write as _;
-    use uscope::tools::syscall_overhead;
     let options = syscall_overhead::Options {
         programs: args.programs.clone(),
-        uscope: args.uscope.clone(),
+        microscope: args.microscope.clone(),
         launcher: args.launcher.clone(),
         runs: args.runs,
         calls: args.calls,
@@ -455,12 +455,12 @@ fn run_syscall_overhead(args: &SyscallOverheadArgs) -> Result<bool> {
 
 /// The summaries as a table, each cost beside the base's when given.
 fn overhead_table(
-    summaries: &[uscope::tools::overhead::Summary],
-    base: Option<&[uscope::tools::overhead::Summary]>,
+    summaries: &[microscope::tools::overhead::Summary],
+    base: Option<&[microscope::tools::overhead::Summary]>,
 ) -> String {
     use std::fmt::Write as _;
     let mut table = String::from(
-        "workload  setup        rate/s     cost   noise      p99   uscope cpu     memory\n",
+        "workload  setup        rate/s     cost   noise      p99 microscope cpu     memory\n",
     );
     for summary in summaries {
         let was = base.and_then(|base| {
@@ -488,7 +488,7 @@ fn overhead_table(
             .map_or_else(|| "-".to_owned(), |rss| format!("{} MiB", rss >> 20));
         let _ = writeln!(
             table,
-            "{:<9} {:<6} {:>12.1} {cost} {:>6.2}% {p99:>8} {cpu:>12} {rss:>10}",
+            "{:<9} {:<6} {:>12.1} {cost} {:>6.2}% {p99:>8} {cpu:>14} {rss:>10}",
             summary.workload, summary.setup, summary.rate, summary.noise_percent
         );
     }
@@ -518,7 +518,7 @@ struct DhatSite {
     fs: Vec<usize>,
 }
 
-/// The first uscope frame of a stack that is not the standard library's
+/// The first microscope frame of a stack that is not the standard library's
 /// plumbing, with its file and line.
 fn allocation_site(frames: &[usize], table: &[String]) -> String {
     const PLUMBING: [&str; 22] = [
@@ -552,7 +552,7 @@ fn allocation_site(frames: &[usize], table: &[String]) -> String {
 
         let function = name.split(" (").next().unwrap_or(name);
         let function = function.split_once(": ").map_or(function, |(_, rest)| rest);
-        if !function.contains("uscope") || PLUMBING.iter().any(|skip| function.contains(skip)) {
+        if !function.contains("microscope") || PLUMBING.iter().any(|skip| function.contains(skip)) {
             continue;
         }
 
@@ -779,8 +779,8 @@ fn corpus(kind: Corpus) -> Result<Vec<Program>> {
         }
 
         programs.push(Program {
-            name: "uscope-large".to_owned(),
-            path: root.join("target/bench/large/uscope"),
+            name: "microscope-large".to_owned(),
+            path: root.join("target/bench/large/microscope"),
         });
     }
 
@@ -867,7 +867,7 @@ fn load_once(program: &Path, jobs: usize) -> Result<Measured> {
 
 /// The instructions one load of `program` runs, as Callgrind counts them.
 fn callgrind(program: &Path) -> Result<u64> {
-    let out = std::env::temp_dir().join(format!("uscope-callgrind-{}.out", std::process::id()));
+    let out = std::env::temp_dir().join(format!("microscope-callgrind-{}.out", std::process::id()));
 
     // One worker, so that the count is the same each run.
     let status = Command::new("valgrind")

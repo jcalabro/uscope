@@ -1,6 +1,6 @@
 // Generated from the kernel's asm/unistd_{64,32,x32}.h by
 // `syscalls::table::tests::tables_match_the_kernel_headers`; do not edit.
-// Rerun it with USCOPE_UPDATE_SYSCALLS=1 after the headers change.
+// Rerun it with MICROSCOPE_UPDATE_SYSCALLS=1 after the headers change.
 
 pub(super) const X86_64: &[(u32, &str)] = &[
     (0, "read"),

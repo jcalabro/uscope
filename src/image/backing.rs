@@ -1,6 +1,6 @@
 //! Owned bytes aligned for tables, and bounded snapshot reads of files.
 //!
-//! Every byte uscope parses is its own copy: a mapping of a file another
+//! Every byte microscope parses is its own copy: a mapping of a file another
 //! process can rewrite would change under the borrows that read it, and a
 //! cached image is validated byte by byte anyway, so mapping it would save
 //! only the copy.
@@ -89,7 +89,7 @@ pub enum ReadError {
     #[error("{path} is a directory")]
     NotAFile { path: String },
 
-    #[error("{path} is {length} bytes, more than the {limit} bytes uscope reads")]
+    #[error("{path} is {length} bytes, more than the {limit} bytes microscope reads")]
     TooLarge {
         path: String,
         length: u64,
@@ -139,7 +139,7 @@ impl From<ReadError> for std::io::Error {
     }
 }
 
-/// The most bytes uscope reads of one input file.
+/// The most bytes microscope reads of one input file.
 pub const MAX_INPUT: u64 = 16 << 30;
 
 /// Reads an input file, such as a program or its debug file, as one

@@ -1,4 +1,4 @@
-// What the programs and uscope exchange: ring records, map keys and
+// What the programs and microscope exchange: ring records, map keys and
 // values. src/backend/linux/syscalls/bpf.rs decodes each with a struct of
 // the same layout, and a test compares the two through this object's BTF.
 // Every field is little-endian and naturally aligned; records are padded
@@ -42,15 +42,15 @@ enum config_flags {
 	CONFIG_COUNT = 2,
 	CONFIG_FOLLOW = 4,
 	// Leave out calls whose entry was not seen: a launched program's are
-	// uscope's own, made before it executes.
+	// microscope's own, made before it executes.
 	CONFIG_SKIP_UNSEEN = 8,
 	// Send each call's and signal's stack: the kernel's walk of its
 	// frame pointers.
 	CONFIG_STACKS = 16,
-	// With each stack, a copy of its top, for uscope to unwind.
+	// With each stack, a copy of its top, for microscope to unwind.
 	CONFIG_STACK_COPY = 32,
 	// Count into the second half of STATS, and ERRNOS keys with their top
-	// bit set, while uscope reads and clears the first, and the reverse.
+	// bit set, while microscope reads and clears the first, and the reverse.
 	CONFIG_GENERATION = 64,
 };
 

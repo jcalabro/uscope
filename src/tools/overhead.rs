@@ -5,7 +5,7 @@
 //! of work in a window that begins once recording is on, so setting up and
 //! finishing a recording, which the program does not wait for, cost it
 //! nothing here. The program runs on CPUs of four physical cores of its
-//! own, and uscope and the server's clients on the other cores that share
+//! own, and microscope and the server's clients on the other cores that share
 //! its last-level cache: unpinned, where the scheduler places four threads
 //! among shared cores, and clients across caches from their server, moves
 //! a rate by more than recording does.
@@ -44,7 +44,7 @@ pub struct Workload {
 }
 
 /// CPU-bound C, Go goroutines that allocate, a tokio server under load,
-/// and Rust instrumented with uscope's probes, listened to when recorded.
+/// and Rust instrumented with microscope's probes, listened to when recorded.
 pub const WORKLOADS: [Workload; 4] = [
     Workload {
         name: "c",
@@ -99,11 +99,11 @@ pub struct Run {
     /// nanoseconds.
     pub p99_ns: Option<u64>,
 
-    /// The share of one CPU uscope spent recording, past reading debug
+    /// The share of one CPU microscope spent recording, past reading debug
     /// information.
     pub recorder_cpu: Option<f64>,
 
-    /// How much more memory uscope's process held at its most while it
+    /// How much more memory microscope's process held at its most while it
     /// recorded than as it began.
     pub recording_bytes: Option<u64>,
 }
@@ -137,7 +137,7 @@ pub fn measure(options: &Options, mut progress: impl FnMut(&Run)) -> Result<Vec<
         })
         .collect();
     let placement = Placement::new()?;
-    placement.uscope()?;
+    placement.microscope()?;
     let mut runs = Vec::new();
     for _ in 0..options.runs.max(1) {
         for workload in &workloads {
@@ -159,10 +159,10 @@ struct Measured {
     p99_ns: Option<u64>,
 }
 
-/// Where the program runs, and where uscope does.
+/// Where the program runs, and where microscope does.
 pub(super) struct Placement {
     program: CpuSet,
-    uscope: CpuSet,
+    microscope: CpuSet,
 }
 
 /// How many cores the program runs on: one for each thread of the
@@ -171,7 +171,7 @@ const PROGRAM_CORES: usize = 4;
 
 impl Placement {
     /// One CPU of each of the first cores for the program, and one of each
-    /// of the other cores that share its last-level cache for uscope, or of
+    /// of the other cores that share its last-level cache for microscope, or of
     /// every other core if none do, so that no two share a core.
     pub(super) fn new() -> Result<Self> {
         let mut cores = Vec::new();
@@ -195,7 +195,7 @@ impl Placement {
 
         anyhow::ensure!(
             cores.len() > PROGRAM_CORES,
-            "the machine has {} cores, and the workloads need {} and uscope one",
+            "the machine has {} cores, and the workloads need {} and microscope one",
             cores.len(),
             PROGRAM_CORES
         );
@@ -210,16 +210,19 @@ impl Placement {
             .filter(|cpu| cache.contains(cpu))
             .collect();
         let mut program = CpuSet::new();
-        let mut uscope = CpuSet::new();
+        let mut microscope = CpuSet::new();
         for &cpu in program_cores {
             program.set(cpu)?;
         }
 
         for &cpu in if near.is_empty() { rest } else { &near } {
-            uscope.set(cpu)?;
+            microscope.set(cpu)?;
         }
 
-        Ok(Self { program, uscope })
+        Ok(Self {
+            program,
+            microscope,
+        })
     }
 
     /// Moves the calling thread to the program's CPUs, so that a program
@@ -237,9 +240,9 @@ impl Placement {
             .join(",")
     }
 
-    /// Moves the calling thread to uscope's CPUs.
-    pub(super) fn uscope(&self) -> Result<()> {
-        Ok(sched_setaffinity(Pid::from_raw(0), &self.uscope)?)
+    /// Moves the calling thread to microscope's CPUs.
+    pub(super) fn microscope(&self) -> Result<()> {
+        Ok(sched_setaffinity(Pid::from_raw(0), &self.microscope)?)
     }
 }
 
@@ -280,7 +283,7 @@ fn run(
             None => {
                 placement.program()?;
                 let child = command.spawn().context("starting the program");
-                placement.uscope()?;
+                placement.microscope()?;
                 let child = child?;
                 drop(command);
                 started.send(()).ok();
@@ -292,7 +295,7 @@ fn run(
                     let mut sent = false;
 
                     // The recording starts the program from this thread,
-                    // which goes back to uscope's CPUs once it has.
+                    // which goes back to microscope's CPUs once it has.
                     placement.program()?;
                     Ok::<_, anyhow::Error>(record_watched(
                         command,
@@ -301,7 +304,7 @@ fn run(
                             every: Duration::MAX,
                             publish: &mut |_| {
                                 if !std::mem::replace(&mut sent, true) {
-                                    placement.uscope().ok();
+                                    placement.microscope().ok();
                                     started.send(()).ok();
                                 }
                             },
@@ -452,7 +455,7 @@ fn client(address: &str, begin: Instant, end: Instant) -> Result<Vec<Duration>> 
     }
 }
 
-/// The share of one CPU uscope spent recording, past reading debug
+/// The share of one CPU microscope spent recording, past reading debug
 /// information, over the recording's span.
 fn recorder_share(profile: &Profile) -> f64 {
     let (cpu, loading) = profile.recorder_cpu();

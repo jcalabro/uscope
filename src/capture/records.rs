@@ -484,7 +484,7 @@ pub enum AccountKind {
     /// 1000: 1001 is [`Truncation::NoUnwindInfo`].
     Truncated = 1000,
 
-    /// Records uscope could not decode.
+    /// Records microscope could not decode.
     Malformed = 3,
 
     /// Bytes of stack the kernel copied.
@@ -503,7 +503,7 @@ pub enum AccountKind {
     /// breakpoint's instruction, while the events were on.
     Counted = 13,
 
-    /// Nanoseconds of CPU time uscope spent recording.
+    /// Nanoseconds of CPU time microscope spent recording.
     RecorderCpu = 14,
 
     /// The part of it spent reading programs' debug information.
@@ -524,7 +524,7 @@ pub enum AccountKind {
     /// Instrumentation events read.
     ProbeEvents = 20,
 
-    /// Instrumentation records a thread overwrote before uscope read them.
+    /// Instrumentation records a thread overwrote before microscope read them.
     ProbeOverwritten = 21,
 
     /// Instrumentation events no ring could take: the program had no ring
@@ -572,7 +572,7 @@ pub struct Site {
     pub module: U32,
 
     /// The site record's kind: an `abi::SITE_` constant of
-    /// `uscope-probes`.
+    /// `microscope-probes`.
     pub kind: u8,
     pub reserved: [u8; 3],
 }
@@ -672,7 +672,7 @@ pub enum MarkerKind {
     /// A program asked for the window to be saved.
     Trigger = 5,
 
-    /// uscope could not read a module's instrumentation; the text says
+    /// microscope could not read a module's instrumentation; the text says
     /// why.
     Probes = 6,
 }
@@ -712,7 +712,7 @@ pub struct Gap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GapReason {
-    /// To hold uscope's own CPU time to its budget.
+    /// To hold microscope's own CPU time to its budget.
     Budget = 1,
 
     /// A task snapshot held the program stopped.

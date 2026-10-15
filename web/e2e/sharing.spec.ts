@@ -5,9 +5,9 @@ import { expect, join, test } from "./server";
 test("a view link shows a coworker the same session without its controls", async ({
   page,
   browser,
-  uscope,
+  microscope,
 }) => {
-  await join(page, uscope.link);
+  await join(page, microscope.link);
   await page.getByRole("button", { name: /Run/ }).click();
   await expect(page.getByTestId("status")).toContainText("Running");
   await page.getByRole("button", { name: /Pause/ }).click();

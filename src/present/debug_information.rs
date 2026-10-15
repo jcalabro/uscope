@@ -1,7 +1,7 @@
 //! What a module's debug information leaves out, as every front end says
 //! it: when a session starts, when a library loads, and in module lists.
 
-use uscope::{DebugFile, DebugInformation, ModuleImage};
+use microscope::{DebugFile, DebugInformation, ModuleImage};
 
 /// What became of the module's DWARF, when not all of it could be read.
 #[must_use]

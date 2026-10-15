@@ -728,7 +728,7 @@ pub struct SyscallStop {
     /// What the call returned, at its exit; none at its entry.
     pub returned: Option<i64>,
 
-    /// The path the call names, when it names one uscope could read.
+    /// The path the call names, when it names one microscope could read.
     pub path: Option<Arc<str>>,
 
     /// The memory behind its pointer arguments, read as the syscall

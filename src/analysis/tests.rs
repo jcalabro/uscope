@@ -640,7 +640,13 @@ fn labeled(spans: &[(u32, i64, i64, u32)], samples: &[Sample]) -> Capture {
         .map(|number| builder.task("goroutine", number, 0))
         .collect();
     builder.describe_task(tasks[1], NONE, Some("phase=spin"));
-    let site = builder.site("route", "app.rs", 1, module, uscope_probes::abi::SITE_LABEL);
+    let site = builder.site(
+        "route",
+        "app.rs",
+        1,
+        module,
+        microscope_probes::abi::SITE_LABEL,
+    );
     for &(thread, start, length, value) in spans {
         let value = builder.string(&format!("v{value}"));
         builder.zone(
@@ -784,7 +790,7 @@ fn a_plot_keeps_each_bins_extremes_and_counts_what_it_cannot_draw() {
         builder.thread(Pid::new(1), Tid::new(1), 0),
         builder.thread(Pid::new(1), Tid::new(2), 0),
     );
-    let kind = uscope_probes::abi::SITE_PLOT;
+    let kind = microscope_probes::abi::SITE_PLOT;
     let sites = [
         builder.site("depth", "a.rs", 1, module, kind),
         builder.site("depth", "b.rs", 2, module, kind),

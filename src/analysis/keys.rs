@@ -502,7 +502,7 @@ fn labels(capture: &Capture) -> Found<'_> {
         let start = range.start.get() as usize;
         for zone in &capture.zones[start..start + range.count.get() as usize] {
             let site = &capture.sites[zone.site.get() as usize];
-            if site.kind != uscope_probes::abi::SITE_LABEL {
+            if site.kind != microscope_probes::abi::SITE_LABEL {
                 continue;
             }
 

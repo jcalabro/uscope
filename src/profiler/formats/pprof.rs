@@ -1,6 +1,6 @@
 //! pprof's `profile.proto`, gzipped as Go writes it: read into a capture,
 //! and written from a call tree, so that what Go's tools show of an
-//! exported profile is what uscope's views show.
+//! exported profile is what microscope's views show.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -388,7 +388,7 @@ fn locations(
     Ok(frames)
 }
 
-/// A sample's label as uscope's tasks keep them, `key=value`.
+/// A sample's label as microscope's tasks keep them, `key=value`.
 fn label(raw: &Raw<'_>, bytes: &[u8]) -> Result<String, String> {
     let (mut key, mut text, mut number, mut unit) = (0, 0, None, 0);
     for field in Fields::new(bytes) {

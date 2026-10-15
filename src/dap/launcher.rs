@@ -1,4 +1,4 @@
-//! `uscope dap-launcher`, which a client runs in a terminal to launch a
+//! `microscope dap-launcher`, which a client runs in a terminal to launch a
 //! program whose streams belong to that terminal. It waits until the adapter
 //! traces it and then executes the program, so the adapter sees the program
 //! from its first instruction.
@@ -16,9 +16,9 @@ use std::process::{Command, ExitCode};
 use clap::Parser;
 use nix::sys::personality::{self, Persona};
 
-/// Runs a program in a terminal for the uscope debug adapter.
+/// Runs a program in a terminal for the microscope debug adapter.
 #[derive(Parser)]
-#[command(name = "uscope dap-launcher")]
+#[command(name = "microscope dap-launcher")]
 struct LauncherArgs {
     /// The adapter's socket, which identifies this process by its peer
     /// credentials.
@@ -35,7 +35,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
     let args = LauncherArgs::parse_from(arguments);
     let error = launch(&args);
     eprintln!(
-        "uscope: cannot run {}: {error}",
+        "microscope: cannot run {}: {error}",
         args.command[0].to_string_lossy()
     );
 

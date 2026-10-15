@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "linux"))]
-compile_error!("uscope currently supports debug information only on Linux");
+compile_error!("microscope currently supports debug information only on Linux");
 
 pub mod coroutines;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

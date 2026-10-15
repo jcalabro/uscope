@@ -8,7 +8,7 @@ use super::libraries::{breakpoint, pending_function};
 use super::support::ExternalProcess;
 use super::*;
 
-fn function_name(trace: &uscope::Backtrace, index: usize) -> Option<&str> {
+fn function_name(trace: &microscope::Backtrace, index: usize) -> Option<&str> {
     trace.frames[index]
         .function
         .as_ref()

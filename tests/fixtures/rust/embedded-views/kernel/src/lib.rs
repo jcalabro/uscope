@@ -5,7 +5,7 @@
 
 #![no_std]
 
-use uscope_views::kernel::{arguments, emit, load};
+use microscope_views::kernel::{arguments, emit, load};
 
 /// The deepest tree it walks: a node waits here for each ancestor whose
 /// next sibling is still to come.
@@ -15,7 +15,7 @@ const MAX_DEPTH: usize = 64;
 ///
 /// # Safety
 ///
-/// uscope calls it with `count` words at `pointer`.
+/// microscope calls it with `count` words at `pointer`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn run(pointer: *const u64, count: i32) -> i32 {
     // SAFETY: as the caller promises.

@@ -1340,7 +1340,7 @@ fn built_in_presentation(
     let (inner, elements) = lent.map_or((None, 0), |(inner, elements)| (Some(inner), elements));
     Presentation {
         view: Arc::new(crate::ViewName {
-            source: "uscope".into(),
+            source: "microscope".into(),
             line: 0,
             header: header.into(),
             extend: false,

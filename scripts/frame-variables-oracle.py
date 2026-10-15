@@ -1,7 +1,8 @@
 # Records gdb's view of every frame's variables in a core dump, for
 # differential tests of frame selection. Run inside gdb:
 #
-#   USCOPE_FRAME_ORACLE=ORACLE gdb -batch -x scripts/frame-variables-oracle.py PROGRAM CORE
+#   MICROSCOPE_FRAME_ORACLE=ORACLE \
+#     gdb -batch -x scripts/frame-variables-oracle.py PROGRAM CORE
 #
 # The oracle is line-oriented and tab-separated:
 #
@@ -97,7 +98,7 @@ def frame_lines(frame, level):
 
 def main():
     gdb.execute("set pagination off")
-    lines = ["uscope-frame-variables-oracle-v2"]
+    lines = ["microscope-frame-variables-oracle-v2"]
     threads = sorted(gdb.selected_inferior().threads(), key=lambda thread: thread.ptid[1])
     for thread in threads:
         thread.switch()
@@ -111,7 +112,7 @@ def main():
             except gdb.error:
                 frame = None
             level += 1
-    with open(os.environ["USCOPE_FRAME_ORACLE"], "w", encoding="utf-8") as oracle:
+    with open(os.environ["MICROSCOPE_FRAME_ORACLE"], "w", encoding="utf-8") as oracle:
         oracle.write("\n".join(lines) + "\n")
 
 

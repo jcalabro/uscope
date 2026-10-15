@@ -214,7 +214,7 @@ export function validate(value: unknown): Picture {
   const where = "the picture";
   const picture = object(value, where);
   if (picture.type !== "picture") {
-    throw new PictureError("the renderer did not return uscope.picture(…)");
+    throw new PictureError("the renderer did not return microscope.picture(…)");
   }
   only(picture, ["type", "width", "height", "shapes", "caption"], where);
   size(picture.width, `${where}'s width`);

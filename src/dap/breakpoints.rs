@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use uscope::{BreakpointHit, BreakpointId};
+use microscope::{BreakpointHit, BreakpointId};
 
 /// A set of breakpoints the client replaces as one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -344,7 +344,7 @@ impl Breakpoints {
     /// Reconciles with the debugger's breakpoints after they changed:
     /// breakpoints nobody here owns, made from the console, become console
     /// entries, and entries whose breakpoint is gone are dropped.
-    pub fn sync(&mut self, current: &[uscope::Breakpoint]) -> Vec<Change> {
+    pub fn sync(&mut self, current: &[microscope::Breakpoint]) -> Vec<Change> {
         let existing = current
             .iter()
             .map(|breakpoint| breakpoint.id)
@@ -556,9 +556,9 @@ mod tests {
         let mut breakpoints = Breakpoints::default();
         let file = Group::Source("/a.c".into());
         apply(&mut breakpoints, &file, vec![line(4)]);
-        let core = |id: u64| uscope::Breakpoint {
+        let core = |id: u64| microscope::Breakpoint {
             id: BreakpointId::new(id),
-            spec: uscope::BreakpointSpec::Function("f".to_owned()),
+            spec: microscope::BreakpointSpec::Function("f".to_owned()),
             locations: std::sync::Arc::from([]),
             hit_condition: None,
             condition: None,
@@ -616,9 +616,9 @@ mod tests {
         };
 
         assert_eq!(breakpoints.hit(&[hit]), (vec![2], "breakpoint"));
-        let core = |id: u64| uscope::Breakpoint {
+        let core = |id: u64| microscope::Breakpoint {
             id: BreakpointId::new(id),
-            spec: uscope::BreakpointSpec::Function("f".to_owned()),
+            spec: microscope::BreakpointSpec::Function("f".to_owned()),
             locations: std::sync::Arc::from([]),
             hit_condition: None,
             condition: None,

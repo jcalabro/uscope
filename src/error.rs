@@ -408,8 +408,8 @@ pub enum Error {
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
 
-    /// A fact uscope relies on did not hold: a defect in uscope, reported
-    /// instead of panicking.
+    /// A fact microscope relies on did not hold: a defect in microscope,
+    /// reported instead of panicking.
     #[error("internal debugger error: {0}")]
     Internal(Arc<str>),
 

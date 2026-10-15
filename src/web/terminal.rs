@@ -1,4 +1,4 @@
-//! Keys pressed in the terminal running `uscope web`: `o` opens the page in
+//! Keys pressed in the terminal running `microscope web`: `o` opens the page in
 //! a browser.
 //!
 //! The browser must be no child of this process. The debugger's waiter
@@ -15,7 +15,7 @@ use nix::sys::termios::{self, LocalFlags, SetArg, SpecialCharacterIndices, Termi
 /// The hidden command that runs the helper, outside the async runtime.
 pub const HELPER: &str = "web-opener";
 
-/// Whether a person at a terminal is running `uscope web`.
+/// Whether a person at a terminal is running `microscope web`.
 pub fn interactive() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
@@ -105,7 +105,7 @@ impl Keys {
                 if matches!(key[0], b'o' | b'O')
                     && opener.write_all(format!("{link}\n").as_bytes()).is_err()
                 {
-                    eprintln!("uscope web: cannot open a browser; open the link above");
+                    eprintln!("microscope web: cannot open a browser; open the link above");
                     return;
                 }
             }

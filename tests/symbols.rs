@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::Arc;
 
-use support::Scenario;
-use uscope::{
+use microscope::{
     Backtrace, CoreDumpOptions, CoreModuleState, EmbeddedSymbolTable, Error, ImageAddress,
     LoadedModuleSnapshot, ModuleIdentity, ModuleImage, StackFrame, StopReason, Symbol,
     SymbolBinding, SymbolExtentProvenance, SymbolKind, SymbolLocation, UnwindTermination,
     VirtualAddress,
 };
+use support::Scenario;
 
 /// Each executable of the ELF symbol fixture and the library it loads. The
 /// gcc, clang, and non-PIE builds load libraries with full symbol tables.
@@ -88,7 +88,7 @@ fn expected_chain(library: &str) -> Vec<Expected> {
 /// The modules of one stopped process, with their file names and images.
 struct Modules {
     snapshot: LoadedModuleSnapshot,
-    images: BTreeMap<uscope::ModuleId, Arc<ModuleImage>>,
+    images: BTreeMap<microscope::ModuleId, Arc<ModuleImage>>,
 }
 
 impl Modules {
@@ -112,7 +112,7 @@ impl Modules {
         Self { snapshot, images }
     }
 
-    fn file_name(&self, module: uscope::ModuleId) -> String {
+    fn file_name(&self, module: microscope::ModuleId) -> String {
         let record = self
             .snapshot
             .modules
@@ -127,7 +127,7 @@ impl Modules {
             .into_owned()
     }
 
-    fn bias(&self, module: uscope::ModuleId) -> u64 {
+    fn bias(&self, module: microscope::ModuleId) -> u64 {
         self.snapshot
             .modules
             .iter()
@@ -138,7 +138,7 @@ impl Modules {
             .get()
     }
 
-    fn named(&self, file_name: &str) -> (uscope::ModuleId, &ModuleImage) {
+    fn named(&self, file_name: &str) -> (microscope::ModuleId, &ModuleImage) {
         let record = self
             .snapshot
             .modules
@@ -770,7 +770,7 @@ impl Oracle {
     /// Adds a local function symbol for each PLT stub objdump names, one
     /// section entry long. objdump names a stub whose slot an
     /// `R_X86_64_IRELATIVE` relocation fills by its resolver's address,
-    /// `*ABS*+0x...@plt`; uscope names it after the indirect function the
+    /// `*ABS*+0x...@plt`; microscope names it after the indirect function the
     /// resolver is: an exported one first, then the first by name.
     fn add_plt_symbols(&mut self) {
         let mut stubs = Vec::new();

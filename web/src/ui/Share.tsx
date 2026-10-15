@@ -116,7 +116,7 @@ export function Share() {
             </div>
             {error && <span className="muted">{error}</span>}
             <span className="muted">
-              Works until uscope exits. Someone on another machine needs a tunnel, such as{" "}
+              Works until microscope exits. Someone on another machine needs a tunnel, such as{" "}
               <code>
                 ssh -L {port}:127.0.0.1:{port} host
               </code>
