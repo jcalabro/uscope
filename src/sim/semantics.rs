@@ -277,7 +277,8 @@ pub struct Begun {
     pub restarts: u64,
 
     /// Whether the thread stood inside a system call, which returns before
-    /// it executes anything else.
+    /// it executes anything else but, if the kernel makes it again, its
+    /// `syscall`.
     pub inside_call: bool,
 
     /// The frame the debugger presented, and how many inline frames it
@@ -311,8 +312,9 @@ impl Begun {
             shadow: thread.shadow.clone(),
             retired: thread.retired,
             restarts: thread.restarts,
-            // At a call's entry, the call is still to be made.
-            inside_call: thread.returning.is_some() || thread.entered,
+            // At a call's entry, the call is still to be made; one that
+            // failed to be made again is made again first.
+            inside_call: thread.returning.is_some() || thread.entered || thread.restarting,
             frame: presentation.map(|presentation| presentation.frame.clone()),
             hidden_inline_frames: presentation
                 .map_or(0, |presentation| presentation.hidden_inline_frames),
@@ -1452,6 +1454,18 @@ mod tests {
         assert_eq!(ran(2, 1), Ok(Some(Judged::Instructions)));
         assert!(ran(2, 0).is_err());
         assert!(ran(1, 1).is_err());
+
+        // A thread stopped after its call failed, to be made again, stands
+        // where the made-again call returns.
+        kernel.threads.get_mut(&tid).expect("the thread").restarting = true;
+        let begun = Begun::new(&kernel.threads[&tid], StepKind::Instruction, None);
+        let thread = kernel.threads.get_mut(&tid).expect("the thread");
+        thread.retired = begun.retired + 1;
+        thread.restarts = begun.restarts + 1;
+        assert_eq!(
+            step(&kernel, &begun, &[], variant),
+            Ok(Some(Judged::Instructions))
+        );
     }
 
     /// A stopped thread of `variant` at its entry, `calls` deep, with each
