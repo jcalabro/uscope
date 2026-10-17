@@ -3028,6 +3028,7 @@ fn function_name(function: &RawFunction) -> Option<Arc<str>> {
             .as_deref()
             .and_then(crate::demangle::demangle)
             .map(Arc::from)
+            .or_else(|| function.linkage_name.clone())
     });
     match (&name, &function.namespace) {
         (Some(raw), Some(namespace)) if function.language == SourceLanguage::Rust => {
