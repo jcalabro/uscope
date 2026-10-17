@@ -25,7 +25,12 @@ struct Holder {
     static constexpr std::int32_t negative_constexpr_member = -123;
 };
 
-volatile std::int32_t Holder::member = 131;
+volatile std::int32_t Holder::member;
+
+struct Initialize {
+    Initialize() { Holder::member = 131; }
+};
+Initialize initialized;
 }  // namespace fixture
 
 __attribute__((noinline)) void inspect_globals() {
